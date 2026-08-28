@@ -18,6 +18,9 @@ class AgentActionType(str, Enum):
     DELETE_AGENT = "delete_agent"
     SET_RELATION = "set_relation"
     SET_OUTPUT = "set_output"
+    # PROJECT_NECESSARY_ADAPTATION: execution control for one stateful
+    # Action--Observation transition. It never mutates the AgentGraph.
+    CONTINUE = "continue"
     FINISH = "finish"
 
 

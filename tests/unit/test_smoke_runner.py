@@ -1578,6 +1578,8 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
             max_turns=3,
             max_action_tokens=256,
             max_observation_chars=0,
+            stepwise_director=False,
+            structured_actions=False,
             timeout_seconds=9.0,
         )
         self.assertIs(shared_registry, runtime.tool_registry)

@@ -140,16 +140,57 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         "set_output",
         "finish",
     ]
+    stepwise_legacy_actions = [
+        "add_agent",
+        "modify_agent",
+        "delete_agent",
+        "set_relation",
+        "set_output",
+        "continue",
+        "finish",
+    ]
+    stepwise_subgraph_actions = [
+        "add_subgraph",
+        "modify_agent",
+        "delete_agent",
+        "set_relation",
+        "set_output",
+        "continue",
+        "finish",
+    ]
     action_profile = graph.get("actions")
-    if action_profile != legacy_actions and action_profile != subgraph_actions:
+    known_profiles = (
+        legacy_actions,
+        subgraph_actions,
+        stepwise_legacy_actions,
+        stepwise_subgraph_actions,
+    )
+    if action_profile not in known_profiles:
         raise ConfigurationError(
             "AgentGraph actions must use the legacy scalar profile or the "
-            "FlowSteer-compatible add_subgraph profile"
+            "FlowSteer-compatible add_subgraph profile, with the optional "
+            "stepwise environment continue boundary"
         )
-    if action_profile == subgraph_actions:
+    if (
+        action_profile == subgraph_actions
+        or action_profile == stepwise_subgraph_actions
+    ):
         if graph.get("max_agents_per_subgraph") != 3:
             raise ConfigurationError(
                 "add_subgraph profile requires max_agents_per_subgraph=3"
+            )
+    if (
+        action_profile == stepwise_legacy_actions
+        or action_profile == stepwise_subgraph_actions
+    ):
+        environment_runtime = value.get("environment_runtime")
+        if (
+            not isinstance(environment_runtime, Mapping)
+            or environment_runtime.get("enabled") is not True
+            or environment_runtime.get("stepwise_director") is not True
+        ):
+            raise ConfigurationError(
+                "the continue action requires an enabled stepwise environment runtime"
             )
     if graph.get("contract_type") != "free_text" or graph.get("relation_encoding") != "two_bit":
         raise ConfigurationError("AgentGraph requires free-text contracts and two-bit relations")

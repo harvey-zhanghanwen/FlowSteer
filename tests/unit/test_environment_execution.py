@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -93,6 +94,8 @@ def resources(
     gateway: SequenceGateway,
     max_turns: int,
     max_observation_chars: int = 0,
+    stepwise_director: bool = False,
+    structured_actions: bool = False,
 ):
     return build_environment_execution_resources(
         gateway=gateway,
@@ -100,6 +103,8 @@ def resources(
         task_family=session.task_family,
         max_turns=max_turns,
         max_observation_chars=max_observation_chars,
+        stepwise_director=stepwise_director,
+        structured_actions=structured_actions,
     )
 
 
@@ -632,6 +637,287 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             gateway.requests[0].agent.contract,
         )
 
+    async def test_webshop_structured_stepwise_calls_advance_one_shared_episode(
+        self,
+    ) -> None:
+        class WebShopSession(FakeSession):
+            environment_id = "fake:webshop"
+            task_family = "webshop"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = {
+                    "has_search_bar": True,
+                    "clickables": ["Back to Search"],
+                }
+
+            def reset(self) -> str:
+                self.reset_count += 1
+                return "Search for a product."
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                if action.startswith("search["):
+                    self._available = {
+                        "has_search_bar": False,
+                        "clickables": ["B000ITEM01"],
+                    }
+                    return "Search result B000ITEM01", 0.0, False, {
+                        "graded_score": 0.0
+                    }
+                return "Product B000ITEM01", 0.0, True, {
+                    "graded_score": 0.0
+                }
+
+        search = json.dumps(
+            {
+                "resource_id": "webshop",
+                "kind": "tool",
+                "name": "search",
+                "arguments": {"query": "blue steel shelf"},
+                "skill_id": None,
+            }
+        )
+        click = json.dumps(
+            {
+                "resource_id": "webshop",
+                "kind": "tool",
+                "name": "click",
+                "arguments": {"target": "B000ITEM01"},
+                "skill_id": None,
+            }
+        )
+        session = WebShopSession()
+        gateway = SequenceGateway([search, click])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+            structured_actions=True,
+        )
+        request = make_request("webshop")
+
+        first = await environment.execution_adapter.execute(request)
+        second = await environment.execution_adapter.execute(request)
+
+        self.assertEqual(1, session.reset_count)
+        self.assertEqual(
+            ["search[blue steel shelf]", "click[B000ITEM01]"],
+            session.actions,
+        )
+        self.assertEqual(1, first.metadata["environment_revision"])
+        self.assertEqual(2, second.metadata["environment_revision"])
+        self.assertEqual(1, len(first.metadata["environment_receipts"]))
+        self.assertEqual(2, len(second.metadata["environment_receipts"]))
+        self.assertEqual(
+            first.metadata["environment_episode_id"],
+            second.metadata["environment_episode_id"],
+        )
+        self.assertEqual(
+            "one_action_one_observation",
+            second.metadata["environment_execution_boundary"],
+        )
+        self.assertTrue(second.metadata["environment_terminal"])
+        self.assertIn(
+            "response_json_schema", gateway.requests[0].model.metadata
+        )
+        self.assertIn("StructuredAction JSON", gateway.requests[0].problem)
+        self.assertNotIn("Do not return JSON", gateway.requests[0].problem)
+        for request_value in gateway.requests:
+            self.assertIn("complete the webshop task", request_value.problem)
+            self.assertNotIn("graded_score", request_value.problem)
+
+    async def test_webshop_structured_action_fills_only_fixed_wire_constants(
+        self,
+    ) -> None:
+        """Provider-omitted const fields do not discard a semantic action."""
+
+        class WebShopSession(FakeSession):
+            environment_id = "fake:webshop"
+            task_family = "webshop"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = {"has_search_bar": True, "clickables": ["Search"]}
+
+            def reset(self) -> str:
+                self.reset_count += 1
+                return "Search page"
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                return "Results", 0.0, True, {"graded_score": 0.0}
+
+        # ``kind`` and ``skill_id`` are fixed by the WebShop tool resource;
+        # the provider supplied every semantic field.
+        provider_value = json.dumps(
+            {
+                "resource_id": "webshop",
+                "name": "search",
+                "arguments": {"query": "blue steel shelf"},
+            }
+        )
+        session = WebShopSession()
+        environment = resources(
+            session=session,
+            gateway=SequenceGateway([provider_value]),
+            max_turns=1,
+            stepwise_director=True,
+            structured_actions=True,
+        )
+
+        response = await environment.execution_adapter.execute(make_request("webshop"))
+
+        self.assertEqual(["search[blue steel shelf]"], session.actions)
+        receipt = response.metadata["environment_receipts"][0]
+        evaluator_entry = response.metadata["evaluator_environment_trace"][0]
+        self.assertEqual("format_normalized", receipt["observation_status"])
+        self.assertEqual(
+            "format_normalized", evaluator_entry["structured_action_status"]
+        )
+        self.assertEqual(provider_value, evaluator_entry["structured_action_output"])
+
+    async def test_canvas_continue_preserves_graph_revision_and_returns_public_state(
+        self,
+    ) -> None:
+        class WebShopSession(FakeSession):
+            environment_id = "fake:webshop"
+            task_family = "webshop"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = {
+                    "has_search_bar": True,
+                    "clickables": ["Back to Search"],
+                }
+
+            def reset(self) -> str:
+                self.reset_count += 1
+                return "Search page"
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                if action.startswith("search["):
+                    self._available = {
+                        "has_search_bar": False,
+                        "clickables": ["Buy Now"],
+                    }
+                    return "Matching product page", 0.0, False, {
+                        "graded_score": 0.0
+                    }
+                return "Thank you for shopping with us!", 1.0, True, {
+                    "graded_score": 1.0
+                }
+
+        actions = [
+            json.dumps(
+                {
+                    "resource_id": "webshop",
+                    "kind": "tool",
+                    "name": "search",
+                    "arguments": {"query": "requested item"},
+                    "skill_id": None,
+                }
+            ),
+            json.dumps(
+                {
+                    "resource_id": "webshop",
+                    "kind": "tool",
+                    "name": "click",
+                    "arguments": {"target": "Buy Now"},
+                    "skill_id": None,
+                }
+            ),
+        ]
+        session = WebShopSession()
+        gateway = SequenceGateway(actions)
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=2,
+            max_observation_chars=12,
+            stepwise_director=True,
+            structured_actions=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="buy the requested item",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "continue",
+                "finish",
+            ),
+        )
+        add = await canvas.step(
+            json.dumps(
+                {
+                    "action": "add_agent",
+                    "agent_id": "actor",
+                    "model_id": "m",
+                    "contract": "Act on the current public shopping state.",
+                    "execution_mode": "react",
+                    "allowed_tools": [environment.tool_id],
+                }
+            )
+        )
+        self.assertTrue(add.accepted)
+        await canvas.step('{"action":"set_output","agent_id":"actor"}')
+        revision_before_continue = canvas.revision
+        self.assertIn("continue", canvas.model_admissible_action_types())
+        continued = await canvas.step('{"action":"continue"}')
+
+        self.assertTrue(continued.accepted)
+        self.assertEqual(revision_before_continue, canvas.revision)
+        self.assertEqual(1, session.reset_count)
+        self.assertEqual(2, len(session.actions))
+        state = canvas.public_environment_state()
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual("buy the requested item", state["task_instruction"])
+        self.assertEqual("click[Buy Now]", state["last_action"])
+        self.assertTrue(state["current_observation_clipped"])
+        self.assertTrue(
+            str(state["current_observation"]).startswith("Thank you fo")
+        )
+        self.assertIn("[OBSERVATION CLIPPED:", state["current_observation"])
+        self.assertEqual(
+            len("Thank you for shopping with us!"),
+            state["current_observation_original_chars"],
+        )
+        assert continued.execution is not None
+        full_trace = continued.execution.output_metadata["actor"][
+            "evaluator_environment_trace"
+        ]
+        self.assertEqual(
+            "Thank you for shopping with us!",
+            full_trace[-1]["next_observation"],
+        )
+        self.assertTrue(state["environment_terminal"])
+        self.assertNotIn("graded_score", str(state))
+        self.assertNotIn("continue", canvas.model_admissible_action_types())
+        self.assertIn("finish", canvas.model_admissible_action_types())
+        finished = await canvas.step('{"action":"finish"}')
+        self.assertTrue(finished.done)
+
     async def test_ragen_session_calls_deployed_adapter_signature(self) -> None:
         class FakeRAGEN:
             available_actions = ["look"]
@@ -837,6 +1123,108 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Reward Details", str(response.metadata["model_calls"]))
         self.assertNotIn("graded_score", str(response.metadata["environment_receipts"]))
         self.assertNotIn("graded_score", str(response.metadata["model_calls"]))
+
+    async def test_evaluator_replays_structured_stepwise_trace_without_model_callback(
+        self,
+    ) -> None:
+        """StructuredAction is retained while evaluator receives native wire."""
+
+        raw_terminal_observation = (
+            "Thank you for shopping with us! [SEP] Purchased [SEP] asin [SEP] "
+            "B000TEST [SEP] Reward [SEP] Your score (min 0.0, max 1.0) "
+            "[SEP] 1.0 [SEP] Reward Details [SEP] None"
+        )
+        structured = json.dumps(
+            {
+                "arguments": {"target": "Buy Now"},
+                "kind": "tool",
+                "name": "click",
+                "resource_id": "webshop",
+                "skill_id": None,
+            },
+            sort_keys=True,
+        )
+
+        class WebShopSession(FakeSession):
+            environment_id = "fake:webshop"
+            task_family = "webshop"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = {"has_search_bar": False, "clickables": ["Buy Now"]}
+
+            def reset(self) -> str:
+                self.reset_count += 1
+                return "Product page"
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                return raw_terminal_observation, 1.0, True, {"graded_score": 1.0}
+
+        runtime = resources(
+            session=WebShopSession(),
+            gateway=SequenceGateway([structured]),
+            max_turns=1,
+            stepwise_director=True,
+            structured_actions=True,
+        )
+        response = await runtime.execution_adapter.execute(make_request("webshop"))
+        trace = response.metadata["evaluator_environment_trace"]
+
+        self.assertEqual("<action>click[Buy Now]</action>", trace[0]["raw_graph_output"])
+        self.assertEqual(structured, trace[0]["structured_action_output"])
+        self.assertEqual("success", trace[0]["structured_action_status"])
+
+        class ReplayAdapter:
+            def __init__(self) -> None:
+                self._env = SimpleNamespace(current_goal_index=7)
+                self.available_actions = {
+                    "has_search_bar": False,
+                    "clickables": ["Buy Now"],
+                }
+
+            def reset(self, env_type, config, question="", extra=None):  # type: ignore[no-untyped-def]
+                return "Product page"
+
+            def step(self, action):  # type: ignore[no-untyped-def]
+                return raw_terminal_observation, 1.0, True, {"graded_score": 1.0}
+
+        record = TaskRecord(
+            task_id="webshop:7",
+            question="buy the item",
+            ground_truth="",
+            split="validation",
+            metadata={
+                "source": "WebShop",
+                "dataset_key": "webshop",
+                "environment": {
+                    "env_type": "webshop",
+                    "env_config": {"goal_index": 7},
+                },
+            },
+        )
+        callback_called = False
+
+        async def run_graph(_prompt: str) -> str:
+            nonlocal callback_called
+            callback_called = True
+            return "click[Buy Now]"
+
+        with patch(
+            "src.interactive.task_evaluator._load_ragen_module",
+            return_value=SimpleNamespace(RAGENAdapter=ReplayAdapter),
+        ):
+            outcome = await evaluate_task(
+                record,
+                response.text,
+                run_graph=run_graph,
+                max_environment_steps=1,
+                environment_replay_trace=trace,
+            )
+
+        self.assertTrue(outcome.valid)
+        self.assertEqual(1.0, outcome.metrics["success"])
+        self.assertFalse(callback_called)
 
     async def test_webshop_terminal_private_fields_do_not_reach_downstream_agent(
         self,

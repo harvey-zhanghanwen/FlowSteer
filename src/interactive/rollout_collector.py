@@ -916,6 +916,7 @@ class SGLangReceiptDirectorClient:
         """Submit one exact SGLang generation phase with transport retries."""
 
         last_error: BaseException | None = None
+        last_http_detail: str | None = None
         started_at = time.monotonic()
         for attempt in range(self.max_retries + 1):
             try:
@@ -927,6 +928,17 @@ class SGLangReceiptDirectorClient:
                 )
             except HTTPError as exc:
                 last_error = exc
+                # ``HTTPError`` is also a readable response object.  Preserve
+                # SGLang's bounded diagnostic so a rejected grammar/context
+                # request can be repaired without replaying successful
+                # trajectories.  This does not alter the request or retry
+                # policy and deliberately excludes request headers/payload.
+                try:
+                    raw_detail = exc.read(2048).decode("utf-8", errors="replace")
+                except (OSError, UnicodeError, ValueError):
+                    raw_detail = ""
+                compact_detail = " ".join(raw_detail.split())
+                last_http_detail = compact_detail[:1024] or None
                 if not (exc.code in {408, 409, 425, 429} or exc.code >= 500):
                     break
             except (URLError, TimeoutError, socket.timeout) as exc:
@@ -938,6 +950,41 @@ class SGLangReceiptDirectorClient:
             if isinstance(last_error, HTTPError)
             else type(last_error).__name__
         )
+        if last_http_detail is not None:
+            detail += f": {last_http_detail}"
+        messages = payload.get("messages")
+        if isinstance(messages, Sequence) and not isinstance(messages, (str, bytes)):
+            message_shape: list[dict[str, Any]] = []
+            for index, item in enumerate(messages):
+                if not isinstance(item, Mapping):
+                    continue
+                content = item.get("content")
+                shape: dict[str, Any] = {
+                    "index": index,
+                    "role": item.get("role"),
+                    "chars": len(content) if isinstance(content, str) else None,
+                }
+                if isinstance(content, str) and "\n\n" in content:
+                    _, _, raw_canvas = content.partition("\n\n")
+                    try:
+                        canvas = json.loads(raw_canvas)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        canvas = None
+                    if isinstance(canvas, Mapping):
+                        shape["largest_canvas_fields"] = sorted(
+                            (
+                                (str(key), len(json.dumps(value, default=str)))
+                                for key, value in canvas.items()
+                            ),
+                            key=lambda pair: pair[1],
+                            reverse=True,
+                        )[:8]
+                message_shape.append(shape)
+            detail += "; request_shape=" + json.dumps(
+                message_shape,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         raise DirectorError(f"SGLang Director request failed: {detail}") from last_error
 
     @staticmethod
@@ -2887,9 +2934,13 @@ _UNIFIED_EXECUTION_METADATA_FIELDS: Tuple[str, ...] = (
     "model_calls",
     "environment_id",
     "task_family",
+    "environment_execution_boundary",
+    "structured_action_format",
+    "environment_episode_id",
     "environment_revision",
     "environment_reset_receipt",
     "environment_receipts",
+    "environment_current_state",
     "environment_terminal",
     "environment_truncated",
     "environment_max_turns",

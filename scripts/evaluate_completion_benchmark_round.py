@@ -2294,7 +2294,26 @@ def _execution_environment_receipts(
                 continue
             for metadata in output_metadata.values():
                 append_from_metadata(metadata)
-    return tuple(episodes)
+    # Stepwise WebShop stores the cumulative public receipt prefix after every
+    # Director turn.  Those prefixes belong to one SkillFlow episode and must
+    # not be counted as separate environment attempts. Legacy request-scoped
+    # executions carry distinct episode IDs and therefore remain separate.
+    longest_by_episode: dict[str, tuple[Mapping[str, Any], ...]] = {}
+    order: list[str] = []
+    anonymous_index = 0
+    for episode in episodes:
+        raw_episode_id = episode[0].get("environment_episode_id")
+        if isinstance(raw_episode_id, str) and raw_episode_id.strip():
+            episode_id = raw_episode_id.strip()
+        else:
+            episode_id = f"anonymous:{anonymous_index}"
+            anonymous_index += 1
+        if episode_id not in longest_by_episode:
+            order.append(episode_id)
+            longest_by_episode[episode_id] = episode
+        elif len(episode) > len(longest_by_episode[episode_id]):
+            longest_by_episode[episode_id] = episode
+    return tuple(longest_by_episode[episode_id] for episode_id in order)
 
 
 def _rollout_environment_diagnostics(

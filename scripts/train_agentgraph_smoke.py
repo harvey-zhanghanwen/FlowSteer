@@ -1050,6 +1050,24 @@ def _environment_runtime_settings(
         raise ConfigurationError(
             "environment_runtime.max_observation_chars must be a non-negative integer"
         )
+    stepwise_director = section.get("stepwise_director", False)
+    structured_actions = section.get("structured_actions", False)
+    if type(stepwise_director) is not bool:
+        raise ConfigurationError(
+            "environment_runtime.stepwise_director must be bool"
+        )
+    if type(structured_actions) is not bool:
+        raise ConfigurationError(
+            "environment_runtime.structured_actions must be bool"
+        )
+    if structured_actions and source_key != "webshop":
+        raise ConfigurationError(
+            "environment_runtime.structured_actions currently supports only webshop"
+        )
+    if structured_actions and not stepwise_director:
+        raise ConfigurationError(
+            "environment_runtime.structured_actions requires stepwise_director"
+        )
     return {
         "source_key": source_key,
         "ragen_adapter_path": ragen_adapter_path.strip(),
@@ -1057,6 +1075,8 @@ def _environment_runtime_settings(
         "tool_timeout_seconds": float(timeout_seconds),
         "max_action_tokens": max_action_tokens,
         "max_observation_chars": max_observation_chars,
+        "stepwise_director": stepwise_director,
+        "structured_actions": structured_actions,
     }
 
 
@@ -2243,6 +2263,12 @@ class LiveSmokeBackend:
                 max_observation_chars=int(
                     environment_settings["max_observation_chars"]
                 ),
+                stepwise_director=bool(
+                    environment_settings["stepwise_director"]
+                ),
+                structured_actions=bool(
+                    environment_settings["structured_actions"]
+                ),
                 timeout_seconds=float(
                     environment_settings["tool_timeout_seconds"]
                 ),
@@ -2257,15 +2283,15 @@ class LiveSmokeBackend:
                 semantic_protocol=semantic_protocol,
             )
 
-            # EnvironmentExecutionAdapter closes the request-scoped simulator
-            # in its own ``finally`` block.  This explicit task lifecycle hook
-            # prevents callers from treating the resource set as process-wide.
+            # Stepwise WebShop retains one task-scoped episode across Director
+            # turns. Close it at the existing per-task Runtime boundary.
             closed = False
 
             def close_environment_runtime() -> None:
                 nonlocal closed
                 if closed:
                     return
+                resources.execution_adapter.close()
                 closed = True
 
             return (

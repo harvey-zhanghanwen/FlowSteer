@@ -60,8 +60,17 @@ Use only action types listed in admissible_action_types, model_id values from mo
 
 Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
 
+STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types, targets and parameters in the current admissible_action_types and action_target_domains, model_id values in model_catalog, and exact tool_id values in tool_catalog. add_agent adds one Agent with a free-text contract. A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange.
+
+Each accepted Canvas edit is executed once. continue leaves the AgentGraph unchanged and executes exactly one Action--Observation transition in the current stateful environment. Inspect the returned original task, action, public state and observation before choosing the next action. ReAct is an execution mode, not an Agent role. Use finish only when finish_admissibility is admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
+
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
+STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION = (
+    "agentgraph.director.minimal-neutral-scalar-stepwise.v1"
+)
 LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1 = (
     "agentgraph.director.minimal-neutral-scalar.v1"
 )
@@ -192,6 +201,126 @@ def _director_neutral_feedback_projection(feedback: str) -> str:
             separators=(",", ":"),
         )
     return feedback
+
+
+_STATEFUL_EXECUTION_RESULT_KEYS = (
+    "output_agent_id",
+    "executed_agent_ids",
+    "reused_agent_ids",
+    "deferred_agent_ids",
+    "candidate_conflict",
+)
+_STATEFUL_EXECUTION_ERROR_KEYS = (
+    "type",
+    "message",
+    "blocked_agent_ids",
+    "pending_agent_ids",
+    "preserved_agent_ids",
+)
+_STATEFUL_FAILED_AGENT_KEYS = (
+    "agent_id",
+    "model_id",
+    "provider_id",
+    "phase",
+    "error_type",
+    "failure_category",
+    "retryability",
+    "http_status",
+    "preferred_repair",
+)
+_STATEFUL_RECOVERY_KEYS = (
+    "policy",
+    "strategy",
+    "phase",
+    "mandatory_repair_agent_ids",
+    "diagnosed_unusable_agent_ids",
+    "repair_exhausted_agent_ids",
+    "terminal_unreachable_agent_ids",
+)
+
+
+def _stateful_recovery_feedback_projection(value: object) -> dict[str, Any]:
+    """Keep the typed recovery diagnosis without cumulative Runtime payloads."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    projected = {
+        key: _director_neutral_state_projection(value[key])
+        for key in _STATEFUL_RECOVERY_KEYS
+        if key in value
+    }
+    availability = value.get("model_availability")
+    if isinstance(availability, Mapping):
+        projected["model_availability"] = {
+            key: _director_neutral_state_projection(availability[key])
+            for key in (
+                "available_model_ids",
+                "unavailable_model_ids",
+                "unavailable_provider_ids",
+            )
+            if key in availability
+        }
+    return projected
+
+
+def _director_stateful_feedback_projection(feedback: str) -> str:
+    """Project one stateful execution receipt to its Supervisor diagnosis.
+
+    SkillFlow's next-step Supervisor consumes the latest public state rather
+    than a second cumulative copy of every environment observation.  The full
+    FlowSteer Runtime receipt remains in the trajectory; this model-visible
+    projection keeps only execution identity and typed recovery fields.
+    """
+
+    for marker in _DIRECTOR_FEEDBACK_JSON_MARKERS:
+        marker_index = feedback.find(marker)
+        if marker_index < 0:
+            continue
+        payload_index = marker_index + len(marker)
+        try:
+            structured = json.loads(feedback[payload_index:])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return " ".join(feedback.split())[:2048]
+        if not isinstance(structured, Mapping):
+            return feedback[:payload_index] + "{}"
+        if marker == "execution_result=":
+            projected: dict[str, Any] = {
+                key: _director_neutral_state_projection(structured[key])
+                for key in _STATEFUL_EXECUTION_RESULT_KEYS
+                if key in structured
+            }
+        elif marker == "execution_error=":
+            projected = {
+                key: _director_neutral_state_projection(structured[key])
+                for key in _STATEFUL_EXECUTION_ERROR_KEYS
+                if key in structured
+            }
+            failed_agents = structured.get("failed_agents")
+            if isinstance(failed_agents, Sequence) and not isinstance(
+                failed_agents, (str, bytes)
+            ):
+                projected["failed_agents"] = [
+                    {
+                        key: _director_neutral_state_projection(item[key])
+                        for key in _STATEFUL_FAILED_AGENT_KEYS
+                        if key in item
+                    }
+                    for item in failed_agents
+                    if isinstance(item, Mapping)
+                ]
+            recovery = _stateful_recovery_feedback_projection(
+                structured.get("recovery_state")
+            )
+            if recovery:
+                projected["recovery_state"] = recovery
+        else:
+            projected = _stateful_recovery_feedback_projection(structured)
+        return feedback[:payload_index] + json.dumps(
+            projected,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    return " ".join(feedback.split())[:2048]
 
 # This is an explicitly selected HotpotQA policy.  The neutral v10 prompt above
 # remains the default for every other dataset and for existing callers.
@@ -487,6 +616,15 @@ def role_conditional_qa_protocol(value: object) -> bool:
     return value == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
 
 
+def scalar_director_prompt_version(value: object) -> bool:
+    """Return whether the prompt consumes scalar live Canvas domains."""
+
+    return value in {
+        SCALAR_DIRECTOR_PROMPT_VERSION,
+        STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION,
+    }
+
+
 def director_system_prompt_for_version(prompt_version: str) -> str:
     """Resolve one explicitly versioned Director policy without changing v10."""
 
@@ -496,6 +634,9 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
     by_version = {
         DIRECTOR_PROMPT_VERSION: DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
+        STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION: (
+            STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT
+        ),
         LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_PROMPT_VERSION_V8: LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
@@ -561,6 +702,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
     {
         DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
+        STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
@@ -727,6 +869,11 @@ DIRECTOR_ACTION_JSON_SCHEMA = {
             "additionalProperties": False,
             "required": ["action"],
             "properties": {"action": {"const": "finish"}},
+        },
+        {
+            "additionalProperties": False,
+            "required": ["action"],
+            "properties": {"action": {"const": "continue"}},
         },
     ],
 }
@@ -2431,6 +2578,16 @@ def director_live_action_parameter_json_schema_text(
                 "target_to_source": {"const": target_to_source},
             },
         }
+    elif action == "continue":
+        if domain.get("admissible") is not True:
+            raise ValueError("continue is outside the live environment domain")
+        if domain.get("execution_semantics") != "one_action_one_observation":
+            raise ValueError("continue has an incompatible execution boundary")
+        if domain.get("graph_revision_unchanged") is not True:
+            raise ValueError("continue must preserve the Canvas revision")
+        schema = json.loads(
+            director_state_conditioned_sampling_json_schema_text("continue")
+        )
     elif action == "finish":
         if domain.get("admissible") is not True:
             raise ValueError("finish is outside the live terminal domain")
@@ -3223,7 +3380,7 @@ class AgentGraphOrchestrator:
                 "required_tool_id": env.required_tool_id,
             },
         }
-        if self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION:
+        if scalar_director_prompt_version(self.prompt_version):
             # FlowSteer exposes the current Canvas identifiers and bounded
             # horizon to the editor.  The v2 scalar observation adds only
             # live legality state; it does not prescribe a topology or role.
@@ -3243,14 +3400,14 @@ class AgentGraphOrchestrator:
                 }
             )
         if (
-            self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION
+            scalar_director_prompt_version(self.prompt_version)
             or verified_qa_semantic_protocol(self.semantic_protocol)
         ):
             payload["action_target_domains"] = (
                 env.model_admissible_action_targets()
             )
         if (
-            self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION
+            scalar_director_prompt_version(self.prompt_version)
             or verified_qa_semantic_protocol(self.semantic_protocol)
         ):
             recent_rejections: list[dict[str, Any]] = []
@@ -3330,6 +3487,16 @@ class AgentGraphOrchestrator:
             # direct edge view avoids making the Director mentally invert a
             # relation after AgentGraph canonicalizes endpoint order.
             payload["directed_edges"] = directed_edges
+        environment_state = env.public_environment_state()
+        if environment_state is not None:
+            # SkillFlow's next-step Supervisor boundary: repeat the public
+            # original instruction together with the latest action,
+            # observation and state. Evaluator reward/hidden goal/info are
+            # absent from ``public_environment_state`` by construction.
+            payload["canvas_feedback"] = (
+                _director_stateful_feedback_projection(snapshot.last_feedback)
+            )
+            payload["environment_state"] = environment_state
         if partial_validation.issues:
             payload["structural_issues"] = [
                 {
@@ -3348,7 +3515,7 @@ class AgentGraphOrchestrator:
         # Director repairs the responsible semantic node instead of probing
         # FINISH or repeatedly modifying the Formatter.
         if (
-            self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION
+            scalar_director_prompt_version(self.prompt_version)
             or verified_qa_semantic_protocol(self.semantic_protocol)
         ):
             payload["finish_admissibility"] = _director_neutral_state_projection(
@@ -3669,6 +3836,10 @@ __all__ = [
     "DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION",
     "DIRECTOR_SYSTEM_PROMPT",
     "DIRECTOR_PROMPT_VERSION",
+    "SCALAR_DIRECTOR_PROMPT_VERSION",
+    "SCALAR_DIRECTOR_SYSTEM_PROMPT",
+    "STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION",
+    "STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT",
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15",
@@ -3731,6 +3902,7 @@ __all__ = [
     "director_system_prompt_for_version",
     "director_sglang_sampling_json_schema_text",
     "director_state_conditioned_sampling_json_schema_text",
+    "scalar_director_prompt_version",
     "verified_qa_semantic_protocol",
     "encode_director_transcript",
 ]

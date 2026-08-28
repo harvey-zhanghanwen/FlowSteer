@@ -81,6 +81,7 @@ from src.interactive.director import (
     director_system_prompt_for_version,
     director_state_conditioned_sampling_json_schema_text,
     encode_director_transcript,
+    _director_stateful_feedback_projection,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
 from src.interactive.scientific_sampling import (
@@ -175,6 +176,67 @@ def observation_payload(message: dict[str, str]) -> dict[str, object]:
 
 
 class DirectorTests(unittest.IsolatedAsyncioTestCase):
+    def test_stateful_feedback_keeps_typed_failure_without_cumulative_receipts(
+        self,
+    ) -> None:
+        feedback = "accepted continue; execution_error=" + json.dumps(
+            {
+                "type": "AgentRuntimeError",
+                "message": "environment action failed",
+                "failed_agents": [
+                    {
+                        "agent_id": "actor",
+                        "model_id": "remote-model",
+                        "provider_id": "provider",
+                        "phase": "single",
+                        "error_type": "EnvironmentExecutionError",
+                        "failure_category": "tool_capability_failure",
+                        "retryability": "repair_tool_capability_or_arguments",
+                        "preferred_repair": {
+                            "action": "modify_agent",
+                            "agent_id": "actor",
+                            "field": "model_id",
+                        },
+                        "environment_receipts": ["private-large-receipt" * 500],
+                    }
+                ],
+                "environment_state": {
+                    "current_observation": "large-observation" * 1000,
+                },
+                "evaluator_environment_trace": ["private-trace" * 1000],
+                "recovery_state": {
+                    "policy": "preserve_diagnose_repair_augment",
+                    "phase": "repair",
+                    "mandatory_repair_agent_ids": ["actor"],
+                    "model_availability": {
+                        "available_model_ids": ["local-model"],
+                        "unavailable_model_ids": ["remote-model"],
+                        "failure_receipts": ["large-provider-receipt" * 500],
+                    },
+                },
+            }
+        )
+
+        projected = _director_stateful_feedback_projection(feedback)
+        payload = json.loads(projected.split("execution_error=", 1)[1])
+
+        self.assertEqual("AgentRuntimeError", payload["type"])
+        self.assertEqual("actor", payload["failed_agents"][0]["agent_id"])
+        self.assertEqual(
+            "modify_agent",
+            payload["failed_agents"][0]["preferred_repair"]["action"],
+        )
+        self.assertEqual(
+            ["local-model"],
+            payload["recovery_state"]["model_availability"][
+                "available_model_ids"
+            ],
+        )
+        self.assertNotIn("environment_receipts", projected)
+        self.assertNotIn("evaluator_environment_trace", projected)
+        self.assertNotIn("large-observation", projected)
+        self.assertLess(len(projected), 2048)
+
     async def test_legacy_canonical_transcript_remains_decodable(self) -> None:
         legacy = encode_director_transcript(
             (

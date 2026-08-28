@@ -212,6 +212,9 @@ class UnifiedMetadataGateway:
                 ),
                 "environment_id": "webshop:test-1",
                 "task_family": "WebShop",
+                "environment_execution_boundary": "one_action_one_observation",
+                "structured_action_format": "structured-action-json@1",
+                "environment_episode_id": "webshop:test-1:run-1",
                 "environment_revision": 1,
                 "environment_reset_receipt": {
                     "environment_id": "webshop:test-1",
@@ -224,6 +227,15 @@ class UnifiedMetadataGateway:
                         "state_advanced": True,
                     },
                 ),
+                "environment_current_state": {
+                    "environment_episode_id": "webshop:test-1:run-1",
+                    "environment_revision": 1,
+                    "last_action": "search[query]",
+                    "current_observation": "results",
+                    "remaining_action_budget": 0,
+                    "environment_terminal": False,
+                    "environment_truncated": True,
+                },
                 "environment_terminal": False,
                 "environment_truncated": True,
                 "environment_max_turns": 1,
@@ -2191,11 +2203,21 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     assert response_receipt["model_calls"][0]["request_id"].endswith(":react:1")
     assert response_receipt["environment_id"] == "webshop:test-1"
     assert response_receipt["task_family"] == "WebShop"
+    assert response_receipt["environment_execution_boundary"] == (
+        "one_action_one_observation"
+    )
+    assert response_receipt["structured_action_format"] == (
+        "structured-action-json@1"
+    )
+    assert response_receipt["environment_episode_id"] == "webshop:test-1:run-1"
     assert response_receipt["environment_revision"] == 1
     assert response_receipt["environment_reset_receipt"]["observation"] == (
         "initial observation"
     )
     assert response_receipt["environment_receipts"][0]["state_advanced"] is True
+    assert response_receipt["environment_current_state"]["last_action"] == (
+        "search[query]"
+    )
     assert response_receipt["environment_terminal"] is False
     assert response_receipt["environment_truncated"] is True
     assert response_receipt["environment_max_turns"] == 1
@@ -2223,6 +2245,9 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     assert output_metadata["continued_action_history_count"] == 1
     assert output_metadata["continued_tool_receipt_count"] == 1
     assert output_metadata["environment_truncated"] is True
+    assert output_metadata["environment_current_state"] == response_receipt[
+        "environment_current_state"
+    ]
     assert output_metadata["environment_max_turns"] == 1
     assert output_metadata["evaluator_environment_trace"] == response_receipt[
         "evaluator_environment_trace"

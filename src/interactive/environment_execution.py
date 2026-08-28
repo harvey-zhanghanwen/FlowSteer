@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 import inspect
+import json
 from pathlib import Path
 import random
 import re
@@ -23,6 +24,8 @@ from typing import Any, Optional, Protocol, Union
 
 from .agent_runtime import AgentGateway, AgentRequest, AgentResponse, GatewayResponse
 from .tool_runtime import (
+    ActionKind,
+    StructuredAction,
     ToolCapability,
     ToolRegistration,
     ToolRegistry,
@@ -113,6 +116,28 @@ class _EnvironmentEpisode:
     raw_observation: str
     revision: int = 0
     pending_transition: Optional[_EnvironmentTransition] = None
+
+
+@dataclass(slots=True)
+class _EnvironmentRolloutState:
+    """Public/evaluator state accumulated across one bounded episode.
+
+    ``EnvironmentExecutionAdapter`` historically kept this state on the Python
+    stack while one Agent invocation ran every environment turn.  The
+    stepwise Director condition retains the same SkillFlow Action--Observation
+    state across successive Canvas turns and commits exactly one turn per
+    invocation.
+    """
+
+    episode: _EnvironmentEpisode
+    episode_id: str
+    reset_receipt: dict[str, object]
+    receipts: list[dict[str, object]] = field(default_factory=list)
+    evaluator_trace: list[dict[str, object]] = field(default_factory=list)
+    tool_receipts: list[dict[str, object]] = field(default_factory=list)
+    model_calls: list[dict[str, object]] = field(default_factory=list)
+    turns_used: int = 0
+    terminal: bool = False
 
 
 _WEBSHOP_SCORE_MARKER = re.compile(
@@ -222,6 +247,20 @@ class EnvironmentToolBackend:
 
     def end(self, token: Token[Optional[_EnvironmentEpisode]]) -> None:
         self._episode.reset(token)
+
+    def bind(
+        self,
+        episode: _EnvironmentEpisode,
+    ) -> Token[Optional[_EnvironmentEpisode]]:
+        """Bind an existing task-scoped episode for one serialized step."""
+
+        if not isinstance(episode, _EnvironmentEpisode):
+            raise TypeError("environment episode has an incompatible type")
+        if self._episode.get() is not None:
+            raise EnvironmentExecutionError(
+                "environment episode is already active in this execution context"
+            )
+        return self._episode.set(episode)
 
     async def invoke(self, request: ToolRequest) -> ToolResult:
         episode = self._episode.get()
@@ -506,6 +545,164 @@ def _parse_action(
         if match and match.group(1).strip() not in {"", "<your query>"}:
             return candidate
     return None
+
+
+def _webshop_structured_action_schema(
+    admissible_actions: Sequence[str],
+    *,
+    has_search_bar: bool,
+) -> dict[str, object]:
+    """Project the live WebShop domain to SkillFlow's StructuredAction wire."""
+
+    branches: list[dict[str, object]] = []
+    if has_search_bar:
+        branches.append(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "arguments",
+                    "kind",
+                    "name",
+                    "resource_id",
+                    "skill_id",
+                ],
+                "properties": {
+                    "arguments": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["query"],
+                        "properties": {
+                            "query": {"type": "string", "minLength": 1}
+                        },
+                    },
+                    "kind": {"const": "tool"},
+                    "name": {"const": "search"},
+                    "resource_id": {"const": "webshop"},
+                    "skill_id": {"type": "null"},
+                },
+            }
+        )
+    click_targets = [
+        action[len("click[") : -1]
+        for action in admissible_actions
+        if action.startswith("click[") and action.endswith("]")
+    ]
+    if click_targets:
+        branches.append(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "arguments",
+                    "kind",
+                    "name",
+                    "resource_id",
+                    "skill_id",
+                ],
+                "properties": {
+                    "arguments": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["target"],
+                        "properties": {"target": {"enum": click_targets}},
+                    },
+                    "kind": {"const": "tool"},
+                    "name": {"const": "click"},
+                    "resource_id": {"const": "webshop"},
+                    "skill_id": {"type": "null"},
+                },
+            }
+        )
+    if not branches:
+        raise EnvironmentExecutionError(
+            "WebShop exposed no StructuredAction-compatible action"
+        )
+    return branches[0] if len(branches) == 1 else {"oneOf": branches}
+
+
+def _parse_webshop_structured_action(
+    output: object,
+    *,
+    admissible_actions: Sequence[str],
+    webshop_has_search_bar: bool,
+) -> tuple[Optional[str], str]:
+    """Parse SkillFlow's five-field action and serialize one native command.
+
+    The public SkillFlow resource is ``webshop``.  The local ToolRegistry uses
+    ``webshop.environment`` as its task-scoped dispatch identifier, so this
+    boundary validates the former and dispatches the resulting native command
+    through the latter without rewriting sampled semantic fields.
+    """
+
+    if not isinstance(output, str) or not output.strip():
+        return None, "parse_error"
+    try:
+        value = json.loads(output)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, "parse_error"
+    format_normalized = False
+    if isinstance(value, Mapping):
+        # Some OpenAI-compatible providers omit JSON-Schema ``const`` fields
+        # from an otherwise complete object.  SkillFlow's WebShop action space
+        # fixes these two values for every environment action, so filling only
+        # those constants is a wire-format normalization and never chooses or
+        # changes the semantic action (``name`` + ``arguments``).  Extra
+        # fields, missing semantic fields, or conflicting constants still fail
+        # closed through ``StructuredAction.from_value`` below.
+        expected_fields = {
+            "arguments",
+            "kind",
+            "name",
+            "resource_id",
+            "skill_id",
+        }
+        semantic_fields = {"arguments", "name", "resource_id"}
+        present_fields = set(value)
+        if semantic_fields.issubset(present_fields) and present_fields.issubset(
+            expected_fields
+        ):
+            normalized_value = dict(value)
+            if "kind" not in normalized_value:
+                normalized_value["kind"] = "tool"
+                format_normalized = True
+            if "skill_id" not in normalized_value:
+                normalized_value["skill_id"] = None
+                format_normalized = True
+            value = normalized_value
+    try:
+        action = StructuredAction.from_value(value)
+    except (KeyError, TypeError, ValueError):
+        return None, "schema_invalid"
+    if (
+        action.kind is not ActionKind.TOOL
+        or action.resource_id != "webshop"
+        or action.skill_id is not None
+        or not isinstance(action.arguments, dict)
+    ):
+        return None, "schema_invalid"
+    native: Optional[str] = None
+    if action.name == "search" and set(action.arguments) == {"query"}:
+        query = action.arguments.get("query")
+        if isinstance(query, str) and query.strip():
+            native = f"search[{query.strip()}]"
+    elif action.name == "click" and set(action.arguments) == {"target"}:
+        target = action.arguments.get("target")
+        if isinstance(target, str) and target.strip():
+            native = f"click[{target.strip()}]"
+    elif action.name == "purchase" and not action.arguments:
+        native = "click[buy now]"
+    if native is None:
+        return None, "schema_invalid"
+    admitted = _parse_action(
+        native,
+        task_family="webshop",
+        admissible_actions=admissible_actions,
+        webshop_has_search_bar=webshop_has_search_bar,
+    )
+    if admitted != native:
+        return None, "schema_invalid"
+    return native, "format_normalized" if format_normalized else "success"
 
 
 def _history_text(receipts: Sequence[Mapping[str, object]]) -> str:
@@ -856,6 +1053,7 @@ def _action_prompt(
     receipts: Sequence[Mapping[str, object]],
     turn: int,
     max_observation_chars: int = 0,
+    structured_actions: bool = False,
 ) -> str:
     """Render SkillFlow's state/action/history boundary without a fixed role."""
 
@@ -870,19 +1068,33 @@ def _action_prompt(
         admissible_actions=admissible_actions,
         receipts=receipts,
     )
-    format_instruction = (
-        "Return exactly one native WebShop action: search[keywords] or click[value]."
-        if task_family.lower() == "webshop"
-        else "Return exactly one native action copied from the admissible action list."
-    )
+    if task_family.lower() == "webshop" and structured_actions:
+        format_instruction = (
+            "Return exactly one SkillFlow StructuredAction JSON object. Use "
+            "resource_id \"webshop\"; name \"search\" with arguments "
+            "{\"query\":...}, or name \"click\" with arguments "
+            "{\"target\":...}. Copy a click target exactly from the current "
+            "admissible-action list. Return no explanation or code fence."
+        )
+    else:
+        format_instruction = (
+            "Return exactly one native WebShop action: search[keywords] or click[value]."
+            if task_family.lower() == "webshop"
+            else "Return exactly one native action copied from the admissible action list."
+        )
     return (
         f"Task:\n{request.problem}\n\n"
         f"Previous environment turns:\n{_history_text(receipts)}\n\n"
         f"{public_state}\n\n"
         f"Current observation (turn {turn}):\n{visible_observation}\n\n"
         f"Admissible actions:\n{actions}\n\n"
-        f"{format_instruction} You may enclose that native action in one <action> "
-        "tag. Do not return JSON, an object, a code fence, or an explanation."
+        f"{format_instruction}"
+        + (
+            ""
+            if task_family.lower() == "webshop" and structured_actions
+            else " You may enclose that native action in one <action> tag. Do not "
+            "return JSON, an object, a code fence, or an explanation."
+        )
     )
 
 
@@ -891,7 +1103,7 @@ async def _resolve(value: Union[Any, Awaitable[Any]]) -> Any:
 
 
 class EnvironmentExecutionAdapter:
-    """Run one bounded model-driven ALFWorld or WebShop environment episode."""
+    """Run a bounded ALFWorld/WebShop episode or one Director-visible step."""
 
     def __init__(
         self,
@@ -902,6 +1114,8 @@ class EnvironmentExecutionAdapter:
         max_turns: int,
         max_action_tokens: int = 512,
         max_observation_chars: int = 0,
+        stepwise_director: bool = False,
+        structured_actions: bool = False,
     ) -> None:
         if not hasattr(gateway, "generate"):
             raise TypeError("gateway must implement generate")
@@ -915,6 +1129,12 @@ class EnvironmentExecutionAdapter:
             raise ValueError("max_action_tokens must be a positive integer")
         if type(max_observation_chars) is not int or max_observation_chars < 0:
             raise ValueError("max_observation_chars must be a non-negative integer")
+        if type(stepwise_director) is not bool:
+            raise TypeError("stepwise_director must be bool")
+        if type(structured_actions) is not bool:
+            raise TypeError("structured_actions must be bool")
+        if structured_actions and environment_backend.task_family != "webshop":
+            raise ValueError("structured environment actions currently support WebShop")
         if environment_backend.tool_id not in tool_registry.resource_ids:
             raise ValueError("environment backend tool is absent from ToolRegistry")
         capability = tool_registry.require_capability(environment_backend.tool_id)
@@ -927,17 +1147,33 @@ class EnvironmentExecutionAdapter:
         self._environment_backend = environment_backend
         self._tool_id = environment_backend.tool_id
         self._max_turns = max_turns
-        # SkillFlow carries this bound as RolloutDecoding.max_action_tokens.
-        # Native environment turns return one short action, so retaining the
-        # generic Executor completion budget can make input+output exceed the
-        # local Qwen context window after several long WebShop observations.
         self._max_action_tokens = max_action_tokens
         self._max_observation_chars = max_observation_chars
+        self._stepwise_director = stepwise_director
+        self._structured_actions = structured_actions
+        self._live_state: Optional[_EnvironmentRolloutState] = None
+        self._step_lock = asyncio.Lock()
         # ``asyncio.wait_for`` may insert a Task boundary between this adapter
-        # and AgentRuntime.  Task cancellation intentionally normalizes the
-        # raised ``CancelledError``, so retain the completed public prefix in
-        # a request-keyed handoff until Runtime has recorded it.
+        # and AgentRuntime. Retain the completed public prefix until Runtime
+        # has copied it into the failure receipt.
         self._cancelled_prefixes: dict[str, Mapping[str, object]] = {}
+
+    @property
+    def stepwise_director(self) -> bool:
+        return self._stepwise_director
+
+    def reset_execution_state(self) -> None:
+        """Drop the task-scoped episode before a new orchestration rollout."""
+
+        if self._step_lock.locked():
+            raise EnvironmentExecutionError(
+                "cannot reset an environment episode while a step is active"
+            )
+        self._live_state = None
+        self._cancelled_prefixes.clear()
+
+    def close(self) -> None:
+        self.reset_execution_state()
 
     def take_cancelled_failure_metadata(
         self,
@@ -947,291 +1183,433 @@ class EnvironmentExecutionAdapter:
 
         return self._cancelled_prefixes.pop(request_id, MappingProxyType({}))
 
-    async def execute(self, request: AgentRequest) -> GatewayResponse:
-        if request.agent.allowed_tools != (self._tool_id,):
-            raise EnvironmentExecutionError(
-                "environment Agent must allow exactly its request-scoped environment tool"
-            )
+    async def _new_state(
+        self,
+        request: AgentRequest,
+    ) -> tuple[_EnvironmentRolloutState, Token[Optional[_EnvironmentEpisode]]]:
         episode, token = await self._environment_backend.begin(request)
         session = episode.session
-        observation = episode.observation
-        raw_observation = episode.raw_observation
-
-        revision = 0
-        terminal = False
-        receipts: list[dict[str, object]] = []
-        evaluator_trace: list[dict[str, object]] = []
-        tool_receipts: list[dict[str, object]] = []
-        model_calls: list[dict[str, object]] = []
         reset_actions, _ = _admissible_actions(
-            session.task_family, session.available_actions
+            session.task_family,
+            session.available_actions,
         )
+        episode_id = f"{session.environment_id}:{request.run_id}"
         reset_receipt: dict[str, object] = {
             "receipt_type": "environment_reset",
+            "environment_episode_id": episode_id,
             "environment_id": session.environment_id,
-            "environment_revision": revision,
-            "observation": observation,
+            "environment_revision": 0,
+            "observation": episode.observation,
             "admissible_actions": list(reset_actions),
             "terminal": False,
         }
+        return (
+            _EnvironmentRolloutState(
+                episode=episode,
+                episode_id=episode_id,
+                reset_receipt=reset_receipt,
+            ),
+            token,
+        )
 
-        try:
-            for turn in range(1, self._max_turns + 1):
-                admissible_actions, has_search_bar = _admissible_actions(
-                    session.task_family, session.available_actions
-                )
-                if not admissible_actions:
-                    raise EnvironmentExecutionError(
-                        "environment exposed no admissible actions before terminal"
-                    )
-                prompt = _action_prompt(
-                    request,
-                    task_family=session.task_family,
-                    observation=observation,
-                    admissible_actions=admissible_actions,
-                    receipts=receipts,
-                    turn=turn,
-                    max_observation_chars=self._max_observation_chars,
-                )
-                public_state = _public_state_feedback(
-                    request,
-                    task_family=session.task_family,
-                    observation=observation,
-                    admissible_actions=admissible_actions,
-                    receipts=receipts,
-                )
-                _, observation_clipped = _prompt_observation(
-                    observation, self._max_observation_chars
-                )
-                model_request = replace(
-                    request,
-                    request_id=f"{request.request_id}:environment:{turn}",
-                    problem=prompt,
-                    # RAGEN exposes native admissible actions rather than the
-                    # generic StructuredAction protocol.  Like FlowSteer's Format
-                    # Operator boundary, the Canvas-authored contract remains in
-                    # the trajectory but cannot override the executor's native
-                    # action grammar for this provider turn.
-                    agent=replace(
-                        request.agent,
-                        execution_mode="reasoning",
-                        contract=(
-                            "Select exactly one native action permitted by the "
-                            "current admissible-action list."
-                        ),
-                        artifact_type="environment_action",
-                        completion_condition=(
-                            "The response parses as one currently admissible native "
-                            "environment action."
-                        ),
-                    ),
-                    model=replace(
-                        request.model,
-                        metadata={
-                            **dict(request.model.metadata),
-                            "max_tokens": str(self._max_action_tokens),
-                        },
-                    ),
-                )
-                generated = await self._gateway.generate(model_request)
-                response = (
-                    generated
-                    if isinstance(generated, AgentResponse)
-                    else AgentResponse(generated)
-                )
-                raw_action = response.text
-                model_calls.append(
-                    {
-                        "turn": turn,
-                        "request_id": model_request.request_id,
-                        "metadata": dict(response.metadata),
-                        "public_state": public_state,
-                        "observation_clipped": observation_clipped,
-                    }
-                )
-                action = _parse_action(
-                    raw_action,
-                    task_family=session.task_family,
-                    admissible_actions=admissible_actions,
-                    webshop_has_search_bar=has_search_bar,
-                )
-                if action is None:
-                    receipts.append(
-                        {
-                            "receipt_type": "environment_transition",
-                            "environment_id": session.environment_id,
-                            "turn": turn,
-                            "environment_revision_before": revision,
-                            "environment_revision_after": revision,
-                            "observation": observation,
-                            "admissible_actions": list(admissible_actions),
-                            "raw_model_output": raw_action,
-                            "action": None,
-                            "next_observation": observation,
-                            "terminal": False,
-                            "state_advanced": False,
-                            "observation_status": "parse_error",
-                            "public_state": public_state,
-                        }
-                    )
-                    evaluator_trace.append(
-                        {
-                            "step": turn - 1,
-                            "observation": raw_observation,
-                            "legal_actions": list(admissible_actions),
-                            "action": "<INVALID>",
-                            "raw_graph_output": raw_action,
-                            "next_observation": raw_observation,
-                            "feedback": "[INVALID] No valid <action> tag found.",
-                            "reward": 0.0,
-                            "done": False,
-                            "state_advanced": False,
-                            "parse_error": True,
-                            "info": {"parse_error": True},
-                            "public_state": public_state,
-                        }
-                    )
-                    continue
+    def _current_public_state(
+        self,
+        state: _EnvironmentRolloutState,
+    ) -> dict[str, object]:
+        episode = state.episode
+        visible_observation, observation_clipped = _prompt_observation(
+            episode.observation,
+            self._max_observation_chars,
+        )
+        admissible_actions = ()
+        if not state.terminal:
+            admissible_actions, _ = _admissible_actions(
+                episode.session.task_family,
+                episode.session.available_actions,
+            )
+        last = state.receipts[-1] if state.receipts else None
+        return {
+            "environment_episode_id": state.episode_id,
+            "environment_id": episode.session.environment_id,
+            "task_family": episode.session.task_family,
+            "environment_revision": episode.revision,
+            "last_action": None if last is None else last.get("action"),
+            "state_advanced": None if last is None else last.get("state_advanced"),
+            "observation_status": (
+                "reset" if last is None else last.get("observation_status")
+            ),
+            # SkillFlow applies its configured observation bound at the
+            # model-input boundary.  The Director consumes this same public
+            # projection; the complete observation remains losslessly stored
+            # in environment/evaluator receipts and is never rewritten.
+            "current_observation": visible_observation,
+            "current_observation_clipped": observation_clipped,
+            "current_observation_original_chars": len(episode.observation),
+            "admissible_actions": list(admissible_actions),
+            "turns_used": state.turns_used,
+            "remaining_action_budget": max(self._max_turns - state.turns_used, 0),
+            "environment_terminal": state.terminal,
+            "environment_truncated": (
+                not state.terminal and state.turns_used == self._max_turns
+            ),
+        }
 
-                previous_revision = revision
-                result, tool_receipt = await self._tool_registry.ainvoke_with_receipt(
-                    self._tool_id, ToolRequest(action, {})
-                )
-                tool_receipts.append(tool_receipt.to_value())
-                if result is None:
-                    raise EnvironmentExecutionError(
-                        "registered environment tool failed with "
-                        f"{tool_receipt.error_type or 'unknown_error'}"
-                    )
-                transition = self._environment_backend.take_transition()
-                value = result.value
-                if (
-                    not isinstance(value, dict)
-                    or value.get("observation") != transition.public_observation
-                    or value.get("terminal") is not transition.terminal
-                    or value.get("environment_revision") != episode.revision
-                ):
-                    raise EnvironmentExecutionError(
-                        "registered environment tool returned an incompatible result"
-                    )
-                revision = episode.revision
-                next_observation = transition.public_observation
-                done = transition.terminal
-                receipts.append(
-                    {
-                        "receipt_type": "environment_transition",
-                        "environment_id": session.environment_id,
-                        "turn": turn,
-                        "environment_revision_before": previous_revision,
-                        "environment_revision_after": revision,
-                        "observation": observation,
-                        "admissible_actions": list(admissible_actions),
-                        "raw_model_output": raw_action,
-                        "action": action,
-                        "next_observation": next_observation,
-                        "terminal": done,
-                        "state_advanced": True,
-                        "observation_status": "success",
-                        "public_state": public_state,
-                    }
-                )
-                evaluator_trace.append(
-                    {
-                        "step": turn - 1,
-                        "observation": raw_observation,
-                        "legal_actions": list(admissible_actions),
-                        "action": action,
-                        "raw_graph_output": raw_action,
-                        "next_observation": transition.observation,
-                        "reward": transition.reward,
-                        "done": done,
-                        "info": dict(transition.info),
-                        "state_advanced": True,
-                        "public_state": public_state,
-                    }
-                )
-                observation = next_observation
-                raw_observation = transition.observation
-                terminal = done
-                if terminal:
-                    break
+    def _response(self, state: _EnvironmentRolloutState) -> AgentResponse:
+        episode = state.episode
+        return AgentResponse(
+            episode.observation,
+            {
+                "execution_mode": "react",
+                "environment_execution_boundary": (
+                    "one_action_one_observation"
+                    if self._stepwise_director
+                    else "bounded_episode"
+                ),
+                "structured_action_format": (
+                    "structured-action-json@1"
+                    if self._structured_actions
+                    else "native-action-text@1"
+                ),
+                "model_calls": list(state.model_calls),
+                "environment_episode_id": state.episode_id,
+                "environment_id": episode.session.environment_id,
+                "task_family": episode.session.task_family,
+                "environment_revision": episode.revision,
+                "environment_reset_receipt": dict(state.reset_receipt),
+                "environment_receipts": list(state.receipts),
+                "environment_current_state": self._current_public_state(state),
+                "environment_terminal": state.terminal,
+                "environment_truncated": (
+                    not state.terminal and state.turns_used == self._max_turns
+                ),
+                "environment_max_turns": self._max_turns,
+                "environment_turns_used": state.turns_used,
+                "environment_steps": episode.revision,
+                "tool_receipts": list(state.tool_receipts),
+                # Evaluator-only replay data. AgentRuntime and Director public
+                # projections never render reward or environment ``info``.
+                "evaluator_environment_trace": list(state.evaluator_trace),
+            },
+        )
 
-            truncated = not terminal and len(receipts) == self._max_turns
-            return AgentResponse(
-                observation,
+    def _failure_metadata(
+        self,
+        state: _EnvironmentRolloutState,
+        *,
+        cause_error_type: str,
+    ) -> dict[str, object]:
+        return {
+            "environment_reset_receipt": dict(state.reset_receipt),
+            "environment_receipts": tuple(dict(item) for item in state.receipts),
+            "evaluator_environment_trace": tuple(
+                dict(item) for item in state.evaluator_trace
+            ),
+            "tool_receipts": tuple(dict(item) for item in state.tool_receipts),
+            "model_calls": tuple(dict(item) for item in state.model_calls),
+            "environment_revision": state.episode.revision,
+            "environment_terminal": state.terminal,
+            "cause_error_type": cause_error_type,
+        }
+
+    async def _execute_turn(
+        self,
+        request: AgentRequest,
+        state: _EnvironmentRolloutState,
+    ) -> None:
+        episode = state.episode
+        session = episode.session
+        turn = state.turns_used + 1
+        if turn > self._max_turns or state.terminal:
+            return
+        admissible_actions, has_search_bar = _admissible_actions(
+            session.task_family,
+            session.available_actions,
+        )
+        if not admissible_actions:
+            raise EnvironmentExecutionError(
+                "environment exposed no admissible actions before terminal"
+            )
+        prompt = _action_prompt(
+            request,
+            task_family=session.task_family,
+            observation=episode.observation,
+            admissible_actions=admissible_actions,
+            receipts=state.receipts,
+            turn=turn,
+            max_observation_chars=self._max_observation_chars,
+            structured_actions=self._structured_actions,
+        )
+        public_state = _public_state_feedback(
+            request,
+            task_family=session.task_family,
+            observation=episode.observation,
+            admissible_actions=admissible_actions,
+            receipts=state.receipts,
+        )
+        _, observation_clipped = _prompt_observation(
+            episode.observation,
+            self._max_observation_chars,
+        )
+        model_metadata = {
+            **dict(request.model.metadata),
+            "max_tokens": str(self._max_action_tokens),
+        }
+        if self._structured_actions:
+            model_metadata["response_json_schema"] = json.dumps(
+                _webshop_structured_action_schema(
+                    admissible_actions,
+                    has_search_bar=has_search_bar,
+                ),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        model_request = replace(
+            request,
+            request_id=f"{request.request_id}:environment:{turn}",
+            problem=prompt,
+            agent=replace(
+                request.agent,
+                # ReAct remains the outer execution mode; a provider turn
+                # emits one action and is not assigned a ReAct role.
+                execution_mode="reasoning",
+                contract=(
+                    "Select exactly one currently admissible SkillFlow "
+                    "StructuredAction."
+                    if self._structured_actions
+                    else "Select exactly one native action permitted by the "
+                    "current admissible-action list."
+                ),
+                artifact_type="environment_action",
+                completion_condition=(
+                    "The response validates as one currently admissible "
+                    "environment action."
+                ),
+            ),
+            model=replace(request.model, metadata=model_metadata),
+        )
+        generated = await self._gateway.generate(model_request)
+        response = generated if isinstance(generated, AgentResponse) else AgentResponse(generated)
+        raw_action = response.text
+        state.model_calls.append(
+            {
+                "turn": turn,
+                "request_id": model_request.request_id,
+                "metadata": dict(response.metadata),
+                "public_state": public_state,
+                "observation_clipped": observation_clipped,
+                "action_format": (
+                    "structured-action-json@1"
+                    if self._structured_actions
+                    else "native-action-text@1"
+                ),
+            }
+        )
+        if self._structured_actions:
+            action, observation_status = _parse_webshop_structured_action(
+                raw_action,
+                admissible_actions=admissible_actions,
+                webshop_has_search_bar=has_search_bar,
+            )
+        else:
+            action = _parse_action(
+                raw_action,
+                task_family=session.task_family,
+                admissible_actions=admissible_actions,
+                webshop_has_search_bar=has_search_bar,
+            )
+            observation_status = "success" if action is not None else "parse_error"
+
+        if action is None:
+            state.turns_used = turn
+            state.receipts.append(
                 {
-                    "execution_mode": "react",
-                    "model_calls": model_calls,
+                    "receipt_type": "environment_transition",
+                    "environment_episode_id": state.episode_id,
                     "environment_id": session.environment_id,
-                    "task_family": session.task_family,
-                    "environment_revision": revision,
-                    "environment_reset_receipt": reset_receipt,
-                    "environment_receipts": receipts,
-                    "environment_terminal": terminal,
-                    "environment_truncated": truncated,
-                    "environment_max_turns": self._max_turns,
-                    "environment_turns_used": len(receipts),
-                    "environment_steps": revision,
-                    "tool_receipts": tool_receipts,
-                    # Evaluator-only replay data. AgentRuntime never renders this
-                    # metadata into downstream prompts or Director feedback.
-                    "evaluator_environment_trace": evaluator_trace,
-                },
-            )
-        except asyncio.CancelledError as exc:
-            # ``asyncio`` must still observe a real cancellation so the
-            # Runtime's fail-fast scheduler cannot mistake this invocation for
-            # a completed Agent.  Publish SkillFlow's already-completed
-            # Action--Observation prefix on the in-flight exception; the
-            # enclosing AgentRuntime consumes it before the Task boundary
-            # normalizes ``CancelledError``.
-            exc.environment_reset_receipt = dict(reset_receipt)
-            exc.environment_receipts = tuple(dict(item) for item in receipts)
-            exc.evaluator_environment_trace = tuple(
-                dict(item) for item in evaluator_trace
-            )
-            exc.tool_receipts = tuple(dict(item) for item in tool_receipts)
-            exc.model_calls = tuple(dict(item) for item in model_calls)
-            exc.environment_revision = revision
-            exc.environment_terminal = terminal
-            exc.cause_error_type = type(exc).__name__
-            self._cancelled_prefixes[request.request_id] = MappingProxyType(
-                {
-                    "environment_reset_receipt": dict(reset_receipt),
-                    "environment_receipts": tuple(
-                        dict(item) for item in receipts
-                    ),
-                    "evaluator_environment_trace": tuple(
-                        dict(item) for item in evaluator_trace
-                    ),
-                    "tool_receipts": tuple(dict(item) for item in tool_receipts),
-                    "model_calls": tuple(dict(item) for item in model_calls),
-                    "environment_revision": revision,
-                    "environment_terminal": terminal,
-                    "cause_error_type": type(exc).__name__,
+                    "turn": turn,
+                    "environment_revision_before": episode.revision,
+                    "environment_revision_after": episode.revision,
+                    "observation": episode.observation,
+                    "admissible_actions": list(admissible_actions),
+                    "raw_model_output": raw_action,
+                    "action": None,
+                    "next_observation": episode.observation,
+                    "next_admissible_actions": list(admissible_actions),
+                    "terminal": False,
+                    "state_advanced": False,
+                    "observation_status": observation_status,
+                    "public_state": public_state,
                 }
             )
-            raise
-        except Exception as exc:
-            cause_error_type = (
-                exc.cause_error_type
-                if isinstance(exc, EnvironmentExecutionError)
-                and exc.cause_error_type is not None
-                else type(exc).__name__
+            state.evaluator_trace.append(
+                {
+                    "step": turn - 1,
+                    "observation": episode.raw_observation,
+                    "legal_actions": list(admissible_actions),
+                    "action": "<INVALID>",
+                    # The native evaluator replays its established
+                    # ``<action>...</action>`` wire.  Keep an invalid native
+                    # wire here and persist the exact SkillFlow
+                    # StructuredAction attempt separately; otherwise a valid
+                    # JSON object is incorrectly interpreted as a native
+                    # WebShop command during replay.
+                    "raw_graph_output": "",
+                    "structured_action_output": (
+                        raw_action if self._structured_actions else None
+                    ),
+                    "structured_action_status": observation_status,
+                    "next_observation": episode.raw_observation,
+                    "feedback": "[INVALID] No valid <action> tag found.",
+                    "reward": 0.0,
+                    "done": False,
+                    "state_advanced": False,
+                    "parse_error": True,
+                    "info": {"parse_error": True},
+                    "public_state": public_state,
+                }
             )
+            return
+
+        previous_revision = episode.revision
+        previous_raw_observation = episode.raw_observation
+        previous_observation = episode.observation
+        result, tool_receipt = await self._tool_registry.ainvoke_with_receipt(
+            self._tool_id,
+            ToolRequest(action, {}),
+        )
+        state.tool_receipts.append(tool_receipt.to_value())
+        if result is None:
             raise EnvironmentExecutionError(
-                " ".join(str(exc).split()) or "environment execution failed",
-                environment_reset_receipt=reset_receipt,
-                environment_receipts=receipts,
-                evaluator_environment_trace=evaluator_trace,
-                tool_receipts=tool_receipts,
-                model_calls=model_calls,
-                environment_revision=revision,
-                environment_terminal=terminal,
-                cause_error_type=cause_error_type,
-            ) from exc
-        finally:
-            self._environment_backend.end(token)
+                "registered environment tool failed with "
+                f"{tool_receipt.error_type or 'unknown_error'}"
+            )
+        transition = self._environment_backend.take_transition()
+        value = result.value
+        if (
+            not isinstance(value, dict)
+            or value.get("observation") != transition.public_observation
+            or value.get("terminal") is not transition.terminal
+            or value.get("environment_revision") != episode.revision
+        ):
+            raise EnvironmentExecutionError(
+                "registered environment tool returned an incompatible result"
+            )
+        state.turns_used = turn
+        state.terminal = transition.terminal
+        next_actions: tuple[str, ...] = ()
+        if not state.terminal:
+            next_actions, _ = _admissible_actions(
+                session.task_family,
+                session.available_actions,
+            )
+        state.receipts.append(
+            {
+                "receipt_type": "environment_transition",
+                "environment_episode_id": state.episode_id,
+                "environment_id": session.environment_id,
+                "turn": turn,
+                "environment_revision_before": previous_revision,
+                "environment_revision_after": episode.revision,
+                "observation": previous_observation,
+                "admissible_actions": list(admissible_actions),
+                "raw_model_output": raw_action,
+                "action": action,
+                "next_observation": transition.public_observation,
+                "next_admissible_actions": list(next_actions),
+                "terminal": state.terminal,
+                "state_advanced": True,
+                "observation_status": observation_status,
+                "public_state": public_state,
+            }
+        )
+        state.evaluator_trace.append(
+            {
+                "step": turn - 1,
+                "observation": previous_raw_observation,
+                "legal_actions": list(admissible_actions),
+                "action": action,
+                # Preserve the native evaluator protocol while retaining the
+                # exact sampled SkillFlow StructuredAction as an independent
+                # trajectory field.  This is a formatting adapter only; the
+                # semantic action remains the already validated ``action``.
+                "raw_graph_output": (
+                    f"<action>{action}</action>"
+                    if self._structured_actions
+                    else raw_action
+                ),
+                "structured_action_output": (
+                    raw_action if self._structured_actions else None
+                ),
+                "structured_action_status": (
+                    observation_status if self._structured_actions else None
+                ),
+                "next_observation": transition.observation,
+                "reward": transition.reward,
+                "done": state.terminal,
+                "info": dict(transition.info),
+                "state_advanced": True,
+                "public_state": public_state,
+            }
+        )
+
+    async def execute(self, request: AgentRequest) -> GatewayResponse:
+        if request.agent.allowed_tools != (self._tool_id,):
+            raise EnvironmentExecutionError(
+                "environment Agent must allow exactly its task-scoped environment tool"
+            )
+        async with self._step_lock:
+            if self._stepwise_director and self._live_state is not None:
+                state = self._live_state
+                token = self._environment_backend.bind(state.episode)
+            else:
+                state, token = await self._new_state(request)
+                if self._stepwise_director:
+                    self._live_state = state
+            try:
+                if self._stepwise_director:
+                    await self._execute_turn(request, state)
+                else:
+                    while not state.terminal and state.turns_used < self._max_turns:
+                        await self._execute_turn(request, state)
+                return self._response(state)
+            except asyncio.CancelledError as exc:
+                metadata = self._failure_metadata(
+                    state,
+                    cause_error_type=type(exc).__name__,
+                )
+                for key, value in metadata.items():
+                    setattr(exc, key, value)
+                self._cancelled_prefixes[request.request_id] = MappingProxyType(
+                    metadata
+                )
+                raise
+            except Exception as exc:
+                cause_error_type = (
+                    exc.cause_error_type
+                    if isinstance(exc, EnvironmentExecutionError)
+                    and exc.cause_error_type is not None
+                    else type(exc).__name__
+                )
+                metadata = self._failure_metadata(
+                    state,
+                    cause_error_type=cause_error_type,
+                )
+                raise EnvironmentExecutionError(
+                    " ".join(str(exc).split()) or "environment execution failed",
+                    environment_reset_receipt=metadata["environment_reset_receipt"],
+                    environment_receipts=metadata["environment_receipts"],
+                    evaluator_environment_trace=metadata[
+                        "evaluator_environment_trace"
+                    ],
+                    tool_receipts=metadata["tool_receipts"],
+                    model_calls=metadata["model_calls"],
+                    environment_revision=state.episode.revision,
+                    environment_terminal=state.terminal,
+                    cause_error_type=cause_error_type,
+                ) from exc
+            finally:
+                self._environment_backend.end(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1251,10 +1629,12 @@ def build_environment_execution_resources(
     max_turns: int,
     max_action_tokens: int = 512,
     max_observation_chars: int = 0,
+    stepwise_director: bool = False,
+    structured_actions: bool = False,
     tool_version: str = "skillflow.ragen_adapter.v2",
     timeout_seconds: Optional[float] = None,
 ) -> EnvironmentExecutionResources:
-    """Create a real environment capability and its request-scoped adapter.
+    """Create a real environment capability and its bounded execution adapter.
 
     The returned registry must be supplied unchanged to both AgentRuntime and
     the Director; ``execution_adapter`` is registered for the ``react`` mode.
@@ -1315,6 +1695,8 @@ def build_environment_execution_resources(
         max_turns=max_turns,
         max_action_tokens=max_action_tokens,
         max_observation_chars=max_observation_chars,
+        stepwise_director=stepwise_director,
+        structured_actions=structured_actions,
     )
     return EnvironmentExecutionResources(tool_id, registry, adapter)
 
