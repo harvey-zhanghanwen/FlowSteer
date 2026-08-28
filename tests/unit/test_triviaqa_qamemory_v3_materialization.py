@@ -24,6 +24,7 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     build_synonym_repair_messages,
     build_verification_messages,
     _has_lexical_or_phrase_replacement,
+    _identity_token_preserved,
     _leading_answer_slot_anchor,
     _leading_answer_slot_anchor_preserved,
     _literal_subject_wh_answer_statement,
@@ -1084,6 +1085,86 @@ def test_v5_parser_accepts_possessive_entity_inflection_without_answer_leakage()
     assert "Hitchcock's" in question
     assert source.canonical_answer in statement
     assert "Rebecca" not in question
+
+
+@pytest.mark.parametrize(
+    "curly_possessive",
+    (
+        "liverpool’s",
+        "women’s",
+        "children’s",
+        "sony’s",
+        "mozart’s",
+    ),
+)
+def test_identity_token_allows_only_possessive_apostrophe_orthography(
+    curly_possessive: str,
+) -> None:
+    base = curly_possessive[:-2]
+    straight_possessive = f"{base}'s"
+
+    assert _identity_token_preserved(
+        curly_possessive,
+        frozenset({straight_possessive}),
+    )
+    assert _identity_token_preserved(
+        straight_possessive,
+        frozenset({curly_possessive}),
+    )
+    assert not _identity_token_preserved(
+        curly_possessive,
+        frozenset(),
+    )
+    assert not _identity_token_preserved(
+        curly_possessive,
+        frozenset({base}),
+    )
+    assert not _identity_token_preserved(
+        curly_possessive,
+        frozenset({f"{base}s"}),
+    )
+    assert not _identity_token_preserved(
+        curly_possessive,
+        frozenset({f"{base}'d"}),
+    )
+    assert not _identity_token_preserved(
+        curly_possessive,
+        frozenset({f"{base}’d"}),
+    )
+    assert not _identity_token_preserved(
+        curly_possessive,
+        frozenset({f"{base[:-1]}x's"}),
+    )
+
+
+def test_parser_accepts_sony_possessive_apostrophe_orthography_only() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:sfq_24084",
+        base_task_id="triviaqa:sfq_24084",
+        selection_index=55634,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="What was the name of Sony’s first game console?",
+        canonical_answer="Play Station",
+        native_split="train",
+    )
+
+    question, statement = parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": (
+                    "What designation was given to Sony's first game console?"
+                ),
+                "paraphrase_answer_statement": (
+                    "The name of Sony’s first game console was Play Station."
+                ),
+            }
+        ),
+        source,
+    )
+
+    assert question == "What designation was given to Sony's first game console?"
+    assert statement.endswith("Play Station.")
 
 
 def test_v5_parser_does_not_remove_possessive_from_lexicalized_entity() -> None:

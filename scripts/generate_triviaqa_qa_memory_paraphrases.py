@@ -603,7 +603,8 @@ def _identity_token_preserved(
     if required in observed_tokens:
         return True
     if required.endswith(("'s", "’s")):
-        return False
+        base = required[:-2]
+        return f"{base}'s" in observed_tokens or f"{base}’s" in observed_tokens
     return f"{required}'s" in observed_tokens or f"{required}’s" in observed_tokens
 
 
