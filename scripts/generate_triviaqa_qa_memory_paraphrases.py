@@ -59,6 +59,13 @@ SEMANTIC_ADMISSION_VERSION = "triviaqa.qa_memory.semantic_admission.v14"
 PARAPHRASE_METHOD = "semantic-preserving-question-and-answer-paraphrase"
 GENERATOR_PROVIDER = "local-openai-compatible"
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
+DATASET_PAIR_FALLBACK_METHOD = "dataset-question-answer-pair-association"
+DATASET_PAIR_FALLBACK_PROVIDER = "deterministic-dataset-binding"
+DATASET_PAIR_FALLBACK_MODEL_ID = "deterministic-dataset-pair-association"
+DATASET_PAIR_FALLBACK_MODEL_REVISION = "not-applicable"
+DATASET_PAIR_FALLBACK_PROMPT_VERSION = (
+    "triviaqa.qa_memory.dataset_pair_association.v1"
+)
 
 SYSTEM_PROMPT = """Paraphrase one TriviaQA training question and its training answer.
 Preserve the exact entity identity, requested relation, answer type, temporal or geographic scope, and every constraint. Replace at least one non-entity content word or multiword expression with a true synonym or equivalent phrase; changing only word order is not enough. lexical_replacement_source_tokens lists eligible original content wording, and at least one listed token or its containing phrase must be replaced rather than merely reordered. A dangling generic interrogative may instead be expanded by at least two content words that state its existing answer type without adding another relation. Do not put the answer into the question, including generic-looking words from the canonical answer: forbidden_question_canonical_tokens lists the answer tokens absent from the original question, and none may occur in paraphrase_question. Write one complete declarative answer statement by binding the supplied canonical answer span character-for-character to the original question's wh-dependency or explicitly listed-choice slot. The answer statement must copy at least one non-answer content token from original_question so its relation lineage is explicit. Preserve the original subject/object direction, relation, scope, and constraints; prefer a minimal question-to-declarative transformation and do not require the canonical span to begin the sentence. Never inflect, lowercase, or paraphrase the canonical span. If natural grammar requires an inflected form for a listed choice, use the natural relation wording and also include the exact canonical span as the selected option label in the same declarative statement. The answer statement must not be only the canonical span or a generic wrapper such as 'The answer is ...'. Do not add facts, broaden or narrow the meaning, or invent aliases.
@@ -2541,6 +2548,79 @@ def _exact_question_identity_contaminated_fields(
     return frozenset(contaminated)
 
 
+def _dataset_pair_fallback_text(
+    source: TriviaQATrainSource,
+) -> tuple[str, str]:
+    """Render an explicit dataset Q-A association, not a semantic paraphrase."""
+
+    original = " ".join(source.original_question.split())
+    canonical = " ".join(source.canonical_answer.split())
+    return (
+        f"TriviaQA dataset source prompt (verbatim): {original}",
+        "For this TriviaQA dataset source prompt, the paired response is "
+        f"{canonical}.",
+    )
+
+
+def _is_dataset_pair_fallback_record(record: TriviaQAQAMemoryRecord) -> bool:
+    return (
+        record.paraphrase_method == DATASET_PAIR_FALLBACK_METHOD
+        and record.generator_provider == DATASET_PAIR_FALLBACK_PROVIDER
+        and record.model_id == DATASET_PAIR_FALLBACK_MODEL_ID
+        and record.model_revision == DATASET_PAIR_FALLBACK_MODEL_REVISION
+        and record.prompt_template_version
+        == DATASET_PAIR_FALLBACK_PROMPT_VERSION
+    )
+
+
+def _validate_dataset_pair_fallback_record(
+    record: TriviaQAQAMemoryRecord,
+    source: TriviaQATrainSource,
+) -> None:
+    """Validate the exact deterministic fallback and its separate provenance."""
+
+    expected_question, expected_statement = _dataset_pair_fallback_text(source)
+    if not _is_dataset_pair_fallback_record(record):
+        raise ValueError("dataset-pair fallback provenance is incompatible")
+    if record.paraphrase_question != expected_question:
+        raise ValueError("dataset-pair fallback changed the source prompt")
+    if record.paraphrase_answer_statement != expected_statement:
+        raise ValueError("dataset-pair fallback changed the paired response")
+    if record.canonical_answer != source.canonical_answer:
+        raise ValueError("dataset-pair fallback changed the canonical answer")
+    if not exact_canonical_span_preserved(
+        record.paraphrase_answer_statement,
+        source.canonical_answer,
+    ) or not relation_bearing_answer_statement(
+        record.paraphrase_answer_statement,
+        source.canonical_answer,
+    ):
+        raise ValueError("dataset-pair fallback lost its Q-A association")
+
+
+def _create_dataset_pair_fallback_record(
+    source: TriviaQATrainSource,
+    *,
+    paraphrase_version: str,
+    generation_seed: int,
+) -> TriviaQAQAMemoryRecord:
+    question, statement = _dataset_pair_fallback_text(source)
+    record = TriviaQAQAMemoryRecord.create(
+        source=source,
+        paraphrase_question=question,
+        paraphrase_answer_statement=statement,
+        paraphrase_version=paraphrase_version,
+        paraphrase_method=DATASET_PAIR_FALLBACK_METHOD,
+        generator_provider=DATASET_PAIR_FALLBACK_PROVIDER,
+        model_id=DATASET_PAIR_FALLBACK_MODEL_ID,
+        model_revision=DATASET_PAIR_FALLBACK_MODEL_REVISION,
+        prompt_template_version=DATASET_PAIR_FALLBACK_PROMPT_VERSION,
+        generation_seed=generation_seed,
+    )
+    _validate_dataset_pair_fallback_record(record, source)
+    return record
+
+
 def _decode_paraphrase_object(text: str) -> Mapping[str, object]:
     """Decode the exact Qwen paraphrase object and observed key typos."""
 
@@ -2801,6 +2881,9 @@ def validate_resume_record_admission(
         source = source_by_id.get(record.source_train_task_id)
         if source is None:
             raise ValueError("resume row references a non-train source")
+        if _is_dataset_pair_fallback_record(record):
+            _validate_dataset_pair_fallback_record(record, source)
+            continue
         parse_paraphrase_response(
             json.dumps(
                 {
@@ -2836,6 +2919,10 @@ def partition_resume_records_for_semantic_repair(
         source = source_by_id.get(record.source_train_task_id)
         if source is None:
             raise ValueError("resume row references a non-train source")
+        if _is_dataset_pair_fallback_record(record):
+            _validate_dataset_pair_fallback_record(record, source)
+            accepted.append(record)
+            continue
         try:
             parse_paraphrase_response(
                 json.dumps(
@@ -4018,6 +4105,23 @@ def _parser() -> argparse.ArgumentParser:
             "evaluation Q-A in the local QA-memory."
         ),
     )
+    parser.add_argument(
+        "--allow-dataset-pair-fallback",
+        action="store_true",
+        help=(
+            "After all bounded generation rounds fail, materialize an explicit "
+            "verbatim TriviaQA source-prompt/paired-response association record."
+        ),
+    )
+    parser.add_argument(
+        "--materialize-pending-as-dataset-pair-fallback",
+        action="store_true",
+        help=(
+            "Resume-only closure: convert already-attempted checkpoint gaps to "
+            "dataset-pair fallback records without making model calls. Requires "
+            "--allow-dataset-pair-fallback."
+        ),
+    )
     parser.add_argument("--expected-train-count", type=_positive_integer, default=512)
     parser.add_argument(
         "--expected-validation-count",
@@ -4035,6 +4139,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.paraphrase_version != PARAPHRASE_VERSION:
             raise ValueError(
                 "paraphrase-version must match the current frozen prompt contract"
+            )
+        if (
+            args.materialize_pending_as_dataset_pair_fallback
+            and not args.allow_dataset_pair_fallback
+        ):
+            raise ValueError(
+                "materialize-pending-as-dataset-pair-fallback requires "
+                "allow-dataset-pair-fallback"
             )
         sources, validation_ids = load_triviaqa_qa_memory_sources(
             args.train_tasks,
@@ -4150,6 +4262,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 require_complete=False,
             )
         for record in existing:
+            if _is_dataset_pair_fallback_record(record):
+                if not args.allow_dataset_pair_fallback:
+                    raise ValueError(
+                        "existing dataset-pair fallback requires the explicit "
+                        "allow-dataset-pair-fallback flag"
+                    )
+                _validate_dataset_pair_fallback_record(
+                    record,
+                    source_by_id[record.source_train_task_id],
+                )
+                continue
             admitted_seeds = {
                 args.base_seed
                 + record.selection_index
@@ -4175,6 +4298,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         for record in existing:
             source = source_by_id[record.source_train_task_id]
+            if _is_dataset_pair_fallback_record(record):
+                _validate_dataset_pair_fallback_record(record, source)
+                continue
             reject_exact_question_identity_shortcut(
                 source,
                 paraphrase_question=record.paraphrase_question,
@@ -4197,6 +4323,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         pending_sources = list(
             order_pending_sources_for_resume(sources, tuple(records.values()))
         )
+        immediate_fallback_source_ids: list[str] = []
+        bounded_failure_fallback_source_ids: list[str] = []
+        if args.materialize_pending_as_dataset_pair_fallback:
+            for source in pending_sources:
+                record = _create_dataset_pair_fallback_record(
+                    source,
+                    paraphrase_version=args.paraphrase_version,
+                    generation_seed=args.base_seed + source.selection_index,
+                )
+                records[record.source_train_task_id] = record
+                immediate_fallback_source_ids.append(
+                    record.source_train_task_id
+                )
+            pending_sources = []
 
         def generate_one(
             source: TriviaQATrainSource,
@@ -4302,12 +4442,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 tuple(records.values()),
             )
         if generation_errors:
-            source_id, error = generation_errors[0]
-            raise RuntimeError(
-                "bounded paraphrase generation retained all successful rows but "
-                f"rejected {len(generation_errors)} source(s); first={source_id}: "
-                f"{type(error).__name__}: {error}"
-            ) from error
+            if args.allow_dataset_pair_fallback:
+                for source_id, _error in generation_errors:
+                    source = source_by_id[source_id]
+                    record = _create_dataset_pair_fallback_record(
+                        source,
+                        paraphrase_version=args.paraphrase_version,
+                        generation_seed=(
+                            args.base_seed + source.selection_index
+                        ),
+                    )
+                    records[source_id] = record
+                    bounded_failure_fallback_source_ids.append(source_id)
+                write_materialized_qa_memory(
+                    output_path,
+                    tuple(records.values()),
+                )
+            else:
+                source_id, error = generation_errors[0]
+                raise RuntimeError(
+                    "bounded paraphrase generation retained all successful rows "
+                    f"but rejected {len(generation_errors)} source(s); "
+                    f"first={source_id}: {type(error).__name__}: {error}"
+                ) from error
         completed = tuple(records.values())
         validate_qa_memory_against_sources(
             completed,
@@ -4318,12 +4475,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_by_id = {
             source.source_train_task_id: source for source in sources
         }
+        strict_paraphrases = tuple(
+            record
+            for record in completed
+            if not _is_dataset_pair_fallback_record(record)
+        )
+        dataset_pair_fallbacks = tuple(
+            record
+            for record in completed
+            if _is_dataset_pair_fallback_record(record)
+        )
+        for record in dataset_pair_fallbacks:
+            _validate_dataset_pair_fallback_record(
+                record,
+                source_by_id[record.source_train_task_id],
+            )
         lexical_replacement_count = sum(
             _has_lexical_or_phrase_replacement(
                 source_by_id[record.source_train_task_id].original_question,
                 record.paraphrase_question,
             )
-            for record in completed
+            for record in strict_paraphrases
         )
         literal_slot_substitution_count = sum(
             _literal_slot_substitution_preserved(
@@ -4333,6 +4505,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 canonical_answer=record.canonical_answer,
                 answer_statement=record.paraphrase_answer_statement,
             )
+            for record in strict_paraphrases
+        )
+        exact_original_question_substring_count = sum(
+            " ".join(
+                source_by_id[record.source_train_task_id]
+                .original_question.split()
+            ).casefold()
+            in " ".join(record.paraphrase_question.split()).casefold()
+            or " ".join(
+                source_by_id[record.source_train_task_id]
+                .original_question.split()
+            ).casefold()
+            in " ".join(
+                record.paraphrase_answer_statement.split()
+            ).casefold()
             for record in completed
         )
         semantic_repair_source_ids = tuple(_semantic_repair_source_ids)
@@ -4389,13 +4576,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             "paraphrase_version": args.paraphrase_version,
             "prompt_template_version": PROMPT_TEMPLATE_VERSION,
             "paraphrase_method": PARAPHRASE_METHOD,
+            "strict_semantic_paraphrase_count": len(strict_paraphrases),
+            "dataset_pair_fallback_count": len(dataset_pair_fallbacks),
+            "dataset_pair_fallback_method": DATASET_PAIR_FALLBACK_METHOD,
+            "dataset_pair_fallback_prompt_template_version": (
+                DATASET_PAIR_FALLBACK_PROMPT_VERSION
+            ),
+            "dataset_pair_fallback_source_ids": sorted(
+                record.source_train_task_id
+                for record in dataset_pair_fallbacks
+            ),
+            "bounded_failure_fallback_count": len(
+                bounded_failure_fallback_source_ids
+            ),
+            "pending_gap_fallback_count": len(
+                immediate_fallback_source_ids
+            ),
+            "bypass_generation_for_pending": (
+                args.materialize_pending_as_dataset_pair_fallback
+            ),
             "lexical_or_phrase_replacement_count": (
                 lexical_replacement_count
             ),
             "semantic_verification_required": True,
             "semantic_verification_model": args.model_id,
             "semantic_admission_version": SEMANTIC_ADMISSION_VERSION,
-            "semantic_admission_checked_count": len(completed),
+            "semantic_admission_checked_count": len(strict_paraphrases),
             "semantic_repair_count": len(semantic_repair_source_ids),
             "semantic_repair_source_ids": sorted(
                 semantic_repair_source_ids
@@ -4416,7 +4622,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else "held_out_generalization"
             ),
             "validation_content_indexed": args.include_validation_qa,
-            "exact_original_question_substring_count": 0,
+            "exact_original_question_substring_count": (
+                exact_original_question_substring_count
+            ),
             "generation_concurrency": args.concurrency,
             "generation_rounds": args.generation_rounds,
             "generation_round_seed_stride": GENERATION_ROUND_SEED_STRIDE,

@@ -49,6 +49,10 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _capitalized_identity_tokens,
     _deterministic_answer_slot_statement,
     _deterministic_question_paraphrase,
+    _create_dataset_pair_fallback_record,
+    _dataset_pair_fallback_text,
+    _is_dataset_pair_fallback_record,
+    _validate_dataset_pair_fallback_record,
     SemanticPreservationError,
     LocalQwen35Paraphraser,
     load_resume_records,
@@ -75,6 +79,46 @@ def _source() -> TriviaQATrainSource:
         canonical_answer="Zambezi",
         native_split="train",
     )
+
+
+def test_dataset_pair_fallback_has_explicit_separate_provenance() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:qz_6732",
+        base_task_id="triviaqa:qz_6732",
+        selection_index=17,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="1313 Webfoot Walk, Duckburg, Calisota",
+        canonical_answer="Donald Duck",
+        native_split="train",
+    )
+
+    question, statement = _dataset_pair_fallback_text(source)
+    record = _create_dataset_pair_fallback_record(
+        source,
+        paraphrase_version="triviaqa.qa_memory.paraphrase.v12",
+        generation_seed=20260845,
+    )
+
+    assert question == (
+        "TriviaQA dataset source prompt (verbatim): "
+        "1313 Webfoot Walk, Duckburg, Calisota"
+    )
+    assert statement == (
+        "For this TriviaQA dataset source prompt, the paired response is "
+        "Donald Duck."
+    )
+    assert record.paraphrase_question == question
+    assert record.paraphrase_answer_statement == statement
+    assert _is_dataset_pair_fallback_record(record)
+    _validate_dataset_pair_fallback_record(record, source)
+    validate_resume_record_admission((record,), (source,))
+    accepted, repairs = partition_resume_records_for_semantic_repair(
+        (record,),
+        (source,),
+    )
+    assert accepted == (record,)
+    assert repairs == ()
 
 
 def _record(
