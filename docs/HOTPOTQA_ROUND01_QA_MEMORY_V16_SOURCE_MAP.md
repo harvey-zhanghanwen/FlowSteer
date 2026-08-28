@@ -68,3 +68,18 @@ architecture:
 These checks are model-free.  They do not constitute a new 128-sample score;
 the historical best remains the evidence attached to its original Round-01
 condition until the separately versioned v16 evaluation completes.
+
+## Paired-QA memory examples
+
+Every embedding document uses the manifest template
+`Question: {paraphrase_question}\nAnswer: {paraphrase_answer_statement}`.  The
+question and answer therefore remain paired inside one training-memory record.
+
+| Source train task | Original QA | Indexed memory QA |
+| --- | --- | --- |
+| `hotpotqa:5a80d30655429938b61421fe` | Q: Are Manhattan West and Singer Building both projects in New York? A: `yes` | Q: Are Manhattan West and the Singer Building both projects in New York? A: The canonical answer is yes. Manhattan West and the Singer Building are both projects located in New York. |
+| `hotpotqa:5a7e567b55429949594199a0` | Q: Who is the American internet entrepreneur who founded the company featured on 24 Hours on Craigslist? A: `Craig Newmark` | Q: Which American internet entrepreneur established the organization that was the subject of the 24 Hours on Craigslist program? A: The American internet entrepreneur who founded the company highlighted in 24 Hours on Craigslist is Craig Newmark. |
+| `hotpotqa:5a77bd595542995d83181291` | Q: Between two tennis players Kim Clijsters and Mary Pierce, who is older? A: `Mary Pierce` | Q: Which of the two tennis players, Kim Clijsters or Mary Pierce, has the greater age? A: Mary Pierce is older than Kim Clijsters. |
+
+The index contains 512 memories from 512 unique training tasks, with no cycled
+record and no task-ID overlap with the frozen 128-item validation partition.
