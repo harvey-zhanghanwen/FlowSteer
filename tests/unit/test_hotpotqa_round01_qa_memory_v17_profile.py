@@ -10,7 +10,7 @@ from src.interactive.config_loader import validate_agent_graph_config
 ROOT = Path(__file__).resolve().parents[2]
 
 
-class HotpotQARound01QAMemoryV16ProfileTest(unittest.TestCase):
+class HotpotQARound01QAMemoryV17ProfileTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.best = yaml.safe_load(
@@ -21,7 +21,7 @@ class HotpotQARound01QAMemoryV16ProfileTest(unittest.TestCase):
         cls.candidate = yaml.safe_load(
             (
                 ROOT
-                / "config/evaluation_hotpotqa_round01_qa_memory_v16.yaml"
+                / "config/evaluation_hotpotqa_round01_qa_memory_v17.yaml"
             ).read_text(encoding="utf-8")
         )
 
@@ -33,13 +33,22 @@ class HotpotQARound01QAMemoryV16ProfileTest(unittest.TestCase):
             self.assertEqual(
                 self.candidate["experiment"][key], self.best["experiment"][key]
             )
-        self.assertEqual(self.candidate["director"], self.best["director"])
+        self.assertEqual(
+            self.candidate["director"],
+            {
+                **self.best["director"],
+                "sampling_action_profile": "model_admissible_canvas_actions",
+                "sampling_action_schema_version": (
+                    "agentgraph.model-admissible-action-mask.v3"
+                ),
+            },
+        )
         self.assertEqual(
             self.candidate["agent_graph"],
             {
                 **self.best["agent_graph"],
                 "model_catalog_path": (
-                    "config/model_catalog_hotpotqa_round01_frozen_v1.yaml"
+                    "config/model_catalog_hotpotqa_qa_memory_v10.yaml"
                 ),
                 "required_evidence_tool_id": "hotpotqa.qa_memory",
                 "require_evidence_relation": True,
@@ -47,14 +56,18 @@ class HotpotQARound01QAMemoryV16ProfileTest(unittest.TestCase):
             },
         )
 
-    def test_round01_ignored_catalog_is_materialized_without_semantic_change(self) -> None:
+    def test_current_available_catalog_reuses_existing_local_profile(self) -> None:
         candidate_path = ROOT / self.candidate["agent_graph"]["model_catalog_path"]
-        expected_path = ROOT.parent.parent / "FlowSteer" / "config/model_catalog.yaml"
         self.assertTrue(candidate_path.is_file())
-        self.assertTrue(expected_path.is_file())
         candidate_catalog = yaml.safe_load(candidate_path.read_text(encoding="utf-8"))
-        expected_catalog = yaml.safe_load(expected_path.read_text(encoding="utf-8"))
-        self.assertEqual(candidate_catalog, expected_catalog)
+        self.assertEqual(
+            [model["model_id"] for model in candidate_catalog["models"]],
+            ["qwen3.5-9b-local"],
+        )
+        self.assertEqual(
+            candidate_catalog["models"][0]["model_name"],
+            "supervisor_theta",
+        )
 
     def test_round01_selection_and_inactive_blocks_are_frozen(self) -> None:
         for key in (
@@ -96,7 +109,7 @@ class HotpotQARound01QAMemoryV16ProfileTest(unittest.TestCase):
         )
         candidate = task_projection(
             ROOT
-            / "artifacts/hotpotqa_round01_qa_memory_v16/selected_tasks.jsonl"
+            / "artifacts/hotpotqa_round01_qa_memory_v17/selected_tasks.jsonl"
         )
         self.assertEqual(len(original), 128)
         self.assertEqual(candidate, original)
@@ -119,7 +132,10 @@ class HotpotQARound01QAMemoryV16ProfileTest(unittest.TestCase):
             self.candidate["agent_graph"]["director_feedback_mode"],
             "control_plane",
         )
-        self.assertNotIn("sampling_action_profile", self.candidate["director"])
+        self.assertEqual(
+            self.candidate["director"]["sampling_action_profile"],
+            "model_admissible_canvas_actions",
+        )
         self.assertNotIn("terminal_protocol", self.candidate["agent_graph"])
         self.assertNotIn("recovery_policy", self.candidate["agent_graph"])
 

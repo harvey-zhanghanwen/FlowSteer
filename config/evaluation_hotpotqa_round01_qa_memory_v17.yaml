@@ -1,17 +1,19 @@
 # HotpotQA Round-01 best-profile architecture with dynamic paired-QA memory.
-# The Round-01 Director/Canvas profile is frozen; only the retrieval boundary
-# changes from no QA-memory to a worker-owned search/read Tool.
+# The Round-01 Director/Canvas profile is retained. Dynamic QA-memory adds a
+# worker Tool boundary; v17 also reuses FlowSteer's constrained scalar-action
+# decoding and the already tracked local-only catalog because the verified
+# Round-01 remote Executor catalog currently fails with provider quota 403.
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
-  name: "hotpotqa_round01_qa_memory_v16"
+  name: "hotpotqa_round01_qa_memory_v17"
   phase: "hotpotqa_evaluation"
   training_enabled: false
   seed: 20260815
-  condition_id: "hotpotqa_round01_qa_memory_v16"
-  sampling_schedule_purpose: "hotpotqa_round01_qa_memory_v16_inference_only"
+  condition_id: "hotpotqa_round01_qa_memory_v17"
+  sampling_schedule_purpose: "hotpotqa_round01_qa_memory_v17_inference_only"
   prompt_version: "agentgraph.director.minimal.v2"
   tool_version: "skillflow.hotpotqa.train-qa-memory.top-k-group-sufficiency-v15"
-  output_dir: "artifacts/hotpotqa_round01_qa_memory_v16"
+  output_dir: "artifacts/hotpotqa_round01_qa_memory_v17"
 
 data:
   catalog_path: "config/datasets_agentgraph.yaml"
@@ -32,12 +34,12 @@ hotpotqa_evaluation:
   direct_protocol: "round01_saved_outputs_official_rescore_v1"
   direct_source_path: "artifacts/hotpotqa_round_01/direct_predictions.jsonl"
   agentgraph_baseline_source_path: "artifacts/hotpotqa_round_01/agentgraph_trajectories.jsonl"
-  agentgraph_protocol: "round01_canvas_dynamic_train_qa_memory_worker_top_k_sufficiency_v16"
+  agentgraph_protocol: "round01_canvas_dynamic_train_qa_memory_worker_top_k_sufficiency_v17"
   protocol_equivalent_to_direct: false
 
 qa_embedding_retrieval:
   enabled: true
-  condition_id: "hotpotqa_round01_qa_memory_v16"
+  condition_id: "hotpotqa_round01_qa_memory_v17"
   mode: "model_driven_search_read"
   corpus_kind: "train_qa_memory"
   index_scope: "global_train_only"
@@ -70,23 +72,23 @@ qa_embedding_retrieval:
 
 storage:
   schema_version: "flowsteer.hotpotqa.qa_memory_retrieval.v1"
-  root: "artifacts/hotpotqa_round01_qa_memory_v16/evidence"
-  selected_tasks_path: "artifacts/hotpotqa_round01_qa_memory_v16/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/hotpotqa_round01_qa_memory_v16/direct_rescored_predictions.jsonl"
-  trajectories_path: "artifacts/hotpotqa_round01_qa_memory_v16/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/hotpotqa_round01_qa_memory_v16/collection_failures.jsonl"
-  paired_results_path: "artifacts/hotpotqa_round01_qa_memory_v16/paired_results.jsonl"
-  wrong_demos_path: "artifacts/hotpotqa_round01_qa_memory_v16/wrong_demos.jsonl"
-  error_demos_path: "reports/hotpotqa_round01_qa_memory_v16/error_demos.jsonl"
+  root: "artifacts/hotpotqa_round01_qa_memory_v17/evidence"
+  selected_tasks_path: "artifacts/hotpotqa_round01_qa_memory_v17/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/hotpotqa_round01_qa_memory_v17/direct_rescored_predictions.jsonl"
+  trajectories_path: "artifacts/hotpotqa_round01_qa_memory_v17/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/hotpotqa_round01_qa_memory_v17/collection_failures.jsonl"
+  paired_results_path: "artifacts/hotpotqa_round01_qa_memory_v17/paired_results.jsonl"
+  wrong_demos_path: "artifacts/hotpotqa_round01_qa_memory_v17/wrong_demos.jsonl"
+  error_demos_path: "reports/hotpotqa_round01_qa_memory_v17/error_demos.jsonl"
   retrieval_profile_selection_path: "artifacts/hotpotqa_qa_memory_v1/profile_selection.json"
   retrieval_index_manifest_path: "artifacts/hotpotqa_qa_memory_source_freeze_v2/index/manifest.json"
   retrieval_index_smoke_path: "artifacts/hotpotqa_qa_memory_source_freeze_v2/index_smoke_receipt.json"
   retrieval_index_rebuild_smoke_path: "artifacts/hotpotqa_qa_memory_source_freeze_v2/index_smoke_receipt.json"
   paraphrase_manifest_path: "artifacts/hotpotqa_qa_memory_v1/paraphrase_manifest.json"
-  manifest_path: "artifacts/hotpotqa_round01_qa_memory_v16/run_manifest.json"
-  preflight_receipt_path: "artifacts/hotpotqa_round01_qa_memory_v16/preflight_receipt.json"
-  report_json_path: "reports/hotpotqa_round01_qa_memory_v16/report.json"
-  report_markdown_path: "reports/hotpotqa_round01_qa_memory_v16/report.md"
+  manifest_path: "artifacts/hotpotqa_round01_qa_memory_v17/run_manifest.json"
+  preflight_receipt_path: "artifacts/hotpotqa_round01_qa_memory_v17/preflight_receipt.json"
+  report_json_path: "reports/hotpotqa_round01_qa_memory_v17/report.json"
+  report_markdown_path: "reports/hotpotqa_round01_qa_memory_v17/report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
@@ -101,6 +103,8 @@ director:
   expected_server_weight_version: "default"
   live_adapter_name: "theta_smoke_step_000001"
   prompt_profile: "minimal"
+  sampling_action_profile: "model_admissible_canvas_actions"
+  sampling_action_schema_version: "agentgraph.model-admissible-action-mask.v3"
   dtype: "bfloat16"
   max_context_tokens: 8192
   max_action_tokens: 256
@@ -129,7 +133,7 @@ agent_graph:
   required_evidence_tool_id: "hotpotqa.qa_memory"
   require_evidence_relation: true
   director_feedback_mode: "control_plane"
-  model_catalog_path: "config/model_catalog_hotpotqa_round01_frozen_v1.yaml"
+  model_catalog_path: "config/model_catalog_hotpotqa_qa_memory_v10.yaml"
 
 evaluation:
   healthbench_judge_model: "gpt-4o-mini"
