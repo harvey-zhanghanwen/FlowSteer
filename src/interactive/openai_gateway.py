@@ -481,12 +481,12 @@ def _structured_upstream_artifact(value: str) -> Mapping[str, object] | None:
 
 
 def _has_qa_memory_coverage_failure(request: AgentRequest) -> bool:
-    """Recognize only a top-level typed QA-memory coverage diagnosis."""
+    """Recognize an all-Retriever typed QA-memory coverage diagnosis."""
 
+    valid_statuses: list[str] = []
     for message in request.upstream:
         if (
-            message.artifact_type != "retrieval_evidence"
-            or not isinstance(message.artifact_version, str)
+            not isinstance(message.artifact_version, str)
             or not message.artifact_version.strip()
             or not message.tool_receipts
         ):
@@ -494,7 +494,11 @@ def _has_qa_memory_coverage_failure(request: AgentRequest) -> bool:
         artifact = _structured_upstream_artifact(message.artifact)
         if artifact is None:
             continue
-        if artifact.get("retrieval_status") != "knowledge_base_coverage_failure":
+        retrieval_status = artifact.get("retrieval_status")
+        if retrieval_status not in {
+            "evidence_found",
+            "knowledge_base_coverage_failure",
+        }:
             continue
         from .qa_tool_adapter import (
             QARetrievalReactExecutionAdapter,
@@ -511,8 +515,11 @@ def _has_qa_memory_coverage_failure(request: AgentRequest) -> bool:
             )
             is None
         ):
-            return True
-    return False
+            valid_statuses.append(str(retrieval_status))
+    return bool(valid_statuses) and all(
+        status == "knowledge_base_coverage_failure"
+        for status in valid_statuses
+    )
 
 
 def _qa_memory_receipts_complete_for_coverage_failure(
@@ -576,8 +583,7 @@ def _has_parametric_fallback_candidate(request: AgentRequest) -> bool:
 
     for message in request.upstream:
         if (
-            message.artifact_type != "semantic_candidate"
-            or not isinstance(message.artifact_version, str)
+            not isinstance(message.artifact_version, str)
             or not message.artifact_version.strip()
             or not message.tool_receipts
         ):
@@ -726,6 +732,18 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             if parametric_fallback_reasoner
             else _QA_REASONER_PROTOCOL
         ) + " Do not use <answer> tags."
+        if parametric_fallback_reasoner:
+            from .task_dataset import (
+                qa_answer_cardinality_constraint,
+                qa_answer_type_constraint,
+            )
+
+            protocol += (
+                " For this unchanged public question, set answer_type exactly "
+                f"to {json.dumps(qa_answer_type_constraint(request.problem))} "
+                "and answer_cardinality exactly to "
+                f"{json.dumps(qa_answer_cardinality_constraint(request.problem))}."
+            )
     elif semantic_lineage and semantic_role == "verifier":
         protocol = (
             _HOTPOTQA_VERIFIER_PROTOCOL

@@ -94,6 +94,12 @@ _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION = (
     "complete only when entity identity and the requested relation are "
     "supported by a matching successful read Tool receipt"
 )
+_QA_MEMORY_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION = (
+    "complete only after one successful embedding search and one successful "
+    "read for every returned top-k memory_id in rank order; then report "
+    "evidence_found only for a record matching the original entity and "
+    "requested relation, otherwise report knowledge_base_coverage_failure"
+)
 _QA_LOCATION_REASONER_RECOVERY_CONTRACT = (
     "preserve the receipt-grounded first-hop location proposition as "
     "evidence_propositions[0], encode the public location-containment "
@@ -2144,9 +2150,14 @@ class AgentWorkflowEnv:
         node = self._graph.get_node(agent_id)
         if (node.role_family or "").casefold() != "evidence_retriever":
             return None
+        completion_condition = (
+            _QA_MEMORY_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+            if self.parametric_fallback_after_coverage_failure
+            else _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+        )
         candidates = {
             "contract": _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
-            "completion_condition": _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION,
+            "completion_condition": completion_condition,
         }
         return {
             field_name: value
@@ -3539,7 +3550,11 @@ class AgentWorkflowEnv:
                                             _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT
                                         ],
                                         "completion_conditions": [
-                                            _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                                            (
+                                                _QA_MEMORY_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                                                if self.parametric_fallback_after_coverage_failure
+                                                else _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION
+                                            )
                                         ],
                                     }
                                     if evidence_retriever_recovery
@@ -6359,8 +6374,8 @@ class AgentWorkflowEnv:
         normalized = unicodedata.normalize("NFKC", value)
         return tuple(
             re.findall(
-                r"(?<![A-Za-z0-9])[+-]?\d+(?:[.,:/-]\d+)*"
-                r"(?:s|['’]s)?(?![A-Za-z0-9])",
+                r"(?<![A-Za-z0-9_])[+-]?\d+(?:[.,:/-]\d+)*"
+                r"(?:s|['’]s)?(?![A-Za-z0-9_])",
                 normalized,
                 flags=re.IGNORECASE,
             )

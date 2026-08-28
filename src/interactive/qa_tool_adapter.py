@@ -9515,28 +9515,51 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 str(candidate["memory_id"])
                 for candidate in candidates
                 if (
-                    _public_search_candidate_compatibility(
-                        original_question=original_question,
-                        title=str(candidate["paraphrase_question"]),
-                        snippet=(
-                            f"{candidate['paraphrase_question']}. "
+                    not _missing_question_named_constraints(
+                        original_question,
+                        (
+                            f"{candidate['paraphrase_question']} "
                             f"{candidate['paraphrase_answer_statement']}"
                         ),
-                        require_entity_relation_compatibility=True,
-                    )[0]
-                    or bool(
-                        original_content_tokens
-                        and original_content_tokens
-                        <= _candidate_matched_question_tokens(
-                            tuple(original_content_tokens),
-                            (
-                                f"{candidate['paraphrase_question']} "
+                    )
+                    and (
+                        _public_search_candidate_compatibility(
+                            original_question=original_question,
+                            title=str(candidate["paraphrase_question"]),
+                            snippet=(
+                                f"{candidate['paraphrase_question']}. "
                                 f"{candidate['paraphrase_answer_statement']}"
                             ),
+                            require_entity_relation_compatibility=True,
+                        )[0]
+                        or bool(
+                            original_content_tokens
+                            and original_content_tokens
+                            <= _candidate_matched_question_tokens(
+                                tuple(original_content_tokens),
+                                (
+                                    f"{candidate['paraphrase_question']} "
+                                    f"{candidate['paraphrase_answer_statement']}"
+                                ),
+                            )
                         )
                     )
                 )
             )
+            if retrieval_status == "evidence_found":
+                incompatible_relevant_ids = tuple(
+                    memory_id
+                    for memory_id in relevant_memory_ids or ()
+                    if memory_id not in compatible_memory_ids
+                )
+                if incompatible_relevant_ids:
+                    return None, (
+                        "TriviaQA QA-memory evidence_found is inadmissible "
+                        "because the selected record does not preserve the "
+                        "public question's named entity/scope and target "
+                        "relation; use knowledge_base_coverage_failure when "
+                        "no fully read top-k record supplies the requested fact"
+                    )
             if (
                 retrieval_status == _KNOWLEDGE_BASE_COVERAGE_FAILURE
                 and compatible_memory_ids

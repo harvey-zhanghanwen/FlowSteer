@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
+from src.interactive.agent_action_parser import AgentAction, AgentActionType
 from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
 from src.interactive.agent_runtime import (
     AgentRequest,
@@ -14,6 +15,7 @@ from src.interactive.agent_runtime import (
 from src.interactive.agent_workflow_env import (
     AgentWorkflowEnv,
     _HOTPOTQA_FORMAT_CONTRACT,
+    _QA_MEMORY_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
 from src.interactive.openai_gateway import build_agent_messages
@@ -355,6 +357,31 @@ def _fallback_execution(
 
 
 class TriviaQATopKEnvRoutingTests(unittest.TestCase):
+    def test_fallback_retriever_recovery_matches_tool_first_schema(self) -> None:
+        env = _env(parametric_fallback_after_coverage_failure=True)
+        values = env._triviaqa_evidence_retriever_recovery_field_values(
+            "retriever"
+        )
+        self.assertIsNotNone(values)
+        self.assertEqual(
+            _QA_MEMORY_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION,
+            values["completion_condition"],
+        )
+
+    def test_agent_ids_are_not_numeric_answer_literals(self) -> None:
+        env = _env(parametric_fallback_after_coverage_failure=True)
+        issue = env._contract_obligation_issue(
+            AgentAction(
+                AgentActionType.MODIFY_AGENT,
+                agent_id="reasoner",
+                contract=(
+                    "derive one semantic candidate from artifacts routed by "
+                    "node_1 and node_5"
+                ),
+            )
+        )
+        self.assertIsNone(issue)
+
     def test_child_agent_prompts_switch_only_after_typed_coverage_failure(
         self,
     ) -> None:
@@ -381,7 +408,10 @@ class TriviaQATopKEnvRoutingTests(unittest.TestCase):
                     "retriever",
                     "reasoner",
                     artifact,
-                    artifact_type="retrieval_evidence",
+                    # FlowSteer's production Canvas defaults AgentNode
+                    # artifact_type to text. Exact schema, current artifact
+                    # version, and Tool receipts establish this wire's type.
+                    artifact_type="text",
                     tool_receipts=receipts,
                     artifact_version="retriever:v1",
                 ),
@@ -393,6 +423,8 @@ class TriviaQATopKEnvRoutingTests(unittest.TestCase):
         )
         self.assertIn("parametric knowledge", reasoner_prompt)
         self.assertIn("mandatory local QA-memory search", reasoner_prompt)
+        self.assertIn('answer_type exactly to "entity"', reasoner_prompt)
+        self.assertIn('answer_cardinality exactly to "single"', reasoner_prompt)
 
         reasoner_artifact = json.dumps(
             {
@@ -419,7 +451,7 @@ class TriviaQATopKEnvRoutingTests(unittest.TestCase):
                     "reasoner",
                     "verifier",
                     reasoner_artifact,
-                    artifact_type="semantic_candidate",
+                    artifact_type="reasoning_artifact",
                     tool_receipts=receipts,
                     artifact_version="reasoner:v1",
                 ),
@@ -447,7 +479,7 @@ class TriviaQATopKEnvRoutingTests(unittest.TestCase):
                     "untyped",
                     "reasoner",
                     artifact,
-                    tool_receipts=receipts,
+                    tool_receipts=(),
                     artifact_version="retriever:v1",
                 ),
             ),
@@ -457,6 +489,53 @@ class TriviaQATopKEnvRoutingTests(unittest.TestCase):
             for message in build_agent_messages(untyped_request)
         )
         self.assertNotIn("mandatory local QA-memory search", untyped_prompt)
+
+        evidence_receipts = json.loads(json.dumps(receipts))
+        evidence_memory = evidence_receipts[1]["result"]["value"]["memory"]
+        evidence_memory["paraphrase_question"] = _QUESTION
+        evidence_memory["paraphrase_answer_statement"] = (
+            "Ada is the author who wrote the novel."
+        )
+        evidence_memory["text"] = (
+            f"Question: {_QUESTION}\n"
+            "Answer: Ada is the author who wrote the novel."
+        )
+        evidence_artifact = _artifact(
+            tuple(evidence_receipts),
+            retrieval_status="evidence_found",
+        )
+        mixed_request = AgentRequest(
+            request_id="mixed-retriever-status-request",
+            run_id="prompt-test",
+            graph_revision=graph.revision,
+            problem=_QUESTION,
+            agent=graph.get_node("reasoner"),
+            model=model,
+            provider=provider,
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            upstream=(
+                UpstreamMessage(
+                    "coverage-retriever",
+                    "reasoner",
+                    artifact,
+                    tool_receipts=receipts,
+                    artifact_version="coverage:v1",
+                ),
+                UpstreamMessage(
+                    "evidence-retriever",
+                    "reasoner",
+                    evidence_artifact,
+                    tool_receipts=tuple(evidence_receipts),
+                    artifact_version="evidence:v1",
+                ),
+            ),
+        )
+        mixed_prompt = "\n".join(
+            message["content"]
+            for message in build_agent_messages(mixed_request)
+        )
+        self.assertNotIn("mandatory local QA-memory search", mixed_prompt)
 
     def test_matching_paired_qa_blocks_coverage_failure_status(self) -> None:
         receipts = json.loads(json.dumps(_receipts()))
@@ -488,6 +567,28 @@ class TriviaQATopKEnvRoutingTests(unittest.TestCase):
         self.assertIsNone(projected)
         self.assertIsNotNone(issue)
         self.assertIn("entity/relation-compatible", issue)
+
+    def test_irrelevant_paired_qa_cannot_claim_evidence_found(self) -> None:
+        projected, issue = (
+            QARetrievalReactExecutionAdapter._qa_memory_completion_receipt_projection(
+                original_question=(
+                    "Which American-born Sinclair won the Nobel Prize for "
+                    "Literature in 1930?"
+                ),
+                selection_artifact=json.dumps(
+                    {
+                        "memory_ids": [row[0] for row in _ROWS],
+                        "retrieval_status": "evidence_found",
+                        "relevant_memory_ids": [_ROWS[0][0]],
+                    }
+                ),
+                tool_receipts=_receipts(),
+                parametric_fallback_after_coverage_failure=True,
+            )
+        )
+        self.assertIsNone(projected)
+        self.assertIsNotNone(issue)
+        self.assertIn("evidence_found is inadmissible", issue)
 
     def test_tool_first_coverage_failure_admits_parametric_child_reasoner(
         self,
@@ -530,14 +631,24 @@ class TriviaQATopKEnvRoutingTests(unittest.TestCase):
         self.assertIsNotNone(issue)
         self.assertIn("read(memory_id)", issue)
 
+        evidence_receipts = json.loads(json.dumps(receipts))
+        evidence_memory = evidence_receipts[1]["result"]["value"]["memory"]
+        evidence_memory["paraphrase_question"] = _QUESTION
+        evidence_memory["paraphrase_answer_statement"] = (
+            "Ada is the author who wrote the novel."
+        )
+        evidence_memory["text"] = (
+            f"Question: {_QUESTION}\n"
+            "Answer: Ada is the author who wrote the novel."
+        )
         evidence_artifact = _artifact(
-            receipts,
+            tuple(evidence_receipts),
             retrieval_status="evidence_found",
         )
         evidence_execution = _fallback_execution(
             env,
             evidence_artifact,
-            receipts,
+            tuple(evidence_receipts),
         )
         issue = env._semantic_protocol_issue(evidence_execution)
         self.assertIsNotNone(issue)
