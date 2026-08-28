@@ -23,6 +23,8 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     build_question_repair_messages,
     build_synonym_repair_messages,
     build_verification_messages,
+    _birth_event_is_target_relation,
+    _exact_question_identity_contaminated_fields,
     _has_lexical_or_phrase_replacement,
     _identity_token_preserved,
     _leading_answer_slot_anchor,
@@ -37,11 +39,13 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _original_interrogative_head_omitted,
     _participation_marker_preserved,
     _restore_authoritative_source_transpositions,
+    _semantic_relation_and_scope_preserved,
     _possessive_name_answer_statement,
     _canonical_answer_is_explicit_compound,
     _called_relation_substitution_preserved,
     _clausal_canonical_relation_statement,
     SemanticPreservationError,
+    LocalQwen35Paraphraser,
     load_resume_records,
     order_pending_sources_for_resume,
     partition_resume_records_for_semantic_repair,
@@ -235,6 +239,70 @@ def test_v12_semantic_gate_rejects_relation_and_scope_drift(
                 }
             ),
             _semantic_source(original, canonical),
+        )
+
+
+@pytest.mark.parametrize(
+    "question",
+    (
+        "Where was Ada Lovelace born?",
+        "Who was born first, Susan Sarandon or Glenn Close?",
+        "Which Oscar-winning actress was born on this date?",
+        "In which country was Ursula Andress born?",
+        "What year was Alan Turing born?",
+    ),
+)
+def test_birth_target_detector_keeps_direct_birth_questions_strict(
+    question: str,
+) -> None:
+    assert _birth_event_is_target_relation(question)
+
+
+@pytest.mark.parametrize(
+    "question",
+    (
+        (
+            "The Pogues singer Shane MacGowan was born in 1957. Which female "
+            "singer featured on their Christmas single?"
+        ),
+        (
+            "James Todd Smith, born 1968, is an American rapper. What is he "
+            "better known as?"
+        ),
+        (
+            "When Achilles was born, his mother dipped him in the Styx. "
+            "Where was he left vulnerable?"
+        ),
+    ),
+)
+def test_birth_target_detector_ignores_context_for_another_relation(
+    question: str,
+) -> None:
+    assert not _birth_event_is_target_relation(question)
+
+
+def test_contextual_birth_does_not_force_birth_into_answer_statement() -> None:
+    _semantic_relation_and_scope_preserved(
+        original_question=(
+            "The Pogues singer Shane MacGowan was born in 1957. Which female "
+            "singer featured on their Christmas single?"
+        ),
+        paraphrase_question=(
+            "Born in 1957, Shane MacGowan led The Pogues; name the female "
+            "vocalist who appeared on their Christmas single."
+        ),
+        paraphrase_answer_statement=(
+            "Kirsty MacColl featured on The Pogues' Christmas single."
+        ),
+    )
+
+
+def test_direct_birth_target_still_requires_birth_in_answer_statement() -> None:
+    with pytest.raises(SemanticPreservationError, match="birth-event"):
+        _semantic_relation_and_scope_preserved(
+            original_question="Where was Ada Lovelace born?",
+            paraphrase_question="In which place was Ada Lovelace born?",
+            paraphrase_answer_statement="Ada Lovelace was in London.",
         )
 
 
@@ -1915,6 +1983,79 @@ def test_v5_materialization_rejects_new_answer_surface_in_question() -> None:
             (record,),
             (_source(),),
             require_complete=True,
+        )
+
+
+def test_exact_query_contamination_is_attributed_to_each_field() -> None:
+    source = _source()
+    original = source.original_question
+    assert _exact_question_identity_contaminated_fields(
+        source,
+        paraphrase_question=f"Determine this: {original}",
+        paraphrase_answer_statement=(
+            f"For {original}, the Zambezi is the requested river."
+        ),
+    ) == frozenset(
+        {"paraphrase_question", "paraphrase_answer_statement"}
+    )
+    assert not _exact_question_identity_contaminated_fields(
+        source,
+        paraphrase_question="Name the waterway holding the Kariba Dam.",
+        paraphrase_answer_statement=(
+            "The Kariba Dam was built on the Zambezi river."
+        ),
+    )
+
+
+def test_exact_query_recovery_routes_only_contaminated_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    client = object.__new__(LocalQwen35Paraphraser)
+    calls: list[str] = []
+
+    def repair_question(*args: object, **kwargs: object) -> str:
+        calls.append("question")
+        return "Name the waterway holding the Kariba Dam."
+
+    def repair_statement(*args: object, **kwargs: object) -> str:
+        calls.append("statement")
+        return "The Kariba Dam was built on the Zambezi river."
+
+    monkeypatch.setattr(client, "_repair_paraphrase_question", repair_question)
+    monkeypatch.setattr(client, "_repair_answer_statement", repair_statement)
+    question, statement = client._repair_exact_question_identity_shortcut(
+        source,
+        question=f"Determine this: {source.original_question}",
+        statement=(
+            f"For {source.original_question}, the Zambezi is the requested river."
+        ),
+        seed=7,
+    )
+
+    assert calls == ["question", "statement"]
+    assert question == "Name the waterway holding the Kariba Dam."
+    assert statement == "The Kariba Dam was built on the Zambezi river."
+
+
+def test_exact_query_recovery_remains_fail_closed_after_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    client = object.__new__(LocalQwen35Paraphraser)
+    contaminated = f"Determine this: {source.original_question}"
+    monkeypatch.setattr(
+        client,
+        "_repair_paraphrase_question",
+        lambda *args, **kwargs: contaminated,
+    )
+
+    with pytest.raises(ValueError, match="complete original question"):
+        client._repair_exact_question_identity_shortcut(
+            source,
+            question=contaminated,
+            statement="The Kariba Dam was built on the Zambezi river.",
+            seed=11,
         )
 
 

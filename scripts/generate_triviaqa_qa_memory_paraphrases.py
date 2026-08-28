@@ -285,6 +285,13 @@ _BIRTH_EVENT = re.compile(
     r"brought into (?:the )?world|(?:come|came) into existence)\b",
     re.IGNORECASE,
 )
+_BIRTH_LOCATION_OR_TIME_HEADS = (
+    *_LOCATION_SLOT_HEADS,
+    "date",
+    "day",
+    "month",
+    "year",
+)
 _RECORDING_CONTRACT_SOURCE = re.compile(
     r"\bsign(?:ed|s|ing)?\s+to\b",
     re.IGNORECASE,
@@ -320,6 +327,62 @@ def _primary_answer_slot(question: str) -> tuple[str, tuple[str, ...]] | None:
         if token == "how":
             return token, folded[index + 1 : index + 9]
     return None
+
+
+def _birth_event_is_target_relation(question: str) -> bool:
+    """Require birth lineage only when the question asks through ``born``.
+
+    TriviaQA frequently mentions that a contextual subject was born somewhere
+    before asking a different relation, such as a stage name, a featured
+    singer, or a team.  Treating every occurrence of ``born`` as the target
+    relation incorrectly forces those unrelated answer statements to assert a
+    birth fact.  This detector remains deliberately narrow: it admits direct
+    who/where/when birth questions, explicit location/time birth slots, and a
+    leading identity slot whose ``born`` constraint identifies the requested
+    person.  A background birth clause before the primary question does not
+    match.
+    """
+
+    normalized = " ".join(question.strip().lstrip('"“').split())
+    birth_match = re.search(r"\bborn\b", normalized, re.IGNORECASE)
+    if birth_match is None:
+        return False
+    # A later interrogative is the operative request in contextual forms such
+    # as ``When X was born, ... Where was he left vulnerable?``.  Do not bind
+    # that later slot to the background birth clause.
+    if re.search(
+        r"\b(?:what|which|who|whom|whose|where|when|why|how)\b[^?]*\?",
+        normalized[birth_match.end() :],
+        re.IGNORECASE,
+    ) is not None:
+        return False
+
+    location_or_time = "|".join(
+        re.escape(head) for head in _BIRTH_LOCATION_OR_TIME_HEADS
+    )
+    if re.search(
+        rf"\b(?:where|when)\b[^?.;]{{0,120}}\bborn\b|"
+        rf"\b(?:in|on|at)\s+(?:what|which)\s+"
+        rf"(?:{location_or_time})\b[^?.;]{{0,120}}\bborn\b|"
+        rf"\b(?:what|which)\s+(?:{location_or_time})\b"
+        rf"[^?.;]{{0,120}}\bborn\b",
+        normalized,
+        re.IGNORECASE,
+    ) is not None:
+        return True
+
+    entity_heads = "|".join(
+        re.escape(head) for head in sorted(_ENTITY_ANSWER_HEADS)
+    )
+    return re.match(
+        rf"^(?:who\b[^?.;]{{0,100}}\bborn\b|"
+        rf"(?:what|which)\s+(?:[^\W_]+(?:['’-][^\W_]+)*\s+){{0,4}}"
+        rf"(?:{entity_heads})\b[^?.;]{{0,100}}\bborn\b|"
+        rf"(?:what|which)\s+(?:[^\W_]+(?:['’-][^\W_]+)*\s+){{0,3}}"
+        rf"born\s+(?:{entity_heads})\b)",
+        normalized,
+        re.IGNORECASE,
+    ) is not None
 
 
 def _who_answer_slot_family_preserved(original: str, paraphrase: str) -> bool:
@@ -503,7 +566,7 @@ def _semantic_relation_and_scope_preserved(
         raise SemanticPreservationError(
             "paraphrase changed a source/destination relation"
         )
-    if re.search(r"\bborn\b", original_question, re.IGNORECASE) is not None:
+    if _birth_event_is_target_relation(original_question):
         if _BIRTH_EVENT.search(paraphrase_question) is None or _BIRTH_EVENT.search(
             paraphrase_answer_statement
         ) is None:
@@ -1755,13 +1818,34 @@ def reject_exact_question_identity_shortcut(
 ) -> None:
     """Reject a stored QA record that contains the complete evaluation query."""
 
-    original = " ".join(source.original_question.split()).casefold()
-    question = " ".join(paraphrase_question.split()).casefold()
-    statement = " ".join(paraphrase_answer_statement.split()).casefold()
-    if original in question or original in statement:
+    contaminated_fields = _exact_question_identity_contaminated_fields(
+        source,
+        paraphrase_question=paraphrase_question,
+        paraphrase_answer_statement=paraphrase_answer_statement,
+    )
+    if contaminated_fields:
         raise ValueError(
             "semantic paraphrase retained the complete original question substring"
         )
+
+
+def _exact_question_identity_contaminated_fields(
+    source: TriviaQATrainSource,
+    *,
+    paraphrase_question: str,
+    paraphrase_answer_statement: str,
+) -> frozenset[str]:
+    """Locate an exact-query shortcut without weakening its rejection gate."""
+
+    original = " ".join(source.original_question.split()).casefold()
+    question = " ".join(paraphrase_question.split()).casefold()
+    statement = " ".join(paraphrase_answer_statement.split()).casefold()
+    contaminated: set[str] = set()
+    if original in question:
+        contaminated.add("paraphrase_question")
+    if original in statement:
+        contaminated.add("paraphrase_answer_statement")
+    return frozenset(contaminated)
 
 
 def _decode_paraphrase_object(text: str) -> Mapping[str, object]:
@@ -2398,6 +2482,53 @@ class LocalQwen35Paraphraser:
             "question repair exhausted eligible lexical source tokens"
         ) from last_error
 
+    def _repair_exact_question_identity_shortcut(
+        self,
+        source: TriviaQATrainSource,
+        *,
+        question: str,
+        statement: str,
+        seed: int,
+    ) -> tuple[str, str]:
+        """Repair only fields that copied the complete source question."""
+
+        contaminated = _exact_question_identity_contaminated_fields(
+            source,
+            paraphrase_question=question,
+            paraphrase_answer_statement=statement,
+        )
+        if not contaminated:
+            return question, statement
+        if "paraphrase_question" in contaminated:
+            question = self._repair_paraphrase_question(
+                source,
+                rejected_question=question,
+                seed=seed,
+            )
+        if "paraphrase_answer_statement" in contaminated:
+            statement = self._repair_answer_statement(
+                source,
+                question=question,
+                rejected_statement=statement,
+                seed=seed + 1_000_000,
+            )
+        question, statement = parse_paraphrase_response(
+            json.dumps(
+                {
+                    "paraphrase_question": question,
+                    "paraphrase_answer_statement": statement,
+                },
+                ensure_ascii=False,
+            ),
+            source,
+        )
+        reject_exact_question_identity_shortcut(
+            source,
+            paraphrase_question=question,
+            paraphrase_answer_statement=statement,
+        )
+        return question, statement
+
     def generate(
         self,
         source: TriviaQATrainSource,
@@ -2703,6 +2834,45 @@ class LocalQwen35Paraphraser:
                         rejected_statement=statement,
                         seed=seed + 3_000_000 + attempt,
                     )
+                contaminated = _exact_question_identity_contaminated_fields(
+                    source,
+                    paraphrase_question=question,
+                    paraphrase_answer_statement=statement,
+                )
+                if contaminated:
+                    question, statement = (
+                        self._repair_exact_question_identity_shortcut(
+                            source,
+                            question=question,
+                            statement=statement,
+                            seed=seed + 6_000_000 + attempt,
+                        )
+                    )
+                    verification = parse_verification_response(
+                        self._complete(
+                            messages=build_verification_messages(
+                                source,
+                                paraphrase_question=question,
+                            ),
+                            seed=seed + 6_500_000 + attempt,
+                            temperature=0.0,
+                        )
+                    )
+                    if any(
+                        verification[field] is not True
+                        for field in _VERIFICATION_FIELDS
+                    ):
+                        raise ValueError(
+                            "semantic verifier rejected exact-query repair"
+                        )
+                    if not self._answer_statement_verified(
+                        source,
+                        statement=statement,
+                        seed=seed + 7_000_000 + attempt,
+                    ):
+                        raise ValueError(
+                            "answer-slot/relation verifier rejected exact-query repair"
+                        )
                 reject_exact_question_identity_shortcut(
                     source,
                     paraphrase_question=question,
