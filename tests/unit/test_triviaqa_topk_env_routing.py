@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
@@ -18,6 +19,11 @@ from src.interactive.agent_workflow_env import (
     _HOTPOTQA_FORMAT_CONTRACT,
     _QA_MEMORY_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION,
 )
+from src.interactive.config_loader import load_yaml, validate_agent_graph_config
+from src.interactive.director import (
+    AgentGraphOrchestrator,
+    decode_director_transcript,
+)
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
 from src.interactive.openai_gateway import build_agent_messages
 from src.interactive.qa_tool_adapter import (
@@ -28,8 +34,15 @@ from src.interactive.qa_tool_adapter import (
     _surface_binds_entity_anchor,
     build_qa_tool_registry,
 )
+from src.interactive.tool_runtime import ToolRegistry
 
 
+_ROOT = Path(__file__).resolve().parents[2]
+_V15_CONFIG_PATH = (
+    _ROOT
+    / "config"
+    / "evaluation_triviaqa_qa_memory_unified_v4_v15_full_train_transductive.yaml"
+)
 _QUESTION = "Which author wrote the novel?"
 _ROWS = (
     ("memory-001", "triviaqa:tc_129", "Ada", 0.93),
@@ -112,11 +125,13 @@ def _graph() -> AgentGraph:
 def _env(
     *,
     parametric_fallback_after_coverage_failure: bool = False,
+    tool_registry: ToolRegistry | None = None,
 ) -> AgentWorkflowEnv:
     registry = _registry()
     runtime = AgentRuntime(
         registry,
         _UnusedGateway(),
+        tool_registry=tool_registry,
         dataset_id="triviaqa",
         semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     )
@@ -136,6 +151,19 @@ def _env(
         ),
         director_feedback_mode="control_plane",
     )
+
+
+def _canvas_observation(prompt: str) -> dict[str, object]:
+    messages = decode_director_transcript(prompt)
+    if messages is None:
+        raise AssertionError("expected canonical Director transcript")
+    _, separator, encoded = messages[-1]["content"].partition("\n\n")
+    if not separator:
+        raise AssertionError("missing current Canvas observation")
+    value = json.loads(encoded)
+    if not isinstance(value, dict):
+        raise AssertionError("Canvas observation must be an object")
+    return value
 
 
 def _receipts() -> tuple[dict[str, object], ...]:
@@ -361,6 +389,189 @@ def _fallback_execution(
 
 
 class TriviaQATopKEnvRoutingTests(unittest.TestCase):
+    def test_v15_config_declares_full_v2_in_database_tool_first_contract(
+        self,
+    ) -> None:
+        config = load_yaml(_V15_CONFIG_PATH)
+        validate_agent_graph_config(config)
+
+        data = config["data"]
+        evaluation = config["triviaqa_evaluation"]
+        runtime = config["qa_tool_runtime"]
+        graph = config["agent_graph"]
+        self.assertEqual(
+            "data/triviaqa_qa_memory_full_train_transductive_v2/index",
+            runtime["index_path"],
+        )
+        self.assertEqual("validation", evaluation["split"])
+        self.assertEqual(
+            "in_database_transductive",
+            evaluation["evaluation_scope"],
+        )
+        self.assertFalse(data["enforce_split_isolation"])
+        self.assertFalse(
+            evaluation["legacy_deterministic_prefetch_enabled"]
+        )
+        self.assertEqual("model_driven_search_read", runtime["mode"])
+        self.assertEqual("train_qa_memory", runtime["corpus_kind"])
+        self.assertEqual(["triviaqa"], runtime["dataset_scope"])
+        self.assertEqual(
+            TRIVIAQA_QA_MEMORY_TOOL_ID,
+            graph["required_evidence_tool_id"],
+        )
+        self.assertEqual("control_plane", graph["director_feedback_mode"])
+        self.assertTrue(
+            runtime["parametric_fallback_after_coverage_failure"]
+        )
+        self.assertEqual(7, runtime["max_turns_per_agent_call"])
+        self.assertEqual(6, runtime["max_tool_calls_per_agent_call"])
+        self.assertNotIn("web_search", json.dumps(config).lower())
+
+    def test_v15_director_is_toolless_and_worker_is_search_read_tool_first(
+        self,
+    ) -> None:
+        config = load_yaml(_V15_CONFIG_PATH)
+        runtime_config = config["qa_tool_runtime"]
+
+        class _Index:
+            manifest = SimpleNamespace(
+                corpus_name="triviaqa-full-train-qa-memory",
+                corpus_version="full-train-transductive-v2",
+                index_id="full-train-transductive-v2-test-index",
+                format="flowsteer.triviaqa.qa-memory-embedding-index.v1",
+                retrieval_backend="normalized-dot-product",
+                tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+                frozen_top_k=3,
+            )
+
+            def search(self, query: str, *, limit: int) -> tuple[object, ...]:
+                raise AssertionError((query, limit))
+
+            def read(self, memory_id: str) -> object:
+                raise AssertionError(memory_id)
+
+            def close(self) -> None:
+                return None
+
+        tool_registry = build_qa_tool_registry(
+            _Index(),
+            dataset_scope=("triviaqa",),
+            tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+        )
+        self.assertEqual(
+            (TRIVIAQA_QA_MEMORY_TOOL_ID,),
+            tool_registry.resource_ids,
+        )
+        capability = tool_registry.require_capability(
+            TRIVIAQA_QA_MEMORY_TOOL_ID
+        )
+        self.assertEqual(("read", "search"), capability.action_names)
+        self.assertEqual(
+            3,
+            capability.action_schemas["search"]["properties"]["limit"][
+                "const"
+            ],
+        )
+
+        env = _env(
+            parametric_fallback_after_coverage_failure=True,
+            tool_registry=tool_registry,
+        )
+        observation = _canvas_observation(
+            AgentGraphOrchestrator(
+                _registry(),
+                _UnusedGateway(),
+                tool_registry=tool_registry,
+                prompt_version=config["experiment"]["prompt_version"],
+                semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+                recovery_policy="preserve_diagnose_repair_augment",
+            ).build_prompt(env, 0, ())
+        )
+        self.assertEqual(
+            {"allowed_tools": [], "tool_calls_enabled": False},
+            observation["director_execution_profile"],
+        )
+        self.assertEqual(
+            [
+                {
+                    "tool_id": TRIVIAQA_QA_MEMORY_TOOL_ID,
+                    "action_names": ["read", "search"],
+                    "availability": True,
+                }
+            ],
+            observation["tool_catalog"],
+        )
+        role_constraints = observation["action_target_domains"][
+            "add_subgraph"
+        ]["role_constraints"]
+        self.assertEqual(
+            [[TRIVIAQA_QA_MEMORY_TOOL_ID]],
+            role_constraints["evidence_retriever"]["allowed_tools"],
+        )
+        self.assertEqual(
+            [[]],
+            role_constraints["reasoner"]["allowed_tools"],
+        )
+
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=_UnusedGateway(),
+            tool_registry=tool_registry,
+            max_turns=runtime_config["max_turns_per_agent_call"],
+            max_tool_calls=runtime_config["max_tool_calls_per_agent_call"],
+            task_type="factual_qa",
+            completion_policy=runtime_config["completion_policy"],
+            parametric_fallback_after_coverage_failure=True,
+            retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+        )
+        request = AgentRequest(
+            request_id="v15-worker-contract",
+            run_id="v15-static-test",
+            graph_revision=env.graph.revision,
+            problem=_QUESTION,
+            agent=env.graph.get_node("retriever"),
+            model=ModelSpec("fake-model", "fake"),
+            provider=ProviderSpec("fake", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        actions, completion = adapter._state_conditioned_action_domain(
+            request,
+            [],
+        )
+        self.assertEqual(
+            frozenset({(TRIVIAQA_QA_MEMORY_TOOL_ID, "search")}),
+            actions,
+        )
+        self.assertFalse(completion)
+
+        search_receipt = _receipts()[0]
+        search_result = json.loads(
+            json.dumps(search_receipt["result"]["value"])
+        )
+        search_result["passage_ids"] = list(search_result["memory_ids"])
+        for hit in search_result["hits"]:
+            hit["passage_id"] = hit["memory_id"]
+        search_observation = {
+            "observation_status": "success",
+            "executed_action": {
+                "kind": "tool",
+                "name": "search",
+                "resource_id": TRIVIAQA_QA_MEMORY_TOOL_ID,
+                "skill_id": None,
+                "arguments": search_receipt["request"]["arguments"],
+            },
+            "result": search_result,
+        }
+        actions, completion = adapter._state_conditioned_action_domain(
+            request,
+            [search_observation],
+        )
+        self.assertEqual(
+            frozenset({(TRIVIAQA_QA_MEMORY_TOOL_ID, "read")}),
+            actions,
+        )
+        self.assertFalse(completion)
+
     def test_fallback_retriever_recovery_matches_tool_first_schema(self) -> None:
         env = _env(parametric_fallback_after_coverage_failure=True)
         values = env._triviaqa_evidence_retriever_recovery_field_values(
