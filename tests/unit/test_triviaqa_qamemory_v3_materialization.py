@@ -2390,6 +2390,18 @@ def test_v8_called_relation_has_deterministic_answer_binding_fallback() -> None:
             "Identify the country that has the internet domain .ch.",
             "Switzerland is the country that has the internet domain .ch.",
         ),
+        (
+            "Who became Queen of the Netherlands in 1980?",
+            "Beatrix",
+            "Identify the person who became Queen of the Netherlands in 1980.",
+            "Beatrix became Queen of the Netherlands in 1980.",
+        ),
+        (
+            "What is the capital of Hong Kong?",
+            "Victoria",
+            "Identify the capital of Hong Kong.",
+            "The capital of Hong Kong is Victoria.",
+        ),
     ),
 )
 def test_deterministic_answer_slot_statement_passes_existing_admission(
@@ -2417,7 +2429,6 @@ def test_deterministic_answer_slot_statement_passes_existing_admission(
 @pytest.mark.parametrize(
     ("original", "canonical"),
     (
-        ("What is the capital of Hong Kong?", "Victoria"),
         (
             "How many are gold; how many are silver?",
             "One gold and three silver",
@@ -2501,6 +2512,23 @@ def test_answer_repair_uses_verified_deterministic_answer_slot(
     )
 
     assert repaired == "The name of Mickey Mouse's pet dog is Pluto."
+
+
+def test_listed_choice_detection_normalizes_apostrophe_glyphs() -> None:
+    augmented = _augment_listed_choice_answer_statement(
+        original_question=(
+            "Does stage left describe the audience’s left or the actor’s left?"
+        ),
+        canonical_answer="Actor's left",
+        rejected_answer_statement=(
+            "Stage left describes the actor’s left from the performer’s viewpoint."
+        ),
+    )
+
+    assert augmented == (
+        "Stage left describes the actor’s left from the performer’s viewpoint; "
+        "the selected listed option is Actor's left."
+    )
 
 
 def test_v7_listed_choice_repair_keeps_exact_canonical_option_label() -> None:
@@ -2858,7 +2886,6 @@ def test_question_repair_uses_deterministic_fallback_only_after_model_paths(
     ("original", "canonical"),
     (
         ("Who did Elizabeth Taylor marry?", "Richard Burton"),
-        ("What is the capital of Hong Kong?", "Victoria"),
         (
             "How many are gold; how many are silver?",
             "One gold and three silver",

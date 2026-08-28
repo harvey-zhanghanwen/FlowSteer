@@ -1212,6 +1212,31 @@ def _deterministic_answer_slot_statement(
                     )
 
     if candidate is None and len(_QUESTION_SLOT_TOKEN.findall(original)) == 1:
+        who_subject = re.fullmatch(r"(?i:who)\s+(?P<predicate>.+)", body)
+        if who_subject is not None and not internal_question_mark:
+            first = _LEXICAL_TOKEN.search(who_subject.group("predicate"))
+            if first is not None and first.group(0).casefold() not in {
+                "did",
+                "do",
+                "does",
+            }:
+                candidate = _declarative_statement(
+                    f"{canonical} {who_subject.group('predicate')}"
+                )
+
+    if candidate is None and len(_QUESTION_SLOT_TOKEN.findall(original)) == 1:
+        what_copular = re.fullmatch(
+            r"(?i:what)\s+(?P<copula>is|was)\s+"
+            r"(?P<complement>the\s+.+)",
+            body,
+        )
+        if what_copular is not None and not internal_question_mark:
+            candidate = _declarative_statement(
+                f"{what_copular.group('complement')} "
+                f"{what_copular.group('copula')} {canonical}"
+            )
+
+    if candidate is None and len(_QUESTION_SLOT_TOKEN.findall(original)) == 1:
         subject_wh = re.fullmatch(
             r"(?i:what|which)\s+(?P<head>.+?)\s+"
             rf"(?P<verb>{_DETERMINISTIC_SUBJECT_RELATIVE_VERB.pattern}|"
@@ -1529,8 +1554,8 @@ def _is_explicit_listed_choice_question(
     original_question: str,
     canonical_answer: str,
 ) -> bool:
-    question = " ".join(original_question.split()).casefold()
-    canonical = " ".join(canonical_answer.split()).casefold()
+    question = " ".join(original_question.split()).casefold().replace("’", "'")
+    canonical = " ".join(canonical_answer.split()).casefold().replace("’", "'")
     return " or " in question and canonical in question
 
 
@@ -3067,6 +3092,21 @@ def _deterministic_question_paraphrase(
         if finish is not None:
             candidate = declarative(
                 f"Supply the ending of {finish.group('tail')}"
+            )
+
+    if candidate is None:
+        what_copular = re.fullmatch(
+            r"(?i:what)\s+(?P<copula>is|was)\s+"
+            r"(?P<complement>the\s+.+)",
+            body,
+        )
+        if (
+            what_copular is not None
+            and _answer_slot_count(original) == 1
+            and len(_QUESTION_SLOT_TOKEN.findall(original)) == 1
+        ):
+            candidate = declarative(
+                f"Identify {what_copular.group('complement')}"
             )
 
     if candidate is None:
