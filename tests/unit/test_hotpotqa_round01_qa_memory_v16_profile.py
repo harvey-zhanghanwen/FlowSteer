@@ -38,11 +38,23 @@ class HotpotQARound01QAMemoryV16ProfileTest(unittest.TestCase):
             self.candidate["agent_graph"],
             {
                 **self.best["agent_graph"],
+                "model_catalog_path": (
+                    "config/model_catalog_hotpotqa_round01_frozen_v1.yaml"
+                ),
                 "required_evidence_tool_id": "hotpotqa.qa_memory",
                 "require_evidence_relation": True,
                 "director_feedback_mode": "control_plane",
             },
         )
+
+    def test_round01_ignored_catalog_is_materialized_without_semantic_change(self) -> None:
+        candidate_path = ROOT / self.candidate["agent_graph"]["model_catalog_path"]
+        expected_path = ROOT.parent.parent / "FlowSteer" / "config/model_catalog.yaml"
+        self.assertTrue(candidate_path.is_file())
+        self.assertTrue(expected_path.is_file())
+        candidate_catalog = yaml.safe_load(candidate_path.read_text(encoding="utf-8"))
+        expected_catalog = yaml.safe_load(expected_path.read_text(encoding="utf-8"))
+        self.assertEqual(candidate_catalog, expected_catalog)
 
     def test_round01_selection_and_inactive_blocks_are_frozen(self) -> None:
         for key in (

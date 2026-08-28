@@ -33,6 +33,7 @@ source provenance metadata only.
 | `required_evidence_tool_id` and `require_evidence_relation` | Existing FlowSteer AgentGraph Tool receipt and relation admission | Require a worker-owned successful search/read receipt to reach the Output Agent through an explicit graph relation before FINISH. |
 | `director_feedback_mode: control_plane` | Existing FlowSteer control-plane feedback mode | Keep retrieved QA content out of Director observations; the Director receives execution state and receipt summaries only. |
 | versioned experiment/storage paths | Existing HotpotQA evaluation driver | Keep the Round-01 result and QA-memory result independently recoverable. |
+| `model_catalog_hotpotqa_round01_frozen_v1.yaml` | Historical Round-01 Director observation plus the ignored local `config/model_catalog.yaml` | Materialize the same four model entries and selection weights in a tracked file; only the path changes. |
 | aligned HotpotQA data paths | Existing deterministic 128-held-out/512-train adapter | Use the isolated train-only memory source while preserving the original validation task projection. |
 | rollout GPU 0 | Deployment configuration only | Follow the requested inference-device assignment; this does not change the Director or AgentGraph search space. |
 

@@ -1,0 +1,54 @@
+# Versioned materialization of the model catalog used by the verified
+# HotpotQA Round-01 AgentGraph run. The historical profile referenced the
+# ignored local path config/model_catalog.yaml; this tracked file preserves
+# the same four model entries and selection weights for reproducible runs.
+providers:
+  - provider_id: "local-director"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:8015/v1"
+    max_concurrency: 32
+
+  - provider_id: "vectorengine"
+    kind: "openai-compatible"
+    endpoint: "${VECTOR_ENGINE_BASE_URL:-https://api.vectorengine.ai/v1}"
+    max_concurrency: 64
+    api_key_env: "VECTOR_ENGINE_API_KEY"
+
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-director"
+    model_name: "supervisor_theta"
+    selection_weight: 10.0
+    cheap_weight: 10.0
+    fast_weight: 9.0
+    context_window: 8192
+    metadata:
+      chat_template_enable_thinking: "false"
+      max_tokens: "4096"
+
+  - model_id: "qwen3.5-flash"
+    provider_id: "vectorengine"
+    model_name: "qwen3.5-flash"
+    selection_weight: 10.0
+    cheap_weight: 10.0
+    fast_weight: 10.0
+    metadata:
+      max_tokens: "4096"
+
+  - model_id: "gpt-4o-mini"
+    provider_id: "vectorengine"
+    model_name: "gpt-4o-mini"
+    selection_weight: 8.0
+    cheap_weight: 8.0
+    fast_weight: 9.0
+    metadata:
+      max_tokens: "4096"
+
+  - model_id: "minimax-m2.5"
+    provider_id: "vectorengine"
+    model_name: "MiniMax-M2.5"
+    selection_weight: 7.0
+    cheap_weight: 8.0
+    fast_weight: 8.0
+    metadata:
+      max_tokens: "4096"

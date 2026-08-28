@@ -129,7 +129,7 @@ agent_graph:
   required_evidence_tool_id: "hotpotqa.qa_memory"
   require_evidence_relation: true
   director_feedback_mode: "control_plane"
-  model_catalog_path: "config/model_catalog.yaml"
+  model_catalog_path: "config/model_catalog_hotpotqa_round01_frozen_v1.yaml"
 
 evaluation:
   healthbench_judge_model: "gpt-4o-mini"
