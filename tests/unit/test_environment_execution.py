@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,14 @@ from src.interactive.agent_runtime import (
     ExecutionPhase,
 )
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
+from src.interactive.director import (
+    AgentGraphOrchestrator,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE,
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
+    STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION,
+    decode_director_transcript,
+    director_system_prompt_for_version,
+)
 from src.interactive.environment_execution import (
     build_environment_execution_resources,
     EnvironmentExecutionError,
@@ -26,10 +35,16 @@ from src.interactive.task_evaluator import evaluate_task
 from src.interactive.tool_runtime import ToolRequest
 
 
-def make_request(task_family: str = "alfworld") -> AgentRequest:
+def make_request(
+    task_family: str = "alfworld",
+    *,
+    tool_id: str | None = None,
+) -> AgentRequest:
     provider = ProviderSpec("fake", kind="test")
     model = ModelSpec("m", "fake")
-    tool_id = "alfworld" if task_family == "alfworld" else f"{task_family}.environment"
+    resolved_tool_id = tool_id or (
+        "alfworld" if task_family == "alfworld" else f"{task_family}.environment"
+    )
     return AgentRequest(
         request_id="run:0:actor:single",
         run_id="run",
@@ -39,7 +54,7 @@ def make_request(task_family: str = "alfworld") -> AgentRequest:
             "actor",
             "m",
             "select an admissible environment action",
-            allowed_tools=(tool_id,),
+            allowed_tools=(resolved_tool_id,),
             execution_mode="react",
             artifact_type="environment_observation",
         ),
@@ -98,6 +113,7 @@ def resources(
     gateway: SequenceGateway,
     max_turns: int,
     max_observation_chars: int = 0,
+    stepwise_director: bool = False,
 ):
     return build_environment_execution_resources(
         gateway=gateway,
@@ -105,6 +121,7 @@ def resources(
         task_family=session.task_family,
         max_turns=max_turns,
         max_observation_chars=max_observation_chars,
+        stepwise_director=stepwise_director,
     )
 
 
@@ -740,6 +757,440 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             "select an admissible environment action",
             gateway.requests[0].agent.contract,
         )
+
+    async def test_alfworld_stepwise_calls_advance_one_shared_native_episode(
+        self,
+    ) -> None:
+        session = FakeSession()
+        gateway = SequenceGateway(["<action>look</action>", "finish"])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=2,
+            stepwise_director=True,
+        )
+        request = make_request(
+            "alfworld",
+            tool_id="alfworld.environment",
+        )
+
+        first = await environment.execution_adapter.execute(request)
+        second = await environment.execution_adapter.execute(request)
+
+        self.assertEqual("alfworld.environment", environment.tool_id)
+        self.assertEqual(1, session.reset_count)
+        self.assertEqual(["look", "finish"], session.actions)
+        self.assertEqual(1, first.metadata["environment_revision"])
+        self.assertEqual(2, second.metadata["environment_revision"])
+        self.assertEqual(1, len(first.metadata["environment_receipts"]))
+        self.assertEqual(2, len(second.metadata["environment_receipts"]))
+        self.assertEqual(
+            first.metadata["environment_episode_id"],
+            second.metadata["environment_episode_id"],
+        )
+        self.assertEqual(
+            "one_action_one_observation",
+            second.metadata["environment_execution_boundary"],
+        )
+        first_state = first.metadata["environment_current_state"]
+        second_state = second.metadata["environment_current_state"]
+        self.assertEqual("look", first_state["last_action"])
+        self.assertEqual(["finish"], first_state["admissible_actions"])
+        self.assertEqual(1, first_state["remaining_action_budget"])
+        self.assertFalse(first_state["environment_terminal"])
+        self.assertEqual("finish", second_state["last_action"])
+        self.assertEqual([], second_state["admissible_actions"])
+        self.assertEqual(0, second_state["remaining_action_budget"])
+        self.assertTrue(second_state["environment_terminal"])
+        for public_value in (first_state, second_state):
+            self.assertNotIn("reward", str(public_value))
+            self.assertNotIn("won", str(public_value))
+            self.assertNotIn("score", str(public_value))
+        self.assertIn(
+            "Pick exactly one action from the admissible actions list",
+            gateway.requests[0].problem,
+        )
+        self.assertNotIn("search[", gateway.requests[0].problem)
+        self.assertNotIn("click[", gateway.requests[0].problem)
+
+    async def test_alfworld_canvas_continue_preserves_graph_revision(
+        self,
+    ) -> None:
+        session = FakeSession()
+        gateway = SequenceGateway(["look", "finish"])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=2,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="alfworld",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="complete the alfworld task",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "continue",
+                "finish",
+            ),
+        )
+        initial_add_domain = canvas.model_admissible_action_targets()["add_agent"]
+        self.assertEqual(
+            [
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["alfworld.environment"],
+                }
+            ],
+            initial_add_domain["execution_profiles"],
+        )
+        added = await canvas.step(
+            '{"action":"add_agent","agent_id":"actor","model_id":"m",'
+            '"contract":"Act once from the current public ALFWorld state.",'
+            '"execution_mode":"react",'
+            '"allowed_tools":["alfworld.environment"]}'
+        )
+        self.assertTrue(added.accepted)
+        owner_modify_domain = canvas.model_admissible_action_targets()[
+            "modify_agent"
+        ]["per_agent_candidates"]
+        owner_fields = next(
+            item["mutable_fields"]
+            for item in owner_modify_domain
+            if item["agent_id"] == "actor"
+        )
+        self.assertNotIn("allowed_tools", owner_fields)
+        self.assertNotIn("execution_mode", owner_fields)
+        later_add_profiles = canvas.model_admissible_action_targets()["add_agent"][
+            "execution_profiles"
+        ]
+        self.assertNotIn(
+            {
+                "execution_mode": "react",
+                "allowed_tools": ["alfworld.environment"],
+            },
+            later_add_profiles,
+        )
+        orchestrator = AgentGraphOrchestrator(
+            registry,
+            client=object(),  # type: ignore[arg-type]
+            tool_registry=environment.tool_registry,
+            max_rounds=4,
+            system_prompt=director_system_prompt_for_version(
+                STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION
+            ),
+            prompt_version=STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION,
+            sampling_action_profile=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            ),
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+        )
+        messages = decode_director_transcript(
+            orchestrator.build_prompt(canvas, 0, ())
+        )
+        self.assertIsNotNone(messages)
+        assert messages is not None
+        observation = json.loads(
+            messages[-1]["content"].rpartition("\n\n")[2]
+        )
+        director_state = observation["environment_state"]
+        self.assertEqual("look", director_state["last_action"])
+        self.assertEqual(["finish"], director_state["admissible_actions"])
+        self.assertEqual(1, director_state["environment_revision"])
+        self.assertEqual(1, director_state["remaining_action_budget"])
+        self.assertNotIn("reward", str(director_state))
+        self.assertNotIn("won", str(director_state))
+        self.assertNotIn("score", str(director_state))
+        selected = await canvas.step(
+            '{"action":"set_output","agent_id":"actor"}'
+        )
+        self.assertTrue(selected.accepted)
+        revision_before_continue = canvas.revision
+        self.assertIn("continue", canvas.model_admissible_action_types())
+
+        continued = await canvas.step('{"action":"continue"}')
+
+        self.assertTrue(continued.accepted)
+        self.assertEqual(revision_before_continue, canvas.revision)
+        self.assertEqual(1, session.reset_count)
+        self.assertEqual(["look", "finish"], session.actions)
+        state = canvas.public_environment_state()
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(
+            "complete the alfworld task",
+            state["task_instruction"],
+        )
+        self.assertEqual("finish", state["last_action"])
+        self.assertTrue(state["environment_terminal"])
+        self.assertNotIn("won", str(state))
+        self.assertNotIn("continue", canvas.model_admissible_action_types())
+        self.assertIn("finish", canvas.model_admissible_action_types())
+        self.assertIn('"environment_state"', continued.feedback)
+        self.assertNotIn('"won"', continued.feedback)
+        finished = await canvas.step('{"action":"finish"}')
+        self.assertTrue(finished.done)
+
+    async def test_alfworld_second_tool_owner_is_rejected_before_environment_step(
+        self,
+    ) -> None:
+        session = FakeSession()
+        gateway = SequenceGateway(["look", "finish"])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=2,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="alfworld",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="complete the alfworld task",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=("add_agent", "modify_agent", "finish"),
+        )
+        owner = await canvas.step(
+            '{"action":"add_agent","agent_id":"actor","model_id":"m",'
+            '"contract":"Act once in ALFWorld.","execution_mode":"react",'
+            '"allowed_tools":["alfworld.environment"]}'
+        )
+        self.assertTrue(owner.accepted)
+
+        removed_owner = await canvas.step(
+            '{"action":"modify_agent","agent_id":"actor",'
+            '"allowed_tools":[]}'
+        )
+        self.assertFalse(removed_owner.accepted)
+        self.assertIn("must be preserved", removed_owner.feedback)
+        self.assertEqual(["look"], session.actions)
+        self.assertEqual(1, len(gateway.requests))
+
+        duplicate = await canvas.step(
+            '{"action":"add_agent","agent_id":"other","model_id":"m",'
+            '"contract":"Also act in ALFWorld.","execution_mode":"react",'
+            '"allowed_tools":["alfworld.environment"]}'
+        )
+
+        self.assertFalse(duplicate.accepted)
+        self.assertIn("at most one", duplicate.feedback)
+        self.assertEqual(["look"], session.actions)
+        self.assertEqual(1, len(gateway.requests))
+
+    async def test_alfworld_stepwise_budget_closure_can_finish_but_is_not_terminal(
+        self,
+    ) -> None:
+        session = FakeSession()
+        gateway = SequenceGateway(["look"])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=1,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="alfworld",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="complete the alfworld task",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=("add_agent", "set_output", "continue", "finish"),
+        )
+        added = await canvas.step(
+            '{"action":"add_agent","agent_id":"actor","model_id":"m",'
+            '"contract":"Act once in ALFWorld.","execution_mode":"react",'
+            '"allowed_tools":["alfworld.environment"]}'
+        )
+        self.assertTrue(added.accepted)
+        selected = await canvas.step(
+            '{"action":"set_output","agent_id":"actor"}'
+        )
+        self.assertTrue(selected.accepted)
+        state = canvas.public_environment_state()
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertTrue(state["environment_truncated"])
+        self.assertFalse(state["environment_terminal"])
+        self.assertEqual(("finish",), canvas.model_admissible_action_types())
+
+        finished = await canvas.step('{"action":"finish"}')
+
+        self.assertTrue(finished.accepted)
+        self.assertTrue(finished.done)
+        assert finished.execution is not None
+        metadata = finished.execution.output_metadata["actor"]
+        self.assertFalse(metadata["environment_terminal"])
+        self.assertTrue(metadata["environment_truncated"])
+        self.assertFalse(metadata["evaluator_environment_trace"][-1]["done"])
+        self.assertNotIn("won", str(canvas.public_environment_state()))
+
+    async def test_alfworld_tool_holder_requires_react_and_exclusive_toolset(
+        self,
+    ) -> None:
+        for execution_mode, allowed_tools, expected in (
+            (
+                "reasoning",
+                '["alfworld.environment"]',
+                "execution_mode='react'",
+            ),
+            (
+                "react",
+                '["alfworld.environment","unrelated.tool"]',
+                "must allow exactly",
+            ),
+        ):
+            with self.subTest(
+                execution_mode=execution_mode,
+                allowed_tools=allowed_tools,
+            ):
+                session = FakeSession()
+                gateway = SequenceGateway([])
+                environment = resources(
+                    session=session,
+                    gateway=gateway,
+                    max_turns=2,
+                    stepwise_director=True,
+                )
+                registry = ModelRegistry(
+                    [ProviderSpec("fake", kind="test")],
+                    [ModelSpec("m", "fake")],
+                )
+                runtime = AgentRuntime(
+                    registry,
+                    gateway,
+                    execution_adapters={
+                        "react": environment.execution_adapter,
+                    },
+                    tool_registry=environment.tool_registry,
+                    dataset_id="alfworld",
+                )
+                canvas = AgentWorkflowEnv(
+                    registry,
+                    runtime=runtime,
+                    problem="complete the alfworld task",
+                    execute_on_edit=True,
+                    required_tool_id=environment.tool_id,
+                    allowed_actions=("add_agent", "finish"),
+                )
+
+                result = await canvas.step(
+                    '{"action":"add_agent","agent_id":"actor",'
+                    '"model_id":"m","contract":"Act in ALFWorld.",'
+                    f'"execution_mode":"{execution_mode}",'
+                    f'"allowed_tools":{allowed_tools}'
+                    '}'
+                )
+
+                self.assertFalse(result.accepted)
+                self.assertIn(expected, result.feedback)
+                self.assertEqual([], session.actions)
+                self.assertEqual([], gateway.requests)
+
+    async def test_alfworld_owner_reciprocal_relation_is_not_admissible(
+        self,
+    ) -> None:
+        session = FakeSession()
+        gateway = SequenceGateway([])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=2,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="alfworld",
+        )
+        graph = AgentGraph(
+            (
+                AgentNode(
+                    "actor",
+                    "m",
+                    "Act once in ALFWorld.",
+                    allowed_tools=("alfworld.environment",),
+                    execution_mode="react",
+                ),
+                AgentNode("peer", "m", "Inspect public artifacts."),
+            ),
+            output_agent_id="actor",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="complete the alfworld task",
+            graph=graph,
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=("set_relation", "finish"),
+        )
+        reciprocal_candidates = [
+            candidate
+            for candidate in canvas.model_admissible_action_targets()[
+                "set_relation"
+            ]["candidates"]
+            if candidate["source_to_target"]
+            and candidate["target_to_source"]
+        ]
+        self.assertEqual([], reciprocal_candidates)
+
+        relation = await canvas.step(
+            '{"action":"set_relation","source_id":"actor",'
+            '"target_id":"peer","source_to_target":true,'
+            '"target_to_source":true}'
+        )
+
+        self.assertFalse(relation.accepted)
+        self.assertIn("reciprocal Agent block", relation.feedback)
+        self.assertEqual([], session.actions)
+        self.assertEqual([], gateway.requests)
 
     async def test_ragen_session_calls_deployed_adapter_signature(self) -> None:
         class FakeRAGEN:

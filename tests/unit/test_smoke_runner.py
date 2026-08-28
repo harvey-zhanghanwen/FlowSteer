@@ -1580,6 +1580,8 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
             max_turns=3,
             max_action_tokens=256,
             max_observation_chars=0,
+            stepwise_director=False,
+            tool_version="skillflow.ragen_adapter.v2",
             timeout_seconds=9.0,
         )
         self.assertIs(shared_registry, runtime.tool_registry)
@@ -1658,6 +1660,55 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
         self.assertEqual("alfworld", runtime.dataset_id)
         self.assertIs(shared_registry, runtime.tool_registry)
         self.assertEqual(("alfworld",), shared_registry.resource_ids)
+        close()
+
+    def test_alfworld_stepwise_runtime_preserves_original_task_and_tool_namespace(
+        self,
+    ) -> None:
+        task = self._task("alfworld")
+        config = self._config(
+            source="alfworld",
+            runtime_budget=20,
+            evaluator_budget=20,
+        )
+        config["environment_runtime"]["stepwise_director"] = True
+        config["environment_runtime"]["tool_version"] = (
+            "skillflow.alfworld.native-stepwise-director.v2"
+        )
+        backend = self._backend(config)
+
+        def session_factory(request):  # type: ignore[no-untyped-def]
+            del request
+            return None
+
+        with (
+            patch.object(
+                _MODULE,
+                "evaluator_locked_ragen_session_factory",
+                return_value=session_factory,
+            ),
+            patch.object(
+                _MODULE,
+                "build_environment_execution_resources",
+                wraps=_MODULE.build_environment_execution_resources,
+            ) as built,
+        ):
+            runtime, shared_registry, close = backend._runtime_for_task(task)
+
+        self.assertTrue(built.call_args.kwargs["stepwise_director"])
+        self.assertEqual(
+            ("alfworld.environment",),
+            shared_registry.resource_ids,
+        )
+        self.assertEqual(
+            "skillflow.alfworld.native-stepwise-director.v2",
+            shared_registry.require_capability(
+                "alfworld.environment"
+            ).version,
+        )
+        self.assertEqual("alfworld", runtime.dataset_id)
+        self.assertEqual(task.question, workflow_problem(task, config))
+        self.assertNotIn("Execution interface", workflow_problem(task, config))
         close()
 
     def test_condition_scope_and_budget_mismatches_are_rejected(self) -> None:

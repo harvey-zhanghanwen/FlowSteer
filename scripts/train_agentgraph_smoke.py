@@ -455,6 +455,12 @@ def _workflow_problem(
     contract = section.get("direct_contract") if isinstance(section, Mapping) else ""
     environment_settings = _environment_runtime_settings(config, task)
     if environment_settings is not None:
+        if environment_settings["stepwise_director"]:
+            # SkillFlow keeps the immutable task instruction separate from
+            # public Action--Observation state.  The concise stepwise Director
+            # prompt, Tool catalog and live Canvas domains carry the execution
+            # boundary without rewriting or narrowing the task.
+            return task.question
         action_contract = (
             contract.strip()
             if isinstance(contract, str) and contract.strip()
@@ -1056,6 +1062,19 @@ def _environment_runtime_settings(
         raise ConfigurationError(
             "environment_runtime.max_observation_chars must be a non-negative integer"
         )
+    stepwise_director = section.get("stepwise_director", False)
+    if type(stepwise_director) is not bool:
+        raise ConfigurationError(
+            "environment_runtime.stepwise_director must be bool"
+        )
+    tool_version = section.get(
+        "tool_version",
+        experiment.get("tool_version", "skillflow.ragen_adapter.v2"),
+    )
+    if not isinstance(tool_version, str) or not tool_version.strip():
+        raise ConfigurationError(
+            "environment_runtime.tool_version must be non-empty text"
+        )
     return {
         "source_key": source_key,
         "ragen_adapter_path": ragen_adapter_path.strip(),
@@ -1063,6 +1082,8 @@ def _environment_runtime_settings(
         "tool_timeout_seconds": float(timeout_seconds),
         "max_action_tokens": max_action_tokens,
         "max_observation_chars": max_observation_chars,
+        "stepwise_director": stepwise_director,
+        "tool_version": tool_version.strip(),
     }
 
 
@@ -2249,6 +2270,10 @@ class LiveSmokeBackend:
                 max_observation_chars=int(
                     environment_settings["max_observation_chars"]
                 ),
+                stepwise_director=bool(
+                    environment_settings["stepwise_director"]
+                ),
+                tool_version=str(environment_settings["tool_version"]),
                 timeout_seconds=float(
                     environment_settings["tool_timeout_seconds"]
                 ),

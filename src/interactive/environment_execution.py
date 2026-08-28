@@ -195,6 +195,7 @@ class EnvironmentToolBackend:
                     episode_id=episode_id,
                     reset_receipt={
                         "receipt_type": "environment_reset",
+                        "environment_episode_id": episode_id,
                         "episode_id": episode_id,
                         "environment_id": session.environment_id,
                         "environment_revision": 0,
@@ -219,6 +220,27 @@ class EnvironmentToolBackend:
     def end(self, token: Token[Optional[_EnvironmentEpisode]]) -> None:
         self._episode.reset(token)
         self._execution_lock.release()
+
+    def reset(self) -> None:
+        """Reset the retained task-scoped episode before a new task starts."""
+
+        if self._execution_lock.locked():
+            raise EnvironmentExecutionError(
+                "cannot reset an environment rollout while an execution is active"
+            )
+        if self._closed:
+            raise EnvironmentExecutionError("environment rollout is already closed")
+        episode = self._rollout_episode
+        self._rollout_episode = None
+        if episode is None:
+            return
+        close = getattr(episode.session, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                raise EnvironmentExecutionError(
+                    "asynchronous environment close is unsupported by this runtime"
+                )
 
     def close(self) -> None:
         """Close the one rollout-owned simulator session exactly once."""
@@ -973,7 +995,7 @@ async def _resolve(value: Union[Any, Awaitable[Any]]) -> Any:
 
 
 class EnvironmentExecutionAdapter:
-    """Run one bounded model-driven ALFWorld or WebShop environment episode."""
+    """Run a bounded episode or one Director-visible environment step."""
 
     def __init__(
         self,
@@ -984,6 +1006,7 @@ class EnvironmentExecutionAdapter:
         max_turns: int,
         max_action_tokens: int = 512,
         max_observation_chars: int = 0,
+        stepwise_director: bool = False,
     ) -> None:
         if not hasattr(gateway, "generate"):
             raise TypeError("gateway must implement generate")
@@ -997,6 +1020,8 @@ class EnvironmentExecutionAdapter:
             raise ValueError("max_action_tokens must be a positive integer")
         if type(max_observation_chars) is not int or max_observation_chars < 0:
             raise ValueError("max_observation_chars must be a non-negative integer")
+        if type(stepwise_director) is not bool:
+            raise TypeError("stepwise_director must be bool")
         if environment_backend.tool_id not in tool_registry.resource_ids:
             raise ValueError("environment backend tool is absent from ToolRegistry")
         capability = tool_registry.require_capability(environment_backend.tool_id)
@@ -1015,11 +1040,22 @@ class EnvironmentExecutionAdapter:
         # local Qwen context window after several long WebShop observations.
         self._max_action_tokens = max_action_tokens
         self._max_observation_chars = max_observation_chars
+        self._stepwise_director = stepwise_director
         # ``asyncio.wait_for`` may insert a Task boundary between this adapter
         # and AgentRuntime.  Task cancellation intentionally normalizes the
         # raised ``CancelledError``, so retain the completed public prefix in
         # a request-keyed handoff until Runtime has recorded it.
         self._cancelled_prefixes: dict[str, Mapping[str, object]] = {}
+
+    @property
+    def stepwise_director(self) -> bool:
+        return self._stepwise_director
+
+    def reset_execution_state(self) -> None:
+        """Drop one retained episode at the task-runtime reset boundary."""
+
+        self._environment_backend.reset()
+        self._cancelled_prefixes.clear()
 
     def take_cancelled_failure_metadata(
         self,
@@ -1033,6 +1069,42 @@ class EnvironmentExecutionAdapter:
         """Close the rollout-scoped environment backend."""
 
         self._environment_backend.close()
+
+    def _current_public_state(
+        self,
+        episode: _EnvironmentEpisode,
+    ) -> dict[str, object]:
+        """Project only the public next-step state returned to the Director."""
+
+        admissible_actions: tuple[str, ...] = ()
+        if not episode.terminal:
+            admissible_actions, _ = _admissible_actions(
+                episode.session.task_family,
+                episode.session.available_actions,
+            )
+        last = episode.receipts[-1] if episode.receipts else None
+        turns_used = len(episode.receipts)
+        return {
+            "environment_episode_id": episode.episode_id,
+            "environment_id": episode.session.environment_id,
+            "task_family": episode.session.task_family,
+            "environment_revision": episode.revision,
+            "last_action": None if last is None else last.get("action"),
+            "state_advanced": (
+                None if last is None else last.get("state_advanced")
+            ),
+            "observation_status": (
+                "reset" if last is None else last.get("observation_status")
+            ),
+            "current_observation": episode.observation,
+            "admissible_actions": list(admissible_actions),
+            "turns_used": turns_used,
+            "remaining_action_budget": max(self._max_turns - turns_used, 0),
+            "environment_terminal": episode.terminal,
+            "environment_truncated": (
+                not episode.terminal and turns_used >= self._max_turns
+            ),
+        }
 
     async def execute(self, request: AgentRequest) -> GatewayResponse:
         if request.agent.allowed_tools != (self._tool_id,):
@@ -1130,6 +1202,7 @@ class EnvironmentExecutionAdapter:
                     receipts.append(
                         {
                             "receipt_type": "environment_transition",
+                            "environment_episode_id": episode.episode_id,
                             "episode_id": episode.episode_id,
                             "environment_id": session.environment_id,
                             "turn": turn,
@@ -1148,6 +1221,7 @@ class EnvironmentExecutionAdapter:
                     )
                     evaluator_trace.append(
                         {
+                            "environment_episode_id": episode.episode_id,
                             "episode_id": episode.episode_id,
                             "step": turn - 1,
                             "observation": observation,
@@ -1164,6 +1238,8 @@ class EnvironmentExecutionAdapter:
                             "public_state": public_state,
                         }
                     )
+                    if self._stepwise_director:
+                        break
                     continue
 
                 previous_revision = revision
@@ -1198,6 +1274,7 @@ class EnvironmentExecutionAdapter:
                 receipts.append(
                     {
                         "receipt_type": "environment_transition",
+                        "environment_episode_id": episode.episode_id,
                         "episode_id": episode.episode_id,
                         "environment_id": session.environment_id,
                         "turn": turn,
@@ -1216,6 +1293,7 @@ class EnvironmentExecutionAdapter:
                 )
                 evaluator_trace.append(
                     {
+                        "environment_episode_id": episode.episode_id,
                         "episode_id": episode.episode_id,
                         "step": turn - 1,
                         "observation": observation,
@@ -1232,21 +1310,34 @@ class EnvironmentExecutionAdapter:
                 )
                 observation = next_observation
                 terminal = done
-                if terminal:
+                if terminal or self._stepwise_director:
                     break
 
             return AgentResponse(
                 observation,
                 {
                     "execution_mode": "react",
+                    "environment_execution_boundary": (
+                        "one_action_one_observation"
+                        if self._stepwise_director
+                        else "bounded_episode"
+                    ),
                     "model_calls": list(model_calls),
+                    "environment_episode_id": episode.episode_id,
                     "episode_id": episode.episode_id,
                     "environment_id": session.environment_id,
                     "task_family": session.task_family,
                     "environment_revision": revision,
                     "environment_reset_receipt": reset_receipt,
                     "environment_receipts": list(receipts),
+                    "environment_current_state": self._current_public_state(
+                        episode
+                    ),
                     "environment_terminal": terminal,
+                    "environment_truncated": (
+                        not terminal and len(receipts) >= self._max_turns
+                    ),
+                    "environment_max_turns": self._max_turns,
                     "environment_turns_used": len(receipts),
                     "environment_steps": revision,
                     "tool_receipts": list(tool_receipts),
@@ -1333,6 +1424,7 @@ def build_environment_execution_resources(
     max_turns: int,
     max_action_tokens: int = 512,
     max_observation_chars: int = 0,
+    stepwise_director: bool = False,
     tool_version: str = "skillflow.ragen_adapter.v2",
     timeout_seconds: Optional[float] = None,
 ) -> EnvironmentExecutionResources:
@@ -1351,14 +1443,20 @@ def build_environment_execution_resources(
         raise ValueError("task_family must be alfworld or webshop")
     if not isinstance(tool_version, str) or not tool_version.strip():
         raise ValueError("tool_version must be non-empty")
+    if type(stepwise_director) is not bool:
+        raise TypeError("stepwise_director must be bool")
     if timeout_seconds is not None and timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive when supplied")
     family = task_family.strip().lower()
-    # DIRECT_REUSE: SkillFlow's public ALFWorld item registers resource_id
-    # ``alfworld`` and exposes exactly one StructuredAction ``act(command)``.
-    # WebShop retains the repository's existing dynamic-action compatibility
-    # surface because it is outside this ALFWorld-only adaptation.
-    tool_id = "alfworld" if family == "alfworld" else f"{family}.environment"
+    # The stepwise AgentGraph capability is explicitly task-scoped.  Legacy
+    # ALFWorld conditions retain the historical ``alfworld`` resource ID;
+    # stepwise conditions expose ``alfworld.environment`` while continuing to
+    # dispatch SkillFlow's exact ``act(command)`` action internally.
+    tool_id = (
+        f"{family}.environment"
+        if stepwise_director or family != "alfworld"
+        else "alfworld"
+    )
     backend = EnvironmentToolBackend(
         session_factory=session_factory,
         task_family=family,
@@ -1427,6 +1525,7 @@ def build_environment_execution_resources(
         max_turns=max_turns,
         max_action_tokens=max_action_tokens,
         max_observation_chars=max_observation_chars,
+        stepwise_director=stepwise_director,
     )
     return EnvironmentExecutionResources(tool_id, registry, adapter)
 

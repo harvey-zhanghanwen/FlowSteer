@@ -546,6 +546,35 @@ class AgentRuntime:
             if self.model_registry.require_provider(provider_id).max_concurrency is not None
         }
 
+    def reset_execution_state(self) -> None:
+        """Reset task-scoped state retained by execution adapters.
+
+        Stateless adapters expose no reset hook. Stateful WebShop/ALFWorld
+        adapters use this boundary when ``AgentWorkflowEnv.reset`` starts a new
+        task, matching SkillFlow's one environment session per rollout.
+        """
+
+        seen: set[int] = set()
+        for adapter in self.execution_adapters.values():
+            if id(adapter) in seen:
+                continue
+            seen.add(id(adapter))
+            reset = getattr(adapter, "reset_execution_state", None)
+            if callable(reset):
+                reset()
+
+    def close_execution_state(self) -> None:
+        """Close retained adapter state at the task-runtime lifecycle boundary."""
+
+        seen: set[int] = set()
+        for adapter in self.execution_adapters.values():
+            if id(adapter) in seen:
+                continue
+            seen.add(id(adapter))
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                close()
+
     def registered_execution_profiles(
         self,
     ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:

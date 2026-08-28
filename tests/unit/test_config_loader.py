@@ -128,6 +128,33 @@ class ConfigLoaderTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             validate_agent_graph_config(mixed)
 
+    def test_stepwise_continue_requires_explicit_environment_runtime(self) -> None:
+        config = load_yaml("config/training_agent_graph.yaml")
+        config["agent_graph"]["actions"] = [
+            "add_agent",
+            "modify_agent",
+            "delete_agent",
+            "set_relation",
+            "set_output",
+            "continue",
+            "finish",
+        ]
+        with self.assertRaisesRegex(
+            ConfigurationError,
+            "continue action requires an enabled stepwise environment runtime",
+        ):
+            validate_agent_graph_config(config)
+
+        config["environment_runtime"] = {
+            "enabled": True,
+            "stepwise_director": True,
+        }
+        validate_agent_graph_config(config)
+
+        config["environment_runtime"]["stepwise_director"] = False
+        with self.assertRaises(ConfigurationError):
+            validate_agent_graph_config(config)
+
     def test_smoke_config_is_strictly_bounded(self) -> None:
         config = load_yaml("config/training_agentgraph_smoke.yaml")
         validate_agent_graph_config(config)

@@ -49,6 +49,8 @@ from src.interactive.director import (
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     SCALAR_DIRECTOR_PROMPT_VERSION,
     SCALAR_DIRECTOR_SYSTEM_PROMPT,
+    STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION,
+    STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
@@ -80,6 +82,7 @@ from src.interactive.director import (
     director_modify_agent_field_selector_json_schema_text,
     director_system_prompt_for_version,
     director_state_conditioned_sampling_json_schema_text,
+    scalar_director_prompt_version,
     encode_director_transcript,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
@@ -216,6 +219,17 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             DIRECTOR_SYSTEM_PROMPT,
             director_system_prompt_for_version("prompt-v1"),
+        )
+        self.assertIs(
+            STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT,
+            director_system_prompt_for_version(
+                STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION
+            ),
+        )
+        self.assertTrue(
+            scalar_director_prompt_version(
+                STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION
+            )
         )
         self.assertIs(
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V22,
@@ -1768,6 +1782,35 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             actions,
             director_actions_from_admissible_schema_branch(legacy_branch),
         )
+
+    def test_stepwise_continue_schema_has_no_graph_mutation_fields(self) -> None:
+        strict_schema = json.loads(
+            director_state_conditioned_sampling_json_schema_text("continue")
+        )
+        self.assertEqual(
+            {"action": {"const": "continue"}},
+            strict_schema["properties"],
+        )
+        live_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "continue",
+                {
+                    "continue": {
+                        "admissible": True,
+                        "execution_semantics": "one_action_one_observation",
+                        "graph_revision_unchanged": True,
+                    }
+                },
+            )
+        )
+        self.assertEqual({"const": "continue"}, live_schema["properties"]["action"])
+        self.assertNotIn("agent_id", live_schema["properties"])
+        self.assertNotIn("source_id", live_schema["properties"])
+        with self.assertRaises(ValueError):
+            director_live_action_parameter_json_schema_text(
+                "continue",
+                {"continue": {"admissible": True}},
+            )
 
     def test_model_admissible_v2_factorizes_action_and_exact_parameters(self) -> None:
         actions = ("modify_agent", "set_relation", "finish")
