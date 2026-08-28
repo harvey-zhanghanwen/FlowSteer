@@ -3221,12 +3221,7 @@ class LocalQwen35Paraphraser:
                     ),
                     source,
                 )
-                if self._answer_statement_verified(
-                    source,
-                    statement=candidate,
-                    seed=seed + 500_000,
-                ):
-                    return candidate
+                return candidate
             except ValueError:
                 pass
             return None

@@ -299,7 +299,6 @@ def test_answer_repair_prefers_verified_rejected_statement_alias(
         accepted=("Three", "3", "three"),
     )
     client = object.__new__(LocalQwen35Paraphraser)
-    verified: list[str] = []
     monkeypatch.setattr(
         client,
         "_complete",
@@ -308,7 +307,9 @@ def test_answer_repair_prefers_verified_rejected_statement_alias(
     monkeypatch.setattr(
         client,
         "_answer_statement_verified",
-        lambda source, *, statement, seed: verified.append(statement) or True,
+        lambda *args, **kwargs: pytest.fail(
+            "literal alias normalization must use local admission"
+        ),
     )
 
     repaired = client._repair_answer_statement(
@@ -323,7 +324,6 @@ def test_answer_repair_prefers_verified_rejected_statement_alias(
     assert repaired == (
         "The number of vice presidents Franklin D Roosevelt had was Three."
     )
-    assert verified == [repaired]
 
 
 def test_answer_repair_canonicalizes_and_verifies_model_statement_alias(
@@ -335,7 +335,6 @@ def test_answer_repair_canonicalizes_and_verifies_model_statement_alias(
         accepted=("Three", "3", "three"),
     )
     client = object.__new__(LocalQwen35Paraphraser)
-    verified: list[str] = []
     monkeypatch.setattr(
         client,
         "_complete",
@@ -350,7 +349,9 @@ def test_answer_repair_canonicalizes_and_verifies_model_statement_alias(
     monkeypatch.setattr(
         client,
         "_answer_statement_verified",
-        lambda source, *, statement, seed: verified.append(statement) or True,
+        lambda *args, **kwargs: pytest.fail(
+            "literal alias normalization must use local admission"
+        ),
     )
 
     repaired = client._repair_answer_statement(
@@ -363,7 +364,6 @@ def test_answer_repair_canonicalizes_and_verifies_model_statement_alias(
     assert repaired == (
         "The number of vice presidents Franklin D Roosevelt had was Three."
     )
-    assert verified == [repaired]
 
 
 @pytest.mark.parametrize(
