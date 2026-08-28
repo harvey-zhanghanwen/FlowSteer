@@ -2480,11 +2480,12 @@ def test_answer_repair_uses_verified_deterministic_answer_slot(
         "Pluto",
     )
     client = object.__new__(LocalQwen35Paraphraser)
-    verified: list[str] = []
     monkeypatch.setattr(
         client,
         "_answer_statement_verified",
-        lambda source, *, statement, seed: verified.append(statement) or True,
+        lambda *args, **kwargs: pytest.fail(
+            "deterministic local admission must not call the model verifier"
+        ),
     )
     monkeypatch.setattr(
         client,
@@ -2500,7 +2501,6 @@ def test_answer_repair_uses_verified_deterministic_answer_slot(
     )
 
     assert repaired == "The name of Mickey Mouse's pet dog is Pluto."
-    assert verified == [repaired]
 
 
 def test_v7_listed_choice_repair_keeps_exact_canonical_option_label() -> None:

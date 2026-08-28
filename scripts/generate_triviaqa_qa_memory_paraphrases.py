@@ -3275,25 +3275,17 @@ class LocalQwen35Paraphraser:
             return literal_subject_statement
         deterministic_statement = _deterministic_answer_slot_statement(source)
         if deterministic_statement is not None:
-            try:
-                _, deterministic_statement = parse_paraphrase_response(
-                    json.dumps(
-                        {
-                            "paraphrase_question": question,
-                            "paraphrase_answer_statement": deterministic_statement,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    source,
-                )
-                if self._answer_statement_verified(
-                    source,
-                    statement=deterministic_statement,
-                    seed=seed + 750_000,
-                ):
-                    return deterministic_statement
-            except ValueError:
-                pass
+            _, deterministic_statement = parse_paraphrase_response(
+                json.dumps(
+                    {
+                        "paraphrase_question": question,
+                        "paraphrase_answer_statement": deterministic_statement,
+                    },
+                    ensure_ascii=False,
+                ),
+                source,
+            )
+            return deterministic_statement
         augmented_statement = _augment_listed_choice_answer_statement(
             original_question=source.original_question,
             canonical_answer=source.canonical_answer,
