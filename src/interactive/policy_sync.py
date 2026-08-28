@@ -269,7 +269,6 @@ class SGLangPolicyPublisher:
         payload = self._json_object(response, "SGLang server-info response")
         required_integer_fields = (
             "context_length",
-            "max_running_requests",
             "max_total_num_tokens",
         )
         for field_name in required_integer_fields:
@@ -278,6 +277,16 @@ class SGLangPolicyPublisher:
                 raise _RequestFailure(
                     f"SGLang server-info {field_name} must be a positive integer"
                 )
+        max_running_requests = payload.get("max_running_requests")
+        if max_running_requests is not None and (
+            isinstance(max_running_requests, bool)
+            or not isinstance(max_running_requests, int)
+            or max_running_requests <= 0
+        ):
+            raise _RequestFailure(
+                "SGLang server-info max_running_requests must be a positive "
+                "integer or null for automatic scheduling"
+            )
         deterministic = payload.get("enable_deterministic_inference")
         if not isinstance(deterministic, bool):
             raise _RequestFailure(
@@ -290,9 +299,16 @@ class SGLangPolicyPublisher:
                     f"SGLang server-info {field_name} must be non-empty"
                 )
         return {
-            "schema_version": "flowsteer.sglang.server-runtime-receipt.v1",
+            "schema_version": (
+                "flowsteer.sglang.server-runtime-receipt.v2"
+                if max_running_requests is None
+                else "flowsteer.sglang.server-runtime-receipt.v1"
+            ),
             "context_length": int(payload["context_length"]),
-            "max_running_requests": int(payload["max_running_requests"]),
+            "max_running_requests": max_running_requests,
+            "max_running_requests_mode": (
+                "auto" if max_running_requests is None else "fixed"
+            ),
             "max_total_num_tokens": int(payload["max_total_num_tokens"]),
             "enable_deterministic_inference": deterministic,
             "sampling_backend": str(payload["sampling_backend"]),
