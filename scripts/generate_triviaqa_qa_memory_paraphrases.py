@@ -54,9 +54,10 @@ from scripts.materialize_triviaqa_full_train_qa_memory import (  # noqa: E402
 
 PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v12"
 PARAPHRASE_VERSION = "triviaqa.qa_memory.paraphrase.v12"
-SEMANTIC_ADMISSION_VERSION = "triviaqa.qa_memory.semantic_admission.v13"
+SEMANTIC_ADMISSION_VERSION = "triviaqa.qa_memory.semantic_admission.v14"
 PARAPHRASE_METHOD = "semantic-preserving-question-and-answer-paraphrase"
 GENERATOR_PROVIDER = "local-openai-compatible"
+GENERATION_ROUND_SEED_STRIDE = 100_000_000
 
 SYSTEM_PROMPT = """Paraphrase one TriviaQA training question and its training answer.
 Preserve the exact entity identity, requested relation, answer type, temporal or geographic scope, and every constraint. Replace at least one non-entity content word or multiword expression with a true synonym or equivalent phrase; changing only word order is not enough. lexical_replacement_source_tokens lists eligible original content wording, and at least one listed token or its containing phrase must be replaced rather than merely reordered. A dangling generic interrogative may instead be expanded by at least two content words that state its existing answer type without adding another relation. Do not put the answer into the question, including generic-looking words from the canonical answer: forbidden_question_canonical_tokens lists the answer tokens absent from the original question, and none may occur in paraphrase_question. Write one complete declarative answer statement by binding the supplied canonical answer span character-for-character to the original question's wh-dependency or explicitly listed-choice slot. The answer statement must copy at least one non-answer content token from original_question so its relation lineage is explicit. Preserve the original subject/object direction, relation, scope, and constraints; prefer a minimal question-to-declarative transformation and do not require the canonical span to begin the sentence. Never inflect, lowercase, or paraphrase the canonical span. If natural grammar requires an inflected form for a listed choice, use the natural relation wording and also include the exact canonical span as the selected option label in the same declarative statement. The answer statement must not be only the canonical span or a generic wrapper such as 'The answer is ...'. Do not add facts, broaden or narrow the meaning, or invent aliases.
@@ -2677,6 +2678,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout-seconds", type=float, default=180.0)
     parser.add_argument("--max-retries", type=_nonnegative_integer, default=2)
     parser.add_argument(
+        "--generation-rounds",
+        type=_positive_integer,
+        default=1,
+        help="Independent deterministic seed rounds for records rejected after retries.",
+    )
+    parser.add_argument(
         "--concurrency",
         type=_positive_integer,
         default=1,
@@ -2833,10 +2840,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 require_complete=False,
             )
         for record in existing:
-            admitted_seeds = range(
-                args.base_seed + record.selection_index,
-                args.base_seed + record.selection_index + args.max_retries + 1,
-            )
+            admitted_seeds = {
+                args.base_seed
+                + record.selection_index
+                + generation_round * GENERATION_ROUND_SEED_STRIDE
+                + retry
+                for generation_round in range(args.generation_rounds)
+                for retry in range(args.max_retries + 1)
+            }
             if (
                 record.paraphrase_version != args.paraphrase_version
                 or record.paraphrase_method != PARAPHRASE_METHOD
@@ -2882,10 +2893,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         def generate_one(
             source: TriviaQATrainSource,
         ) -> TriviaQAQAMemoryRecord:
-            paraphrase, answer_statement, accepted_seed = client.generate(
-                source,
-                seed=args.base_seed + source.selection_index,
-            )
+            last_generation_error: RuntimeError | None = None
+            for generation_round in range(args.generation_rounds):
+                try:
+                    paraphrase, answer_statement, accepted_seed = client.generate(
+                        source,
+                        seed=(
+                            args.base_seed
+                            + source.selection_index
+                            + generation_round * GENERATION_ROUND_SEED_STRIDE
+                        ),
+                    )
+                    break
+                except RuntimeError as exc:
+                    last_generation_error = exc
+            else:
+                assert last_generation_error is not None
+                raise last_generation_error
             reject_exact_question_identity_shortcut(
                 source,
                 paraphrase_question=paraphrase,
@@ -2939,6 +2963,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     write_materialized_qa_memory(
                         output_path,
                         tuple(records.values()),
+                    )
+                    print(
+                        json.dumps(
+                            {
+                                "checkpoint_record_count": len(records),
+                                "rejected_source_count": len(generation_errors),
+                            },
+                            sort_keys=True,
+                        ),
+                        file=sys.stderr,
+                        flush=True,
                     )
                     processed_since_checkpoint = 0
         if processed_since_checkpoint or generation_errors:
@@ -3063,6 +3098,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "validation_content_indexed": args.include_validation_qa,
             "exact_original_question_substring_count": 0,
             "generation_concurrency": args.concurrency,
+            "generation_rounds": args.generation_rounds,
+            "generation_round_seed_stride": GENERATION_ROUND_SEED_STRIDE,
             "checkpoint_every": checkpoint_every,
             "seed_paraphrase_reused_count": seed_reused_count,
             "seed_paraphrase_rejected_by_current_admission_count": (
