@@ -11,10 +11,10 @@ from src.interactive.triviaqa_qa_memory import QA_MEMORY_TOOL_ID
 
 ROOT = Path(__file__).resolve().parents[2]
 ROUND01 = ROOT / "config" / "evaluation_triviaqa_round_01.yaml"
-V20 = ROOT / "config" / "evaluation_triviaqa_round01_qa_memory_v20.yaml"
+V21 = ROOT / "config" / "evaluation_triviaqa_round01_qa_memory_v21.yaml"
 RUNNER_PATH = ROOT / "scripts" / "evaluate_completion_benchmark_round.py"
 SPEC = importlib.util.spec_from_file_location(
-    "evaluate_triviaqa_round01_qa_memory_v20_test",
+    "evaluate_triviaqa_round01_qa_memory_v21_test",
     RUNNER_PATH,
 )
 assert SPEC is not None and SPEC.loader is not None
@@ -23,9 +23,9 @@ sys.modules[SPEC.name] = RUNNER
 SPEC.loader.exec_module(RUNNER)
 
 
-def test_v20_freezes_round01_director_and_canvas_profile() -> None:
+def test_v21_freezes_round01_director_and_canvas_profile() -> None:
     baseline = load_yaml(ROUND01)
-    config = load_yaml(V20)
+    config = load_yaml(V21)
     validate_agent_graph_config(config)
 
     assert config["experiment"]["seed"] == baseline["experiment"]["seed"]
@@ -80,8 +80,8 @@ def test_v20_freezes_round01_director_and_canvas_profile() -> None:
     assert "max_agents_per_subgraph" not in config["agent_graph"]
 
 
-def test_v20_only_adds_worker_local_qamemory_boundary() -> None:
-    config = load_yaml(V20)
+def test_v21_only_adds_worker_local_qamemory_boundary() -> None:
+    config = load_yaml(V21)
     runtime = config["qa_tool_runtime"]
     graph = config["agent_graph"]
     bounded = config["triviaqa_evaluation"]
@@ -98,6 +98,7 @@ def test_v20_only_adds_worker_local_qamemory_boundary() -> None:
     assert runtime["completion_policy"] == "retrieval_first_parametric_fallback"
     assert graph["required_evidence_tool_id"] == QA_MEMORY_TOOL_ID
     assert graph["require_evidence_relation"] is True
+    assert graph["require_format_agent"] is False
     assert graph["director_feedback_mode"] == "control_plane"
     assert config["experiment"]["training_enabled"] is False
     assert config["grpo"]["max_optimizer_updates"] == 0
@@ -111,7 +112,7 @@ def _round01_direct_row() -> dict[str, object]:
 
 
 def test_matching_nested_legacy_seed_is_materialized_and_exactly_reusable() -> None:
-    config = load_yaml(V20)
+    config = load_yaml(V21)
     expected_seed = config["triviaqa_evaluation"]["direct_generation_seed"]
     row = _round01_direct_row()
     task = RUNNER.TaskRecord.from_dict(row["task"])
@@ -132,7 +133,7 @@ def test_matching_nested_legacy_seed_is_materialized_and_exactly_reusable() -> N
 
 
 def test_mismatched_nested_legacy_seed_is_not_materialized_or_reusable() -> None:
-    config = load_yaml(V20)
+    config = load_yaml(V21)
     expected_seed = config["triviaqa_evaluation"]["direct_generation_seed"]
     row = _round01_direct_row()
     row["execution"]["metadata"]["response"]["generation_seed"] = expected_seed + 1
@@ -154,7 +155,7 @@ def test_mismatched_nested_legacy_seed_is_not_materialized_or_reusable() -> None
 
 
 def test_missing_nested_legacy_seed_is_not_materialized_or_reusable() -> None:
-    config = load_yaml(V20)
+    config = load_yaml(V21)
     expected_seed = config["triviaqa_evaluation"]["direct_generation_seed"]
     row = _round01_direct_row()
     del row["execution"]["metadata"]["response"]["generation_seed"]

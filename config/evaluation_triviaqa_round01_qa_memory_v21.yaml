@@ -4,17 +4,17 @@
 schema_version: "flowsteer.agentgraph.config.v1"
 execution_timeout: 600.0
 experiment:
-  name: "triviaqa_round01_qa_memory_v20"
+  name: "triviaqa_round01_qa_memory_v21"
   phase: "triviaqa_evaluation"
   baseline_id: "triviaqa_round_01_stable_zero"
-  step_id: "round01_profile_dynamic_train_qa_memory_v20"
+  step_id: "round01_profile_dynamic_train_qa_memory_v21"
   training_enabled: false
   seed: 20260817
-  condition_id: "triviaqa_round01_qa_memory_v20"
+  condition_id: "triviaqa_round01_qa_memory_v21"
   catalog_order_namespace: "triviaqa_round_01_local_qwen35"
   prompt_version: "agentgraph.director.minimal.v2"
-  tool_version: "skillflow.search-read+flowsteer.v63+triviaqa-train-qa-memory.retrieval-first-fallback.v20"
-  output_dir: "artifacts/triviaqa_round01_qa_memory_v20"
+  tool_version: "skillflow.search-read+flowsteer.v63+triviaqa-train-qa-memory.retrieval-first-fallback.v21"
+  output_dir: "artifacts/triviaqa_round01_qa_memory_v21"
 
 data:
   catalog_path: "config/joint_qa_partitions_v2.yaml"
@@ -43,12 +43,12 @@ triviaqa_evaluation:
   direct_generation_seed: 20260817
   direct_reused_from: "artifacts/triviaqa_round_01/direct_predictions.jsonl"
   legacy_deterministic_prefetch_enabled: false
-  agentgraph_protocol: "round01_profile_plus_worker_dynamic_train_qa_memory_retrieval_first_fallback_v20"
+  agentgraph_protocol: "round01_profile_plus_worker_dynamic_train_qa_memory_retrieval_first_fallback_v21"
   protocol_equivalent_to_direct: false
 
 qa_tool_runtime:
   enabled: true
-  condition_id: "triviaqa_round01_qa_memory_v20"
+  condition_id: "triviaqa_round01_qa_memory_v21"
   mode: "model_driven_search_read"
   passage_source: "external_corpus"
   dataset_scope: ["triviaqa"]
@@ -61,17 +61,17 @@ qa_tool_runtime:
 
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"
-  root: "artifacts/triviaqa_round01_qa_memory_v20/evidence"
-  selected_tasks_path: "artifacts/triviaqa_round01_qa_memory_v20/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/triviaqa_round01_qa_memory_v20/direct_predictions.jsonl"
-  trajectories_path: "artifacts/triviaqa_round01_qa_memory_v20/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/triviaqa_round01_qa_memory_v20/collection_failures.jsonl"
-  paired_results_path: "artifacts/triviaqa_round01_qa_memory_v20/paired_results.jsonl"
-  wrong_demos_path: "artifacts/triviaqa_round01_qa_memory_v20/wrong_demos.jsonl"
-  manifest_path: "artifacts/triviaqa_round01_qa_memory_v20/run_manifest.json"
-  preflight_receipt_path: "artifacts/triviaqa_round01_qa_memory_v20/preflight_receipt.json"
-  report_json_path: "reports/triviaqa_round01_qa_memory_v20/report.json"
-  report_markdown_path: "reports/triviaqa_round01_qa_memory_v20/report.md"
+  root: "artifacts/triviaqa_round01_qa_memory_v21/evidence"
+  selected_tasks_path: "artifacts/triviaqa_round01_qa_memory_v21/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/triviaqa_round01_qa_memory_v21/direct_predictions.jsonl"
+  trajectories_path: "artifacts/triviaqa_round01_qa_memory_v21/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/triviaqa_round01_qa_memory_v21/collection_failures.jsonl"
+  paired_results_path: "artifacts/triviaqa_round01_qa_memory_v21/paired_results.jsonl"
+  wrong_demos_path: "artifacts/triviaqa_round01_qa_memory_v21/wrong_demos.jsonl"
+  manifest_path: "artifacts/triviaqa_round01_qa_memory_v21/run_manifest.json"
+  preflight_receipt_path: "artifacts/triviaqa_round01_qa_memory_v21/preflight_receipt.json"
+  report_json_path: "reports/triviaqa_round01_qa_memory_v21/report.json"
+  report_markdown_path: "reports/triviaqa_round01_qa_memory_v21/report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/ssd1/iclr/gpf/models/Qwen3.5-9B}"
@@ -79,7 +79,7 @@ director:
   backend: "sglang"
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
   served_model_name: "supervisor_theta"
-  behavior_policy_version: "qwen35-9b-base-triviaqa-round01-qa-memory-v20"
+  behavior_policy_version: "qwen35-9b-base-triviaqa-round01-qa-memory-v21"
   behavior_adapter_name: null
   behavior_adapter_checkpoint: null
   updated_policy_version: "unused-evaluation-only"
@@ -110,6 +110,9 @@ agent_graph:
   max_bidirectional_block_size: 2
   require_unique_output: true
   require_all_agents_reach_output: true
+  # Preserve exact-answer terminal syntax without requiring a dedicated
+  # Format role or a fixed terminal topology.
+  require_format_agent: false
   director_feedback_mode: "control_plane"
   required_evidence_tool_id: "triviaqa.qa_memory"
   require_evidence_relation: true
@@ -148,7 +151,7 @@ grpo:
 policy_sync:
   enabled: false
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
-  adapter_name_prefix: "theta_triviaqa_round01_qa_memory_v20_unused_"
+  adapter_name_prefix: "theta_triviaqa_round01_qa_memory_v21_unused_"
   request_timeout_seconds: 120
   max_retries: 0
   retry_backoff_seconds: 1

@@ -1,4 +1,4 @@
-# TriviaQA Round-01 + QA-memory v20 source map
+# TriviaQA Round-01 + QA-memory v21 source map
 
 This condition is an inference-only composition. It does not introduce a new
 Director policy or AgentGraph topology.
@@ -18,11 +18,11 @@ Source: `config/evaluation_triviaqa_round_01.yaml`.
 - Executor selection, bidirectional-block limit, output/reachability rules,
   exact-answer terminal protocol, and `config/model_catalog_triviaqa_v1.yaml`.
 - The stored Round-01 Direct prediction file and its historical protocol are
-  referenced as a descriptive baseline. The v20 AgentGraph protocol is not
+  referenced as a descriptive baseline. The v21 AgentGraph protocol is not
   claimed protocol-equivalent to this static-retrieval historical Direct arm.
   Those historical rows stored `generation_seed` inside the provider response
   receipt. On read-only reuse, the runner projects that seed to the current
-  top-level field only when it exactly equals the frozen v20 seed; the existing
+  top-level field only when it exactly equals the frozen v21 seed; the existing
   task/model/protocol/execution/evaluator resume checks remain unchanged.
 
 ## Necessary QA-memory adaptation reused from v19
@@ -47,7 +47,10 @@ condition disables legacy deterministic DPR prefetch and does not expose Web
 Search. The additions to the Round-01 Canvas configuration are therefore only
 `director_feedback_mode=control_plane`,
 `required_evidence_tool_id=triviaqa.qa_memory`, and
-`require_evidence_relation=true`.
+`require_evidence_relation=true`. It also explicitly sets
+`require_format_agent=false`: the official exact-answer tag remains terminal
+syntax, while a dedicated Format role and fixed terminal topology remain
+optional.
 
 ## Explicitly not inherited from v19
 
@@ -61,7 +64,7 @@ Search. The additions to the Round-01 Canvas configuration are therefore only
 
 ## Validation
 
-- `tests/unit/test_triviaqa_round01_qa_memory_v20_profile.py` checks the frozen
+- `tests/unit/test_triviaqa_round01_qa_memory_v21_profile.py` checks the frozen
   Director/Canvas fields and the minimal QA-memory boundary.
 - `--prepare-only` validates the runner configuration and freezes the same
   sequential 128-item held-out selection without calling a model or API.
