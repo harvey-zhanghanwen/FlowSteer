@@ -42,6 +42,7 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _clausal_canonical_relation_statement,
     SemanticPreservationError,
     load_resume_records,
+    order_pending_sources_for_resume,
     partition_resume_records_for_semantic_repair,
     validate_resume_record_admission,
     parse_paraphrase_response,
@@ -367,6 +368,52 @@ def test_v12_resume_partitions_only_new_semantic_gate_failures() -> None:
 
     assert accepted == (valid,)
     assert repair_source_ids == ("triviaqa:tc_9998",)
+
+
+def test_resume_orders_untouched_tail_before_admission_gaps() -> None:
+    sources = tuple(
+        TriviaQATrainSource(
+            source_train_task_id=f"triviaqa:resume_{index}",
+            base_task_id=f"triviaqa:resume_{index}",
+            selection_index=index,
+            cycled_training_sample=False,
+            cycle_index=None,
+            original_question=f"Which river is source {index}?",
+            canonical_answer=f"River {index}",
+            native_split="train",
+        )
+        for index in range(5)
+    )
+
+    def admitted(source: TriviaQATrainSource) -> TriviaQAQAMemoryRecord:
+        return TriviaQAQAMemoryRecord.create(
+            source=source,
+            paraphrase_question=(
+                f"Name the river associated with source {source.selection_index}."
+            ),
+            paraphrase_answer_statement=(
+                f"The river associated with source {source.selection_index} is "
+                f"{source.canonical_answer}."
+            ),
+            paraphrase_version="triviaqa.qa_memory.paraphrase.v12",
+            paraphrase_method=(
+                "semantic-preserving-question-and-answer-paraphrase"
+            ),
+            generator_provider="local-openai-compatible",
+            model_id="supervisor_theta",
+            model_revision="Qwen3.5-9B-local",
+            prompt_template_version=(
+                "triviaqa.qa_memory.qa_paraphrase.v12"
+            ),
+            generation_seed=20260828 + source.selection_index,
+        )
+
+    pending = order_pending_sources_for_resume(
+        sources,
+        (admitted(sources[0]), admitted(sources[2])),
+    )
+
+    assert tuple(source.selection_index for source in pending) == (3, 4, 1)
 
 
 def test_v12_resume_partition_keeps_older_admission_errors_fail_closed() -> None:

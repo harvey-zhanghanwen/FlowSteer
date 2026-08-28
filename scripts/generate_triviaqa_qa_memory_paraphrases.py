@@ -2003,6 +2003,41 @@ def partition_resume_records_for_semantic_repair(
     return tuple(accepted), tuple(repair_source_ids)
 
 
+def order_pending_sources_for_resume(
+    sources: Sequence[TriviaQATrainSource],
+    records: Sequence[TriviaQAQAMemoryRecord],
+) -> tuple[TriviaQATrainSource, ...]:
+    """Run never-attempted tail rows before deterministic resume gaps.
+
+    A missing row at or below the highest admitted ``selection_index`` has
+    already crossed the bounded generation/admission boundary in an earlier
+    resumable pass.  Keeping those hard gaps behind the untouched source tail
+    prevents a restart from replaying the same deterministic seeds before it
+    reaches new work.  Every gap remains in the returned sequence and is still
+    processed in frozen source order after the tail.
+    """
+
+    admitted_ids = {
+        record.source_train_task_id for record in records
+    }
+    frontier = max(
+        (record.selection_index for record in records),
+        default=-1,
+    )
+    untouched_tail: list[TriviaQATrainSource] = []
+    resume_gaps: list[TriviaQATrainSource] = []
+    for source in sources:
+        if source.source_train_task_id in admitted_ids:
+            continue
+        target = (
+            untouched_tail
+            if source.selection_index > frontier
+            else resume_gaps
+        )
+        target.append(source)
+    return tuple((*untouched_tail, *resume_gaps))
+
+
 class LocalQwen35Paraphraser:
     """Small dependency-free client matching the existing local gateway."""
 
@@ -2885,11 +2920,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_retries=args.max_retries,
         )
         records = {record.source_train_task_id: record for record in existing}
-        pending_sources = [
-            source
-            for source in sources
-            if source.source_train_task_id not in records
-        ]
+        pending_sources = list(
+            order_pending_sources_for_resume(sources, tuple(records.values()))
+        )
 
         def generate_one(
             source: TriviaQATrainSource,
