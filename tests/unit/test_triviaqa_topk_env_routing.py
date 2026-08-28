@@ -4,12 +4,19 @@ import json
 import unittest
 
 from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
-from src.interactive.agent_runtime import AgentRuntime, AgentRuntimeResult
+from src.interactive.agent_runtime import (
+    AgentRequest,
+    AgentRuntime,
+    AgentRuntimeResult,
+    ExecutionPhase,
+    UpstreamMessage,
+)
 from src.interactive.agent_workflow_env import (
     AgentWorkflowEnv,
     _HOTPOTQA_FORMAT_CONTRACT,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
+from src.interactive.openai_gateway import build_agent_messages
 from src.interactive.qa_tool_adapter import (
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     QARetrievalReactExecutionAdapter,
@@ -96,7 +103,10 @@ def _graph() -> AgentGraph:
     )
 
 
-def _env() -> AgentWorkflowEnv:
+def _env(
+    *,
+    parametric_fallback_after_coverage_failure: bool = False,
+) -> AgentWorkflowEnv:
     registry = _registry()
     runtime = AgentRuntime(
         registry,
@@ -115,6 +125,9 @@ def _env() -> AgentWorkflowEnv:
         semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
         recovery_policy="preserve_diagnose_repair_augment",
         required_evidence_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+        parametric_fallback_after_coverage_failure=(
+            parametric_fallback_after_coverage_failure
+        ),
         director_feedback_mode="control_plane",
     )
 
@@ -190,14 +203,33 @@ def _receipts() -> tuple[dict[str, object], ...]:
     return (search, *reads)
 
 
-def _artifact(receipts: tuple[dict[str, object], ...]) -> str:
+def _artifact(
+    receipts: tuple[dict[str, object], ...],
+    *,
+    retrieval_status: str | None = None,
+) -> str:
+    selection: dict[str, object] = {
+        "memory_ids": [row[0] for row in _ROWS],
+    }
+    if retrieval_status is not None:
+        selection.update(
+            {
+                "retrieval_status": retrieval_status,
+                "relevant_memory_ids": (
+                    [_ROWS[0][0]]
+                    if retrieval_status == "evidence_found"
+                    else []
+                ),
+            }
+        )
     projected, issue = (
         QARetrievalReactExecutionAdapter._qa_memory_completion_receipt_projection(
             original_question=_QUESTION,
-            selection_artifact=json.dumps(
-                {"memory_ids": [row[0] for row in _ROWS]}
-            ),
+            selection_artifact=json.dumps(selection),
             tool_receipts=receipts,
+            parametric_fallback_after_coverage_failure=(
+                retrieval_status is not None
+            ),
         )
     )
     if issue is not None or projected is None:
@@ -266,7 +298,263 @@ def _execution(
     )
 
 
+def _fallback_execution(
+    env: AgentWorkflowEnv,
+    artifact: str,
+    receipts: tuple[dict[str, object], ...],
+    *,
+    candidate: str = "Ada",
+) -> AgentRuntimeResult:
+    reasoner_artifact = json.dumps(
+        {
+            "question_scope": _QUESTION,
+            "retrieval_status": "knowledge_base_coverage_failure",
+            "answer_source": "parametric_knowledge",
+            "answer_type": "entity",
+            "answer_cardinality": "single",
+            "candidate_answer": candidate,
+        }
+    )
+    verifier_artifact = json.dumps(
+        {
+            "candidate_answer": candidate,
+            "retrieval_status": "knowledge_base_coverage_failure",
+            "answer_source": "parametric_knowledge",
+            "evidence_supported": False,
+            "scope_preserved": True,
+            "answer_type_cardinality_correct": True,
+            "minimal_answer_surface": True,
+            "verification_status": "parametric_fallback",
+        }
+    )
+    metadata = _metadata(artifact, receipts)
+    metadata["verifier"]["input_artifact_provenance"] = [
+        {
+            "source_agent_id": "reasoner",
+            "target_agent_id": "verifier",
+            "artifact": reasoner_artifact,
+            "artifact_version": "reasoner:v1",
+            "tool_receipts": list(receipts),
+        }
+    ]
+    return AgentRuntimeResult(
+        run_id="topk-parametric-fallback",
+        graph_revision=env.graph.revision,
+        output_agent_id="formatter",
+        final_answer=f"<answer>{candidate}</answer>",
+        outputs={
+            "retriever": artifact,
+            "reasoner": reasoner_artifact,
+            "verifier": verifier_artifact,
+            "formatter": f"<answer>{candidate}</answer>",
+        },
+        calls=(),
+        block_completion_order=(),
+        output_metadata=metadata,
+    )
+
+
 class TriviaQATopKEnvRoutingTests(unittest.TestCase):
+    def test_child_agent_prompts_switch_only_after_typed_coverage_failure(
+        self,
+    ) -> None:
+        receipts = _receipts()
+        artifact = _artifact(
+            receipts,
+            retrieval_status="knowledge_base_coverage_failure",
+        )
+        graph = _graph()
+        model = ModelSpec("fake-model", "fake")
+        provider = ProviderSpec("fake", kind="test")
+        reasoner_request = AgentRequest(
+            request_id="reasoner-request",
+            run_id="prompt-test",
+            graph_revision=graph.revision,
+            problem=_QUESTION,
+            agent=graph.get_node("reasoner"),
+            model=model,
+            provider=provider,
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            upstream=(
+                UpstreamMessage(
+                    "retriever",
+                    "reasoner",
+                    artifact,
+                    artifact_type="retrieval_evidence",
+                    tool_receipts=receipts,
+                    artifact_version="retriever:v1",
+                ),
+            ),
+        )
+        reasoner_prompt = "\n".join(
+            message["content"]
+            for message in build_agent_messages(reasoner_request)
+        )
+        self.assertIn("parametric knowledge", reasoner_prompt)
+        self.assertIn("mandatory local QA-memory search", reasoner_prompt)
+
+        reasoner_artifact = json.dumps(
+            {
+                "question_scope": _QUESTION,
+                "retrieval_status": "knowledge_base_coverage_failure",
+                "answer_source": "parametric_knowledge",
+                "answer_type": "entity",
+                "answer_cardinality": "single",
+                "candidate_answer": "Ada",
+            }
+        )
+        verifier_request = AgentRequest(
+            request_id="verifier-request",
+            run_id="prompt-test",
+            graph_revision=graph.revision,
+            problem=_QUESTION,
+            agent=graph.get_node("verifier"),
+            model=model,
+            provider=provider,
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            upstream=(
+                UpstreamMessage(
+                    "reasoner",
+                    "verifier",
+                    reasoner_artifact,
+                    artifact_type="semantic_candidate",
+                    tool_receipts=receipts,
+                    artifact_version="reasoner:v1",
+                ),
+            ),
+        )
+        verifier_prompt = "\n".join(
+            message["content"]
+            for message in build_agent_messages(verifier_request)
+        )
+        self.assertIn("evidence_supported to false", verifier_prompt)
+        self.assertIn("parametric_fallback", verifier_prompt)
+
+        untyped_request = AgentRequest(
+            request_id="untyped-reasoner-request",
+            run_id="prompt-test",
+            graph_revision=graph.revision,
+            problem=_QUESTION,
+            agent=graph.get_node("reasoner"),
+            model=model,
+            provider=provider,
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            upstream=(
+                UpstreamMessage(
+                    "untyped",
+                    "reasoner",
+                    artifact,
+                    tool_receipts=receipts,
+                    artifact_version="retriever:v1",
+                ),
+            ),
+        )
+        untyped_prompt = "\n".join(
+            message["content"]
+            for message in build_agent_messages(untyped_request)
+        )
+        self.assertNotIn("mandatory local QA-memory search", untyped_prompt)
+
+    def test_matching_paired_qa_blocks_coverage_failure_status(self) -> None:
+        receipts = json.loads(json.dumps(_receipts()))
+        first_read = receipts[1]["result"]["value"]["memory"]
+        first_read["paraphrase_question"] = _QUESTION
+        first_read["paraphrase_answer_statement"] = (
+            "Ada is the author who wrote the novel."
+        )
+        first_read["text"] = (
+            f"Question: {_QUESTION}\n"
+            "Answer: Ada is the author who wrote the novel."
+        )
+        projected, issue = (
+            QARetrievalReactExecutionAdapter._qa_memory_completion_receipt_projection(
+                original_question=_QUESTION,
+                selection_artifact=json.dumps(
+                    {
+                        "memory_ids": [row[0] for row in _ROWS],
+                        "retrieval_status": (
+                            "knowledge_base_coverage_failure"
+                        ),
+                        "relevant_memory_ids": [],
+                    }
+                ),
+                tool_receipts=tuple(receipts),
+                parametric_fallback_after_coverage_failure=True,
+            )
+        )
+        self.assertIsNone(projected)
+        self.assertIsNotNone(issue)
+        self.assertIn("entity/relation-compatible", issue)
+
+    def test_tool_first_coverage_failure_admits_parametric_child_reasoner(
+        self,
+    ) -> None:
+        env = _env(parametric_fallback_after_coverage_failure=True)
+        receipts = _receipts()
+        artifact = _artifact(
+            receipts,
+            retrieval_status="knowledge_base_coverage_failure",
+        )
+        execution = _fallback_execution(env, artifact, receipts)
+
+        self.assertIsNone(env._semantic_protocol_issue(execution))
+        env._progressive_outputs = dict(execution.outputs)
+        env._progressive_output_metadata = {
+            agent_id: dict(metadata)
+            for agent_id, metadata in execution.output_metadata.items()
+        }
+        self.assertEqual(
+            ("reasoner", "verifier", "formatter"),
+            env._active_semantic_lineage_ids(),
+        )
+
+    def test_parametric_fallback_cannot_bypass_complete_top_k_or_status(
+        self,
+    ) -> None:
+        env = _env(parametric_fallback_after_coverage_failure=True)
+        receipts = _receipts()
+        coverage_artifact = _artifact(
+            receipts,
+            retrieval_status="knowledge_base_coverage_failure",
+        )
+        missing_read = receipts[:-1]
+        incomplete = _fallback_execution(
+            env,
+            coverage_artifact,
+            missing_read,
+        )
+        issue = env._semantic_protocol_issue(incomplete)
+        self.assertIsNotNone(issue)
+        self.assertIn("read(memory_id)", issue)
+
+        evidence_artifact = _artifact(
+            receipts,
+            retrieval_status="evidence_found",
+        )
+        evidence_execution = _fallback_execution(
+            env,
+            evidence_artifact,
+            receipts,
+        )
+        issue = env._semantic_protocol_issue(evidence_execution)
+        self.assertIsNotNone(issue)
+        self.assertIn("Reasoner", issue)
+
+    def test_v13_default_does_not_admit_coverage_fallback(self) -> None:
+        env = _env()
+        receipts = _receipts()
+        coverage_artifact = _artifact(
+            receipts,
+            retrieval_status="knowledge_base_coverage_failure",
+        )
+        issue = env._semantic_protocol_issue(
+            _fallback_execution(env, coverage_artifact, receipts)
+        )
+        self.assertIsNotNone(issue)
+
     def test_complete_top_k_artifact_is_routed_on_explicit_direct_relation(
         self,
     ) -> None:

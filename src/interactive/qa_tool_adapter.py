@@ -89,6 +89,10 @@ _QA_MEMORY_EVIDENCE_ARTIFACT_FIELDS = (
     "top_k",
     "candidates",
 )
+_QA_MEMORY_RETRIEVAL_STATUS_FIELDS = (
+    "retrieval_status",
+    "relevant_memory_ids",
+)
 _QA_MEMORY_CANDIDATE_FIELDS = (
     "rank",
     "similarity",
@@ -4261,6 +4265,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         max_action_tokens: int = 512,
         task_type: str | None = None,
         completion_policy: str = "required_tool_call",
+        parametric_fallback_after_coverage_failure: bool = False,
         retrieval_tool_id: str = QA_RETRIEVAL_TOOL_ID,
         sampling_base_seed: int | None = None,
         sampling_coordinate: ScientificSamplingCoordinate | None = None,
@@ -4275,6 +4280,17 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             raise ValueError(
                 "QA completion_policy must be optional, required_tool_call, "
                 "or required_evidence"
+            )
+        if type(parametric_fallback_after_coverage_failure) is not bool:
+            raise ValueError(
+                "parametric_fallback_after_coverage_failure must be bool"
+            )
+        if (
+            parametric_fallback_after_coverage_failure
+            and retrieval_tool_id != TRIVIAQA_QA_MEMORY_TOOL_ID
+        ):
+            raise ValueError(
+                "parametric fallback is supported only by triviaqa.qa_memory"
             )
         if retrieval_tool_id not in _SUPPORTED_QA_RETRIEVAL_TOOL_IDS:
             raise ValueError(
@@ -4291,6 +4307,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         self._task_type = task_type
         self._completion_policy = completion_policy
+        self._parametric_fallback_after_coverage_failure = (
+            parametric_fallback_after_coverage_failure
+        )
         self._retrieval_tool_id = retrieval_tool_id
         self._frozen_search_limit: int | None = None
         if retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID:
@@ -4402,6 +4421,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 artifact=message.content,
                 tool_receipts=message_receipts,
                 retrieval_tool_id=self._retrieval_tool_id,
+                parametric_fallback_after_coverage_failure=(
+                    self._parametric_fallback_after_coverage_failure
+                ),
             ) is not None:
                 continue
             validated_receipts.extend(message_receipts)
@@ -6334,7 +6356,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "properties": {
                     "value": {
                         "type": "object",
-                        "required": ["memory_ids"],
+                        "required": [
+                            "memory_ids",
+                            *(
+                                ["retrieval_status", "relevant_memory_ids"]
+                                if self._parametric_fallback_after_coverage_failure
+                                else []
+                            ),
+                        ],
                         "properties": {
                             "memory_ids": {
                                 "type": "array",
@@ -6352,6 +6381,41 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                     "the ranked record fields from those receipts."
                                 ),
                             },
+                            **(
+                                {
+                                    "retrieval_status": {
+                                        "type": "string",
+                                        "enum": [
+                                            "evidence_found",
+                                            "knowledge_base_coverage_failure",
+                                        ],
+                                        "description": (
+                                            "After reading every returned QA pair, use "
+                                            "evidence_found only when at least one "
+                                            "record matches the question entity and "
+                                            "requested relation and supplies the answer. "
+                                            "Otherwise use "
+                                            "knowledge_base_coverage_failure."
+                                        ),
+                                    },
+                                    "relevant_memory_ids": {
+                                        "type": "array",
+                                        "uniqueItems": True,
+                                        "items": {
+                                            "type": "string",
+                                            "minLength": 1,
+                                        },
+                                        "description": (
+                                            "For evidence_found, list the matching "
+                                            "memory_id values in embedding rank order. "
+                                            "For knowledge_base_coverage_failure, use "
+                                            "an empty list."
+                                        ),
+                                    },
+                                }
+                                if self._parametric_fallback_after_coverage_failure
+                                else {}
+                            ),
                         },
                         "additionalProperties": False,
                     }
@@ -9012,14 +9076,20 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         original_question: str,
         artifact: str,
         tool_receipts: Sequence[Mapping[str, object]],
+        parametric_fallback_after_coverage_failure: bool = False,
     ) -> str | None:
         """Validate one complete ranked QA-memory batch against Tool receipts."""
 
         from .agent_workflow_env import AgentWorkflowEnv
 
+        required_fields = _QA_MEMORY_EVIDENCE_ARTIFACT_FIELDS + (
+            _QA_MEMORY_RETRIEVAL_STATUS_FIELDS
+            if parametric_fallback_after_coverage_failure
+            else ()
+        )
         fields, issue = AgentWorkflowEnv._structured_semantic_fields(
             artifact,
-            _QA_MEMORY_EVIDENCE_ARTIFACT_FIELDS,
+            required_fields,
         )
         if issue is not None or fields is None:
             return issue or "TriviaQA QA-memory Evidence Retriever artifact is missing"
@@ -9078,16 +9148,80 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "TriviaQA QA-memory Evidence Retriever candidates contain "
                 "duplicate memory_id values"
             )
+        if parametric_fallback_after_coverage_failure:
+            retrieval_status = fields.get("retrieval_status")
+            relevant_memory_ids = fields.get("relevant_memory_ids")
+            if retrieval_status not in {
+                "evidence_found",
+                _KNOWLEDGE_BASE_COVERAGE_FAILURE,
+            }:
+                return (
+                    "TriviaQA QA-memory retrieval_status must be "
+                    "evidence_found or knowledge_base_coverage_failure"
+                )
+            if not isinstance(relevant_memory_ids, list) or any(
+                not isinstance(memory_id, str)
+                or not memory_id.strip()
+                or memory_id != memory_id.strip()
+                for memory_id in relevant_memory_ids
+            ):
+                return (
+                    "TriviaQA QA-memory relevant_memory_ids must be a list of "
+                    "non-empty trimmed strings"
+                )
+            if len(relevant_memory_ids) != len(set(relevant_memory_ids)):
+                return (
+                    "TriviaQA QA-memory relevant_memory_ids must not contain "
+                    "duplicates"
+                )
+            expected_relevant_order = [
+                memory_id
+                for memory_id in memory_ids
+                if memory_id in set(relevant_memory_ids)
+            ]
+            if relevant_memory_ids != expected_relevant_order:
+                return (
+                    "TriviaQA QA-memory relevant_memory_ids must be a subset "
+                    "of the top-k in embedding rank order"
+                )
+            if retrieval_status == "evidence_found" and not relevant_memory_ids:
+                return (
+                    "TriviaQA QA-memory evidence_found requires at least one "
+                    "relevant_memory_id"
+                )
+            if (
+                retrieval_status == _KNOWLEDGE_BASE_COVERAGE_FAILURE
+                and relevant_memory_ids
+            ):
+                return (
+                    "TriviaQA QA-memory knowledge_base_coverage_failure requires "
+                    "an empty relevant_memory_ids list"
+                )
 
         projected, projection_issue = (
             QARetrievalReactExecutionAdapter._qa_memory_completion_receipt_projection(
                 original_question=original_question,
                 selection_artifact=json.dumps(
-                    {"memory_ids": memory_ids},
+                    {
+                        "memory_ids": memory_ids,
+                        **(
+                            {
+                                "retrieval_status": fields["retrieval_status"],
+                                "relevant_memory_ids": fields[
+                                    "relevant_memory_ids"
+                                ],
+                            }
+                            if parametric_fallback_after_coverage_failure
+                            else {}
+                        ),
+                    },
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ),
                 tool_receipts=tool_receipts,
+                parametric_fallback_after_coverage_failure=(
+                    parametric_fallback_after_coverage_failure
+                ),
             )
         )
         if projection_issue is not None or projected is None:
@@ -9097,7 +9231,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         expected = json.loads(projected)
         if fields == expected:
             return None
-        for field_name in _QA_MEMORY_EVIDENCE_ARTIFACT_FIELDS:
+        for field_name in required_fields:
             if fields.get(field_name) != expected.get(field_name):
                 return (
                     "TriviaQA QA-memory Evidence Retriever field "
@@ -9115,6 +9249,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         original_question: str,
         selection_artifact: str,
         tool_receipts: Sequence[Mapping[str, object]],
+        parametric_fallback_after_coverage_failure: bool = False,
     ) -> tuple[str | None, str | None]:
         """Project a complete embedding-ranked batch from exact Tool receipts."""
 
@@ -9146,6 +9281,70 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "TriviaQA QA-memory completion memory_ids must contain unique "
                 "non-empty trimmed strings"
             )
+
+        retrieval_status: str | None = None
+        relevant_memory_ids: list[str] | None = None
+        if parametric_fallback_after_coverage_failure:
+            raw_status = selection.get("retrieval_status")
+            raw_relevant_ids = selection.get("relevant_memory_ids")
+            if raw_status not in {
+                "evidence_found",
+                _KNOWLEDGE_BASE_COVERAGE_FAILURE,
+            }:
+                return None, (
+                    "TriviaQA QA-memory completion retrieval_status must be "
+                    "evidence_found or knowledge_base_coverage_failure"
+                )
+            if not isinstance(raw_relevant_ids, list) or any(
+                not isinstance(memory_id, str)
+                or not memory_id.strip()
+                or memory_id != memory_id.strip()
+                for memory_id in raw_relevant_ids
+            ):
+                return None, (
+                    "TriviaQA QA-memory completion relevant_memory_ids must be "
+                    "a list of non-empty trimmed strings"
+                )
+            if len(raw_relevant_ids) != len(set(raw_relevant_ids)):
+                return None, (
+                    "TriviaQA QA-memory completion relevant_memory_ids must not "
+                    "contain duplicates"
+                )
+            selected_id_set = set(selected_ids)
+            if any(
+                memory_id not in selected_id_set
+                for memory_id in raw_relevant_ids
+            ):
+                return None, (
+                    "TriviaQA QA-memory completion relevant_memory_ids must be "
+                    "a subset of memory_ids"
+                )
+            expected_relevant_order = [
+                memory_id
+                for memory_id in selected_ids
+                if memory_id in set(raw_relevant_ids)
+            ]
+            if raw_relevant_ids != expected_relevant_order:
+                return None, (
+                    "TriviaQA QA-memory completion relevant_memory_ids must "
+                    "preserve embedding rank order"
+                )
+            if raw_status == "evidence_found" and not raw_relevant_ids:
+                return None, (
+                    "TriviaQA QA-memory completion evidence_found requires at "
+                    "least one relevant_memory_id"
+                )
+            if (
+                raw_status == _KNOWLEDGE_BASE_COVERAGE_FAILURE
+                and raw_relevant_ids
+            ):
+                return None, (
+                    "TriviaQA QA-memory completion "
+                    "knowledge_base_coverage_failure requires an empty "
+                    "relevant_memory_ids list"
+                )
+            retrieval_status = raw_status
+            relevant_memory_ids = list(raw_relevant_ids)
 
         latest_search: tuple[
             int,
@@ -9308,6 +9507,52 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             "top_k": search_arguments["limit"],
             "candidates": candidates,
         }
+        if parametric_fallback_after_coverage_failure:
+            original_content_tokens = frozenset(
+                _candidate_question_content_tokens(original_question)
+            )
+            compatible_memory_ids = tuple(
+                str(candidate["memory_id"])
+                for candidate in candidates
+                if (
+                    _public_search_candidate_compatibility(
+                        original_question=original_question,
+                        title=str(candidate["paraphrase_question"]),
+                        snippet=(
+                            f"{candidate['paraphrase_question']}. "
+                            f"{candidate['paraphrase_answer_statement']}"
+                        ),
+                        require_entity_relation_compatibility=True,
+                    )[0]
+                    or bool(
+                        original_content_tokens
+                        and original_content_tokens
+                        <= _candidate_matched_question_tokens(
+                            tuple(original_content_tokens),
+                            (
+                                f"{candidate['paraphrase_question']} "
+                                f"{candidate['paraphrase_answer_statement']}"
+                            ),
+                        )
+                    )
+                )
+            )
+            if (
+                retrieval_status == _KNOWLEDGE_BASE_COVERAGE_FAILURE
+                and compatible_memory_ids
+            ):
+                return None, (
+                    "TriviaQA QA-memory coverage failure is inadmissible because "
+                    "the complete top-k contains an entity/relation-compatible "
+                    "paired QA record; use evidence_found and identify its "
+                    "memory_id"
+                )
+            projected.update(
+                {
+                    "retrieval_status": retrieval_status,
+                    "relevant_memory_ids": relevant_memory_ids,
+                }
+            )
         return (
             json.dumps(
                 projected,
@@ -9325,6 +9570,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         artifact: str,
         tool_receipts: Sequence[Mapping[str, object]],
         retrieval_tool_id: str = QA_RETRIEVAL_TOOL_ID,
+        parametric_fallback_after_coverage_failure: bool = False,
     ) -> str | None:
         """Validate one answer-free Retriever artifact against one read receipt.
 
@@ -9337,6 +9583,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 original_question=original_question,
                 artifact=artifact,
                 tool_receipts=tool_receipts,
+                parametric_fallback_after_coverage_failure=(
+                    parametric_fallback_after_coverage_failure
+                ),
             )
 
         from .agent_workflow_env import (
@@ -9861,6 +10110,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 original_question=original_question,
                 selection_artifact=artifact,
                 tool_receipts=tool_receipts,
+                parametric_fallback_after_coverage_failure=(
+                    self._parametric_fallback_after_coverage_failure
+                ),
             )
             if projected is not None:
                 return projected
@@ -9891,6 +10143,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     original_question=evidence_retriever_question,
                     selection_artifact=artifact,
                     tool_receipts=tool_receipts,
+                    parametric_fallback_after_coverage_failure=(
+                        self._parametric_fallback_after_coverage_failure
+                    ),
                 )
             )
             if projection_issue is not None or projected is None:
@@ -10055,6 +10310,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 artifact=artifact,
                 tool_receipts=tool_receipts,
                 retrieval_tool_id=self._retrieval_tool_id,
+                parametric_fallback_after_coverage_failure=(
+                    self._parametric_fallback_after_coverage_failure
+                ),
             )
             if issue is None:
                 return None

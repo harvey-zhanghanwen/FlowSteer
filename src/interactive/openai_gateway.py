@@ -11,6 +11,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import yaml
+
 from scripts.prompts.prompt import FORMAT_PROMPT
 
 from .agent_runtime import (
@@ -435,6 +437,178 @@ _QA_VERIFIER_PROTOCOL = (
     "passes; otherwise set it to repair_required and do not provide a substitute."
 )
 
+_QA_PARAMETRIC_FALLBACK_REASONER_PROTOCOL = (
+    "You are the semantic Reasoner, not a Retriever, Verifier, Formatter, or "
+    "Director. The upstream Evidence Retriever has already completed its "
+    "mandatory local QA-memory search and every ordered top-k read, and its "
+    "typed retrieval_status is knowledge_base_coverage_failure. Do not claim "
+    "that the retrieved records support the answer and do not fabricate "
+    "evidence. Answer the unchanged original question from your parametric "
+    "knowledge with the shortest correct span. Return exactly these six fields: "
+    "question_scope, retrieval_status, answer_source, answer_type, "
+    "answer_cardinality, and candidate_answer. Copy question_scope exactly; set "
+    "retrieval_status to knowledge_base_coverage_failure and answer_source to "
+    "parametric_knowledge. Do not use <answer> tags."
+)
+
+_QA_PARAMETRIC_FALLBACK_VERIFIER_PROTOCOL = (
+    "You are the semantic Verifier, not a Retriever, Reasoner, Formatter, or "
+    "Director. Verify the routed parametric fallback answer without pretending "
+    "that the irrelevant QA-memory top-k supports it. You must not select, "
+    "replace, canonicalize, or invent a candidate. Return exactly these fields: "
+    "candidate_answer, retrieval_status, answer_source, evidence_supported, "
+    "scope_preserved, answer_type_cardinality_correct, minimal_answer_surface, "
+    "and verification_status. Copy candidate_answer character-for-character; "
+    "set retrieval_status to knowledge_base_coverage_failure, answer_source to "
+    "parametric_knowledge, and evidence_supported to false. Set "
+    "verification_status to parametric_fallback only when scope, answer type, "
+    "cardinality, and answer surface pass; otherwise use repair_required. Do not "
+    "use <answer> tags."
+)
+
+
+def _structured_upstream_artifact(value: str) -> Mapping[str, object] | None:
+    """Parse one child-Agent artifact for protocol selection only."""
+
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        try:
+            parsed = yaml.safe_load(value)
+        except yaml.YAMLError:
+            return None
+    return parsed if isinstance(parsed, Mapping) else None
+
+
+def _has_qa_memory_coverage_failure(request: AgentRequest) -> bool:
+    """Recognize only a top-level typed QA-memory coverage diagnosis."""
+
+    for message in request.upstream:
+        if (
+            message.artifact_type != "retrieval_evidence"
+            or not isinstance(message.artifact_version, str)
+            or not message.artifact_version.strip()
+            or not message.tool_receipts
+        ):
+            continue
+        artifact = _structured_upstream_artifact(message.artifact)
+        if artifact is None:
+            continue
+        if artifact.get("retrieval_status") != "knowledge_base_coverage_failure":
+            continue
+        from .qa_tool_adapter import (
+            QARetrievalReactExecutionAdapter,
+            TRIVIAQA_QA_MEMORY_TOOL_ID,
+        )
+
+        if (
+            QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
+                original_question=request.problem,
+                artifact=message.artifact,
+                tool_receipts=message.tool_receipts,
+                retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+                parametric_fallback_after_coverage_failure=True,
+            )
+            is None
+        ):
+            return True
+    return False
+
+
+def _qa_memory_receipts_complete_for_coverage_failure(
+    request: AgentRequest,
+    message: UpstreamMessage,
+) -> bool:
+    """Revalidate the worker search/read batch carried to the Verifier."""
+
+    from .qa_tool_adapter import (
+        QARetrievalReactExecutionAdapter,
+        TRIVIAQA_QA_MEMORY_TOOL_ID,
+    )
+
+    memory_ids: list[str] | None = None
+    for receipt in message.tool_receipts:
+        if (
+            receipt.get("tool_id") != TRIVIAQA_QA_MEMORY_TOOL_ID
+            or receipt.get("error_type") is not None
+        ):
+            continue
+        receipt_request = receipt.get("request")
+        result = receipt.get("result")
+        if (
+            not isinstance(receipt_request, Mapping)
+            or receipt_request.get("action") != "search"
+            or not isinstance(result, Mapping)
+            or result.get("completed") is not True
+        ):
+            continue
+        value = result.get("value", result)
+        if not isinstance(value, Mapping):
+            continue
+        raw_ids = value.get("memory_ids")
+        if isinstance(raw_ids, list) and all(
+            isinstance(memory_id, str) and memory_id.strip()
+            for memory_id in raw_ids
+        ):
+            memory_ids = list(raw_ids)
+    if not memory_ids:
+        return False
+    _, issue = (
+        QARetrievalReactExecutionAdapter._qa_memory_completion_receipt_projection(
+            original_question=request.problem,
+            selection_artifact=json.dumps(
+                {
+                    "memory_ids": memory_ids,
+                    "retrieval_status": "knowledge_base_coverage_failure",
+                    "relevant_memory_ids": [],
+                },
+                ensure_ascii=False,
+            ),
+            tool_receipts=message.tool_receipts,
+            parametric_fallback_after_coverage_failure=True,
+        )
+    )
+    return issue is None
+
+
+def _has_parametric_fallback_candidate(request: AgentRequest) -> bool:
+    """Recognize the exact Reasoner fallback control fields for Verifier routing."""
+
+    for message in request.upstream:
+        if (
+            message.artifact_type != "semantic_candidate"
+            or not isinstance(message.artifact_version, str)
+            or not message.artifact_version.strip()
+            or not message.tool_receipts
+        ):
+            continue
+        artifact = _structured_upstream_artifact(message.artifact)
+        if artifact is None:
+            continue
+        if (
+            set(artifact)
+            == {
+                "question_scope",
+                "retrieval_status",
+                "answer_source",
+                "answer_type",
+                "answer_cardinality",
+                "candidate_answer",
+            }
+            and artifact.get("question_scope") == request.problem
+            and artifact.get("retrieval_status")
+            == "knowledge_base_coverage_failure"
+            and artifact.get("answer_source") == "parametric_knowledge"
+            and isinstance(artifact.get("candidate_answer"), str)
+            and bool(str(artifact["candidate_answer"]).strip())
+            and _qa_memory_receipts_complete_for_coverage_failure(
+                request,
+                message,
+            )
+        ):
+            return True
+    return False
+
 
 def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     """Build finite-phase prompts without exposing provider credentials."""
@@ -448,6 +622,16 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     hotpot_semantic = request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
     unified_qa_semantic = request.semantic_protocol == "qa_verified_answer_lineage_v2"
     semantic_lineage = hotpot_semantic or unified_qa_semantic
+    parametric_fallback_reasoner = bool(
+        unified_qa_semantic
+        and semantic_role == "reasoner"
+        and _has_qa_memory_coverage_failure(request)
+    )
+    parametric_fallback_verifier = bool(
+        unified_qa_semantic
+        and semantic_role == "verifier"
+        and _has_parametric_fallback_candidate(request)
+    )
     if execution_mode in {"react", "coding"}:
         # SkillFlow's BoundedAgent asks the policy for one StructuredAction per
         # model turn.  The execution adapter, not this provider boundary,
@@ -538,12 +722,16 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         protocol = (
             _HOTPOTQA_REASONER_PROTOCOL
             if hotpot_semantic
+            else _QA_PARAMETRIC_FALLBACK_REASONER_PROTOCOL
+            if parametric_fallback_reasoner
             else _QA_REASONER_PROTOCOL
         ) + " Do not use <answer> tags."
     elif semantic_lineage and semantic_role == "verifier":
         protocol = (
             _HOTPOTQA_VERIFIER_PROTOCOL
             if hotpot_semantic
+            else _QA_PARAMETRIC_FALLBACK_VERIFIER_PROTOCOL
+            if parametric_fallback_verifier
             else _QA_VERIFIER_PROTOCOL
         ) + " Do not use <answer> tags."
     elif request.is_format_agent:

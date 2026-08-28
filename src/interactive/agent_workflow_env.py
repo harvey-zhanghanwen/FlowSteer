@@ -38,7 +38,9 @@ from .task_dataset import (
     hotpotqa_answer_type_constraint,
     hotpotqa_question_scope,
     qa_answer_argument_constraint,
+    qa_answer_cardinality_constraint,
     qa_answer_type_constraint,
+    qa_question_scope,
     verified_year_to_decade_normalization,
 )
 
@@ -188,6 +190,24 @@ _VERIFIER_SEMANTIC_FIELDS = (
     "multi_hop_complete",
     "minimal_answer_surface",
     "scope_preserved",
+    "verification_status",
+)
+_PARAMETRIC_FALLBACK_REASONER_FIELDS = (
+    "question_scope",
+    "retrieval_status",
+    "answer_source",
+    "answer_type",
+    "answer_cardinality",
+    "candidate_answer",
+)
+_PARAMETRIC_FALLBACK_VERIFIER_FIELDS = (
+    "candidate_answer",
+    "retrieval_status",
+    "answer_source",
+    "evidence_supported",
+    "scope_preserved",
+    "answer_type_cardinality_correct",
+    "minimal_answer_surface",
     "verification_status",
 )
 
@@ -376,6 +396,7 @@ class AgentWorkflowEnv:
         semantic_protocol: str = "none",
         recovery_policy: str = "default",
         required_evidence_tool_id: Optional[str] = None,
+        parametric_fallback_after_coverage_failure: bool = False,
         director_feedback_mode: str = "artifact_preview",
     ) -> None:
         if runtime is None and gateway is None:
@@ -427,6 +448,10 @@ class AgentWorkflowEnv:
             raise AgentWorkflowStateError(
                 "required_evidence_tool_id must be non-empty text or None"
             )
+        if type(parametric_fallback_after_coverage_failure) is not bool:
+            raise AgentWorkflowStateError(
+                "parametric_fallback_after_coverage_failure must be bool"
+            )
         if director_feedback_mode not in {"artifact_preview", "control_plane"}:
             raise AgentWorkflowStateError(
                 "director_feedback_mode must be artifact_preview or control_plane"
@@ -460,6 +485,20 @@ class AgentWorkflowEnv:
                 raise AgentWorkflowStateError(
                     "qa_verified_answer_lineage_v2 requires runtime.dataset_id "
                     "to be 'hotpotqa' or 'triviaqa'"
+                )
+        if parametric_fallback_after_coverage_failure:
+            dataset_id = None if runtime is None else runtime.dataset_id
+            if (
+                semantic_protocol != _QA_SEMANTIC_PROTOCOL
+                or not isinstance(dataset_id, str)
+                or dataset_id.casefold() != "triviaqa"
+                or required_evidence_tool_id
+                != _TRIVIAQA_QA_MEMORY_TOOL_ID
+                or require_format_agent is not True
+            ):
+                raise AgentWorkflowStateError(
+                    "parametric fallback requires TriviaQA QA-memory semantic "
+                    "lineage with a terminal Format Agent"
                 )
         if runtime is not None and runtime.semantic_protocol != semantic_protocol:
             raise AgentWorkflowStateError(
@@ -506,6 +545,9 @@ class AgentWorkflowEnv:
             None
             if required_evidence_tool_id is None
             else required_evidence_tool_id.strip()
+        )
+        self.parametric_fallback_after_coverage_failure = (
+            parametric_fallback_after_coverage_failure
         )
         self.director_feedback_mode = director_feedback_mode
         self.allowed_action_types = resolved_allowed_actions
@@ -7317,6 +7359,139 @@ class AgentWorkflowEnv:
             ),
         )
 
+    @staticmethod
+    def _qa_memory_retrieval_status(artifact: object) -> Optional[str]:
+        """Return only the top-level typed status from a QA-memory artifact."""
+
+        if not isinstance(artifact, str) or not artifact.strip():
+            return None
+        try:
+            parsed = json.loads(artifact)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(parsed, Mapping):
+            return None
+        status = parsed.get("retrieval_status")
+        if status in {
+            "evidence_found",
+            "knowledge_base_coverage_failure",
+        }:
+            return str(status)
+        return None
+
+    def _parametric_fallback_reasoner_candidate(
+        self,
+        artifact: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        fields, issue = self._structured_semantic_fields(
+            artifact,
+            _PARAMETRIC_FALLBACK_REASONER_FIELDS,
+        )
+        if issue is not None or fields is None:
+            return None, issue
+        if fields["question_scope"] != qa_question_scope(self._problem):
+            return None, (
+                "Parametric fallback Reasoner question_scope must equal the "
+                "original question"
+            )
+        if fields["retrieval_status"] != "knowledge_base_coverage_failure":
+            return None, (
+                "Parametric fallback Reasoner retrieval_status must be "
+                "knowledge_base_coverage_failure"
+            )
+        if fields["answer_source"] != "parametric_knowledge":
+            return None, (
+                "Parametric fallback Reasoner answer_source must be "
+                "parametric_knowledge"
+            )
+        if fields["answer_type"] != qa_answer_type_constraint(self._problem):
+            return None, (
+                "Parametric fallback Reasoner answer_type must equal the "
+                "question-only answer type constraint"
+            )
+        if fields["answer_cardinality"] != qa_answer_cardinality_constraint(
+            self._problem
+        ):
+            return None, (
+                "Parametric fallback Reasoner answer_cardinality must equal "
+                "the question-only cardinality constraint"
+            )
+        candidate = fields["candidate_answer"]
+        if (
+            not isinstance(candidate, str)
+            or not candidate
+            or candidate != candidate.strip()
+            or "\n" in candidate
+        ):
+            return None, (
+                "Parametric fallback Reasoner candidate_answer must be one "
+                "non-empty bare answer span"
+            )
+        from .qa_tool_adapter import _answer_surface_type_issue
+
+        surface_issue = _answer_surface_type_issue(
+            expected_type=str(fields["answer_type"]),
+            surface=candidate,
+        )
+        if surface_issue is not None:
+            return None, (
+                "Parametric fallback Reasoner candidate_answer violates the "
+                f"question answer type: {surface_issue}"
+            )
+        return candidate, None
+
+    @classmethod
+    def _parametric_fallback_verifier_candidate(
+        cls,
+        artifact: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        fields, issue = cls._structured_semantic_fields(
+            artifact,
+            _PARAMETRIC_FALLBACK_VERIFIER_FIELDS,
+        )
+        if issue is not None or fields is None:
+            return None, issue
+        candidate = fields["candidate_answer"]
+        if (
+            not isinstance(candidate, str)
+            or not candidate
+            or candidate != candidate.strip()
+            or "\n" in candidate
+        ):
+            return None, (
+                "Parametric fallback Verifier candidate_answer must be one "
+                "non-empty bare answer span"
+            )
+        if fields["retrieval_status"] != "knowledge_base_coverage_failure":
+            return None, (
+                "Parametric fallback Verifier retrieval_status must be "
+                "knowledge_base_coverage_failure"
+            )
+        if fields["answer_source"] != "parametric_knowledge":
+            return None, (
+                "Parametric fallback Verifier answer_source must be "
+                "parametric_knowledge"
+            )
+        if fields["evidence_supported"] is not False:
+            return None, (
+                "Parametric fallback Verifier evidence_supported must be false"
+            )
+        for field in (
+            "scope_preserved",
+            "answer_type_cardinality_correct",
+            "minimal_answer_surface",
+        ):
+            if fields[field] is not True:
+                return None, (
+                    f"Parametric fallback Verifier field {field!r} must be true"
+                )
+        if fields["verification_status"] != "parametric_fallback":
+            return None, (
+                "Parametric fallback Verifier verification_status must be "
+                "parametric_fallback"
+            )
+        return candidate, None
+
     @classmethod
     def _verifier_candidate(
         cls,
@@ -8312,6 +8487,9 @@ class AgentWorkflowEnv:
                 artifact=artifact,
                 tool_receipts=retriever_receipts,
                 retrieval_tool_id=_TRIVIAQA_QA_MEMORY_TOOL_ID,
+                parametric_fallback_after_coverage_failure=(
+                    self.parametric_fallback_after_coverage_failure
+                ),
             )
         )
         if completion_issue is not None:
@@ -8374,6 +8552,9 @@ class AgentWorkflowEnv:
                     artifact=routed_artifact,
                     tool_receipts=routed_receipts,
                     retrieval_tool_id=_TRIVIAQA_QA_MEMORY_TOOL_ID,
+                    parametric_fallback_after_coverage_failure=(
+                        self.parametric_fallback_after_coverage_failure
+                    ),
                 )
             )
             if routed_issue is None:
@@ -8389,6 +8570,41 @@ class AgentWorkflowEnv:
             f"Reasoner {reasoner_id!r} did not consume the complete ordered "
             f"QA-memory top-k artifact from {retriever_id!r} through its "
             f"explicit direct relation: {detail}"
+        )
+
+    def _qa_memory_parametric_fallback_ingress(
+        self,
+        outputs: Mapping[str, str],
+        output_metadata: Mapping[str, Mapping[str, object]],
+        *,
+        reasoner_id: str,
+    ) -> bool:
+        """Require complete Tool-first ingress before parametric fallback."""
+
+        if not self.parametric_fallback_after_coverage_failure:
+            return False
+        statuses: list[str] = []
+        for predecessor_id in self._graph.directed_predecessors(reasoner_id):
+            predecessor = self._graph.get_node(predecessor_id)
+            if (
+                predecessor.role_family or ""
+            ).casefold() != "evidence_retriever":
+                continue
+            if self._triviaqa_qa_memory_ingress_issue(
+                outputs,
+                output_metadata,
+                retriever_id=predecessor_id,
+                reasoner_id=reasoner_id,
+            ) is not None:
+                continue
+            status = self._qa_memory_retrieval_status(
+                outputs.get(predecessor_id)
+            )
+            if status is not None:
+                statuses.append(status)
+        return bool(statuses) and all(
+            status == "knowledge_base_coverage_failure"
+            for status in statuses
         )
 
     def _semantic_protocol_issue(
@@ -8431,6 +8647,7 @@ class AgentWorkflowEnv:
             return f"Reasoner {reasoner_id!r} has no current semantic artifact"
         if verifier_artifact is None:
             return f"Verifier {verifier_id!r} has no current verification artifact"
+        valid_qa_memory_retriever_statuses: dict[str, str] = {}
         if self.semantic_protocol == _QA_SEMANTIC_PROTOCOL:
             # NECESSARY_ADAPTATION: TriviaQA's evidence-grounding boundary is
             # an executed data dependency rather than a Director prompt
@@ -8461,7 +8678,21 @@ class AgentWorkflowEnv:
                     )
                     if ingress_issue is None:
                         valid_retriever_ingress = True
-                        break
+                        if self.parametric_fallback_after_coverage_failure:
+                            retrieval_status = self._qa_memory_retrieval_status(
+                                execution.outputs.get(predecessor_id)
+                            )
+                            if retrieval_status is None:
+                                retriever_ingress_issues.append(
+                                    "the valid QA-memory artifact has no "
+                                    "top-level typed retrieval_status"
+                                )
+                                valid_retriever_ingress = False
+                                continue
+                            valid_qa_memory_retriever_statuses[
+                                predecessor_id
+                            ] = retrieval_status
+                        continue
                     retriever_ingress_issues.append(ingress_issue)
                     continue
                 artifact = execution.outputs.get(predecessor_id)
@@ -8488,6 +8719,9 @@ class AgentWorkflowEnv:
                         artifact=artifact,
                         tool_receipts=public_receipts,
                         retrieval_tool_id=self.required_evidence_tool_id,
+                        parametric_fallback_after_coverage_failure=(
+                            self.parametric_fallback_after_coverage_failure
+                        ),
                     )
                     is not None
                 ):
@@ -8554,6 +8788,69 @@ class AgentWorkflowEnv:
         )
         if verifier_receipt_issue is not None:
             return verifier_receipt_issue
+        parametric_fallback = bool(
+            self.parametric_fallback_after_coverage_failure
+            and valid_qa_memory_retriever_statuses
+            and all(
+                status == "knowledge_base_coverage_failure"
+                for status in valid_qa_memory_retriever_statuses.values()
+            )
+        )
+        if parametric_fallback:
+            reasoner_node = self._graph.get_node(reasoner_id)
+            execution_mode = getattr(
+                reasoner_node.execution_mode,
+                "value",
+                reasoner_node.execution_mode,
+            )
+            if execution_mode != "reasoning" or reasoner_node.allowed_tools:
+                return (
+                    "TriviaQA parametric fallback must be produced by a "
+                    "Tool-less child Reasoner with execution_mode=reasoning"
+                )
+            reasoner_candidate, reasoner_issue = (
+                self._parametric_fallback_reasoner_candidate(
+                    reasoner_artifact
+                )
+            )
+            if reasoner_issue is not None or reasoner_candidate is None:
+                return (
+                    "TriviaQA parametric fallback Reasoner artifact is invalid: "
+                    f"{reasoner_issue}. Required fields are "
+                    f"{list(_PARAMETRIC_FALLBACK_REASONER_FIELDS)!r}"
+                )
+            verifier_candidate, verifier_issue = (
+                self._parametric_fallback_verifier_candidate(
+                    verifier_artifact
+                )
+            )
+            if verifier_issue is not None or verifier_candidate is None:
+                return (
+                    "TriviaQA parametric fallback Verifier artifact is invalid: "
+                    f"{verifier_issue}. Required fields are "
+                    f"{list(_PARAMETRIC_FALLBACK_VERIFIER_FIELDS)!r}"
+                )
+            if verifier_candidate != reasoner_candidate:
+                return (
+                    "Parametric fallback Verifier changed the Reasoner's "
+                    "candidate_answer: "
+                    f"reasoner={reasoner_candidate!r}, "
+                    f"verifier={verifier_candidate!r}"
+                )
+            wrapper = re.fullmatch(
+                r"\s*<answer>(.*?)</answer>\s*",
+                execution.final_answer or "",
+                flags=re.DOTALL,
+            )
+            if wrapper is None or wrapper.group(1) != reasoner_candidate:
+                formatter_value = None if wrapper is None else wrapper.group(1)
+                return (
+                    "Formatter must copy the parametric fallback candidate "
+                    "character-for-character: "
+                    f"candidate_answer={reasoner_candidate!r}, "
+                    f"wrapper_content={formatter_value!r}"
+                )
+            return None
         evidence_owner_ids = (
             reasoner_id,
             *self._graph.directed_predecessors(reasoner_id),
@@ -8561,6 +8858,7 @@ class AgentWorkflowEnv:
         coverage_failure_agent_ids = tuple(
             agent_id
             for agent_id in evidence_owner_ids
+            if agent_id not in valid_qa_memory_retriever_statuses
             if self._reports_knowledge_base_coverage_failure(
                 execution.outputs.get(agent_id)
             )
@@ -9406,6 +9704,9 @@ class AgentWorkflowEnv:
                 artifact=artifact,
                 tool_receipts=public_receipts,
                 retrieval_tool_id=self.required_evidence_tool_id,
+                parametric_fallback_after_coverage_failure=(
+                    self.parametric_fallback_after_coverage_failure
+                ),
             )
             return completion_issue is None
         if role_family == "reasoner":
@@ -9431,6 +9732,26 @@ class AgentWorkflowEnv:
                 )
             ):
                 return False
+            if self._qa_memory_parametric_fallback_ingress(
+                self._progressive_outputs,
+                self._progressive_output_metadata,
+                reasoner_id=agent_id,
+            ):
+                node = self._graph.get_node(agent_id)
+                execution_mode = getattr(
+                    node.execution_mode,
+                    "value",
+                    node.execution_mode,
+                )
+                fallback_candidate, fallback_issue = (
+                    self._parametric_fallback_reasoner_candidate(artifact)
+                )
+                return (
+                    execution_mode == "reasoning"
+                    and not node.allowed_tools
+                    and fallback_issue is None
+                    and fallback_candidate is not None
+                )
             candidate, issue = self._reasoner_candidate_for_current_dataset(
                 artifact
             )
@@ -9483,10 +9804,32 @@ class AgentWorkflowEnv:
                 consumer_role="Verifier",
             ) is not None:
                 return False
+            reasoner_artifact = self._progressive_outputs.get(
+                reasoner_ids[0],
+                "",
+            )
+            if self._qa_memory_parametric_fallback_ingress(
+                self._progressive_outputs,
+                self._progressive_output_metadata,
+                reasoner_id=reasoner_ids[0],
+            ):
+                reasoner_candidate, reasoner_issue = (
+                    self._parametric_fallback_reasoner_candidate(
+                        reasoner_artifact
+                    )
+                )
+                verifier_candidate, verifier_issue = (
+                    self._parametric_fallback_verifier_candidate(artifact)
+                )
+                return (
+                    reasoner_issue is None
+                    and reasoner_candidate is not None
+                    and verifier_issue is None
+                    and verifier_candidate == reasoner_candidate
+                )
             verifier_candidate, verifier_issue = self._verifier_candidate(artifact)
             if verifier_issue is not None or verifier_candidate is None:
                 return False
-            reasoner_artifact = self._progressive_outputs.get(reasoner_ids[0], "")
             reasoner_candidate, reasoner_issue = (
                 self._reasoner_candidate_for_current_dataset(reasoner_artifact)
             )
@@ -9507,9 +9850,33 @@ class AgentWorkflowEnv:
             ) is not None:
                 return False
             verifier_artifact = self._progressive_outputs.get(predecessors[0], "")
-            verifier_candidate, verifier_issue = self._verifier_candidate(
-                verifier_artifact
+            reasoner_ids = tuple(
+                predecessor_id
+                for predecessor_id in self._graph.directed_predecessors(
+                    predecessors[0]
+                )
+                if (
+                    self._graph.get_node(predecessor_id).role_family or ""
+                ).casefold()
+                == "reasoner"
             )
+            if (
+                len(reasoner_ids) == 1
+                and self._qa_memory_parametric_fallback_ingress(
+                    self._progressive_outputs,
+                    self._progressive_output_metadata,
+                    reasoner_id=reasoner_ids[0],
+                )
+            ):
+                verifier_candidate, verifier_issue = (
+                    self._parametric_fallback_verifier_candidate(
+                        verifier_artifact
+                    )
+                )
+            else:
+                verifier_candidate, verifier_issue = self._verifier_candidate(
+                    verifier_artifact
+                )
             wrapper = re.fullmatch(
                 r"\s*<answer>(.*?)</answer>\s*",
                 artifact,

@@ -689,6 +689,23 @@ def _qa_tool_runtime_settings(
             "qa_tool_runtime.completion_policy must be optional, "
             "required_tool_call, or required_evidence"
         )
+    parametric_fallback = section.get(
+        "parametric_fallback_after_coverage_failure",
+        False,
+    )
+    if type(parametric_fallback) is not bool:
+        raise ConfigurationError(
+            "qa_tool_runtime.parametric_fallback_after_coverage_failure "
+            "must be bool"
+        )
+    if parametric_fallback and (
+        source_key != "triviaqa"
+        or completion_policy != "required_evidence"
+    ):
+        raise ConfigurationError(
+            "parametric fallback requires TriviaQA and "
+            "qa_tool_runtime.completion_policy=required_evidence"
+        )
     if runtime_arm == "tool_off":
         return None
     return {
@@ -700,6 +717,7 @@ def _qa_tool_runtime_settings(
         "max_tool_calls": int(section["max_tool_calls_per_agent_call"]),
         "tool_timeout_seconds": float(timeout_seconds),
         "completion_policy": completion_policy,
+        "parametric_fallback_after_coverage_failure": parametric_fallback,
     }
 
 
@@ -2341,6 +2359,11 @@ class LiveSmokeBackend:
                 max_action_tokens=tool_action_tokens,
                 task_type=str(task_type),
                 completion_policy=str(qa_settings["completion_policy"]),
+                parametric_fallback_after_coverage_failure=bool(
+                    qa_settings[
+                        "parametric_fallback_after_coverage_failure"
+                    ]
+                ),
                 retrieval_tool_id=opened_tool_id,
                 sampling_base_seed=sampling_base_seed,
                 sampling_coordinate=sampling_coordinate,
@@ -3265,6 +3288,11 @@ class LiveSmokeBackend:
             sampling_base_seed=base_seed,
             sampling_coordinate=sampling_coordinate,
         )
+        qa_runtime_settings = _qa_tool_runtime_settings(
+            self.config,
+            task,
+            condition_id=resolved_condition_id,
+        )
         try:
             environment_runtime_settings = _environment_runtime_settings(
                 self.config,
@@ -3321,6 +3349,12 @@ class LiveSmokeBackend:
                 semantic_protocol=semantic_protocol,
                 recovery_policy=recovery_policy,
                 required_evidence_tool_id=required_evidence_tool_id,
+                parametric_fallback_after_coverage_failure=bool(
+                    qa_runtime_settings
+                    and qa_runtime_settings[
+                        "parametric_fallback_after_coverage_failure"
+                    ]
+                ),
                 director_feedback_mode=str(
                     graph_config.get(
                         "director_feedback_mode", "artifact_preview"

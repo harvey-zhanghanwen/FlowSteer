@@ -348,6 +348,22 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
                 "qa_tool_runtime with required_evidence completion for every "
                 "configured QA source"
             )
+        parametric_fallback = qa_runtime.get(
+            "parametric_fallback_after_coverage_failure",
+            False,
+        )
+        if type(parametric_fallback) is not bool:
+            raise ConfigurationError(
+                "qa_tool_runtime.parametric_fallback_after_coverage_failure "
+                "must be bool"
+            )
+        if parametric_fallback and (
+            set(shared_qa_sources) != {"triviaqa"}
+            or required_evidence_tool_id != "triviaqa.qa_memory"
+        ):
+            raise ConfigurationError(
+                "parametric fallback is scoped to TriviaQA QA-memory"
+            )
     if graph.get("max_bidirectional_block_size") != 2:
         raise ConfigurationError("AgentGraph v1 supports bidirectional blocks of size two")
     if graph.get("require_unique_output") is not True:

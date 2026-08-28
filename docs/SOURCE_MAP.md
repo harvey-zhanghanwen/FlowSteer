@@ -1356,3 +1356,17 @@ and the Director remains local Qwen3.5-9B. The QA-memory registry contains no
 browser, HTTP search or Web Search capability. Stable Zero and fixed-128
 scores are reported only from completed version-bound manifests; this source
 map does not claim a formal result.
+
+## TriviaQA QA-memory v14 retrieval-first parametric fallback
+
+This is a versioned extension of the train QA-memory condition above, not a
+second orchestration architecture. The paired QA-memory index remains frozen at
+v13; v14 changes only the child-Agent routing and terminal admission after a
+complete retrieval attempt.
+
+| Current module/boundary | Classification | Primary source retained | Minimal adaptation and exclusion |
+| --- | --- | --- | --- |
+| `qa_tool_adapter.py::{_completion_arguments_schema,_qa_memory_completion_receipt_projection,_qa_memory_evidence_retriever_completion_issue}` | Necessary TriviaQA Tool adaptation | SkillFlow bounded `StructuredAction -> ToolResult -> Observation` execution and the existing ordered `search -> read(top-k)` receipt projection | The Retriever worker must still search and read every ranked QA memory. Its projected artifact retains each paired paraphrased question and answer statement and adds a top-level typed `retrieval_status` plus ordered `relevant_memory_ids`. No status is accepted without the exact worker receipts. |
+| `openai_gateway.py::build_agent_messages` | Necessary child-Agent execution adaptation | Existing role-specific Agent prompts and explicit AgentGraph communication envelopes | `evidence_found` keeps the evidence-grounded Reasoner/Verifier path. Only `knowledge_base_coverage_failure` after the complete top-k switches a Tool-less child Reasoner to parametric knowledge and a Verifier that explicitly records `evidence_supported=false`. Director prompting is unchanged. |
+| `agent_workflow_env.py::{_triviaqa_qa_memory_ingress_issue,_semantic_protocol_issue,_semantic_replacement_has_valid_artifact}` | Necessary terminal-admission adaptation | FlowSteer explicit relation routing, artifact-version binding, non-destructive artifact preservation and FINISH gate | Parametric fallback requires current `Retriever -> Reasoner -> Verifier -> Formatter` lineage, complete worker Tool receipts and exact candidate copying. It skips only the invalid requirement that a parametric answer occur in an irrelevant read record; missing reads, stale versions, broken relations, Tool-capable Reasoners and arbitrary text markers remain inadmissible. |
+| `evaluation_triviaqa_qa_memory_unified_v4_v14.yaml` | Isolated inference-only configuration | Same fixed 128 held-out validation tasks, v13 paired QA-memory index, Qwen3.5-9B Director, model catalog and official TriviaQA EM/F1 evaluator | Enables the versioned fallback gate while keeping Web Search, training, GRPO, LoRA, MACE and Skill updates disabled. |
