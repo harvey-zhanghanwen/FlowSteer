@@ -368,3 +368,10 @@ and pinned HealthBench reference evaluator as official-v1.
 This condition does not enable GRPO, backward, optimizer update, LoRA, MACE,
 Bayesian inference, Skill retrieval/evolution, medical retrieval, or any new
 model-visible evaluator field.
+
+The 525-task inference evidence for this condition is complete: every raw
+AgentGraph trajectory reached explicit `FINISH`. Reference grading is only
+partially complete because the configured grader account returned an
+insufficient-quota error after 510 Direct and 488 AgentGraph evaluations.
+The report preserves those counts separately from inference completion and
+does not promote the partial condition to the HealthBench best-profile.

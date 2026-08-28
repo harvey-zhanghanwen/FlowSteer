@@ -667,6 +667,16 @@ change was made during profile selection.
   historical conditions keep the prior strict positive-integer preflight.
 - Training, GRPO, backward, optimizer update, LoRA publication, MACE,
   Bayesian update, Skill evolution, and Tool use remain disabled.
-- Evaluation status at this log entry: implementation and directed tests are
-  complete; formal 525-case metrics must be appended only after the new
-  condition finishes under the pinned evaluator.
+- Evaluation status: all 525 Direct responses and all 525 AgentGraph raw
+  trajectories were generated. AgentGraph reached explicit `FINISH` on
+  525/525 tasks with zero `max_rounds` or terminal failures, compared with
+  503/525 and 22 terminal failures in official-v1. The pinned reference grader
+  returned valid receipts for 510 Direct and 488 AgentGraph responses before
+  the configured grader account exhausted its quota. On the 473 same-task
+  complete cases, `overall_score_length_adjusted` is 18.3629% for Direct and
+  20.5584% for AgentGraph (+2.1955 percentage points). Fixed-denominator
+  lower bounds are 17.2993% and 18.3264%, respectively. These are explicitly
+  partial-evaluator results, not a fabricated complete 525-case official
+  score; v2 therefore does not replace the completed official-v1 best-profile.
+- The versioned Chinese status report is
+  `reports/healthbench_professional_inference_loop_v2/evaluation_report_zh.md`.
