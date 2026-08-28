@@ -1389,6 +1389,35 @@ async def _direct_one(
     }
 
 
+def _materialize_reused_direct_generation_seed(
+    value: Mapping[str, Any],
+    *,
+    expected_seed: int,
+) -> dict[str, Any]:
+    """Project a legacy nested generation-seed receipt to the current row.
+
+    Historical Round-01 rows persisted the provider generation seed only at
+    ``execution.metadata.response.generation_seed``.  The current exact resume
+    matcher requires the same receipt at the row top level.  Materialize it
+    only when the nested receipt exists and exactly matches the active frozen
+    seed; every other Direct identity/evaluator check remains authoritative in
+    ``_direct_resume_matches``.
+    """
+
+    copied = dict(value)
+    if "generation_seed" in copied:
+        return copied
+    execution = copied.get("execution")
+    metadata = execution.get("metadata") if isinstance(execution, Mapping) else None
+    response = metadata.get("response") if isinstance(metadata, Mapping) else None
+    nested_seed = (
+        response.get("generation_seed") if isinstance(response, Mapping) else None
+    )
+    if type(nested_seed) is int and nested_seed == expected_seed:
+        copied["generation_seed"] = nested_seed
+    return copied
+
+
 async def _collect_direct(
     backend: LiveSmokeBackend,
     selected: Sequence[TaskRecord],
@@ -1421,7 +1450,10 @@ async def _collect_direct(
         if reuse_path.resolve() != path.resolve():
             reused = []
             for value in _read_jsonl(reuse_path):
-                copied = dict(value)
+                copied = _materialize_reused_direct_generation_seed(
+                    value,
+                    expected_seed=seed,
+                )
                 copied["reuse_receipt"] = {"reused": True, "source": str(reuse_path)}
                 reused.append(copied)
             direct_candidates = reused + direct_candidates
