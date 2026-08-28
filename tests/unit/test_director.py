@@ -392,6 +392,191 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             observation["director_execution_profile"],
         )
 
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_agent",
+                observation["action_target_domains"],
+            )
+        )
+        self.assertEqual(
+            [
+                "action",
+                "agent_id",
+                "model_id",
+                "contract",
+                "allowed_tools",
+                "execution_mode",
+            ],
+            schema["required"],
+        )
+        self.assertEqual(
+            {"const": "react"},
+            schema["properties"]["execution_mode"],
+        )
+        self.assertEqual(
+            {"const": ["triviaqa.qa_memory"]},
+            schema["properties"]["allowed_tools"],
+        )
+        self.assertNotIn("allOf", schema)
+
+    def test_multi_profile_add_agent_schema_keeps_branch_required_fields(self) -> None:
+        domains = {
+            "add_agent": {
+                "agent_ids": ["node_2"],
+                "existing_agent_ids": ["node_1"],
+                "topology_neutral": True,
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "allowed_tools",
+                    "execution_mode",
+                ],
+                "model_ids": ["qwen", "other"],
+                "registered_execution_profiles": [
+                    {"execution_mode": "reasoning", "allowed_tools": []},
+                    {"execution_mode": "react", "allowed_tools": []},
+                ],
+                "contract_semantics": "free_text",
+            }
+        }
+
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_agent",
+                domains,
+            )
+        )
+
+        self.assertNotIn("allOf", schema)
+        self.assertEqual(2, len(schema["oneOf"]))
+        for branch in schema["oneOf"]:
+            self.assertEqual(
+                {
+                    "action",
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "allowed_tools",
+                    "execution_mode",
+                },
+                set(branch["required"]),
+            )
+            self.assertNotIn("allOf", branch)
+            self.assertNotIn("anyOf", branch)
+            self.assertEqual(
+                {"enum": ["node_2"]},
+                branch["properties"]["agent_id"],
+            )
+            self.assertIn("const", branch["properties"]["execution_mode"])
+            self.assertIn("const", branch["properties"]["allowed_tools"])
+
+    def test_modify_profile_domains_are_atomic_compatible_and_non_noop(self) -> None:
+        class MultiProfileRuntime(TriviaMemoryProfileRuntime):
+            def registered_execution_profiles(self):
+                return (
+                    ("reasoning", ()),
+                    ("react", ()),
+                    ("react", ("triviaqa.qa_memory",)),
+                )
+
+        model_registry = registry()
+        env = AgentWorkflowEnv(
+            model_registry,
+            runtime=MultiProfileRuntime(model_registry),  # type: ignore[arg-type]
+            problem="Who wrote the novel?",
+            max_agents=8,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=False,
+        )
+        env.graph.add_agent(
+            AgentNode(
+                "node_1",
+                "qwen",
+                "produce one answer artifact",
+                allowed_tools=(),
+                execution_mode="react",
+            )
+        )
+
+        domain = env.model_admissible_action_targets()["modify_agent"]
+        candidate = domain["per_agent_candidates"][0]
+
+        self.assertEqual(
+            ["reasoning"],
+            candidate["discrete_value_domains"]["execution_mode"],
+        )
+        self.assertEqual(
+            [["triviaqa.qa_memory"]],
+            candidate["discrete_value_domains"]["allowed_tools"],
+        )
+        self.assertNotIn(
+            "react",
+            candidate["discrete_value_domains"]["execution_mode"],
+        )
+        self.assertNotIn(
+            [],
+            candidate["discrete_value_domains"]["allowed_tools"],
+        )
+
+        for field_name in ("execution_mode", "allowed_tools"):
+            schema = json.loads(
+                director_live_action_parameter_json_schema_text(
+                    "modify_agent",
+                    {"modify_agent": domain},
+                    modify_field=field_name,
+                    modify_agent_id="node_1",
+                )
+            )
+            self.assertEqual(
+                candidate["discrete_value_domains"][field_name],
+                schema["properties"][field_name]["enum"],
+            )
+
+    def test_modify_drops_profile_fields_without_atomic_compatible_value(self) -> None:
+        model_registry = registry()
+        env = AgentWorkflowEnv(
+            model_registry,
+            runtime=TriviaMemoryProfileRuntime(model_registry),  # type: ignore[arg-type]
+            problem="Who wrote the novel?",
+            max_agents=8,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            required_evidence_tool_id="triviaqa.qa_memory",
+            require_evidence_relation=False,
+        )
+        env.graph.add_agent(
+            AgentNode(
+                "node_1",
+                "qwen",
+                "produce one answer artifact",
+                allowed_tools=(),
+                execution_mode="reasoning",
+            )
+        )
+
+        domain = env.model_admissible_action_targets()["modify_agent"]
+        candidate = domain["per_agent_candidates"][0]
+
+        self.assertNotIn("execution_mode", candidate["mutable_fields"])
+        self.assertNotIn("allowed_tools", candidate["mutable_fields"])
+        self.assertNotIn("execution_mode", domain["mutable_fields"])
+        self.assertNotIn("allowed_tools", domain["mutable_fields"])
+
     async def test_hotpot_v22_prompt_encodes_semantic_and_recovery_policy(self) -> None:
         model_registry = registry()
         env = AgentWorkflowEnv(

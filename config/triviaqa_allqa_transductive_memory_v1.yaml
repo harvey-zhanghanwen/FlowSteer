@@ -1,0 +1,48 @@
+# Prepared-only corpus profile. This does not replace the train-only index and
+# does not define an official held-out evaluation condition.
+
+schema_version: "flowsteer.triviaqa.qa_memory.transductive.build.v1"
+condition_id: "triviaqa_allqa_transductive_memory_v1"
+status: "prepared_only"
+evaluation_regime: "transductive_retrieval"
+official_heldout_eligible: false
+contains_evaluation_answers: true
+
+sources:
+  train_tasks_path: "data/joint_qa_v2/train.jsonl"
+  frozen_development_validation_tasks_path: "data/joint_qa_v2/development.jsonl"
+  source_counts:
+    train: 512
+    frozen_development_validation: 128
+    total: 640
+  evaluation_memory_overlap_count: 128
+
+materialization:
+  generator_script: "scripts/generate_triviaqa_transductive_qa_memory_paraphrases.py"
+  output_path: "data/triviaqa_qa_memory_transductive_v1/materialized/paraphrases.jsonl"
+  train_only_path_must_remain: "data/triviaqa_qa_memory_v1/train_qa_memory.jsonl"
+  record_class: "src.interactive.triviaqa_qa_memory.TriviaQAQAMemoryRecord"
+  paraphrase_contract: "semantic_preserving_question_and_canonical_answer_statement"
+
+index:
+  builder_script: "scripts/build_triviaqa_transductive_qa_memory_index.py"
+  output_path: "data/triviaqa_qa_memory_transductive_v1/index"
+  train_only_path_must_remain: "data/triviaqa_qa_memory_v1/index"
+  index_class: "src.interactive.triviaqa_transductive_qa_memory.TriviaQATransductiveQAMemoryIndex"
+  embedding_model: "BAAI/bge-base-en-v1.5"
+  normalization: "l2"
+  similarity: "dot_product"
+  frozen_top_k: 3
+
+tool_runtime:
+  tool_id: "triviaqa.qa_memory"
+  actions: [search, read]
+  execution_owner: "worker_agent"
+  director_tool_calls_allowed: false
+  web_search_allowed: false
+  max_tool_calls_per_agent_call: 4
+  max_turns_per_agent_call: 7
+
+reporting:
+  metric_label: "transductive_retrieval_accuracy"
+  must_not_replace_official_heldout_best_profile: true

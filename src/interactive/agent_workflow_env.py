@@ -815,6 +815,63 @@ class AgentWorkflowEnv:
             return tuple(profile for profile in profiles if not profile[1])
         return profiles
 
+    def _atomic_execution_profile_value_domains(
+        self,
+        agent_id: str,
+    ) -> dict[str, list[object]]:
+        """Project only executable, non-no-op scalar profile mutations.
+
+        ``MODIFY_AGENT`` changes one field per hierarchical action.  A new
+        execution mode is therefore legal only when paired with the Agent's
+        current Tool set, and a new Tool set is legal only when paired with
+        its current execution mode.  This is the Runtime profile boundary
+        already used by ADD; no role, topology, or repair policy is inferred.
+        """
+
+        if not self._graph.has_node(agent_id):
+            return {}
+        node = self._graph.get_node(agent_id)
+        if self._uses_role_conditional_capabilities():
+            profiles = self._role_conditional_execution_profiles_for(
+                node.role_family or ""
+            )
+        elif self.require_evidence_relation and not self._uses_semantic_lineage_protocol():
+            profiles = self._topology_neutral_registered_execution_profiles()
+        else:
+            profiles = tuple(self.runtime.registered_execution_profiles())
+        current_mode = node.execution_mode.value
+        current_tools = tuple(node.allowed_tools)
+        execution_modes = list(
+            dict.fromkeys(
+                mode
+                for mode, tool_ids in profiles
+                if tool_ids == current_tools and mode != current_mode
+            )
+        )
+        allowed_tool_sets = list(
+            dict.fromkeys(
+                tool_ids
+                for mode, tool_ids in profiles
+                if mode == current_mode and tool_ids != current_tools
+            )
+        )
+        return {
+            **(
+                {"execution_mode": list(execution_modes)}
+                if execution_modes
+                else {}
+            ),
+            **(
+                {
+                    "allowed_tools": [
+                        list(tool_ids) for tool_ids in allowed_tool_sets
+                    ]
+                }
+                if allowed_tool_sets
+                else {}
+            ),
+        }
+
     def _role_conditional_execution_profiles_for(
         self,
         role_family: str,
@@ -3468,6 +3525,10 @@ class AgentWorkflowEnv:
         )
         targets: dict[str, object] = {}
         if AgentActionType.ADD_AGENT.value in admitted:
+            used_agent_ids = set(node_ids)
+            next_index = 1
+            while f"node_{next_index}" in used_agent_ids:
+                next_index += 1
             registered_profiles = (
                 self._topology_neutral_registered_execution_profiles()
                 if (
@@ -3477,6 +3538,11 @@ class AgentWorkflowEnv:
                 else tuple(self.runtime.registered_execution_profiles())
             )
             targets[AgentActionType.ADD_AGENT.value] = {
+                # DIRECT_REUSE: FlowSteer's WorkflowGraph allocates neutral
+                # node_N identifiers.  Expose that scalar domain so the
+                # hierarchical ADD parameter phase does not need an allOf/not
+                # intersection merely to exclude existing IDs.
+                "agent_ids": [f"node_{next_index}"],
                 "topology_neutral": True,
                 "required_agent_fields": [
                     "agent_id",
@@ -3494,6 +3560,7 @@ class AgentWorkflowEnv:
                     }
                     for execution_mode, allowed_tools in registered_profiles
                 ],
+                "contract_semantics": "free_text",
             }
         if AgentActionType.ADD_SUBGRAPH.value in admitted:
             remaining = (
@@ -3866,6 +3933,12 @@ class AgentWorkflowEnv:
                 )
                 for agent_id in modifiable_node_ids
             }
+            per_agent_atomic_profile_domains = {
+                agent_id: self._atomic_execution_profile_value_domains(
+                    agent_id
+                )
+                for agent_id in modifiable_node_ids
+            }
             per_agent_mutable_fields = {
                 agent_id: [
                     field
@@ -3900,6 +3973,11 @@ class AgentWorkflowEnv:
                         field == "model_id"
                         and not per_agent_model_domains[agent_id]
                     )
+                    and not (
+                        field in {"allowed_tools", "execution_mode"}
+                        and field
+                        not in per_agent_atomic_profile_domains[agent_id]
+                    )
                 ]
                 for agent_id in modifiable_node_ids
             }
@@ -3923,6 +4001,11 @@ class AgentWorkflowEnv:
                     discrete_domains["model_id"] = list(
                         per_agent_model_domains[agent_id]
                     )
+                for field in ("allowed_tools", "execution_mode"):
+                    if field in fields:
+                        discrete_domains[field] = list(
+                            per_agent_atomic_profile_domains[agent_id][field]
+                        )
                 recovery_field_values = per_agent_recovery_field_values[
                     agent_id
                 ]

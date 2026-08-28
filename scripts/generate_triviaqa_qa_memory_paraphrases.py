@@ -177,7 +177,28 @@ class LocalQwen35Paraphraser:
             "max_tokens": 128,
             "seed": seed,
             "chat_template_kwargs": {"enable_thinking": False},
-            "response_format": {"type": "json_object"},
+            # DIRECT_REUSE: match OpenAICompatibleGateway's SkillFlow
+            # request-scoped JSON-schema boundary.  Plain json_object allowed
+            # Qwen/SGLang to emit near-miss keys such as
+            # `.paraphrase_question` on short questions.
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "triviaqa_question_paraphrase",
+                    "schema": {
+                        "type": "object",
+                        "required": ["paraphrase_question"],
+                        "properties": {
+                            "paraphrase_question": {
+                                "type": "string",
+                                "minLength": 1,
+                            }
+                        },
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                },
+            },
         }
         last_error: BaseException | None = None
         for attempt in range(self.max_retries + 1):
@@ -234,7 +255,12 @@ class LocalQwen35Paraphraser:
                 content = message.get("content") if isinstance(message, Mapping) else None
                 if not isinstance(content, str):
                     raise ValueError("local Qwen response has no text content")
-                return parse_paraphrase_response(content, source), seed + attempt
+                try:
+                    parsed_question = parse_paraphrase_response(content, source)
+                except ValueError as exc:
+                    preview = " ".join(content.split())[:240]
+                    raise ValueError(f"{exc}; response={preview!r}") from exc
+                return parsed_question, seed + attempt
             except HTTPError as exc:
                 last_error = exc
                 retryable = exc.code in {408, 409, 425, 429} or exc.code >= 500
@@ -247,7 +273,10 @@ class LocalQwen35Paraphraser:
         detail = (
             f"HTTP {last_error.code}"
             if isinstance(last_error, HTTPError)
-            else type(last_error).__name__
+            else (
+                f"{type(last_error).__name__}: "
+                f"{' '.join(str(last_error).split())}"
+            )
         )
         raise RuntimeError(
             "local Qwen paraphrase failed for "

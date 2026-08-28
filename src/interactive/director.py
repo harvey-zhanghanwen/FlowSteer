@@ -1311,6 +1311,69 @@ def _live_new_agent_ids(
     return tuple(result)
 
 
+def _live_add_agent_domain(
+    action_target_domains: Mapping[str, Any],
+) -> tuple[
+    Mapping[str, Any],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[tuple[str, tuple[str, ...]], ...],
+]:
+    """Validate the role-neutral scalar ADD_AGENT live domain.
+
+    DIRECT_REUSE: this is the scalar FlowSteer ``node_N`` allocation and
+    SkillFlow Runtime execution-profile boundary already used by the current
+    shared architecture.  The contract remains model-authored free text.
+    """
+
+    domain = action_target_domains.get("add_agent")
+    if not isinstance(domain, Mapping):
+        raise ValueError("add_agent live target domain is missing")
+    agent_ids = _live_string_domain(
+        domain.get("agent_ids"),
+        label="add_agent.agent_ids",
+    )
+    existing_agent_ids = domain.get("existing_agent_ids")
+    if not isinstance(existing_agent_ids, (list, tuple)) or any(
+        not isinstance(agent_id, str) or not agent_id
+        for agent_id in existing_agent_ids
+    ):
+        raise ValueError("add_agent existing Agent IDs are invalid")
+    if len(existing_agent_ids) != len(set(existing_agent_ids)):
+        raise ValueError("add_agent existing Agent IDs contain duplicates")
+    if set(agent_ids).intersection(existing_agent_ids):
+        raise ValueError("add_agent live Agent IDs already exist")
+    if agent_ids != _live_new_agent_ids(existing_agent_ids, len(agent_ids)):
+        raise ValueError(
+            "add_agent live Agent IDs must use the current neutral node_N domain"
+        )
+    model_ids = _live_string_domain(
+        domain.get("model_ids"),
+        label="add_agent.model_ids",
+    )
+    required_fields = domain.get("required_agent_fields")
+    expected_required = {
+        "agent_id",
+        "model_id",
+        "contract",
+        "execution_mode",
+        "allowed_tools",
+    }
+    if (
+        not isinstance(required_fields, (list, tuple))
+        or set(required_fields) != expected_required
+        or len(required_fields) != len(set(required_fields))
+    ):
+        raise ValueError("add_agent required Agent fields are invalid")
+    if domain.get("contract_semantics") != "free_text":
+        raise ValueError("add_agent contract must remain free text")
+    profiles = _live_execution_profiles(
+        domain.get("registered_execution_profiles"),
+        label="add_agent.registered_execution_profiles",
+    )
+    return domain, agent_ids, model_ids, profiles
+
+
 def _live_existing_agent_roles(
     domain: Mapping[str, Any],
     role_constraints: Mapping[str, Any],
@@ -2704,61 +2767,47 @@ def director_live_action_parameter_json_schema_text(
         raise ValueError(f"missing live target domain for {action}")
 
     if action == "add_agent":
-        required_fields = domain.get("required_agent_fields")
-        required_minimum = {
-            "agent_id",
-            "model_id",
-            "contract",
-            "allowed_tools",
-            "execution_mode",
-        }
-        if (
-            not isinstance(required_fields, (list, tuple))
-            or set(required_fields) != required_minimum
-        ):
-            raise ValueError("add_agent required Agent fields are incomplete")
-        model_ids = _live_string_domain(
-            domain.get("model_ids"),
-            label="add_agent.model_ids",
+        _, agent_ids, model_ids, execution_profiles = _live_add_agent_domain(
+            action_target_domains
         )
-        existing_agent_ids = domain.get("existing_agent_ids")
-        if not isinstance(existing_agent_ids, (list, tuple)) or any(
-            not isinstance(agent_id, str) or not agent_id
-            for agent_id in existing_agent_ids
-        ):
-            raise ValueError("add_agent existing Agent IDs are invalid")
-        if len(existing_agent_ids) != len(set(existing_agent_ids)):
-            raise ValueError("add_agent existing Agent IDs contain duplicates")
-        profiles = _live_execution_profiles(
-            domain.get("registered_execution_profiles"),
-            label="add_agent.registered_execution_profiles",
-        )
-        schema = json.loads(
+        base_schema = json.loads(
             director_state_conditioned_sampling_json_schema_text("add_agent")
         )
-        schema["required"] = ["action", *required_fields]
-        schema["properties"]["model_id"] = {"enum": list(model_ids)}
-        if existing_agent_ids:
-            schema["properties"]["agent_id"] = {
-                "allOf": [
-                    _NON_EMPTY_STRING_SCHEMA,
-                    {"not": {"enum": list(existing_agent_ids)}},
-                ]
+        branches: list[dict[str, Any]] = []
+        for execution_mode, allowed_tools in execution_profiles:
+            # The action discriminator is already selected by the existing
+            # hierarchical phase.  Keep each remaining profile alternative a
+            # complete object with its own required fields: xgrammar then has
+            # no outer required/allOf intersection to drop.
+            branch = json.loads(json.dumps(base_schema))
+            for field_name in (
+                "role_family",
+                "artifact_type",
+                "completion_condition",
+            ):
+                branch["properties"].pop(field_name, None)
+            branch["required"] = [
+                "action",
+                "agent_id",
+                "model_id",
+                "contract",
+                "allowed_tools",
+                "execution_mode",
+            ]
+            branch["properties"]["agent_id"] = {"enum": list(agent_ids)}
+            branch["properties"]["model_id"] = {"enum": list(model_ids)}
+            branch["properties"]["execution_mode"] = {
+                "const": execution_mode
             }
-        schema["allOf"] = [
-            {
-                "anyOf": [
-                    {
-                        "required": ["execution_mode", "allowed_tools"],
-                        "properties": {
-                            "execution_mode": {"const": execution_mode},
-                            "allowed_tools": {"const": list(allowed_tools)},
-                        },
-                    }
-                    for execution_mode, allowed_tools in profiles
-                ]
+            branch["properties"]["allowed_tools"] = {
+                "const": list(allowed_tools)
             }
-        ]
+            branches.append(branch)
+        schema = (
+            branches[0]
+            if len(branches) == 1
+            else {"type": "object", "oneOf": branches}
+        )
     elif action == "add_subgraph":
         if add_agents is None:
             raise ValueError(

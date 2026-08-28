@@ -259,6 +259,50 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         checks["evaluation.healthbench_judge_catalog_path"] = bool(
             str(evaluation.get("healthbench_judge_catalog_path", "")).strip()
         )
+    if (
+        dataset_key == "triviaqa"
+        and bounded.get("contains_evaluation_answers") is True
+    ):
+        qa_runtime = _mapping(config.get("qa_tool_runtime"), "qa_tool_runtime")
+        checks.update(
+            {
+                "evaluation.transductive_regime": bounded.get(
+                    "evaluation_regime"
+                )
+                == "transductive_retrieval",
+                "evaluation.not_official_heldout": bounded.get(
+                    "official_heldout_eligible"
+                )
+                is False,
+                "evaluation.transductive_metric_label": bounded.get(
+                    "metric_label"
+                )
+                == "transductive_retrieval_accuracy",
+                "qa_tool_runtime.transductive_index_format": qa_runtime.get(
+                    "index_format"
+                )
+                == (
+                    "flowsteer.triviaqa."
+                    "qa-memory-transductive-embedding-index.v1"
+                ),
+                "qa_tool_runtime.no_static_prefetch": qa_runtime.get(
+                    "static_prefetch_enabled"
+                )
+                is False,
+                "qa_tool_runtime.director_has_no_tool": qa_runtime.get(
+                    "director_tool_calls_allowed"
+                )
+                is False,
+                "qa_tool_runtime.no_web_search": qa_runtime.get(
+                    "web_search_allowed"
+                )
+                is False,
+                "qa_tool_runtime.retrieval_first": qa_runtime.get(
+                    "completion_policy"
+                )
+                == "retrieval_first_parametric_fallback",
+            }
+        )
     if dataset_key in _INTERACTIVE_BENCHMARKS:
         evaluation = _mapping(config.get("evaluation"), "evaluation")
         per_source = evaluation.get("max_environment_steps_by_source")
@@ -2229,14 +2273,45 @@ def _triviaqa_qa_memory_index_summary(
         raise CompletionBenchmarkRoundError(
             "TriviaQA QA-memory manifest must contain an object"
         )
+    source_counts = value.get("source_counts")
+    source_counts = source_counts if isinstance(source_counts, Mapping) else {}
+    contains_evaluation_answers = value.get("contains_evaluation_answers")
+    evaluation_regime = value.get("evaluation_regime")
+    official_heldout_eligible = value.get("official_heldout_eligible")
+    if contains_evaluation_answers is True and (
+        evaluation_regime != "transductive_retrieval"
+        or official_heldout_eligible is not False
+        or value.get("validation_content_indexed") is not True
+    ):
+        raise CompletionBenchmarkRoundError(
+            "TriviaQA transductive QA-memory manifest has an ambiguous "
+            "evaluation boundary"
+        )
     return {
         "manifest_path": str(manifest_path),
-        "train_record_count": value.get("train_count"),
+        "train_record_count": value.get(
+            "train_count", source_counts.get("train")
+        ),
+        "evaluation_record_count": source_counts.get(
+            "frozen_development_validation"
+        ),
+        "total_record_count": source_counts.get(
+            "total", value.get("memory_count")
+        ),
         "unique_source_count": value.get("unique_source_count"),
         "cycled_record_count": value.get("cycled_count"),
         "paraphrase_count": value.get("paraphrase_count"),
-        "heldout_validation_count": value.get("validation_isolation_count"),
+        "heldout_validation_count": value.get(
+            "validation_isolation_count",
+            0 if contains_evaluation_answers is True else None,
+        ),
         "validation_content_indexed": value.get("validation_content_indexed"),
+        "contains_evaluation_answers": contains_evaluation_answers,
+        "evaluation_regime": evaluation_regime,
+        "official_heldout_eligible": official_heldout_eligible,
+        "evaluation_memory_overlap_count": value.get(
+            "evaluation_memory_overlap_count"
+        ),
         "embedding_model": value.get("embedding_model"),
         "embedding_dimension": value.get("embedding_dimension"),
         "normalization": value.get("normalization"),
@@ -2540,12 +2615,17 @@ async def run_completion_benchmark_round(
             "stable_zero_chain_only_not_a_benchmark_estimate"
             if canary_only
             else (
-                "development_result_not_a_final_benchmark_estimate"
-                if bounded.get("stage") == "development"
+                "transductive_retrieval_not_official_heldout"
+                if bounded.get("evaluation_regime")
+                == "transductive_retrieval"
                 else (
-                    "formal_evaluation_result"
-                    if bounded.get("stage") == "final_evaluation"
-                    else "legacy_evaluation_scope_not_formal_heldout"
+                    "development_result_not_a_final_benchmark_estimate"
+                    if bounded.get("stage") == "development"
+                    else (
+                        "formal_evaluation_result"
+                        if bounded.get("stage") == "final_evaluation"
+                        else "legacy_evaluation_scope_not_formal_heldout"
+                    )
                 )
             )
         ),
@@ -2554,6 +2634,20 @@ async def run_completion_benchmark_round(
             "ground_truth_role": "evaluator_only",
             "evaluator_payload_role": "evaluator_only",
         },
+        "retrieval_memory_boundary": {
+            "evaluation_regime": bounded.get("evaluation_regime"),
+            "contains_evaluation_answers": bounded.get(
+                "contains_evaluation_answers", False
+            ),
+            "official_heldout_eligible": bounded.get(
+                "official_heldout_eligible"
+            ),
+            "director_tool_calls_allowed": _mapping(
+                config.get("qa_tool_runtime"), "qa_tool_runtime"
+            ).get("director_tool_calls_allowed"),
+        }
+        if dataset_key == "triviaqa"
+        else None,
         "training_enabled": False,
         "optimizer_updates": 0,
         "runtime_resource": {
@@ -2577,6 +2671,46 @@ async def run_completion_benchmark_round(
         },
         "artifacts": {name: str(path) for name, path in paths.items()},
     }
+    if dataset_key == "triviaqa":
+        qa_runtime = _mapping(config.get("qa_tool_runtime"), "qa_tool_runtime")
+        index_value = qa_runtime.get("index_path")
+        index_manifest_present = bool(
+            isinstance(index_value, str)
+            and index_value
+            and (_resolve(root, index_value) / "manifest.json").is_file()
+        )
+        if index_manifest_present:
+            qa_memory_index_preflight = _triviaqa_qa_memory_index_summary(
+                config, root
+            )
+            if (
+                bounded.get("evaluation_regime") == "transductive_retrieval"
+                and (
+                    qa_memory_index_preflight is None
+                    or qa_memory_index_preflight.get(
+                        "contains_evaluation_answers"
+                    )
+                    is not True
+                    or qa_memory_index_preflight.get("evaluation_regime")
+                    != "transductive_retrieval"
+                    or qa_memory_index_preflight.get(
+                        "official_heldout_eligible"
+                    )
+                    is not False
+                )
+            ):
+                raise CompletionBenchmarkRoundError(
+                    "TriviaQA v24 config and transductive index manifest differ"
+                )
+            manifest["qa_memory_index_preflight"] = {
+                "status": "manifest_ready",
+                **dict(qa_memory_index_preflight or {}),
+            }
+        else:
+            manifest["qa_memory_index_preflight"] = {
+                "status": "manifest_missing",
+                "index_path": str(index_value or ""),
+            }
     _write_json(paths["manifest"], manifest)
     if prepare_only:
         manifest["completed_at"] = _utc_now()

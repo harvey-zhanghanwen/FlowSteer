@@ -1,0 +1,213 @@
+# TriviaQA inference-only transductive condition: the verified highest
+# Round-01 Director/Canvas profile plus the v23 action mask and worker-local
+# search/read runtime. The 128 evaluated QA pairs are present in this memory,
+# so its score is transductive retrieval accuracy, never a held-out result.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+execution_timeout: 600.0
+experiment:
+  name: "triviaqa_round01_qa_memory_v24"
+  phase: "triviaqa_evaluation"
+  baseline_id: "triviaqa_round_01_stable_zero"
+  step_id: "round01_profile_dynamic_transductive_all_qa_memory_v24"
+  training_enabled: false
+  seed: 20260817
+  condition_id: "triviaqa_round01_qa_memory_v24"
+  catalog_order_namespace: "triviaqa_round_01_local_qwen35"
+  prompt_version: "agentgraph.director.minimal.v2"
+  tool_version: "skillflow.search-read+flowsteer.v63+triviaqa-allqa-transductive-memory.retrieval-first-fallback.v24"
+  output_dir: "artifacts/triviaqa_round01_qa_memory_v24"
+
+data:
+  catalog_path: "config/joint_qa_partitions_v2.yaml"
+  registry_path: "config/datasets_runtime_v2.yaml"
+  registry_dataset_key: "triviaqa"
+  train_path: "data/joint_qa_v2/train.jsonl"
+  validation_path: "data/joint_qa_v2/development.jsonl"
+  test_path: "data/joint_qa_v2/test.jsonl"
+  enforce_split_isolation: true
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+
+triviaqa_evaluation:
+  dataset_key: "triviaqa"
+  stage: "development"
+  split: "validation"
+  evaluation_regime: "transductive_retrieval"
+  metric_label: "transductive_retrieval_accuracy"
+  contains_evaluation_answers: true
+  official_heldout_eligible: false
+  selection: "sequential"
+  sample_count: 128
+  stable_zero_sample_count: 3
+  rollouts_per_task: 1
+  concurrency: 4
+  task_timeout_seconds: 7200.0
+  evaluator_version: "triviaqa.official.answer.v1"
+  direct_model_id: "qwen3.5-9b-local"
+  direct_protocol: "qwen35_single_call_same_public_retrieval_context_v1"
+  direct_contract: "Answer the TriviaQA question with the shortest correct span inside a single <answer>...</answer> tag."
+  direct_generation_seed: 20260817
+  direct_reused_from: "artifacts/triviaqa_round_01/direct_predictions.jsonl"
+  legacy_deterministic_prefetch_enabled: false
+  agentgraph_protocol: "round01_profile_plus_worker_dynamic_transductive_all_qa_memory_retrieval_first_fallback_v24"
+  protocol_equivalent_to_direct: false
+
+qa_tool_runtime:
+  enabled: true
+  condition_id: "triviaqa_round01_qa_memory_v24"
+  mode: "model_driven_search_read"
+  passage_source: "external_corpus"
+  dataset_scope: ["triviaqa"]
+  skillflow_source: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src"
+  index_path: "data/triviaqa_qa_memory_transductive_v1/index"
+  index_format: "flowsteer.triviaqa.qa-memory-transductive-embedding-index.v1"
+  index_class: "src.interactive.triviaqa_transductive_qa_memory.TriviaQATransductiveQAMemoryIndex"
+  max_turns_per_agent_call: 7
+  max_tool_calls_per_agent_call: 4
+  tool_timeout_seconds: 30.0
+  completion_policy: "retrieval_first_parametric_fallback"
+  retrieval_order: "search_read_before_parametric_completion"
+  parametric_fallback_condition: "all_frozen_top_k_read_and_evidence_unsupported"
+  static_prefetch_enabled: false
+  director_tool_calls_allowed: false
+  web_search_allowed: false
+
+storage:
+  schema_version: "flowsteer.completion_benchmark.round.v1"
+  root: "artifacts/triviaqa_round01_qa_memory_v24/evidence"
+  selected_tasks_path: "artifacts/triviaqa_round01_qa_memory_v24/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/triviaqa_round01_qa_memory_v24/direct_predictions.jsonl"
+  trajectories_path: "artifacts/triviaqa_round01_qa_memory_v24/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/triviaqa_round01_qa_memory_v24/collection_failures.jsonl"
+  paired_results_path: "artifacts/triviaqa_round01_qa_memory_v24/paired_results.jsonl"
+  wrong_demos_path: "artifacts/triviaqa_round01_qa_memory_v24/wrong_demos.jsonl"
+  manifest_path: "artifacts/triviaqa_round01_qa_memory_v24/run_manifest.json"
+  preflight_receipt_path: "artifacts/triviaqa_round01_qa_memory_v24/preflight_receipt.json"
+  report_json_path: "reports/triviaqa_round01_qa_memory_v24/report.json"
+  report_markdown_path: "reports/triviaqa_round01_qa_memory_v24/report.md"
+
+director:
+  base_model: "${QWEN35_9B_MODEL_PATH:-/ssd1/iclr/gpf/models/Qwen3.5-9B}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/ssd1/iclr/gpf/models/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "qwen35-9b-base-triviaqa-round01-qa-memory-v24"
+  behavior_adapter_name: null
+  behavior_adapter_checkpoint: null
+  updated_policy_version: "unused-evaluation-only"
+  expected_server_weight_version: "default"
+  prompt_profile: "minimal"
+  # Directly reuse FlowSteer's live Canvas JSON-schema boundary so the
+  # Director cannot select Tool workers as Output or bypass required routing.
+  action_decoding: "json_schema"
+  action_schema_version: "agentgraph.canvas-action-json-schema.v1"
+  sampling_schema_version: "agentgraph.model-admissible-action-mask.v3"
+  sampling_action_profile: "model_admissible_canvas_actions"
+  dtype: "bfloat16"
+  max_context_tokens: 8192
+  max_action_tokens: 512
+  temperature: 0.7
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 14
+  execute_on_edit: true
+  history_window: 4
+  lora:
+    enabled: false
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+agent_graph:
+  max_agents: 8
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_agent, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "director_catalog_choice"
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  # Preserve exact-answer terminal syntax without requiring a dedicated
+  # Format role or a fixed terminal topology.
+  require_format_agent: false
+  director_feedback_mode: "control_plane"
+  required_evidence_tool_id: "triviaqa.qa_memory"
+  require_evidence_relation: true
+  terminal_protocol_by_source:
+    triviaqa: "exact_single_answer_tag"
+  model_catalog_path: "config/model_catalog_triviaqa_v1.yaml"
+
+evaluation:
+  healthbench_judge_model: ""
+  max_environment_steps: 20
+  swebench_harness_enabled: false
+  invalid_evaluator_action: "persist_and_exclude"
+
+grpo:
+  enabled: false
+  objective: "action_masked_one_pass"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 1
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 0
+  max_optimizer_updates: 0
+  learning_rate: 0.0
+  gradient_checkpointing: false
+  max_grad_norm: 0.0
+
+policy_sync:
+  enabled: false
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
+  adapter_name_prefix: "theta_triviaqa_round01_qa_memory_v24_unused_"
+  request_timeout_seconds: 120
+  max_retries: 0
+  retry_backoff_seconds: 1
+
+exploration:
+  enabled: false
+  strategy: "none"
+  forced_probe_rollouts: 0
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+  library_version: "none"
+
+gpu:
+  learner_physical: 3
+  rollout_physical: 0
+  gradient_replica_physical: 5
+  learner_device: "cuda:3"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:5"
+  supervisor_gpu_id: 0
+  supervisor_api_base: "http://127.0.0.1:8015/v1"
+  training_enabled: false
+  oom_policy:
+    status: "inactive_evaluation_only"
+    micro_batch_size: 1
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [1]
+    retry_on_cuda_oom: false
+    split_items_across_learner_and_replica: false
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: false
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: false
+  require_version_compatible_skills: true

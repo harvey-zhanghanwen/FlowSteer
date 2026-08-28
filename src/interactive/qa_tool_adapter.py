@@ -10945,9 +10945,29 @@ def open_qa_tool_registry(
             raise SkillFlowRetrievalError(
                 "directory index is not a TriviaQA QA-memory index"
             )
-        from .triviaqa_qa_memory import TriviaQAQAMemoryIndex
+        index_format = manifest_value.get("format")
+        if index_format == (
+            "flowsteer.triviaqa.qa-memory-transductive-embedding-index.v1"
+        ):
+            if (
+                manifest_value.get("contains_evaluation_answers") is not True
+                or manifest_value.get("evaluation_regime")
+                != "transductive_retrieval"
+                or manifest_value.get("official_heldout_eligible") is not False
+            ):
+                raise SkillFlowRetrievalError(
+                    "transductive TriviaQA QA-memory manifest does not declare "
+                    "its evaluation-answer boundary"
+                )
+            from .triviaqa_transductive_qa_memory import (
+                TriviaQATransductiveQAMemoryIndex,
+            )
 
-        retrieval_index_class = TriviaQAQAMemoryIndex
+            retrieval_index_class = TriviaQATransductiveQAMemoryIndex
+        else:
+            from .triviaqa_qa_memory import TriviaQAQAMemoryIndex
+
+            retrieval_index_class = TriviaQAQAMemoryIndex
     else:
         retrieval_index_class = _load_retrieval_index_class(Path(skillflow_source))
     try:

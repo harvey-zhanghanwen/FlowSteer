@@ -428,15 +428,18 @@ class ToolReactExecutionAdapter:
             )
             for tool_id, action_name, argument_schema in action_contracts
         )
-        # DIRECT_REUSE: SkillFlow rollout/context.py::_ACTION_GUIDANCE uses
-        # ``arguments={"value": ...}`` for completion.  Do not place a
-        # concrete placeholder such as ``"final artifact"`` in the public
-        # action example: generation models can copy it verbatim and thereby
-        # sever the semantic artifact routed to the next AgentGraph node.
+        # DIRECT_REUSE: SkillFlow exposes the admitted StructuredAction schema
+        # to the model.  Dataset adapters may specialize completion arguments,
+        # so derive the public guidance from the same schema that the parser
+        # and constrained-decoding boundary enforce rather than describing the
+        # generic ``value`` contract independently.
+        completion_arguments_schema = dict(
+            self._completion_arguments_schema(request)
+        )
         completion_schema = {
             "kind": {"const": "complete"},
             "name": {"const": "complete"},
-            "arguments": dict(self._completion_arguments_schema(request)),
+            "arguments": completion_arguments_schema,
             "resource_id": {"const": None},
             "skill_id": {"const": None},
         }
@@ -472,7 +475,9 @@ class ToolReactExecutionAdapter:
             "resource_id below, and skill_id=null. "
             + (
                 "For completion use kind=complete, name=complete, "
-                "arguments={\"value\": ...}, resource_id=null, and skill_id=null.\n"
+                "resource_id=null, and skill_id=null. The arguments object "
+                "must satisfy the exact completion Arguments JSON Schema "
+                "shown below, including every field listed in required.\n"
                 if completion_admitted
                 else "A completion action is not currently admissible.\n"
             )
@@ -486,7 +491,15 @@ class ToolReactExecutionAdapter:
             + (
                 "\nCurrently admissible completion schema: "
                 + json.dumps(
+                    completion_arguments_schema,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\nCurrently admissible completion field constraints: "
+                + json.dumps(
                     completion_schema,
+                    ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
                 )
