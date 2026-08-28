@@ -134,6 +134,24 @@ _LEADING_INTERROGATIVE_CONTRACTION = re.compile(
     r"(?:['’](?:d|ll|re|s|ve))",
     re.IGNORECASE,
 )
+_SENTENCE_BOUNDARY_CONTRACTION = re.compile(
+    r"(?:i['’]m|you['’]re|they['’]re|we['’]re|"
+    r"do(?:n't|n’t)|ca(?:n't|n’t)|wo(?:n't|n’t))",
+    re.IGNORECASE,
+)
+_SENTENCE_BOUNDARY_IMPERATIVE = frozenset(
+    {
+        "complete",
+        "finish",
+        "give",
+        "identify",
+        "name",
+        "specify",
+        "state",
+        "supply",
+        "tell",
+    }
+)
 _OBSERVED_RESPONSE_KEY_TYPOS = {
     ".paraphrase_question": "paraphrase_question",
     ".paraphrase_answer_statement": "paraphrase_answer_statement",
@@ -1097,30 +1115,18 @@ def _augment_listed_choice_answer_statement(
 
 
 def _capitalized_identity_tokens(question: str) -> frozenset[str]:
-    tokens = _LEXICAL_TOKEN.findall(question)
+    matches = tuple(_LEXICAL_TOKEN.finditer(question))
+    tokens = tuple(match.group(0) for match in matches)
     return frozenset(
         token.casefold()
-        for index, token in enumerate(tokens)
+        for index, (token, match) in enumerate(zip(tokens, matches))
         if (
             (
                 token[:1].isupper()
                 and token.casefold() not in _FUNCTION_WORDS
-                and not (
-                    index == 0
-                    and _LEADING_INTERROGATIVE_CONTRACTION.fullmatch(token)
-                    is not None
-                )
-                and not (
-                    index == 0
-                    and token.casefold()
-                    in {
-                        "identify",
-                        "name",
-                        "state",
-                        "give",
-                        "specify",
-                        "tell",
-                    }
+                and not _sentence_boundary_non_entity_token(
+                    question,
+                    match,
                 )
             )
             or (
@@ -1131,6 +1137,38 @@ def _capitalized_identity_tokens(question: str) -> frozenset[str]:
                 and tokens[index + 1][:1].isupper()
             )
         )
+    )
+
+
+def _sentence_boundary_non_entity_token(
+    text: str,
+    token_match: re.Match[str],
+) -> bool:
+    """Exclude only clear discourse operators at a sentence boundary.
+
+    Capitalization alone makes a leading imperative or ordinary contraction
+    look like a named entity.  Keep the exception position-sensitive instead
+    of globally whitelisting the surface: the same token elsewhere remains
+    eligible for identity protection, while quoted spans continue to be
+    protected independently by the immutable quote gate.
+    """
+
+    prefix = text[: token_match.start()].rstrip()
+    while prefix.endswith(('"', "“", "'", "‘", "(", "[", "{")):
+        prefix = prefix[:-1].rstrip()
+    at_boundary = not prefix or prefix[-1] in ".!?;:"
+    if not at_boundary:
+        return False
+    token = token_match.group(0)
+    if _SENTENCE_BOUNDARY_CONTRACTION.fullmatch(token) is not None:
+        next_token = _LEXICAL_TOKEN.search(text, token_match.end())
+        # Preserve title-like capitalization such as ``Don't Panic``.  The
+        # exception is only for ordinary sentence-boundary contractions such
+        # as ``Don't guess`` or ``I'm ready``.
+        return next_token is None or not next_token.group(0)[:1].isupper()
+    return bool(
+        _LEADING_INTERROGATIVE_CONTRACTION.fullmatch(token)
+        or token.casefold() in _SENTENCE_BOUNDARY_IMPERATIVE
     )
 
 
@@ -2363,6 +2401,254 @@ def order_pending_sources_for_resume(
     return tuple((*untouched_tail, *resume_gaps))
 
 
+_DETERMINISTIC_SUBJECT_RELATIVE_VERB = re.compile(
+    r"(?:appears?|became|becomes?|begins?|belongs?|co[- ]?founded|"
+    r"contains?|created|creates?|features?|has|have|had|includes?|"
+    r"inspired|inspires?|played|plays?|recorded|records?|reads?|"
+    r"said|sang|stars?|starred|supplies?|translates?|won|wrote)",
+    re.IGNORECASE,
+)
+
+
+def _finish_deterministic_question_candidate(
+    source: TriviaQATrainSource,
+    candidate: str,
+) -> str | None:
+    """Run question-level admission checks before returning a fallback.
+
+    Every caller immediately combines the returned question with its current
+    answer statement and invokes :func:`parse_paraphrase_response`; this
+    preflight is intentionally not a parallel materialization boundary.  It
+    only avoids returning a deterministic sentence transformation that is
+    already known to violate an existing question-side invariant.
+    """
+
+    original = " ".join(source.original_question.split())
+    candidate = " ".join(candidate.split())
+    if not candidate or original.casefold() in candidate.casefold():
+        return None
+    if not _has_lexical_or_phrase_replacement(original, candidate):
+        return None
+    if not _who_answer_slot_family_preserved(original, candidate):
+        return None
+    if not _leading_answer_slot_anchor_preserved(source, candidate):
+        return None
+    if not _participation_marker_preserved(original, candidate):
+        return None
+    if Counter(_NUMBER_OR_DATE_TOKEN.findall(original)) != Counter(
+        _NUMBER_OR_DATE_TOKEN.findall(candidate)
+    ):
+        return None
+    if not _quoted_scope_preserved(original, candidate):
+        return None
+    if _answer_slot_count(original) != _answer_slot_count(candidate):
+        return None
+    original_identity_tokens = _capitalized_identity_tokens(original)
+    candidate_tokens = frozenset(
+        token.casefold()
+        for token in _LEXICAL_TOKEN.findall(candidate)
+        if token.casefold() not in _FUNCTION_WORDS
+    )
+    if any(
+        not _identity_token_preserved(token, candidate_tokens)
+        for token in original_identity_tokens
+    ):
+        return None
+    if _canonical_question_leakage(
+        original_question=original,
+        paraphrase_question=candidate,
+        canonical_answer=source.canonical_answer,
+    ) and not canonical_is_original_spelling_variant(
+        original,
+        source.canonical_answer,
+    ):
+        return None
+    if _contains_source_spelling_correction(original, candidate):
+        return None
+    return candidate
+
+
+def _deterministic_question_paraphrase(
+    source: TriviaQATrainSource,
+) -> str | None:
+    """Apply conservative semantic-preserving sentence transformations.
+
+    This is a final repair fallback after bounded model and synonym repair.
+    It transforms the authoritative leading answer-slot construction itself;
+    it never wraps or embeds the complete original question.  Patterns that
+    would require uncertain dependency parsing (for example object-WH
+    inversion after ``did``) fail closed.
+    """
+
+    original = " ".join(source.original_question.split())
+    body = original[:-1].rstrip() if original.endswith(("?", ".")) else original
+    candidate: str | None = None
+
+    def declarative(text: str) -> str:
+        stripped = text.rstrip()
+        if re.search(r"[.!?][\"'”’]?\Z", stripped):
+            return stripped
+        return stripped + "."
+
+    who = re.fullmatch(r"(?i:who)\s+(?P<tail>.+)", body)
+    if (
+        who is not None
+        and _answer_slot_count(original) == 1
+        and len(_QUESTION_SLOT_TOKEN.findall(original)) == 1
+    ):
+        tail = who.group("tail")
+        first = _LEXICAL_TOKEN.search(tail)
+        # A leading do-support auxiliary usually marks an object-WH question;
+        # converting it safely requires dependency parsing and inflection.
+        if first is not None and first.group(0).casefold() not in {
+            "did",
+            "do",
+            "does",
+        }:
+            candidate = declarative(f"Identify the person who {tail}")
+
+    if candidate is None:
+        where = re.fullmatch(r"(?i:where)\s+(?P<tail>.+)", body)
+        if (
+            where is not None
+            and _answer_slot_count(original) == 1
+            and len(_QUESTION_SLOT_TOKEN.findall(original)) == 1
+        ):
+            candidate = f"At what location {where.group('tail')}?"
+
+    if candidate is None:
+        when = re.fullmatch(r"(?i:when)\s+(?P<tail>.+)", body)
+        if (
+            when is not None
+            and _answer_slot_count(original) == 1
+            and len(_QUESTION_SLOT_TOKEN.findall(original)) == 1
+        ):
+            first_tail_token = _LEXICAL_TOKEN.search(when.group("tail"))
+            safe_auxiliary = (
+                first_tail_token is not None
+                and first_tail_token.group(0).casefold()
+                in {
+                    "are",
+                    "can",
+                    "did",
+                    "do",
+                    "does",
+                    "had",
+                    "has",
+                    "have",
+                    "is",
+                    "was",
+                    "were",
+                    "will",
+                    "would",
+                }
+            )
+        else:
+            safe_auxiliary = False
+        if when is not None and safe_auxiliary:
+            candidate = f"At what time {when.group('tail')}?"
+
+    if candidate is None:
+        how_many = re.fullmatch(r"(?i:how\s+many)\s+(?P<tail>.+)", body)
+        if (
+            how_many is not None
+            and len(_QUESTION_SLOT_TOKEN.findall(original)) == 1
+        ):
+            tail = how_many.group("tail")
+            existential = re.fullmatch(
+                r"(?P<head>.+?)\s+(?P<aux>are|were|is|was)\s+there"
+                r"(?P<rest>.*)",
+                tail,
+                re.IGNORECASE,
+            )
+            perfect_existential = re.fullmatch(
+                r"(?P<head>.+?)\s+(?P<aux>have|has|had)\s+there\s+been"
+                r"(?P<rest>.*)",
+                tail,
+                re.IGNORECASE,
+            )
+            predicative = re.fullmatch(
+                r"(?P<head>.+?)\s+(?P<aux>are|were|is|was)\s+"
+                r"(?P<rest>.+)",
+                tail,
+                re.IGNORECASE,
+            )
+            if perfect_existential is not None:
+                candidate = declarative(
+                    "State the number of "
+                    f"{perfect_existential.group('head')} there "
+                    f"{perfect_existential.group('aux')} been"
+                    f"{perfect_existential.group('rest')}"
+                )
+            elif existential is not None:
+                candidate = declarative(
+                    "State the number of "
+                    f"{existential.group('head')} there "
+                    f"{existential.group('aux')}"
+                    f"{existential.group('rest')}"
+                )
+            elif predicative is not None:
+                candidate = declarative(
+                    "State the number of "
+                    f"{predicative.group('head')} that "
+                    f"{predicative.group('aux')} "
+                    f"{predicative.group('rest')}"
+                )
+            elif re.search(
+                r"\b(?:are|were|is|was|do|does|did|have|has|had)\b",
+                tail,
+                re.IGNORECASE,
+            ) is None:
+                connector = "" if tail.casefold().startswith("of ") else "of "
+                candidate = declarative(f"State the number {connector}{tail}")
+
+    if candidate is None:
+        imperative = re.fullmatch(
+            r"(?P<head>(?i:name))\s+(?P<tail>.+)",
+            body,
+        )
+        if imperative is not None:
+            candidate = declarative(f"Identify {imperative.group('tail')}")
+
+    if candidate is None:
+        complete = re.fullmatch(r"(?i:complete)\s+(?P<tail>.+)", body)
+        if complete is not None:
+            candidate = declarative(
+                "Supply the missing completion for "
+                f"{complete.group('tail')}"
+            )
+
+    if candidate is None:
+        finish = re.fullmatch(r"(?i:finish)\s+(?P<tail>.+)", body)
+        if finish is not None:
+            candidate = declarative(
+                f"Supply the ending of {finish.group('tail')}"
+            )
+
+    if candidate is None:
+        subject_wh = re.fullmatch(
+            r"(?P<wh>(?i:what|which))\s+"
+            r"(?P<head>.+?)\s+"
+            rf"(?P<verb>{_DETERMINISTIC_SUBJECT_RELATIVE_VERB.pattern})\s+"
+            r"(?P<tail>.+)",
+            body,
+            re.IGNORECASE,
+        )
+        if (
+            subject_wh is not None
+            and _answer_slot_count(original) == 1
+            and len(_QUESTION_SLOT_TOKEN.findall(original)) == 1
+        ):
+            candidate = declarative(
+                f"Identify the {subject_wh.group('head')} that "
+                f"{subject_wh.group('verb')} {subject_wh.group('tail')}"
+            )
+
+    if candidate is None:
+        return None
+    return _finish_deterministic_question_candidate(source, candidate)
+
+
 class LocalQwen35Paraphraser:
     """Small dependency-free client matching the existing local gateway."""
 
@@ -2651,6 +2937,9 @@ class LocalQwen35Paraphraser:
                     return candidate
             except ValueError as exc:
                 last_error = exc
+        deterministic = _deterministic_question_paraphrase(source)
+        if deterministic is not None:
+            return deterministic
         raise ValueError(
             "question repair exhausted eligible lexical source tokens"
         ) from last_error

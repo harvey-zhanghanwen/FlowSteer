@@ -45,6 +45,8 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _canonical_answer_is_explicit_compound,
     _called_relation_substitution_preserved,
     _clausal_canonical_relation_statement,
+    _capitalized_identity_tokens,
+    _deterministic_question_paraphrase,
     SemanticPreservationError,
     LocalQwen35Paraphraser,
     load_resume_records,
@@ -2321,3 +2323,173 @@ def test_v5_materialization_allows_original_spelling_normalization() -> None:
     )
 
     validate_qa_memory_against_sources((record,), (source,), require_complete=True)
+
+
+@pytest.mark.parametrize(
+    ("original", "canonical", "statement", "expected"),
+    (
+        (
+            "Who became Queen of the Netherlands in 1980?",
+            "Beatrix",
+            "Beatrix became Queen of the Netherlands in 1980.",
+            "Identify the person who became Queen of the Netherlands in 1980.",
+        ),
+        (
+            "Where was Albert Einstein born?",
+            "Ulm",
+            "Albert Einstein was born in Ulm.",
+            "At what location was Albert Einstein born?",
+        ),
+        (
+            "When was Apollo 11 launched?",
+            "1969",
+            "Apollo 11 was launched in 1969.",
+            "At what time was Apollo 11 launched?",
+        ),
+        (
+            "How many players are on a baseball team?",
+            "Nine",
+            "Nine players are on a baseball team.",
+            "State the number of players that are on a baseball team.",
+        ),
+        (
+            "Name the river containing the Kariba Dam.",
+            "Zambezi",
+            "The river containing the Kariba Dam is the Zambezi.",
+            "Identify the river containing the Kariba Dam.",
+        ),
+        (
+            'Complete the title "A Tale of Two ___."',
+            "Cities",
+            'The title "A Tale of Two ___." is completed with Cities.',
+            'Supply the missing completion for the title "A Tale of Two ___."',
+        ),
+        (
+            'Finish the proverb "A stitch in time saves ___."',
+            "nine",
+            'The ending of the proverb "A stitch in time saves ___." is nine.',
+            'Supply the ending of the proverb "A stitch in time saves ___."',
+        ),
+        (
+            "Which river contains the Kariba Dam?",
+            "Zambezi",
+            "The Zambezi river contains the Kariba Dam.",
+            "Identify the river that contains the Kariba Dam.",
+        ),
+        (
+            "Which Gloria co-founded Ms magazine?",
+            "Gloria Steinem",
+            "Gloria Steinem co-founded Ms magazine.",
+            "Identify the Gloria that co-founded Ms magazine.",
+        ),
+    ),
+)
+def test_deterministic_question_fallback_passes_full_materialization_gate(
+    original: str,
+    canonical: str,
+    statement: str,
+    expected: str,
+) -> None:
+    source = _semantic_source(original, canonical)
+
+    candidate = _deterministic_question_paraphrase(source)
+
+    assert candidate == expected
+    assert " ".join(original.split()).casefold() not in candidate.casefold()
+    assert _has_lexical_or_phrase_replacement(original, candidate)
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": candidate,
+                "paraphrase_answer_statement": statement,
+            }
+        ),
+        source,
+    ) == (candidate, statement)
+
+
+def test_question_repair_uses_deterministic_fallback_only_after_model_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _semantic_source(
+        "Who became Queen of the Netherlands in 1980?",
+        "Beatrix",
+    )
+    client = object.__new__(LocalQwen35Paraphraser)
+    calls = 0
+
+    def reject_model_repair(**_: object) -> str:
+        nonlocal calls
+        calls += 1
+        raise ValueError("synthetic bounded repair failure")
+
+    monkeypatch.setattr(client, "_complete", reject_model_repair)
+
+    assert client._repair_paraphrase_question(
+        source,
+        rejected_question=source.original_question,
+        seed=19,
+    ) == "Identify the person who became Queen of the Netherlands in 1980."
+    assert calls > 0
+
+
+@pytest.mark.parametrize(
+    ("original", "canonical"),
+    (
+        ("Who did Elizabeth Taylor marry?", "Richard Burton"),
+        ("What is the capital of Hong Kong?", "Victoria"),
+        (
+            "How many are gold; how many are silver?",
+            "One gold and three silver",
+        ),
+        ("Complete.", "the missing text"),
+        (
+            "When You’re Strange is a tribute band to which band?",
+            "The Doors",
+        ),
+        (
+            "When eating out, what French phrase is the opposite of a la carte?",
+            "table d'hôte",
+        ),
+        ("Where Eagles Dare starred which actor?", "Richard Burton"),
+    ),
+)
+def test_deterministic_question_fallback_fails_closed_for_unsafe_shapes(
+    original: str,
+    canonical: str,
+) -> None:
+    assert _deterministic_question_paraphrase(
+        _semantic_source(original, canonical)
+    ) is None
+
+
+def test_sentence_boundary_operators_are_not_named_entities() -> None:
+    identities = _capitalized_identity_tokens(
+        "I'm ready. Don't guess. Name Liverpool's river. "
+        "You're certain; Identify Sony's label."
+    )
+
+    assert "i'm" not in identities
+    assert "don't" not in identities
+    assert "name" not in identities
+    assert "you're" not in identities
+    assert "identify" not in identities
+    assert "liverpool's" in identities
+    assert "sony's" in identities
+
+
+def test_contraction_exception_is_position_sensitive_and_quotes_stay_immutable() -> None:
+    assert "don't" in _capitalized_identity_tokens(
+        "Don't Panic released a record."
+    )
+    assert "don't" in _capitalized_identity_tokens(
+        "The band Don't Panic released a record."
+    )
+    assert _quoted_scope_preserved(
+        'Which band recorded "Don\'t Stop"?',
+        'Identify the band that recorded "Don\'t Stop".',
+    )
+    assert not _quoted_scope_preserved(
+        'Which band recorded "Don\'t Stop"?',
+        'Identify the band that recorded "Do Not Stop".',
+    )
