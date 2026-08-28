@@ -4,7 +4,9 @@
 This is a scale adapter over the existing TriviaQA converter and QA-memory
 record/index contracts.  The native ``rc.nocontext`` train parquet repeats a
 question once per evidence row, so this command keeps the first source-order
-Q-A for each ``question_id`` and globally removes every fixed held-out ID.
+Q-A for each ``question_id``.  The v2 projection can explicitly retain the
+fixed evaluation Q-A records for the in-database protocol; the manifest records
+that choice instead of presenting the result as split-isolated retrieval.
 
 This command only freezes the paired Q-A source projection.  Actual semantic
 paraphrases are produced by the existing strict local-Qwen generator and its

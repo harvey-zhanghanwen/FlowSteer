@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Materialize semantic-preserving TriviaQA train QA paraphrases.
+"""Materialize semantic-preserving TriviaQA native-train Q-A paraphrases.
 
-Split consistency is checked before the local Qwen3.5 OpenAI-compatible
-endpoint is contacted.  The model generates a reworded question and a
-relation-bearing declarative answer statement from the frozen train-only
-``accepted_answers[0]`` canonical span.
+Source binding is checked before the local Qwen3.5 OpenAI-compatible endpoint
+is contacted.  The model generates a reworded question and a relation-bearing
+declarative answer statement from each frozen canonical Q-A pair.  Depending
+on the explicit CLI protocol, fixed evaluation Q-A records are either excluded
+for split-isolated retrieval or retained for the in-database protocol.
 """
 
 from __future__ import annotations

@@ -485,7 +485,11 @@ def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     )
 
 
-def _assert_formal_report_metrics_tool_ownership_isolation_routing_and_demos() -> None:
+def _assert_formal_report_metrics_tool_ownership_isolation_routing_and_demos(
+    *,
+    validation_content_indexed: bool = False,
+    validation_isolation_count: int = 128,
+) -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         task_ids = [f"triviaqa:validation:{index}" for index in range(3)]
@@ -523,8 +527,8 @@ def _assert_formal_report_metrics_tool_ownership_isolation_routing_and_demos() -
                     "unique_source_count": 512,
                     "cycled_count": 0,
                     "paraphrase_count": 512,
-                    "validation_content_indexed": False,
-                    "validation_isolation_count": 128,
+                    "validation_content_indexed": validation_content_indexed,
+                    "validation_isolation_count": validation_isolation_count,
                 }
             ),
             encoding="utf-8",
@@ -540,6 +544,14 @@ def _assert_formal_report_metrics_tool_ownership_isolation_routing_and_demos() -
         report = analysis.build_report(args)
 
     assert report["run"]["status"] == "complete"
+    expected_scope = (
+        "in_database_transductive"
+        if validation_content_indexed and validation_isolation_count == 0
+        else "official fixed held-out validation"
+    )
+    assert report["metrics"]["scope"] == expected_scope
+    markdown = analysis._render_markdown(report)  # noqa: SLF001
+    assert f"评估口径为 `{expected_scope}`" in markdown
     assert report["metrics"]["direct"]["strict_exact_match"] == 1 / 3
     assert report["metrics"]["agentgraph"]["strict_exact_match"] == 0.0
     assertions = report["control_plane_and_tool_routing"]["assertions"]
@@ -853,6 +865,12 @@ class TriviaQAQAMemoryResultAnalysisTests(unittest.TestCase):
         self,
     ) -> None:
         _assert_formal_report_metrics_tool_ownership_isolation_routing_and_demos()
+
+    def test_complete_transductive_report_uses_index_manifest_scope(self) -> None:
+        _assert_formal_report_metrics_tool_ownership_isolation_routing_and_demos(
+            validation_content_indexed=True,
+            validation_isolation_count=0,
+        )
 
     def test_control_plane_assertions_fail_closed_on_payload_leak_and_missing_relation(
         self,

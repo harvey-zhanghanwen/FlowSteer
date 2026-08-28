@@ -1566,6 +1566,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "validation_isolation_count",
         )
     }
+    complete_metric_scope = (
+        "in_database_transductive"
+        if index_manifest.get("validation_content_indexed") is True
+        and index_manifest.get("validation_isolation_count") == 0
+        else "official fixed held-out validation"
+    )
     return {
         "schema_version": "flowsteer.triviaqa.qa-memory.formal-result-analysis.v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1586,7 +1592,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "agentgraph": agentgraph,
             "agentgraph_minus_direct": delta,
             "scope": (
-                "official fixed held-out validation" if run_complete else
+                complete_metric_scope if run_complete else
                 "partial snapshot; strict denominator remains the selected task count"
             ),
         },
@@ -1633,10 +1639,14 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
     control = base._mapping(report.get("control_plane_and_tool_routing"))
     assertions = base._mapping(control.get("assertions"))
     if run.get("status") == "complete":
-        delta_note = "该差值来自同一固定 128 条 held-out validation 的完整正式结果。"
+        delta_note = (
+            "该差值来自同一固定 128 条完整正式结果；"
+            f"评估口径为 `{metrics.get('scope')}`。"
+        )
     else:
         delta_note = (
-            "partial 状态下该值仅是固定分母 fail-closed snapshot，"
+            f"评估口径为 `{metrics.get('scope')}`；partial 状态下该值仅是"
+            "固定分母 fail-closed snapshot，"
             "不是完整 128 条正式结果。"
         )
     lines = [
