@@ -7,11 +7,18 @@ import unittest
 
 from src.interactive.agent_graph import AgentNode
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
-from src.interactive.agent_runtime import AgentRequest, AgentResponse, ExecutionPhase
+from src.interactive.agent_runtime import (
+    AgentRequest,
+    AgentResponse,
+    ExecutionPhase,
+    UpstreamMessage,
+)
 from src.interactive.model_registry import ModelSpec, ProviderSpec
+from src.interactive.openai_gateway import build_agent_messages
 from src.interactive.qa_tool_adapter import (
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     QARetrievalReactExecutionAdapter,
+    RETRIEVAL_FIRST_PARAMETRIC_FALLBACK_POLICY,
     TRIVIAQA_QA_MEMORY_TOOL_ID,
     build_qa_tool_registry,
 )
@@ -87,6 +94,45 @@ class _Index:
         return None
 
 
+class _TopKIndex(_Index):
+    def search(self, query: str, *, limit: int) -> tuple[_MemoryHit, ...]:
+        self.search_calls.append((query, limit))
+        return tuple(
+            replace(
+                _MemoryHit(),
+                passage_id=f"memory-{index:03d}",
+                memory_id=f"memory-{index:03d}",
+                document_id=f"triviaqa:tc_{128 + index}",
+                source_train_task_id=f"triviaqa:tc_{128 + index}",
+                base_task_id=f"triviaqa:tc_{128 + index}",
+                canonical_answer=answer,
+                paraphrase_answer_statement=f"The answer is {answer}",
+                snippet=f"The answer is {answer}",
+                rank=index,
+            )
+            for index, answer in enumerate(("Ada", "Bob", "Carol"), start=1)
+        )
+
+    def read(self, memory_id: str) -> _MemoryRecord:
+        self.read_calls.append(memory_id)
+        index = int(memory_id.rsplit("-", 1)[1])
+        answer = ("Ada", "Bob", "Carol")[index - 1]
+        return replace(
+            _MemoryRecord(),
+            passage_id=memory_id,
+            memory_id=memory_id,
+            document_id=f"triviaqa:tc_{128 + index}",
+            source_train_task_id=f"triviaqa:tc_{128 + index}",
+            base_task_id=f"triviaqa:tc_{128 + index}",
+            canonical_answer=answer,
+            paraphrase_answer_statement=f"The answer is {answer}",
+            text=(
+                "Question: Which author wrote the novel?\n"
+                f"Answer: The answer is {answer}"
+            ),
+        )
+
+
 class TriviaQAQAMemoryV2AdapterTests(unittest.IsolatedAsyncioTestCase):
     def _request(self) -> AgentRequest:
         return AgentRequest(
@@ -127,6 +173,16 @@ class TriviaQAQAMemoryV2AdapterTests(unittest.IsolatedAsyncioTestCase):
         assert search_result is not None
         self.assertEqual(["memory-001"], search_result.value["memory_ids"])
         self.assertEqual(["memory-001"], search_result.value["passage_ids"])
+        search_memory = search_result.value["hits"][0]
+        self.assertEqual(
+            "Which author wrote the novel?",
+            search_memory["paraphrase_question"],
+        )
+        self.assertEqual(
+            "The answer is Ada",
+            search_memory["paraphrase_answer_statement"],
+        )
+        self.assertEqual("Ada", search_memory["canonical_answer"])
         self.assertEqual(TRIVIAQA_QA_MEMORY_TOOL_ID, search_receipt.tool_id)
 
         read_result, read_receipt = await registry.ainvoke_with_receipt(
@@ -138,6 +194,18 @@ class TriviaQAQAMemoryV2AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("memory-001", read_result.value["memory_id"])
         self.assertEqual("memory-001", read_result.value["passage_id"])
         self.assertEqual(read_result.value["memory"], read_result.value["passage"])
+        self.assertEqual(
+            "Which author wrote the novel?",
+            read_result.value["memory"]["paraphrase_question"],
+        )
+        self.assertEqual(
+            "The answer is Ada",
+            read_result.value["memory"]["paraphrase_answer_statement"],
+        )
+        self.assertEqual(
+            "Ada",
+            read_result.value["memory"]["canonical_answer"],
+        )
         self.assertEqual(TRIVIAQA_QA_MEMORY_TOOL_ID, read_receipt.tool_id)
         self.assertEqual(
             {"memory_id": "memory-001"},
@@ -226,6 +294,230 @@ class TriviaQAQAMemoryV2AdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([("author novel", 3)], index.search_calls)
         self.assertEqual(["memory-001"], index.read_calls)
+
+    async def test_retrieval_first_policy_reads_full_top_k_and_routes_fallback(
+        self,
+    ) -> None:
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None
+                        if name == "complete"
+                        else TRIVIAQA_QA_MEMORY_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class _Gateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+                self.outputs = [
+                    action("search", {"query": "author novel", "limit": 3}),
+                    action("read", {"memory_id": "memory-001"}),
+                    action("read", {"memory_id": "memory-002"}),
+                    action("read", {"memory_id": "memory-003"}),
+                    action(
+                        "complete",
+                        {
+                            "value": "parametric_fallback_required",
+                            "evidence_sufficiency": "unsupported",
+                            "answer_source": "parametric_fallback_required",
+                            "supporting_memory_ids": [],
+                        },
+                    ),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(self.outputs.pop(0))
+
+        gateway = _Gateway()
+        index = _TopKIndex()
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=5,
+            max_tool_calls=4,
+            task_type="factual_qa",
+            completion_policy=RETRIEVAL_FIRST_PARAMETRIC_FALLBACK_POLICY,
+            retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+        )
+
+        response = await adapter.execute(self._request())
+
+        self.assertIn("Retrieval evidence sufficiency: unsupported", response.text)
+        self.assertIn("Parametric fallback required: true", response.text)
+        self.assertNotIn("Candidate answer:", response.text)
+        self.assertEqual([("author novel", 3)], index.search_calls)
+        self.assertEqual(
+            ["memory-001", "memory-002", "memory-003"],
+            index.read_calls,
+        )
+        self.assertEqual(4, len(response.metadata["tool_receipts"]))
+        resolution = response.metadata["retrieval_resolution_receipt"]
+        self.assertEqual("unsupported", resolution["evidence_sufficiency"])
+        self.assertEqual(
+            "parametric_fallback_required",
+            resolution["answer_source"],
+        )
+        self.assertEqual(
+            ["memory-001", "memory-002", "memory-003"],
+            resolution["evaluated_memory_ids"],
+        )
+        self.assertTrue(resolution["all_top_k_read"])
+        self.assertFalse(resolution["heldout_label_access"])
+        self.assertFalse(resolution["evaluator_access"])
+        self.assertFalse(resolution["web_search"])
+        final_contract = gateway.requests[-1].agent.contract
+        self.assertIn("Retrieval-first parametric fallback is active", final_contract)
+        self.assertIn("read every memory_id", final_contract)
+        self.assertIn("entity identity, requested relation, qualifiers", final_contract)
+        self.assertIn("parametric_fallback_required", final_contract)
+        self.assertIn("Never use evaluator feedback", final_contract)
+        self.assertIn("or Web Search", final_contract)
+
+        downstream = replace(
+            self._request(),
+            request_id="triviaqa:qamemory-downstream",
+            agent=AgentNode(
+                "output",
+                "model",
+                "answer the public task",
+                execution_mode="react",
+            ),
+            is_output_agent=True,
+            terminal_protocol="exact_single_answer_tag",
+            upstream=(
+                UpstreamMessage(
+                    "retriever",
+                    "output",
+                    response.text,
+                    tool_receipts=tuple(response.metadata["tool_receipts"]),
+                ),
+            ),
+        )
+        rendered = "\n".join(
+            str(message["content"])
+            for message in build_agent_messages(downstream)
+        )
+        self.assertIn(
+            "Retrieval evidence sufficiency: unsupported",
+            rendered,
+        )
+        self.assertIn("answer the original public task from parametric knowledge", rendered)
+
+    async def test_retrieval_first_supported_decision_binds_paired_answer(self) -> None:
+        def action(name: str, arguments: object) -> str:
+            return json.dumps(
+                {
+                    "arguments": arguments,
+                    "kind": "complete" if name == "complete" else "tool",
+                    "name": name,
+                    "resource_id": (
+                        None
+                        if name == "complete"
+                        else TRIVIAQA_QA_MEMORY_TOOL_ID
+                    ),
+                    "skill_id": None,
+                }
+            )
+
+        class _Gateway:
+            def __init__(self) -> None:
+                self.outputs = [
+                    action("search", {"query": "author novel", "limit": 3}),
+                    action("read", {"memory_id": "memory-001"}),
+                    action("read", {"memory_id": "memory-002"}),
+                    action("read", {"memory_id": "memory-003"}),
+                    action(
+                        "complete",
+                        {
+                            "value": "Bob",
+                            "evidence_sufficiency": "supported",
+                            "answer_source": "qa_memory",
+                            "supporting_memory_ids": ["memory-002"],
+                        },
+                    ),
+                ]
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                return AgentResponse(self.outputs.pop(0))
+
+        index = _TopKIndex()
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=_Gateway(),
+            tool_registry=build_qa_tool_registry(index),
+            max_turns=5,
+            max_tool_calls=4,
+            task_type="factual_qa",
+            completion_policy=RETRIEVAL_FIRST_PARAMETRIC_FALLBACK_POLICY,
+            retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+        )
+
+        response = await adapter.execute(self._request())
+
+        self.assertIn("Retrieval evidence sufficiency: supported", response.text)
+        self.assertIn("Answer source: qa_memory", response.text)
+        self.assertIn("Supporting memory IDs: [\"memory-002\"]", response.text)
+        self.assertIn("Candidate answer: Bob", response.text)
+        resolution = response.metadata["retrieval_resolution_receipt"]
+        self.assertEqual(["memory-002"], resolution["supporting_memory_ids"])
+        self.assertTrue(resolution["all_top_k_read"])
+
+    async def test_retrieval_first_policy_does_not_bind_non_tool_agent(self) -> None:
+        class _Gateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(
+                    json.dumps(
+                        {
+                            "arguments": {"value": "<answer>Ada</answer>"},
+                            "kind": "complete",
+                            "name": "complete",
+                            "resource_id": None,
+                            "skill_id": None,
+                        }
+                    )
+                )
+
+        gateway = _Gateway()
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=build_qa_tool_registry(_TopKIndex()),
+            max_turns=5,
+            max_tool_calls=4,
+            task_type="factual_qa",
+            completion_policy=RETRIEVAL_FIRST_PARAMETRIC_FALLBACK_POLICY,
+            retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+        )
+        request = replace(
+            self._request(),
+            agent=AgentNode(
+                "output",
+                "model",
+                "answer the public task",
+                execution_mode="react",
+            ),
+            is_output_agent=True,
+            terminal_protocol="exact_single_answer_tag",
+        )
+
+        response = await adapter.execute(request)
+
+        self.assertEqual("<answer>Ada</answer>", response.text)
+        self.assertNotIn("retrieval_resolution_receipt", response.metadata)
+        self.assertNotIn(
+            "Retrieval-first parametric fallback is active",
+            gateway.requests[-1].agent.contract,
+        )
 
     def test_v63_state_conditioned_search_read_complete_is_preserved(self) -> None:
         registry = build_qa_tool_registry(_Index())

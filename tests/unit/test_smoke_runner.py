@@ -765,6 +765,21 @@ class QAToolRuntimeWiringTests(unittest.TestCase):
             required_settings["completion_policy"],
         )
 
+        retrieval_first = self._config()
+        retrieval_first["qa_tool_runtime"]["completion_policy"] = (
+            "retrieval_first_parametric_fallback"
+        )
+        retrieval_first_settings = qa_tool_runtime_settings(
+            retrieval_first,
+            task,
+        )
+        self.assertIsNotNone(retrieval_first_settings)
+        assert retrieval_first_settings is not None
+        self.assertEqual(
+            "retrieval_first_parametric_fallback",
+            retrieval_first_settings["completion_policy"],
+        )
+
         invalid = self._config()
         invalid["qa_tool_runtime"]["completion_policy"] = "required_dispatch_twice"
         with self.assertRaisesRegex(ConfigurationError, "completion_policy"):

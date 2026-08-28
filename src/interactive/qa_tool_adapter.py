@@ -20,10 +20,11 @@ from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
 from threading import Event
+from types import MappingProxyType
 from typing import Callable, Mapping, Optional, Protocol, Sequence
 import unicodedata
 
-from .agent_runtime import AgentGateway, AgentRequest, GatewayResponse
+from .agent_runtime import AgentGateway, AgentRequest, AgentResponse, GatewayResponse
 from .react_execution import ReactExecutionError, ToolReactExecutionAdapter
 from .scientific_sampling import ScientificSamplingCoordinate
 from .task_dataset import (
@@ -60,6 +61,9 @@ from .tool_runtime import (
 QA_RETRIEVAL_TOOL_ID = "qa-retrieval"
 TRIVIAQA_QA_MEMORY_TOOL_ID = "triviaqa.qa_memory"
 QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL = "qa_verified_answer_lineage_v2"
+RETRIEVAL_FIRST_PARAMETRIC_FALLBACK_POLICY = (
+    "retrieval_first_parametric_fallback"
+)
 DEFAULT_QA_DATASET_SCOPE = ("hotpotqa", "triviaqa")
 _QA_MEMORY_OPTIONAL_FIELDS = (
     "memory_id",
@@ -4183,10 +4187,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             "optional",
             "required_tool_call",
             "required_evidence",
+            RETRIEVAL_FIRST_PARAMETRIC_FALLBACK_POLICY,
         }:
             raise ValueError(
                 "QA completion_policy must be optional, required_tool_call, "
-                "or required_evidence"
+                "required_evidence, or retrieval_first_parametric_fallback"
             )
         if retrieval_tool_id not in _SUPPORTED_QA_RETRIEVAL_TOOL_IDS:
             raise ValueError(
@@ -4264,6 +4269,47 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             self._task_type == "factual_qa"
             and request.semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
         )
+
+    def _retrieval_first_parametric_fallback(self) -> bool:
+        return (
+            self._completion_policy
+            == RETRIEVAL_FIRST_PARAMETRIC_FALLBACK_POLICY
+        )
+
+    def _retrieval_first_action_domain(
+        self,
+        state: _RequiredEvidenceState,
+    ) -> tuple[frozenset[tuple[str, str]], bool]:
+        """Read the complete frozen top-k before a sufficiency decision.
+
+        This keeps SkillFlow's one-Action/one-Observation transition model.
+        The model may not declare either memory support or parametric fallback
+        until every ID from the one successful embedding search has a
+        successful worker-owned read receipt.
+        """
+
+        remaining_tool_calls = max(
+            0,
+            self._max_tool_calls - state.dispatched_tool_calls,
+        )
+        if not state.search_queries:
+            if remaining_tool_calls < 1:
+                return frozenset(), False
+            return frozenset({(self._retrieval_tool_id, "search")}), False
+        if self._frozen_search_limit is None:
+            raise RuntimeError(
+                "retrieval-first parametric fallback requires a frozen top-k"
+            )
+        if len(state.latest_search_passage_ids) != self._frozen_search_limit:
+            return frozenset(), False
+        if state.latest_unread_passage_ids:
+            if remaining_tool_calls < 1:
+                return frozenset(), False
+            return frozenset({(self._retrieval_tool_id, "read")}), False
+        read_ids = frozenset(state.read_passage_ids)
+        if not set(state.latest_search_passage_ids) <= read_ids:
+            return frozenset(), False
+        return frozenset(), True
 
     @staticmethod
     def _direct_upstream_tool_receipts(
@@ -5448,7 +5494,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         observations: list[Mapping[str, object]],
     ) -> _RequiredEvidenceState:
         required = (
-            self._completion_policy == "required_evidence"
+            self._completion_policy
+            in {
+                "required_evidence",
+                RETRIEVAL_FIRST_PARAMETRIC_FALLBACK_POLICY,
+            }
             and self._max_tool_calls > 0
             and self._retrieval_tool_id in request.agent.allowed_tools
         )
@@ -5991,6 +6041,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         state = self._required_evidence_state(request, observations)
         if not state.required:
             return super()._state_conditioned_action_domain(request, observations)
+        if self._retrieval_first_parametric_fallback():
+            # PROJECT_NECESSARY_ADAPTATION: unlike required_evidence, this
+            # condition evaluates the entire frozen embedding top-k before it
+            # admits either memory use or closed-book parametric fallback.
+            # The topology remains Director-authored; this narrows only the
+            # Tool-capable worker's local SkillFlow action domain.
+            return self._retrieval_first_action_domain(state)
         if (
             self._unified_factual_protocol(request)
             and (request.agent.role_family or "").casefold() == "reasoner"
@@ -6174,6 +6231,63 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         self,
         request: AgentRequest,
     ) -> Mapping[str, object]:
+        if (
+            self._retrieval_first_parametric_fallback()
+            and self._retrieval_tool_id in request.agent.allowed_tools
+        ):
+            memory_ids = {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "uniqueItems": True,
+            }
+            return {
+                "type": "object",
+                "required": [
+                    "value",
+                    "evidence_sufficiency",
+                    "answer_source",
+                    "supporting_memory_ids",
+                ],
+                "properties": {
+                    "value": {"type": "string"},
+                    "evidence_sufficiency": {
+                        "type": "string",
+                        "enum": ["supported", "unsupported"],
+                    },
+                    "answer_source": {
+                        "type": "string",
+                        "enum": ["qa_memory", "parametric_fallback_required"],
+                    },
+                    "supporting_memory_ids": memory_ids,
+                },
+                "oneOf": [
+                    {
+                        "properties": {
+                            "value": {"type": "string", "minLength": 1},
+                            "evidence_sufficiency": {"const": "supported"},
+                            "answer_source": {"const": "qa_memory"},
+                            "supporting_memory_ids": {
+                                **memory_ids,
+                                "minItems": 1,
+                            },
+                        }
+                    },
+                    {
+                        "properties": {
+                            "value": {"const": "parametric_fallback_required"},
+                            "evidence_sufficiency": {"const": "unsupported"},
+                            "answer_source": {
+                                "const": "parametric_fallback_required"
+                            },
+                            "supporting_memory_ids": {
+                                **memory_ids,
+                                "maxItems": 0,
+                            },
+                        }
+                    },
+                ],
+                "additionalProperties": False,
+            }
         semantic_protocol = request.semantic_protocol
         semantic_role = (request.agent.role_family or "").casefold()
         if semantic_role == "evidence_retriever" and semantic_protocol in {
@@ -7604,7 +7718,67 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         try:
             try:
-                return await super().execute(request)
+                response = await super().execute(request)
+                if (
+                    not self._retrieval_first_parametric_fallback()
+                    or not requires_retrieval
+                    or not isinstance(response, AgentResponse)
+                ):
+                    return response
+                trace = response.metadata.get("react_trace", ())
+                final_action: Mapping[str, object] | None = None
+                if isinstance(trace, (list, tuple)):
+                    for item in reversed(trace):
+                        if not isinstance(item, Mapping):
+                            continue
+                        candidate = item.get("structured_action")
+                        if isinstance(candidate, Mapping) and candidate.get(
+                            "kind"
+                        ) == "complete":
+                            final_action = candidate
+                            break
+                final_arguments = (
+                    final_action.get("arguments")
+                    if isinstance(final_action, Mapping)
+                    else None
+                )
+                receipts = response.metadata.get("tool_receipts", ())
+                public_receipts = tuple(
+                    receipt
+                    for receipt in receipts
+                    if isinstance(receipt, Mapping)
+                ) if isinstance(receipts, (list, tuple)) else ()
+                top_k_ids, read_records = self._retrieval_first_memory_receipts(
+                    public_receipts
+                )
+                metadata = dict(response.metadata)
+                if isinstance(final_arguments, Mapping):
+                    metadata["retrieval_resolution_receipt"] = {
+                        "schema_version": (
+                            "flowsteer.qa.retrieval-resolution-receipt.v1"
+                        ),
+                        "tool_id": self._retrieval_tool_id,
+                        "evidence_sufficiency": final_arguments.get(
+                            "evidence_sufficiency"
+                        ),
+                        "answer_source": final_arguments.get("answer_source"),
+                        "evaluated_memory_ids": list(top_k_ids),
+                        "supporting_memory_ids": list(
+                            final_arguments.get("supporting_memory_ids", ())
+                        ),
+                        "all_top_k_read": bool(
+                            top_k_ids
+                            and set(top_k_ids) == set(read_records)
+                        ),
+                        "decision_inputs": [
+                            "public_task",
+                            "worker_tool_observations",
+                        ],
+                        "heldout_label_access": False,
+                        "evaluator_access": False,
+                        "web_search": False,
+                    }
+                return AgentResponse(response.text, metadata)
             except ReactExecutionError as exc:
                 public_observations = self._continuation_observations(
                     exc.react_trace
@@ -8150,7 +8324,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         # continuation boundary.
         evidence_continuation = ""
         if (
-            self._completion_policy == "required_evidence"
+            self._completion_policy
+            in {
+                "required_evidence",
+                RETRIEVAL_FIRST_PARAMETRIC_FALLBACK_POLICY,
+            }
             and self._retrieval_tool_id in request.agent.allowed_tools
         ):
             evidence_continuation = (
@@ -8413,6 +8591,39 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "report that the memory does not cover the current fact and do not copy "
                 "its answer."
             )
+            if (
+                self._completion_policy
+                == RETRIEVAL_FIRST_PARAMETRIC_FALLBACK_POLICY
+                and self._retrieval_tool_id in request.agent.allowed_tools
+            ):
+                # PROJECT_NECESSARY_ADAPTATION: keep SkillFlow's bounded
+                # search -> read -> complete execution unchanged, then apply a
+                # retrieval-augmented generation sufficiency gate over the
+                # paired train-QA observation.  This decision uses only the
+                # public task and worker-owned Tool observations; it cannot
+                # inspect evaluator state or held-out labels.
+                qa_memory_wire += (
+                    " Retrieval-first parametric fallback is active. Before any "
+                    "task answer, execute one search and then read every memory_id "
+                    "in its complete frozen top-k, one read Action per Observation. "
+                    "Treat each read record as one paired Question-Answer memory: "
+                    "paraphrase_question, paraphrase_answer_statement, and "
+                    "canonical_answer stay together. Only after every top-k read, "
+                    "decide evidence sufficiency from the current public question and "
+                    "the complete set: entity identity, requested relation, qualifiers, "
+                    "answer type/cardinality, and answer slot must all align. Complete "
+                    "with evidence_sufficiency=supported, answer_source=qa_memory, "
+                    "one or more receipt-backed supporting_memory_ids, and value equal "
+                    "to a selected paired canonical_answer only when those fields "
+                    "align. If no top-k record aligns, complete with "
+                    "evidence_sufficiency=unsupported, "
+                    "answer_source=parametric_fallback_required, empty "
+                    "supporting_memory_ids, and value=parametric_fallback_required. "
+                    "That routed unsupported artifact delegates direct answering to a "
+                    "downstream Agent; do not transfer any memory answer. Never use evaluator "
+                    "feedback, held-out labels, accepted aliases, or Web Search for "
+                    "this decision."
+                )
         return (
             contract
             + qa_guidance
@@ -9302,6 +9513,126 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 )
         return None
 
+    def _retrieval_first_memory_receipts(
+        self,
+        tool_receipts: Sequence[Mapping[str, object]],
+    ) -> tuple[tuple[str, ...], Mapping[str, Mapping[str, object]]]:
+        """Project the latest search top-k and successful paired-QA reads."""
+
+        latest_search_ids: tuple[str, ...] = ()
+        read_records: dict[str, Mapping[str, object]] = {}
+        for receipt in tool_receipts:
+            if receipt.get("tool_id") != self._retrieval_tool_id:
+                continue
+            request_value = receipt.get("request")
+            result_value = receipt.get("result")
+            if (
+                not isinstance(request_value, Mapping)
+                or not isinstance(result_value, Mapping)
+                or receipt.get("error_type") is not None
+            ):
+                continue
+            value = result_value.get("value", result_value)
+            if not isinstance(value, Mapping):
+                continue
+            if (
+                request_value.get("action") == "search"
+                and value.get("operation") == "search"
+            ):
+                raw_ids = value.get("memory_ids")
+                if isinstance(raw_ids, list) and all(
+                    isinstance(item, str) and item.strip()
+                    for item in raw_ids
+                ):
+                    latest_search_ids = tuple(
+                        dict.fromkeys(item.strip() for item in raw_ids)
+                    )
+                continue
+            if (
+                request_value.get("action") != "read"
+                or value.get("operation") != "read"
+                or not self._successful_read_receipt(
+                    receipt,
+                    self._retrieval_tool_id,
+                )
+            ):
+                continue
+            memory = value.get("memory")
+            memory_id = value.get("memory_id")
+            if not isinstance(memory, Mapping) or not isinstance(memory_id, str):
+                continue
+            memory_id = memory_id.strip()
+            if not memory_id:
+                continue
+            paired_fields = (
+                memory.get("paraphrase_question"),
+                memory.get("paraphrase_answer_statement"),
+                memory.get("canonical_answer"),
+            )
+            if not all(
+                isinstance(item, str) and item.strip()
+                for item in paired_fields
+            ):
+                continue
+            read_records[memory_id] = memory
+        return latest_search_ids, MappingProxyType(read_records)
+
+    def _retrieval_first_completion_issue(
+        self,
+        *,
+        action: StructuredAction,
+        tool_receipts: Sequence[Mapping[str, object]],
+    ) -> str | None:
+        """Validate a worker-declared sufficiency decision without labels."""
+
+        arguments = action.arguments
+        if not isinstance(arguments, Mapping) or set(arguments) != {
+            "value",
+            "evidence_sufficiency",
+            "answer_source",
+            "supporting_memory_ids",
+        }:
+            return "qa_memory_resolution_schema_invalid"
+        latest_search_ids, read_records = self._retrieval_first_memory_receipts(
+            tool_receipts
+        )
+        if self._frozen_search_limit is None or len(latest_search_ids) != (
+            self._frozen_search_limit
+        ):
+            return "qa_memory_resolution_requires_complete_frozen_top_k"
+        if set(latest_search_ids) != set(read_records):
+            return "qa_memory_resolution_requires_all_top_k_reads"
+        sufficiency = arguments.get("evidence_sufficiency")
+        answer_source = arguments.get("answer_source")
+        supporting_ids = arguments.get("supporting_memory_ids")
+        value = arguments.get("value")
+        if not isinstance(supporting_ids, list) or any(
+            not isinstance(item, str) or item not in read_records
+            for item in supporting_ids
+        ):
+            return "qa_memory_resolution_supporting_ids_invalid"
+        if len(set(supporting_ids)) != len(supporting_ids):
+            return "qa_memory_resolution_supporting_ids_duplicate"
+        if sufficiency == "unsupported":
+            if (
+                answer_source != "parametric_fallback_required"
+                or supporting_ids
+                or value != "parametric_fallback_required"
+            ):
+                return "qa_memory_unsupported_resolution_invalid"
+            return None
+        if sufficiency != "supported" or answer_source != "qa_memory":
+            return "qa_memory_supported_resolution_invalid"
+        if not supporting_ids or not isinstance(value, str) or not value.strip():
+            return "qa_memory_supported_resolution_invalid"
+        canonical_answers = {
+            str(read_records[memory_id]["canonical_answer"]).strip()
+            for memory_id in supporting_ids
+        }
+        if value.strip() not in canonical_answers:
+            return "qa_memory_supported_answer_not_in_selected_pair"
+        return None
+
     def _completion_error(
         self,
         *,
@@ -9454,6 +9785,15 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 if unified_factual and retrieval_budget_exhausted:
                     return retrieval_failure_code
                 return "qa_completion_requires_successful_read_evidence"
+
+        if (
+            self._retrieval_first_parametric_fallback()
+            and self._retrieval_completion_required.get()
+        ):
+            return self._retrieval_first_completion_issue(
+                action=action,
+                tool_receipts=tool_receipts,
+            )
 
         evidence_retriever_question = (
             self._semantic_evidence_retriever_question.get()
@@ -9794,6 +10134,40 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         + location_lineage_issue
                     )
         return None
+
+    def _completion_artifact(
+        self,
+        *,
+        action: StructuredAction,
+        artifact: str,
+        tool_receipts: list[dict[str, object]],
+    ) -> str:
+        if not (
+            self._retrieval_first_parametric_fallback()
+            and self._retrieval_completion_required.get()
+        ):
+            return super()._completion_artifact(
+                action=action,
+                artifact=artifact,
+                tool_receipts=tool_receipts,
+            )
+        del artifact, tool_receipts
+        arguments = action.arguments
+        assert isinstance(arguments, Mapping)
+        sufficiency = str(arguments["evidence_sufficiency"])
+        answer_source = str(arguments["answer_source"])
+        supporting_ids = list(arguments["supporting_memory_ids"])
+        lines = [
+            "Retrieval evidence sufficiency: " + sufficiency,
+            "Answer source: " + answer_source,
+            "Supporting memory IDs: "
+            + json.dumps(supporting_ids, ensure_ascii=False, separators=(",", ":")),
+        ]
+        if sufficiency == "supported":
+            lines.append("Candidate answer: " + str(arguments["value"]).strip())
+        else:
+            lines.append("Parametric fallback required: true")
+        return "\n".join(lines)
 
     def _tool_action_error(
         self,
@@ -10695,6 +11069,7 @@ __all__ = [
     "QAReadToolBackend",
     "QA_RETRIEVAL_TOOL_ID",
     "QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL",
+    "RETRIEVAL_FIRST_PARAMETRIC_FALLBACK_POLICY",
     "TRIVIAQA_QA_MEMORY_TOOL_ID",
     "QASearchToolBackend",
     "build_qa_tool_registry",

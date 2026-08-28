@@ -422,7 +422,7 @@ class TriviaQAQAMemoryV2ControlPlaneTests(unittest.IsolatedAsyncioTestCase):
             output_metadata=stripped_metadata,
         )
         self.assertIn(
-            "did not actually consume",
+            "has not consumed",
             env._required_evidence_issue(stripped_execution) or "",
         )
 

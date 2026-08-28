@@ -684,10 +684,12 @@ def _qa_tool_runtime_settings(
         "optional",
         "required_tool_call",
         "required_evidence",
+        "retrieval_first_parametric_fallback",
     }:
         raise ConfigurationError(
             "qa_tool_runtime.completion_policy must be optional, "
-            "required_tool_call, or required_evidence"
+            "required_tool_call, required_evidence, or "
+            "retrieval_first_parametric_fallback"
         )
     if runtime_arm == "tool_off":
         return None

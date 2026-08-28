@@ -457,6 +457,15 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         request.terminal_protocol == "exact_single_answer_tag"
     )
     qa_memory_context = _uses_qa_memory(request)
+    retrieval_fallback_required = bool(
+        request.is_output_agent
+        and any(
+            isinstance(message.artifact, str)
+            and "Retrieval evidence sufficiency: unsupported" in message.artifact
+            and "Parametric fallback required: true" in message.artifact
+            for message in request.upstream
+        )
+    )
     if execution_mode in {"react", "coding"}:
         # SkillFlow's BoundedAgent asks the policy for one StructuredAction per
         # model turn.  The execution adapter, not this provider boundary,
@@ -486,6 +495,13 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "retrieved canonical answer only when those fields are semantically "
                 "aligned. Otherwise state that the memory does not cover the current "
                 "fact and do not transfer its answer to the current task."
+            )
+        if retrieval_fallback_required:
+            protocol += (
+                " The routed retrieval worker found no sufficiently aligned "
+                "QA-memory record. Ignore every retrieved canonical answer and "
+                "answer the original public task from parametric knowledge; "
+                "do not change its entity, relation, qualifiers, or answer slot."
             )
         if semantic_lineage and semantic_role == "reasoner":
             protocol += (
@@ -622,7 +638,12 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "answer only when entity binding, requested relation, qualifiers and "
                 "answer slot align with the current question. If a memory is unrelated, "
                 "use the remaining valid upstream reasoning and the public task, and "
-                "never copy the unrelated record's canonical answer."
+                "never copy the unrelated record's canonical answer. When a routed "
+                "worker artifact explicitly says `Retrieval evidence sufficiency: "
+                "unsupported` and `Parametric fallback required: true`, ignore every "
+                "retrieved canonical answer and answer the original public task from "
+                "parametric knowledge. When it says `supported`, use only its explicit "
+                "Candidate answer backed by the listed supporting memory IDs."
             )
     else:
         protocol = (
