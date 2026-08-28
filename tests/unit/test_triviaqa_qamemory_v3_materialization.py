@@ -370,6 +370,43 @@ def test_v12_resume_partitions_only_new_semantic_gate_failures() -> None:
     assert repair_source_ids == ("triviaqa:tc_9998",)
 
 
+def test_resume_partitions_newly_detected_curly_quote_drift() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:curly_quote_resume",
+        base_task_id="triviaqa:curly_quote_resume",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="Who recorded ‘Blue Moon’?",
+        canonical_answer="Example Singer",
+        native_split="train",
+    )
+    drifted = TriviaQAQAMemoryRecord.create(
+        source=source,
+        paraphrase_question="Name the performer who released 'Blue moon'.",
+        paraphrase_answer_statement=(
+            "Example Singer recorded Blue Moon."
+        ),
+        paraphrase_version="triviaqa.qa_memory.paraphrase.v12",
+        paraphrase_method=(
+            "semantic-preserving-question-and-answer-paraphrase"
+        ),
+        generator_provider="local-openai-compatible",
+        model_id="supervisor_theta",
+        model_revision="Qwen3.5-9B-local",
+        prompt_template_version="triviaqa.qa_memory.qa_paraphrase.v12",
+        generation_seed=20260828,
+    )
+
+    accepted, repair_source_ids = partition_resume_records_for_semantic_repair(
+        (drifted,),
+        (source,),
+    )
+
+    assert accepted == ()
+    assert repair_source_ids == ("triviaqa:curly_quote_resume",)
+
+
 def test_resume_orders_untouched_tail_before_admission_gaps() -> None:
     sources = tuple(
         TriviaQATrainSource(

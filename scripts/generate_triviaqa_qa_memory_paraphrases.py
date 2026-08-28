@@ -1852,7 +1852,7 @@ def parse_paraphrase_response(
             "paraphrase_question added, removed, or changed a numeric/date constraint"
         )
     if not _quoted_scope_preserved(source.original_question, question):
-        raise ValueError(
+        raise SemanticPreservationError(
             "paraphrase_question removed, changed, or invented quoted content"
         )
     if _answer_slot_count(question) != _answer_slot_count(
