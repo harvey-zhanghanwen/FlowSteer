@@ -488,6 +488,8 @@ def _contains_source_spelling_correction(original: str, candidate: str) -> bool:
 def _restore_authoritative_source_transpositions(
     original: str,
     candidate: str,
+    *,
+    protected_span: str | None = None,
 ) -> str:
     """Undo only unambiguous adjacent-transposition source corrections.
 
@@ -520,6 +522,11 @@ def _restore_authoritative_source_transpositions(
         ]
         return matches[0] if len(matches) == 1 else surface
 
+    if protected_span and protected_span in candidate:
+        return protected_span.join(
+            _LEXICAL_TOKEN.sub(restore, segment)
+            for segment in candidate.split(protected_span)
+        )
     return _LEXICAL_TOKEN.sub(restore, candidate)
 
 
@@ -571,6 +578,7 @@ def _semantic_relation_and_scope_preserved(
     original_question: str,
     paraphrase_question: str,
     paraphrase_answer_statement: str,
+    canonical_answer: str | None = None,
 ) -> None:
     """Fail closed on deterministic, high-confidence semantic drift."""
 
@@ -659,12 +667,17 @@ def _semantic_relation_and_scope_preserved(
         raise SemanticPreservationError(
             "paraphrase narrowed calendar-date granularity to day-of-month"
         )
+    statement_for_spelling_check = paraphrase_answer_statement
+    if canonical_answer and canonical_answer in statement_for_spelling_check:
+        statement_for_spelling_check = "".join(
+            statement_for_spelling_check.split(canonical_answer)
+        )
     if _contains_source_spelling_correction(
         original_question,
         paraphrase_question,
     ) or _contains_source_spelling_correction(
         original_question,
-        paraphrase_answer_statement,
+        statement_for_spelling_check,
     ):
         raise SemanticPreservationError(
             "paraphrase silently corrected an authoritative source token"
@@ -2653,6 +2666,15 @@ def parse_paraphrase_response(
     if not isinstance(statement, str) or not statement.strip():
         raise ValueError("paraphrase_answer_statement must be non-empty text")
     statement = " ".join(statement.split())
+    if not exact_canonical_span_preserved(statement, canonical):
+        canonicalized_statement = (
+            _canonicalize_answer_statement_from_accepted_alias(
+                source,
+                statement,
+            )
+        )
+        if canonicalized_statement is not None:
+            statement = canonicalized_statement
     possessive_name_binding = _possessive_name_answer_statement(source)
     if (
         possessive_name_binding is not None
@@ -2713,6 +2735,7 @@ def parse_paraphrase_response(
         original_question=source.original_question,
         paraphrase_question=question,
         paraphrase_answer_statement=statement,
+        canonical_answer=canonical,
     )
     return question, statement
 
@@ -3745,9 +3768,18 @@ class LocalQwen35Paraphraser:
                                 source.original_question,
                                 question,
                             )
+                            canonicalized_statement = (
+                                _canonicalize_answer_statement_from_accepted_alias(
+                                    source,
+                                    statement,
+                                )
+                            )
+                            if canonicalized_statement is not None:
+                                statement = canonicalized_statement
                             statement = _restore_authoritative_source_transpositions(
                                 source.original_question,
                                 statement,
+                                protected_span=source.canonical_answer,
                             )
                             question, statement = parse_paraphrase_response(
                                 json.dumps(

@@ -290,6 +290,56 @@ def test_accepted_alias_canonicalization_fails_closed(
     ) is None
 
 
+def test_parser_normalizes_admitted_alias_before_exact_canonical_gate() -> None:
+    source = _alias_source(
+        original="How many vice presidents did Franklin D Roosevelt have?",
+        canonical="Three",
+        accepted=("Three", "3", "three"),
+    )
+
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": (
+                    "State the number of vice presidents Franklin D Roosevelt had."
+                ),
+                "paraphrase_answer_statement": (
+                    "Franklin D Roosevelt had 3 vice presidents."
+                ),
+            }
+        ),
+        source,
+    ) == (
+        "State the number of vice presidents Franklin D Roosevelt had.",
+        "Franklin D Roosevelt had Three vice presidents.",
+    )
+
+
+def test_parser_does_not_treat_canonical_three_as_correction_of_there() -> None:
+    source = _alias_source(
+        original="How many independent 'Baltic states' are there?",
+        canonical="Three",
+        accepted=("Three", "3", "three"),
+    )
+
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": (
+                    "State the number of independent 'Baltic states' there are."
+                ),
+                "paraphrase_answer_statement": (
+                    "There are 3 independent 'Baltic states'."
+                ),
+            }
+        ),
+        source,
+    ) == (
+        "State the number of independent 'Baltic states' there are.",
+        "There are Three independent 'Baltic states'.",
+    )
+
+
 def test_answer_repair_prefers_verified_rejected_statement_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
