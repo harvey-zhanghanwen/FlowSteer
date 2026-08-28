@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 import json
 from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from src.interactive.agent_graph import AgentNode
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
@@ -18,7 +19,18 @@ from src.interactive.qa_tool_adapter import (
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     QARetrievalReactExecutionAdapter,
     TRIVIAQA_QA_MEMORY_TOOL_ID,
+    _normalized_retrieval_query,
+    _question_entity_anchor_tokens,
     build_qa_tool_registry,
+)
+from src.interactive.react_execution import (
+    ReactExecutionError,
+    ToolReactExecutionAdapter,
+)
+from src.interactive.scientific_sampling import (
+    ScientificSamplingCoordinate,
+    scientific_sampling_schedule_hash,
+    stable_hash,
 )
 from src.interactive.tool_runtime import ActionKind, StructuredAction, ToolRequest
 
@@ -166,6 +178,92 @@ class TriviaQAQAMemoryV2AdapterTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 observations=[],
             )
+        )
+
+    def test_malformed_possessive_is_normalized_before_query_admission(
+        self,
+    ) -> None:
+        question = "What was John Glenn/'s first spacecraft called?"
+        request = replace(
+            self._request(),
+            problem=question,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(_Index()),
+            max_turns=16,
+            max_tool_calls=12,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+            retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+        )
+
+        self.assertEqual(
+            _normalized_retrieval_query("John Glenn's first spacecraft called"),
+            _normalized_retrieval_query("John Glenn/'s first spacecraft called"),
+        )
+        self.assertEqual(
+            ("john", "glenn's"),
+            _question_entity_anchor_tokens(question),
+        )
+        self.assertIsNone(
+            adapter._tool_action_error(
+                request=request,
+                action=StructuredAction(
+                    ActionKind.TOOL,
+                    "search",
+                    {
+                        "query": "John Glenn first spacecraft called",
+                        "limit": 3,
+                    },
+                    resource_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+                ),
+                observations=[],
+            )
+        )
+
+    async def test_qamemory_failure_keeps_the_public_query_task_id(self) -> None:
+        task_id = "triviaqa:tc_public"
+        coordinate = ScientificSamplingCoordinate(
+            sampling_schedule_hash=scientific_sampling_schedule_hash(
+                base_seed=17
+            ),
+            schedule_purpose="triviaqa-qamemory-test",
+            ordered_sequence_hash=stable_hash([task_id]),
+            sequence_position=0,
+            task_id=task_id,
+            optimizer_step_or_anchor_ordinal=0,
+        )
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(_Index()),
+            max_turns=16,
+            max_tool_calls=12,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+            retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+            sampling_base_seed=17,
+            sampling_coordinate=coordinate,
+        )
+        request = replace(
+            self._request(),
+            problem="Which author wrote the novel?",
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        failure = ReactExecutionError("bounded retrieval continuation")
+
+        with patch.object(
+            ToolReactExecutionAdapter,
+            "execute",
+            new=AsyncMock(side_effect=failure),
+        ):
+            with self.assertRaises(ReactExecutionError) as caught:
+                await adapter.execute(request)
+
+        self.assertEqual(
+            task_id,
+            caught.exception.qa_memory_query_task_id,
         )
 
     async def test_registry_uses_canonical_qamemory_wire_and_receipts(self) -> None:

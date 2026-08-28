@@ -696,7 +696,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         class ReactFailureGateway:
             async def generate(self, request: AgentRequest) -> str:
-                raise ReactExecutionError(
+                failure = ReactExecutionError(
                     "bounded execution exhausted",
                     react_trace=(
                         {
@@ -711,6 +711,8 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         {"turn": 1, "request_id": request.request_id},
                     ),
                 )
+                failure.qa_memory_query_task_id = "triviaqa:tc_public"
+                raise failure
 
         graph = AgentGraph([AgentNode("a", "m1", "answer")])
         with self.assertRaises(AgentRuntimeError) as raised:
@@ -727,6 +729,10 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             failure.metadata["react_trace"][0]["observation_status"],
         )
         self.assertEqual("qa.search", failure.metadata["tool_receipts"][0]["tool_id"])
+        self.assertEqual(
+            "triviaqa:tc_public",
+            failure.metadata["qa_memory_query_task_id"],
+        )
 
     async def test_format_execution_role_is_explicit_and_terminal(self) -> None:
         catalog = registry()

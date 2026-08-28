@@ -623,6 +623,48 @@ def test_qa_reports_native_exact_match_and_token_f1_together():
     assert result["completed_only_token_f1"] == 1.0
 
 
+def test_in_database_triviaqa_report_names_the_qa_memory_direct_accuracy():
+    report = {
+        "dataset_key": "triviaqa",
+        "dataset": "TriviaQA",
+        "evaluation_scope": "in_database_transductive",
+        "primary_metric": "exact_match",
+        "project_split": "validation",
+        "sample_count": 128,
+        "metric_scope": (
+            "TriviaQA_official_normalization_exact_match_and_token_F1"
+        ),
+        "explicit_finished_count": 112,
+        "terminal_failure_count": 16,
+        "operational_failure_count": 0,
+        "direct_local_baseline": {
+            "completed": 128,
+            "evaluator_valid": 128,
+            "strict_exact_match": 0.3516,
+            "strict_token_f1": 0.4082,
+        },
+        "agentgraph": {
+            "completed": 112,
+            "evaluator_valid": 128,
+            "strict_exact_match": 0.875,
+            "strict_token_f1": 0.875,
+        },
+        "agentgraph_minus_direct": {
+            "exact_match": 0.5234,
+            "token_f1": 0.4668,
+        },
+        "failure_types": {"canvas_action_domain_exhausted": 16},
+        "protocol_equivalent_to_direct": False,
+        "skill_injection_performed": False,
+    }
+
+    markdown = _MODULE._report_markdown(report)
+
+    assert "全量 TriviaQA Q–A memory 条件下的直接准确率" in markdown
+    assert "Qwen3.5-9B 闭卷 Direct（question-only 对照）" in markdown
+    assert "AgentGraph Tool 检索直接准确率" in markdown
+
+
 def test_qa_metric_receipt_requires_both_native_metrics():
     valid, values = _MODULE._metrics(
         {

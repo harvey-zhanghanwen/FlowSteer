@@ -401,6 +401,7 @@ def _public_failure_metadata(exc: BaseException) -> Mapping[str, object]:
         "environment_terminal",
         "cause_error_type",
         "tool_plan_exhausted",
+        "qa_memory_query_task_id",
         "provider_id",
         "model_id",
         "http_status",

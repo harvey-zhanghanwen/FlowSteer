@@ -436,13 +436,18 @@ class MessageTests(unittest.TestCase):
         self.assertIn("Verification status:", verifier_system)
 
         original_question = "PRIVATE QUESTION SHOULD NOT REACH FORMATTER"
+        composite_candidate = (
+            "23 years. Third baseman Robinson played with the Baltimore "
+            "Orioles from 1955 to 1977; Carl Yastrzemski played with the "
+            "Boston Red Sox from 1961 to 1983"
+        )
         formatter_messages = build_agent_messages(
             request(
                 is_format_agent=True,
                 role_family="format",
                 problem=original_question,
                 upstream_artifact=(
-                    "Candidate answer: Florence\n"
+                    f"Candidate answer: {composite_candidate}\n"
                     "Evidence supported: true\n"
                     "Entity attribute binding correct: true\n"
                     "Multi-hop complete: true\nScope preserved: true\n"
@@ -458,6 +463,10 @@ class MessageTests(unittest.TestCase):
         self.assertIn("terminal FlowSteer Format Operator", formatter_system)
         self.assertIn("Copy character-for-character", formatter_user)
         self.assertIn("never change an alias, abbreviation", formatter_user)
+        self.assertIn(composite_candidate, formatter_user)
+        self.assertIn("do not shorten", formatter_user)
+        self.assertNotIn("OUTPUT ANSWER VALUE ONLY", formatter_user)
+        self.assertNotIn("PRESERVE SYMBOLIC FORMS", formatter_user)
         self.assertNotIn(original_question, formatter_system)
         self.assertNotIn(original_question, formatter_user)
 
@@ -978,6 +987,151 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(statement, proposition["evidence_span"]["const"])
         self.assertEqual(
             "Walter",
+            schema["properties"]["candidate_answer"]["const"],
+        )
+
+    def test_tool_less_reasoner_binds_copular_article_wrapped_answer(
+        self,
+    ) -> None:
+        statement = (
+            "The Amendment that introduced prohibition in 1920 is the 18th."
+        )
+        item = request(
+            is_output_agent=False,
+            role_family="reasoner",
+            problem=(
+                "Which Amendment to the Constitution brought in prohibition "
+                "in 1920?"
+            ),
+            semantic_protocol="qa_verified_answer_lineage_v2",
+            upstream_tool_receipts=qa_memory_tool_receipts(),
+            upstream_artifact=json.dumps(
+                {
+                    "retrieval_status": "evidence_found",
+                    "relevant_memory_ids": ["memory-18th"],
+                    "candidates": [
+                        {
+                            "memory_id": "memory-18th",
+                            "canonical_answer": "18th",
+                            "paraphrase_answer_statement": statement,
+                        }
+                    ],
+                }
+            ),
+        )
+
+        schema = OpenAICompatibleGateway().request_payload(item)[
+            "response_format"
+        ]["json_schema"]["schema"]
+        answer_slot = schema["properties"]["answer_slot"]["properties"]
+        proposition = schema["properties"]["evidence_propositions"][
+            "items"
+        ]["properties"]
+
+        self.assertEqual(
+            "object_or_attribute_value",
+            answer_slot["answer_field"]["const"],
+        )
+        self.assertEqual("is", proposition["relation"]["const"])
+        self.assertEqual(
+            "18th",
+            proposition["object_or_attribute_value"]["const"],
+        )
+        self.assertEqual(
+            "18th",
+            schema["properties"]["candidate_answer"]["const"],
+        )
+
+    def test_tool_less_reasoner_binds_passive_featured_in_answer(self) -> None:
+        statement = "The song Flash Bang, Wallop was featured in Half."
+        item = request(
+            is_output_agent=False,
+            role_family="reasoner",
+            problem="Which musical featured the song Flash Bang, Wallop?",
+            semantic_protocol="qa_verified_answer_lineage_v2",
+            upstream_tool_receipts=qa_memory_tool_receipts(),
+            upstream_artifact=json.dumps(
+                {
+                    "retrieval_status": "evidence_found",
+                    "relevant_memory_ids": ["memory-half"],
+                    "candidates": [
+                        {
+                            "memory_id": "memory-half",
+                            "canonical_answer": "Half",
+                            "paraphrase_answer_statement": statement,
+                        }
+                    ],
+                }
+            ),
+        )
+
+        schema = OpenAICompatibleGateway().request_payload(item)[
+            "response_format"
+        ]["json_schema"]["schema"]
+        answer_slot = schema["properties"]["answer_slot"]["properties"]
+        proposition = schema["properties"]["evidence_propositions"][
+            "items"
+        ]["properties"]
+
+        self.assertEqual(
+            "object_or_attribute_value",
+            answer_slot["answer_field"]["const"],
+        )
+        self.assertEqual(
+            "The song Flash Bang, Wallop",
+            proposition["subject"]["const"],
+        )
+        self.assertEqual("was featured in", proposition["relation"]["const"])
+        self.assertEqual(
+            "Half",
+            proposition["object_or_attribute_value"]["const"],
+        )
+
+    def test_tool_less_reasoner_strips_question_backed_type_wrapper(
+        self,
+    ) -> None:
+        statement = (
+            "The theme song 'Do You Know Where You're Going To' was featured "
+            "in the film Mahogany."
+        )
+        item = request(
+            is_output_agent=False,
+            role_family="reasoner",
+            problem=(
+                "Do You Know Where You're Going To? was the theme from which "
+                "film?"
+            ),
+            semantic_protocol="qa_verified_answer_lineage_v2",
+            upstream_tool_receipts=qa_memory_tool_receipts(),
+            upstream_artifact=json.dumps(
+                {
+                    "retrieval_status": "evidence_found",
+                    "relevant_memory_ids": ["memory-mahogany"],
+                    "candidates": [
+                        {
+                            "memory_id": "memory-mahogany",
+                            "canonical_answer": "Mahogany",
+                            "paraphrase_answer_statement": statement,
+                        }
+                    ],
+                }
+            ),
+        )
+
+        schema = OpenAICompatibleGateway().request_payload(item)[
+            "response_format"
+        ]["json_schema"]["schema"]
+        proposition = schema["properties"]["evidence_propositions"][
+            "items"
+        ]["properties"]
+
+        self.assertEqual("was featured in", proposition["relation"]["const"])
+        self.assertEqual(
+            "Mahogany",
+            proposition["object_or_attribute_value"]["const"],
+        )
+        self.assertEqual(
+            "Mahogany",
             schema["properties"]["candidate_answer"]["const"],
         )
 

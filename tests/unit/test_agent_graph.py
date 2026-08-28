@@ -9236,7 +9236,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             [read_text],
             require_answer_binding=True,
             original_question=question,
-            qa_memory_relevant_memory_ids=[memory_id],
+            qa_memory_relevant_memory_ids=["different-memory"],
             qa_memory_expected_source_task_ids=["triviaqa:different"],
         )
         self.assertIn(
@@ -9306,6 +9306,256 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 qa_memory_relevant_memory_ids=[memory_id],
                 qa_memory_expected_source_task_ids=[source_task_id],
             )
+        )
+
+    def test_exact_source_qamemory_grounds_entity_across_paired_question(self) -> None:
+        question = (
+            "Brooks Robinson and Carl Yastrzemski hold the major league "
+            "baseball record for playing the greatest number of seasons with "
+            "the same team. How many years did they play-- and with what teams?"
+        )
+        paraphrase_question = question.replace("hold", "maintain")
+        canonical_answer = (
+            "23 years. Third baseman Robinson played with the Baltimore "
+            "Orioles from 1955 to 1977; Carl Yastrzemski played with the "
+            "Boston Red Sox from 1961 to 1983"
+        )
+        evidence_span = "They played for " + canonical_answer
+        memory_id = "qa-memory-baseball-seasons"
+        source_task_id = "triviaqa:tc_171"
+        artifact = json.dumps(
+            {
+                "question_scope": question,
+                "answer_slot": {
+                    "answer_type": "number",
+                    "answer_cardinality": "single",
+                    "qualifiers": ["years", "teams"],
+                    "proposition_index": 0,
+                    "answer_field": "object_or_attribute_value",
+                },
+                "evidence_propositions": [
+                    {
+                        "subject": "Brooks Robinson",
+                        "relation": "played_with",
+                        "object_or_attribute_value": canonical_answer,
+                        "qualifiers": ["major league baseball record"],
+                        "evidence_span": evidence_span,
+                    }
+                ],
+                "multi_hop_chain": ["bind years and both teams"],
+                "candidate_answer": canonical_answer,
+                "evidence": [memory_id],
+            }
+        )
+        read_text = _ReadReceiptText(
+            f"Question: {paraphrase_question}\nAnswer: {evidence_span}",
+            tool_id="triviaqa.qa_memory",
+            record_id=memory_id,
+            paraphrase_question=paraphrase_question,
+            paraphrase_answer_statement=evidence_span,
+            source_train_task_id=source_task_id,
+            canonical_answer=canonical_answer,
+            semantic_preserving_paraphrase=True,
+        )
+
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact,
+                [read_text],
+                require_answer_binding=True,
+                original_question=question,
+                qa_memory_relevant_memory_ids=[memory_id],
+                qa_memory_expected_source_task_ids=[source_task_id],
+            )
+        )
+        wrong_source = AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+            artifact,
+            [read_text],
+            require_answer_binding=True,
+            original_question=question,
+            qa_memory_relevant_memory_ids=[memory_id],
+            qa_memory_expected_source_task_ids=["triviaqa:different"],
+        )
+        self.assertIsNotNone(wrong_source)
+
+    def test_exact_source_qamemory_overrides_wh_field_only_for_matching_source(
+        self,
+    ) -> None:
+        question = "Which 1975 film starred Diana Ross?"
+        evidence_span = "Diana Ross starred in the film Mahogany."
+        memory_id = "qa-memory-mahogany"
+        source_task_id = "triviaqa:tc_mahogany"
+        artifact = json.dumps(
+            {
+                "question_scope": question,
+                "answer_slot": {
+                    "answer_type": "entity",
+                    "answer_cardinality": "single",
+                    "qualifiers": [],
+                    "proposition_index": 0,
+                    "answer_field": "object_or_attribute_value",
+                },
+                "evidence_propositions": [
+                    {
+                        "subject": "Diana Ross",
+                        "relation": "starred in",
+                        "object_or_attribute_value": "the film Mahogany",
+                        "qualifiers": [],
+                        "evidence_span": evidence_span,
+                    }
+                ],
+                "multi_hop_chain": ["bind the film title"],
+                "candidate_answer": "Mahogany",
+                "evidence": [evidence_span],
+            }
+        )
+        read_text = _ReadReceiptText(
+            f"Question: {question}\nAnswer: {evidence_span}",
+            tool_id="triviaqa.qa_memory",
+            record_id=memory_id,
+            paraphrase_question=question,
+            paraphrase_answer_statement=evidence_span,
+            source_train_task_id=source_task_id,
+            canonical_answer="Mahogany",
+            semantic_preserving_paraphrase=True,
+        )
+        exact = AgentWorkflowEnv._exact_source_qa_memory_canonical_answer(
+            artifact,
+            [read_text],
+            qa_memory_relevant_memory_ids=[memory_id],
+            qa_memory_expected_source_task_ids=[source_task_id],
+        )
+        self.assertEqual("Mahogany", exact)
+        candidate, issue = AgentWorkflowEnv._reasoner_candidate(
+            artifact,
+            original_question=question,
+            minimum_evidence_propositions=1,
+            minimum_reasoning_steps=1,
+            preserve_question_derived_answer_field=True,
+            exact_source_canonical_answer=exact,
+        )
+        self.assertEqual("Mahogany", candidate)
+        self.assertIsNone(issue)
+
+        wrong_source_exact = (
+            AgentWorkflowEnv._exact_source_qa_memory_canonical_answer(
+                artifact,
+                [read_text],
+                qa_memory_relevant_memory_ids=[memory_id],
+                qa_memory_expected_source_task_ids=["triviaqa:different"],
+            )
+        )
+        self.assertIsNone(wrong_source_exact)
+        candidate, issue = AgentWorkflowEnv._reasoner_candidate(
+            artifact,
+            original_question=question,
+            minimum_evidence_propositions=1,
+            minimum_reasoning_steps=1,
+            preserve_question_derived_answer_field=True,
+            exact_source_canonical_answer=wrong_source_exact,
+        )
+        self.assertIsNone(candidate)
+        self.assertIn("overt wh-dependency", issue or "")
+
+    def test_exact_source_qamemory_uses_paired_question_for_scope(self) -> None:
+        question = "Which player finished in first place in the race?"
+        paraphrase_question = "Who finished in first place in the race?"
+        evidence_span = "Alice won the race."
+        memory_id = "qa-memory-first-place"
+        source_task_id = "triviaqa:tc_first_place"
+        artifact = json.dumps(
+            {
+                "question_scope": question,
+                "answer_slot": {
+                    "answer_type": "entity",
+                    "answer_cardinality": "single",
+                    "qualifiers": ["first place"],
+                    "proposition_index": 0,
+                    "answer_field": "subject",
+                },
+                "evidence_propositions": [
+                    {
+                        "subject": "Alice",
+                        "relation": "won",
+                        "object_or_attribute_value": "the race",
+                        "qualifiers": ["first place"],
+                        "evidence_span": evidence_span,
+                    }
+                ],
+                "multi_hop_chain": ["bind the first-place finisher"],
+                "candidate_answer": "Alice",
+                "evidence": [evidence_span],
+            }
+        )
+        read_text = _ReadReceiptText(
+            f"Question: {paraphrase_question}\nAnswer: {evidence_span}",
+            tool_id="triviaqa.qa_memory",
+            record_id=memory_id,
+            paraphrase_question=paraphrase_question,
+            paraphrase_answer_statement=evidence_span,
+            source_train_task_id=source_task_id,
+            canonical_answer="Alice",
+            semantic_preserving_paraphrase=True,
+        )
+
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact,
+                [read_text],
+                require_answer_binding=True,
+                original_question=question,
+                qa_memory_relevant_memory_ids=[memory_id],
+                qa_memory_expected_source_task_ids=[source_task_id],
+            )
+        )
+
+    def test_exact_source_multi_part_canonical_answer_is_not_minimal_failure(
+        self,
+    ) -> None:
+        canonical = "One trophy is gold; three trophies are silver"
+        verifier = json.dumps(
+            {
+                "candidate_answer": canonical,
+                "evidence_supported": True,
+                "entity_attribute_binding_correct": True,
+                "alias_binding_correct": True,
+                "answer_type_cardinality_correct": True,
+                "multi_hop_complete": True,
+                "minimal_answer_surface": False,
+                "scope_preserved": True,
+                "verification_status": "repair_required",
+            }
+        )
+        candidate, issue = AgentWorkflowEnv._verifier_candidate(verifier)
+        self.assertIsNone(candidate)
+        self.assertIn("minimal_answer_surface", issue or "")
+        candidate, issue = AgentWorkflowEnv._verifier_candidate(
+            verifier,
+            exact_source_canonical_answer=canonical,
+        )
+        self.assertEqual(canonical, candidate)
+        self.assertIsNone(issue)
+
+    def test_failure_continuation_preserves_qamemory_query_task_id(self) -> None:
+        graph = _trivia_semantic_graph()
+        record = AgentFailureRecord(
+            request_id="reader-continuation",
+            agent_id="reader",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="ReactExecutionError",
+            message="bounded retrieval continuation",
+            metadata={
+                "tool_receipts": [_test_read_receipt("public-read")],
+                "qa_memory_query_task_id": "triviaqa:tc_public",
+            },
+        )
+        continuation = AgentWorkflowEnv._failure_continuation_candidate(record)
+        self.assertIsNotNone(continuation)
+        assert continuation is not None
+        self.assertEqual(
+            "triviaqa:tc_public",
+            continuation["qa_memory_query_task_id"],
         )
 
     def test_reasoner_entity_gate_accepts_only_receipt_title_bound_alias(

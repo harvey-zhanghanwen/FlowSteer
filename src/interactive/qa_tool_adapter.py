@@ -35,6 +35,7 @@ from .task_dataset import (
     qa_answer_cardinality_constraint,
     qa_answer_type_constraint,
     qa_question_scope,
+    verified_year_to_decade_normalization,
 )
 from .qa_retrieval import (
     DEFAULT_QA_RETRIEVAL_INDEX,
@@ -230,7 +231,8 @@ def _qa_memory_answer_proposition(
                 "answer_field": "subject",
             }
     trailing = re.fullmatch(
-        rf"\s*(.+?)\s+(is|are|was|were)\s+({answer_pattern})\s*[.!?]?\s*",
+        rf"\s*(.+?)\s+(is|are|was|were)\s+"
+        rf"(?:(?:the|a|an)\s+)?({answer_pattern})\s*[.!?]?\s*",
         statement,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -244,6 +246,73 @@ def _qa_memory_answer_proposition(
                 "evidence_span": statement,
                 "answer_field": "object_or_attribute_value",
             }
+    # TriviaQA QA-memory can realize a location answer with the bounded
+    # copular-locative form ``subject + be + in/at/on + answer``.  FlowSteer's
+    # terminal proposition still copies the lexical predicate from the routed
+    # statement; this adaptation only prevents the Reasoner from replacing
+    # ``is in`` with an unsupported semantic label such as ``located_in``.
+    trailing_copular_locative = re.fullmatch(
+        rf"\s*(.+?)\s+((?:is|are|was|were)\s+(?:in|at|on))\s+"
+        rf"({answer_pattern})\s*[.!?]?\s*",
+        statement,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if trailing_copular_locative is not None:
+        subject = trailing_copular_locative.group(1).strip()
+        relation = trailing_copular_locative.group(2).strip()
+        if subject and relation:
+            return {
+                "subject": subject,
+                "relation": relation,
+                "object_or_attribute_value": answer,
+                "evidence_span": statement,
+                "answer_field": "object_or_attribute_value",
+            }
+    # A declarative QA-memory statement may realize an answer as the object of
+    # an evidence-surface passive predicate, for example ``the song was
+    # featured in [the film] Mahogany``.  Parse only the bounded English
+    # passive form and strip at most a determiner plus one question-published
+    # answer-type wrapper.  The canonical answer itself, routed read receipt,
+    # and full evidence statement remain the authority; this does not infer an
+    # alias or relation class.
+    trailing_object = re.fullmatch(
+        rf"\s*(.+?)\s+({answer_pattern})\s*[.!?]?\s*",
+        statement,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if trailing_object is not None:
+        predicate_prefix = trailing_object.group(1).strip()
+        wrapper = re.search(
+            r"\s+(the|a|an)(?:\s+([^\W\d_]+(?:[-'’][^\W\d_]+)*))?\s*$",
+            predicate_prefix,
+            flags=re.IGNORECASE | re.UNICODE,
+        )
+        if wrapper is not None:
+            wrapper_type = wrapper.group(2)
+            question_tokens = frozenset(_scope_tokens(request.problem))
+            if wrapper_type is None or all(
+                token in question_tokens for token in _scope_tokens(wrapper_type)
+            ):
+                predicate_prefix = predicate_prefix[: wrapper.start()].rstrip()
+        passive = re.fullmatch(
+            r"\s*(.+?)\s+((?:(?:is|are|was|were|be|been|being)|"
+            r"(?:has|have|had)\s+been)\s+"
+            r"[^\W\d_]+(?:ed|en)\s+"
+            r"(?:in|on|from|by|with|at|for|to))\s*",
+            predicate_prefix,
+            flags=re.IGNORECASE | re.DOTALL | re.UNICODE,
+        )
+        if passive is not None:
+            subject = passive.group(1).strip()
+            relation = passive.group(2).strip()
+            if subject and relation:
+                return {
+                    "subject": subject,
+                    "relation": relation,
+                    "object_or_attribute_value": answer,
+                    "evidence_span": statement,
+                    "answer_field": "object_or_attribute_value",
+                }
     leading_active = re.fullmatch(
         rf"\s*(?:(?:The|A|An)\s+)?(?:[\w'’.-]+\s+)?"
         rf"({answer_pattern})\s+([^\W\d_]+)\s+(.+?)\s*[.!?]?\s*",
@@ -1700,10 +1769,24 @@ def _location_relation_candidate_compatible(
     )
 
 
+def _normalize_abnormal_possessive_surface(surface: str) -> str:
+    """Repair only the dataset's malformed slash-before-possessive surface.
+
+    TriviaQA contains a public question spelling such as ``John Glenn/'s``.
+    The slash is not part of the possessor and previously produced a separate
+    one-letter ``s`` entity-anchor token.  Normalize that exact orthographic
+    boundary before query/entity/scope validation without changing other
+    slashes, apostrophes, names, or retrieval payloads.
+    """
+
+    normalized = unicodedata.normalize("NFKC", surface)
+    return re.sub(r"/(?=['’][sS]\b)", "", normalized)
+
+
 def _normalized_retrieval_query(query: str) -> str:
     """Canonicalize only for duplicate-request admission, not retrieval."""
 
-    normalized = unicodedata.normalize("NFKC", query).casefold()
+    normalized = _normalize_abnormal_possessive_surface(query).casefold()
     return " ".join(re.findall(r"\w+", normalized, flags=re.UNICODE))
 
 
@@ -1782,8 +1865,24 @@ def _relation_surface_matches_evidence(
 ) -> bool:
     """Check exact or conservative inflectional relation grounding."""
 
-    canonical_relation = " ".join(relation_surface.casefold().split())
-    canonical_evidence = " ".join(evidence_surface.casefold().split())
+    # Structured predicates use the conventional snake_case wire surface.
+    # Underscores delimit predicate terms; treating ``born_in`` as one lexical
+    # token made a valid receipt sentence such as ``was born in`` impossible
+    # to ground.  This is lexical normalization only, not a relation alias.
+    canonical_relation = " ".join(
+        re.sub(
+            r"_+",
+            " ",
+            unicodedata.normalize("NFKC", relation_surface).casefold(),
+        ).split()
+    )
+    canonical_evidence = " ".join(
+        re.sub(
+            r"_+",
+            " ",
+            unicodedata.normalize("NFKC", evidence_surface).casefold(),
+        ).split()
+    )
     if canonical_relation and canonical_relation in canonical_evidence:
         return True
     relation_tokens = tuple(
@@ -1796,12 +1895,49 @@ def _relation_surface_matches_evidence(
         for token in re.findall(r"\w+", canonical_evidence, flags=re.UNICODE)
     )
     return bool(relation_tokens) and all(
-        any(
+        (
+            relation_token == "decade"
+            and _surface_contains_verified_decade(canonical_evidence)
+        )
+        or any(
             _relation_token_variants(relation_token) & evidence_token_variants
             for evidence_token_variants in evidence_variants
         )
         for relation_token in relation_tokens
     )
+
+
+_NUMERIC_DECADE_SURFACE_PATTERN = re.compile(
+    r"(?<!\w)(?:(?:1\d{3}|20\d{2})(?:['’]?s|[-–](?:1\d{3}|20\d{2}))"
+    r"|['’]?\d{2}(?:['’]?s|[-–]\d{2}))(?!\w)",
+    flags=re.IGNORECASE,
+)
+
+
+def _surface_contains_verified_decade(surface: str) -> bool:
+    """Return whether text contains an existing deterministic decade form.
+
+    The authoritative conversion remains
+    :func:`verified_year_to_decade_normalization`; this helper only extracts a
+    bounded numeric surface from receipt text and supplies its own decade
+    start as the source year.  A bare year therefore cannot satisfy a
+    structured ``*_decade`` predicate.
+    """
+
+    for match in _NUMERIC_DECADE_SURFACE_PATTERN.finditer(surface):
+        decade_surface = match.group(0)
+        digits = re.search(r"\d{2,4}", decade_surface)
+        if digits is None:
+            continue
+        start = int(digits.group(0))
+        source_year = start if len(digits.group(0)) == 4 else 1900 + start
+        if verified_year_to_decade_normalization(
+            original_question="Which decade?",
+            source_value=str(source_year),
+            candidate_answer=decade_surface,
+        ):
+            return True
+    return False
 
 
 def _relation_surface_tokens(surface: str) -> tuple[str, ...]:
@@ -2062,7 +2198,7 @@ def _scope_tokens(surface: str) -> tuple[str, ...]:
     return tuple(
         re.findall(
             r"\w+(?:['’]\w+)?",
-            unicodedata.normalize("NFKC", surface).casefold(),
+            _normalize_abnormal_possessive_surface(surface).casefold(),
             flags=re.UNICODE,
         )
     )
@@ -2190,7 +2326,7 @@ def _question_entity_anchor_tokens(original_question: str) -> tuple[str, ...]:
     raw_tokens = tuple(
         re.findall(
             r"[^\W\d_]+(?:[-'’][^\W\d_]+)*",
-            unicodedata.normalize("NFKC", original_question),
+            _normalize_abnormal_possessive_surface(original_question),
             flags=re.UNICODE,
         )
     )
@@ -2306,7 +2442,7 @@ def _question_has_proper_entity_anchor(original_question: str) -> bool:
         and token.casefold() not in _RELATION_CONTEXT_STOPWORDS
         for token in re.findall(
             r"[^\W\d_]+(?:[-'’][^\W\d_]+)*",
-            unicodedata.normalize("NFKC", original_question),
+            _normalize_abnormal_possessive_surface(original_question),
             flags=re.UNICODE,
         )
     )
@@ -2330,7 +2466,7 @@ def _question_proper_name_title_anchor_tokens(
     raw_tokens = tuple(
         re.findall(
             r"[^\W\d_]+(?:[-'’][^\W\d_]+)*",
-            unicodedata.normalize("NFKC", original_question),
+            _normalize_abnormal_possessive_surface(original_question),
             flags=re.UNICODE,
         )
     )
@@ -2860,7 +2996,7 @@ def _question_named_constraint_tokens(
     for index, match in enumerate(
         re.finditer(
             r"[^\W\d_]+(?:[-'’][^\W\d_]+)*",
-            unicodedata.normalize("NFKC", original_question),
+            _normalize_abnormal_possessive_surface(original_question),
             flags=re.UNICODE,
         )
     ):
@@ -8820,6 +8956,22 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     model_calls=exc.model_calls,
                     tool_plan_exhausted=True,
                 ) from exc
+        except ReactExecutionError as exc:
+            # The worker's sampling coordinate is already the public task
+            # identity used on successful QA-memory receipts.  Preserve the
+            # same scalar on a bounded failure so FlowSteer's non-destructive
+            # same-role continuation can retain exact-source provenance without
+            # exposing any retrieved Q-A content to the Director.
+            if (
+                semantic_evidence_retriever_protocol
+                == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+                and self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+                and self._sampling_coordinate is not None
+            ):
+                exc.qa_memory_query_task_id = (
+                    self._sampling_coordinate.task_id
+                )
+            raise
         finally:
             self._semantic_evidence_retriever_protocol.reset(
                 evidence_retriever_protocol_token

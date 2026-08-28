@@ -5308,6 +5308,16 @@ class AgentWorkflowEnv:
         tool_plan_exhausted = record.metadata.get("tool_plan_exhausted")
         if type(tool_plan_exhausted) is bool:
             result["tool_plan_exhausted"] = tool_plan_exhausted
+        qa_memory_query_task_id = record.metadata.get(
+            "qa_memory_query_task_id"
+        )
+        if (
+            isinstance(qa_memory_query_task_id, str)
+            and qa_memory_query_task_id.strip()
+        ):
+            result["qa_memory_query_task_id"] = (
+                qa_memory_query_task_id.strip()
+            )
         return result if len(result) > 1 else None
 
     def _recovery_continuation_handoff(
@@ -5428,6 +5438,14 @@ class AgentWorkflowEnv:
             ]
             if receipts:
                 result["tool_receipts"] = receipts
+        qa_memory_query_task_id = source.get("qa_memory_query_task_id")
+        if (
+            isinstance(qa_memory_query_task_id, str)
+            and qa_memory_query_task_id.strip()
+        ):
+            result["qa_memory_query_task_id"] = (
+                qa_memory_query_task_id.strip()
+            )
         if not any(field_name in result for field_name in ("react_trace", "tool_receipts")):
             return None
         return result
@@ -7014,6 +7032,123 @@ class AgentWorkflowEnv:
         return None
 
     @classmethod
+    def _canonical_candidate_matches_argument_wrapper(
+        cls,
+        candidate: str,
+        argument: object,
+        *,
+        original_question: Optional[str],
+    ) -> bool:
+        """Match an exact canonical answer inside a question-derived wrapper.
+
+        A paired QA-memory answer statement can realize the answer argument as
+        ``the 18th`` or ``the film Mahogany`` while the canonical candidate is
+        ``18th`` or ``Mahogany``.  The wrapper is admissible only when every
+        extra lexical token is a determiner or already occurs in the original
+        question; arbitrary appositives and answer expansion remain rejected.
+        """
+
+        if not isinstance(argument, str) or not argument.strip():
+            return False
+        candidate_tokens = cls._lexical_tokens(candidate)
+        argument_tokens = cls._lexical_tokens(argument)
+        if not candidate_tokens or len(candidate_tokens) > len(argument_tokens):
+            return False
+        occurrences = tuple(
+            index
+            for index in range(len(argument_tokens) - len(candidate_tokens) + 1)
+            if argument_tokens[index : index + len(candidate_tokens)]
+            == candidate_tokens
+        )
+        if len(occurrences) != 1:
+            return False
+        start = occurrences[0]
+        wrapper_tokens = (
+            *argument_tokens[:start],
+            *argument_tokens[start + len(candidate_tokens) :],
+        )
+        if not wrapper_tokens:
+            return True
+        if len(wrapper_tokens) > 3 or not isinstance(original_question, str):
+            return False
+        question_tokens = set(cls._lexical_tokens(original_question))
+        return all(
+            token in {"a", "an", "the"} or token in question_tokens
+            for token in wrapper_tokens
+        )
+
+    @classmethod
+    def _exact_source_qa_memory_canonical_answer(
+        cls,
+        artifact: str,
+        read_evidence_texts: Sequence[str],
+        *,
+        qa_memory_relevant_memory_ids: Sequence[str],
+        qa_memory_expected_source_task_ids: Sequence[str],
+    ) -> Optional[str]:
+        """Return the candidate bound to the routed exact-source QA record.
+
+        This consumes only worker Tool receipts and the worker-selected memory
+        identifiers already routed through AgentGraph.  It does not consult an
+        evaluator label.  Both source task identity and canonical answer must
+        agree, and the selected proposition must cite that same read record.
+        """
+
+        relevant_ids = frozenset(qa_memory_relevant_memory_ids)
+        expected_source_ids = frozenset(qa_memory_expected_source_task_ids)
+        if not relevant_ids or not expected_source_ids:
+            return None
+        fields, issue = cls._structured_semantic_fields(
+            artifact,
+            _REASONER_SEMANTIC_FIELDS,
+        )
+        if issue is not None or fields is None:
+            return None
+        candidate = fields.get("candidate_answer")
+        answer_slot = fields.get("answer_slot")
+        propositions = fields.get("evidence_propositions")
+        if (
+            not isinstance(candidate, str)
+            or not candidate.strip()
+            or not isinstance(answer_slot, Mapping)
+            or not isinstance(propositions, (list, tuple))
+        ):
+            return None
+        proposition_index = answer_slot.get("proposition_index")
+        if (
+            isinstance(proposition_index, bool)
+            or not isinstance(proposition_index, int)
+            or proposition_index < 0
+            or proposition_index >= len(propositions)
+        ):
+            return None
+        selected = propositions[proposition_index]
+        evidence_span = (
+            selected.get("evidence_span")
+            if isinstance(selected, Mapping)
+            else None
+        )
+        if not isinstance(evidence_span, str) or not evidence_span.strip():
+            return None
+        for read_text in read_evidence_texts:
+            if not isinstance(read_text, _ReadReceiptText):
+                continue
+            if (
+                read_text.tool_id == _TRIVIAQA_QA_MEMORY_TOOL_ID
+                and read_text.record_id in relevant_ids
+                and read_text.source_train_task_id in expected_source_ids
+                and read_text.canonical_answer == candidate
+                and isinstance(read_text.paraphrase_answer_statement, str)
+                and read_text.paraphrase_answer_statement.strip()
+                and _evidence_span_matches_read(
+                    evidence_span,
+                    read_text.paraphrase_answer_statement,
+                )
+            ):
+                return candidate
+        return None
+
+    @classmethod
     def _reasoner_candidate(
         cls,
         artifact: str,
@@ -7022,6 +7157,7 @@ class AgentWorkflowEnv:
         minimum_evidence_propositions: int = 2,
         minimum_reasoning_steps: int = 2,
         preserve_question_derived_answer_field: bool = False,
+        exact_source_canonical_answer: Optional[str] = None,
     ) -> tuple[Optional[str], Optional[str]]:
         if (
             isinstance(minimum_evidence_propositions, bool)
@@ -7061,6 +7197,10 @@ class AgentWorkflowEnv:
                 "Reasoner field 'candidate_answer' must be one non-empty bare "
                 "answer span without surrounding whitespace"
             )
+        exact_source_candidate = bool(
+            isinstance(exact_source_canonical_answer, str)
+            and exact_source_canonical_answer == candidate
+        )
 
         answer_slot = fields["answer_slot"]
         propositions = fields["evidence_propositions"]
@@ -7231,6 +7371,7 @@ class AgentWorkflowEnv:
         if (
             expected_answer_field is not None
             and answer_field != expected_answer_field
+            and not exact_source_candidate
         ):
             return None, (
                 "Reasoner answer_slot.answer_field must preserve the original "
@@ -7241,6 +7382,14 @@ class AgentWorkflowEnv:
         selected_object = selected["object_or_attribute_value"]
         assert isinstance(selected_subject, str)
         assert isinstance(selected_object, str)
+        exact_source_argument_binding = bool(
+            exact_source_candidate
+            and cls._canonical_candidate_matches_argument_wrapper(
+                candidate,
+                selected.get(answer_field),
+                original_question=original_question,
+            )
+        )
         if (
             _canonical_evidence_text(selected_subject)
             == _canonical_evidence_text(selected_object)
@@ -7327,6 +7476,7 @@ class AgentWorkflowEnv:
             if (
                 preserve_question_derived_answer_field
                 and expected_answer_field is not None
+                and not exact_source_argument_binding
             ):
                 return None, (
                     "Reasoner candidate_answer is bound to the alternate "
@@ -7357,6 +7507,8 @@ class AgentWorkflowEnv:
                 "normalization requested by the question"
             )
         if candidate != selected[answer_field] and not temporal_normalization:
+            if exact_source_argument_binding:
+                return candidate, None
             matching_fields = tuple(
                 field_name
                 for field_name in ("subject", "object_or_attribute_value")
@@ -7366,6 +7518,7 @@ class AgentWorkflowEnv:
                 if (
                     preserve_question_derived_answer_field
                     and expected_answer_field is not None
+                    and not exact_source_argument_binding
                 ):
                     return None, (
                         "Reasoner candidate_answer is bound to the alternate "
@@ -7402,8 +7555,25 @@ class AgentWorkflowEnv:
     def _reasoner_candidate_for_current_dataset(
         self,
         artifact: str,
+        *,
+        read_evidence_texts: Sequence[str] = (),
+        qa_memory_relevant_memory_ids: Sequence[str] = (),
+        qa_memory_expected_source_task_ids: Sequence[str] = (),
     ) -> tuple[Optional[str], Optional[str]]:
         minimum_evidence, minimum_steps = self._semantic_minimums()
+        exact_source_canonical_answer = (
+            self._exact_source_qa_memory_canonical_answer(
+                artifact,
+                read_evidence_texts,
+                qa_memory_relevant_memory_ids=qa_memory_relevant_memory_ids,
+                qa_memory_expected_source_task_ids=(
+                    qa_memory_expected_source_task_ids
+                ),
+            )
+            if self.required_evidence_tool_id
+            == _TRIVIAQA_QA_MEMORY_TOOL_ID
+            else None
+        )
         return self._reasoner_candidate(
             artifact,
             original_question=hotpotqa_question_scope(self._problem),
@@ -7412,6 +7582,7 @@ class AgentWorkflowEnv:
             preserve_question_derived_answer_field=(
                 self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
             ),
+            exact_source_canonical_answer=exact_source_canonical_answer,
         )
 
     @staticmethod
@@ -7574,6 +7745,8 @@ class AgentWorkflowEnv:
     def _verifier_candidate(
         cls,
         artifact: str,
+        *,
+        exact_source_canonical_answer: Optional[str] = None,
     ) -> tuple[Optional[str], Optional[str]]:
         fields, issue = cls._structured_semantic_fields(
             artifact,
@@ -7598,13 +7771,31 @@ class AgentWorkflowEnv:
             "alias_binding_correct",
             "answer_type_cardinality_correct",
             "multi_hop_complete",
-            "minimal_answer_surface",
             "scope_preserved",
         ):
             if fields[field] is not True:
                 return None, f"Verifier field {field!r} must be true"
+        canonical_multi_part_answer = bool(
+            isinstance(exact_source_canonical_answer, str)
+            and exact_source_canonical_answer == candidate
+            and len(cls._lexical_tokens(candidate)) > 1
+        )
+        if (
+            fields["minimal_answer_surface"] is not True
+            and not canonical_multi_part_answer
+        ):
+            return None, "Verifier field 'minimal_answer_surface' must be true"
         status = fields["verification_status"]
-        if not isinstance(status, str) or status.strip().casefold() != "supported":
+        admitted_statuses = (
+            {"supported", "repair_required"}
+            if canonical_multi_part_answer
+            and fields["minimal_answer_surface"] is False
+            else {"supported"}
+        )
+        if (
+            not isinstance(status, str)
+            or status.strip().casefold() not in admitted_statuses
+        ):
             return None, "Verifier field 'verification_status' must be 'supported'"
         return candidate, None
 
@@ -7793,6 +7984,16 @@ class AgentWorkflowEnv:
             qa_memory_expected_source_task_ids
         )
         candidate_answer = fields.get("candidate_answer")
+        exact_source_canonical_answer = (
+            cls._exact_source_qa_memory_canonical_answer(
+                artifact,
+                read_evidence_texts,
+                qa_memory_relevant_memory_ids=qa_memory_relevant_memory_ids,
+                qa_memory_expected_source_task_ids=(
+                    qa_memory_expected_source_task_ids
+                ),
+            )
+        )
 
         def paired_qa_memory_provenance_valid(
             proposition: Mapping[str, object],
@@ -7849,14 +8050,61 @@ class AgentWorkflowEnv:
                     expected_source_task_ids
                     and read_text.source_train_task_id
                     in expected_source_task_ids
-                    and read_text.semantic_preserving_paraphrase
                     and isinstance(candidate_answer, str)
                     and candidate_answer.strip()
                     and read_text.canonical_answer == candidate_answer
+                    and exact_source_canonical_answer == candidate_answer
                 )
                 if lexical_relation_preserved or exact_source_paraphrase:
                     return True
             return False
+
+        def paired_qa_memory_surface(
+            proposition: Mapping[str, object],
+        ) -> Optional[str]:
+            """Return the routed question+answer surface for scope validation."""
+
+            if not original_question or not relevant_memory_ids:
+                return None
+            evidence_span = proposition.get("evidence_span")
+            if not isinstance(evidence_span, str) or not evidence_span.strip():
+                return None
+            for read_text in read_evidence_texts:
+                if not isinstance(read_text, _ReadReceiptText):
+                    continue
+                if (
+                    read_text.tool_id != _TRIVIAQA_QA_MEMORY_TOOL_ID
+                    or read_text.record_id not in relevant_memory_ids
+                    or not isinstance(read_text.paraphrase_question, str)
+                    or not read_text.paraphrase_question.strip()
+                    or not isinstance(
+                        read_text.paraphrase_answer_statement,
+                        str,
+                    )
+                    or not read_text.paraphrase_answer_statement.strip()
+                    or not _evidence_span_matches_read(
+                        evidence_span,
+                        read_text.paraphrase_answer_statement,
+                    )
+                ):
+                    continue
+                exact_source = bool(
+                    exact_source_canonical_answer
+                    and read_text.source_train_task_id
+                    in expected_source_task_ids
+                    and read_text.canonical_answer
+                    == exact_source_canonical_answer
+                )
+                combined = (
+                    f"{read_text.paraphrase_question} "
+                    f"{read_text.paraphrase_answer_statement}"
+                )
+                if exact_source or _relation_surface_matches_evidence(
+                    original_question,
+                    combined,
+                ):
+                    return combined
+            return None
 
         for index, proposition in enumerate(propositions):
             if not isinstance(proposition, Mapping):
@@ -7872,15 +8120,33 @@ class AgentWorkflowEnv:
                     "qa-retrieval read"
                 )
             canonical_span = _canonical_evidence_text(evidence_span)
+            paired_surface = paired_qa_memory_surface(proposition)
+            canonical_paired_surface = (
+                _canonical_evidence_text(paired_surface)
+                if isinstance(paired_surface, str) and paired_surface.strip()
+                else ""
+            )
             relation = proposition.get("relation")
             if (
                 not isinstance(relation, str)
                 or not relation.strip()
-                or not _relation_surface_matches_evidence(relation, evidence_span)
+                or not (
+                    _relation_surface_matches_evidence(
+                        relation,
+                        evidence_span,
+                    )
+                    or (
+                        paired_surface is not None
+                        and _relation_surface_matches_evidence(
+                            relation,
+                            paired_surface,
+                        )
+                    )
+                )
             ):
                 return (
                     f"Reasoner evidence_propositions[{index}].relation is not "
-                    "grounded in its evidence_span from the same successful "
+                    "grounded in its paired Q-A memory from the same successful "
                     "qa-retrieval read receipt"
                 )
             for field_name in ("subject", "object_or_attribute_value"):
@@ -7892,10 +8158,14 @@ class AgentWorkflowEnv:
                     )
                 if argument.casefold() in {"yes", "no"}:
                     continue
-                if _canonical_evidence_text(argument) not in canonical_span:
+                canonical_argument = _canonical_evidence_text(argument)
+                if (
+                    canonical_argument not in canonical_span
+                    and canonical_argument not in canonical_paired_surface
+                ):
                     return (
                         f"Reasoner evidence_propositions[{index}].{field_name} "
-                        "is not grounded in its evidence_span from the same "
+                        "is not grounded in its paired Q-A memory from the same "
                         "successful qa-retrieval read receipt"
                     )
         if not require_answer_binding:
@@ -7929,9 +8199,10 @@ class AgentWorkflowEnv:
                 f"Reasoner evidence_propositions[{proposition_index}]."
                 "evidence_span must be non-empty text"
             )
+        paired_surface = paired_qa_memory_surface(selected)
         scope_modifier_issue = _question_scope_modifier_issue(
             original_question or "",
-            evidence_span,
+            paired_surface or evidence_span,
         )
         if scope_modifier_issue is not None:
             return (
@@ -7942,14 +8213,23 @@ class AgentWorkflowEnv:
         if (
             not isinstance(selected_relation, str)
             or not selected_relation.strip()
-            or not _relation_surface_matches_evidence(
-                selected_relation,
-                evidence_span,
+            or not (
+                _relation_surface_matches_evidence(
+                    selected_relation,
+                    evidence_span,
+                )
+                or (
+                    paired_surface is not None
+                    and _relation_surface_matches_evidence(
+                        selected_relation,
+                        paired_surface,
+                    )
+                )
             )
         ):
             return (
                 "Reasoner target relation is not grounded in the selected "
-                "evidence_span from a successful qa-retrieval read receipt"
+                "paired Q-A memory from a successful qa-retrieval read receipt"
             )
         relation_aligned_propositions = tuple(
             proposition
@@ -8247,9 +8527,19 @@ class AgentWorkflowEnv:
                 f"{alternate_temporal_fields[0]!r}; set answer_field to that "
                 "proposition field"
             )
+        exact_source_argument_binding = bool(
+            isinstance(candidate, str)
+            and exact_source_canonical_answer == candidate
+            and cls._canonical_candidate_matches_argument_wrapper(
+                candidate,
+                selected.get(answer_field),
+                original_question=original_question,
+            )
+        )
         if not isinstance(candidate, str) or (
             selected.get(answer_field) != candidate
             and not temporal_normalization
+            and not exact_source_argument_binding
         ):
             return (
                 "Reasoner candidate_answer must copy the selected proposition "
@@ -8257,7 +8547,9 @@ class AgentWorkflowEnv:
                 "temporal normalization requested by the question"
             )
 
-        canonical_span = _canonical_evidence_text(evidence_span)
+        canonical_selected_grounding_surface = _canonical_evidence_text(
+            paired_surface or evidence_span
+        )
         for field_name in ("subject", "object_or_attribute_value"):
             value = selected.get(field_name)
             if not isinstance(value, str) or not value.strip():
@@ -8267,14 +8559,18 @@ class AgentWorkflowEnv:
                 )
             # yes/no is inferred from a grounded relation rather than copied
             # from a passage.  The proposition's remaining entity argument is
-            # still required to bind lexically to the successful read span.
+            # still required to bind lexically to the successful paired-QA
+            # read record.
             if value.casefold() in {"yes", "no"}:
                 continue
-            if _canonical_evidence_text(value) not in canonical_span:
+            if (
+                _canonical_evidence_text(value)
+                not in canonical_selected_grounding_surface
+            ):
                 return (
                     "Reasoner answer-bearing proposition has no deterministic "
                     f"entity binding: field {field_name!r} value {value!r} does "
-                    "not occur in its evidence_span from a successful "
+                    "not occur in its paired Q-A memory from a successful "
                     "qa-retrieval read receipt"
                 )
         return None
@@ -8488,19 +8784,12 @@ class AgentWorkflowEnv:
             )
 
         routed_candidates: dict[str, str] = {}
+        exact_source_candidates: set[str] = set()
         for agent_id in routed_ids:
             node = self._graph.get_node(agent_id)
             role = (node.role_family or "").casefold()
             artifact = execution.outputs.get(agent_id, "")
             if role == "reasoner" and agent_id != output_id:
-                candidate, issue = self._reasoner_candidate_for_current_dataset(
-                    artifact
-                )
-                if issue is not None or candidate is None:
-                    return (
-                        f"Reasoner {agent_id!r} semantic artifact is invalid: "
-                        f"{issue}"
-                    )
                 evidence_owner_ids = (
                     *self._directed_ancestor_ids(self._graph, agent_id),
                     agent_id,
@@ -8514,23 +8803,44 @@ class AgentWorkflowEnv:
                         f"Reasoner {agent_id!r} has no routed successful "
                         "qa-retrieval read receipt"
                     )
+                relevant_memory_ids = self._qa_memory_relevant_ids_for_agents(
+                    execution.outputs,
+                    evidence_owner_ids,
+                )
+                expected_source_task_ids = (
+                    self._qa_memory_expected_source_ids_for_agents(
+                        execution.output_metadata,
+                        evidence_owner_ids,
+                    )
+                )
+                exact_source_candidate = (
+                    self._exact_source_qa_memory_canonical_answer(
+                        artifact,
+                        owner_texts,
+                        qa_memory_relevant_memory_ids=relevant_memory_ids,
+                        qa_memory_expected_source_task_ids=(
+                            expected_source_task_ids
+                        ),
+                    )
+                )
+                candidate, issue = self._reasoner_candidate_for_current_dataset(
+                    artifact,
+                    read_evidence_texts=owner_texts,
+                    qa_memory_relevant_memory_ids=relevant_memory_ids,
+                    qa_memory_expected_source_task_ids=expected_source_task_ids,
+                )
+                if issue is not None or candidate is None:
+                    return (
+                        f"Reasoner {agent_id!r} semantic artifact is invalid: "
+                        f"{issue}"
+                    )
                 provenance_issue = self._reasoner_evidence_provenance_issue(
                     artifact,
                     owner_texts,
                     require_answer_binding=True,
                     original_question=hotpotqa_question_scope(self._problem),
-                    qa_memory_relevant_memory_ids=(
-                        self._qa_memory_relevant_ids_for_agents(
-                            execution.outputs,
-                            evidence_owner_ids,
-                        )
-                    ),
-                    qa_memory_expected_source_task_ids=(
-                        self._qa_memory_expected_source_ids_for_agents(
-                            execution.output_metadata,
-                            evidence_owner_ids,
-                        )
-                    ),
+                    qa_memory_relevant_memory_ids=relevant_memory_ids,
+                    qa_memory_expected_source_task_ids=expected_source_task_ids,
                 )
                 if provenance_issue is not None:
                     return (
@@ -8538,19 +8848,72 @@ class AgentWorkflowEnv:
                         f"{provenance_issue}"
                     )
                 routed_candidates[agent_id] = candidate
+                if exact_source_candidate == candidate:
+                    exact_source_candidates.add(candidate)
                 continue
 
             if role == "verifier" and agent_id != output_id:
-                candidate, issue = self._verifier_candidate(artifact)
+                ancestor_ids = self._directed_ancestor_ids(
+                    self._graph,
+                    agent_id,
+                )
+                raw_candidate, raw_issue = self._semantic_candidate_from_artifact(
+                    artifact
+                )
+                exact_ancestor_candidates: set[str] = set(
+                    exact_source_candidates
+                )
+                for upstream_id in ancestor_ids:
+                    upstream_node = self._graph.get_node(upstream_id)
+                    if (
+                        upstream_node.role_family or ""
+                    ).casefold() != "reasoner":
+                        continue
+                    owner_ids = (
+                        *self._directed_ancestor_ids(self._graph, upstream_id),
+                        upstream_id,
+                    )
+                    upstream_artifact = execution.outputs.get(upstream_id, "")
+                    exact_candidate = (
+                        self._exact_source_qa_memory_canonical_answer(
+                            upstream_artifact,
+                            self._successful_read_texts_for_agents(
+                                execution,
+                                owner_ids,
+                            ),
+                            qa_memory_relevant_memory_ids=(
+                                self._qa_memory_relevant_ids_for_agents(
+                                    execution.outputs,
+                                    owner_ids,
+                                )
+                            ),
+                            qa_memory_expected_source_task_ids=(
+                                self._qa_memory_expected_source_ids_for_agents(
+                                    execution.output_metadata,
+                                    owner_ids,
+                                )
+                            ),
+                        )
+                    )
+                    if exact_candidate is not None:
+                        exact_ancestor_candidates.add(exact_candidate)
+                exact_source_canonical_answer = (
+                    raw_candidate
+                    if raw_issue is None
+                    and raw_candidate in exact_ancestor_candidates
+                    else None
+                )
+                candidate, issue = self._verifier_candidate(
+                    artifact,
+                    exact_source_canonical_answer=(
+                        exact_source_canonical_answer
+                    ),
+                )
                 if issue is not None or candidate is None:
                     return (
                         f"Verifier {agent_id!r} semantic artifact is invalid: "
                         f"{issue}"
                     )
-                ancestor_ids = self._directed_ancestor_ids(
-                    self._graph,
-                    agent_id,
-                )
                 upstream_candidates = tuple(
                     upstream_candidate
                     for upstream_id in ancestor_ids
@@ -9171,15 +9534,6 @@ class AgentWorkflowEnv:
                 "augment retrieval before FINISH; do not guess an answer or "
                 "fabricate evidence"
             )
-        reasoner_candidate, reasoner_issue = (
-            self._reasoner_candidate_for_current_dataset(reasoner_artifact)
-        )
-        if reasoner_issue is not None or reasoner_candidate is None:
-            return (
-                f"Reasoner {reasoner_id!r} semantic artifact is invalid: "
-                f"{reasoner_issue}. Required fields are "
-                f"{list(_REASONER_SEMANTIC_FIELDS)!r}"
-            )
         # Evidence may be read by the Reasoner itself or by a dedicated
         # Retriever routed into the Reasoner. It may not bypass semantic
         # alignment through a Retriever -> Verifier edge.
@@ -9208,6 +9562,32 @@ class AgentWorkflowEnv:
                 "non-empty passage. Preserve existing artifacts and add or repair "
                 "retrieval into the Reasoner before FINISH"
             )
+        relevant_memory_ids = tuple(sorted(valid_qa_memory_relevant_ids))
+        expected_source_task_ids = tuple(
+            sorted(valid_qa_memory_source_task_ids)
+        )
+        exact_source_canonical_answer = (
+            self._exact_source_qa_memory_canonical_answer(
+                reasoner_artifact,
+                read_evidence_texts,
+                qa_memory_relevant_memory_ids=relevant_memory_ids,
+                qa_memory_expected_source_task_ids=expected_source_task_ids,
+            )
+        )
+        reasoner_candidate, reasoner_issue = (
+            self._reasoner_candidate_for_current_dataset(
+                reasoner_artifact,
+                read_evidence_texts=read_evidence_texts,
+                qa_memory_relevant_memory_ids=relevant_memory_ids,
+                qa_memory_expected_source_task_ids=expected_source_task_ids,
+            )
+        )
+        if reasoner_issue is not None or reasoner_candidate is None:
+            return (
+                f"Reasoner {reasoner_id!r} semantic artifact is invalid: "
+                f"{reasoner_issue}. Required fields are "
+                f"{list(_REASONER_SEMANTIC_FIELDS)!r}"
+            )
         provenance_issue = self._reasoner_evidence_provenance_issue(
             reasoner_artifact,
             read_evidence_texts,
@@ -9215,12 +9595,8 @@ class AgentWorkflowEnv:
                 self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
             ),
             original_question=hotpotqa_question_scope(self._problem),
-            qa_memory_relevant_memory_ids=tuple(
-                sorted(valid_qa_memory_relevant_ids)
-            ),
-            qa_memory_expected_source_task_ids=tuple(
-                sorted(valid_qa_memory_source_task_ids)
-            ),
+            qa_memory_relevant_memory_ids=relevant_memory_ids,
+            qa_memory_expected_source_task_ids=expected_source_task_ids,
         )
         if provenance_issue is not None:
             completion_only_repair = (
@@ -9253,12 +9629,8 @@ class AgentWorkflowEnv:
                 self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
             ),
             original_question=hotpotqa_question_scope(self._problem),
-            qa_memory_relevant_memory_ids=tuple(
-                sorted(valid_qa_memory_relevant_ids)
-            ),
-            qa_memory_expected_source_task_ids=tuple(
-                sorted(valid_qa_memory_source_task_ids)
-            ),
+            qa_memory_relevant_memory_ids=relevant_memory_ids,
+            qa_memory_expected_source_task_ids=expected_source_task_ids,
         )
         if verifier_lineage_issue is not None:
             return (
@@ -9268,7 +9640,8 @@ class AgentWorkflowEnv:
                 "handoff before FINISH"
             )
         verifier_candidate, verifier_issue = self._verifier_candidate(
-            verifier_artifact
+            verifier_artifact,
+            exact_source_canonical_answer=exact_source_canonical_answer,
         )
         if verifier_issue is not None or verifier_candidate is None:
             return (
@@ -9924,11 +10297,6 @@ class AgentWorkflowEnv:
             return False
         if not self._requires_complete_semantic_lineage():
             if role_family == "reasoner":
-                candidate, issue = self._reasoner_candidate_for_current_dataset(
-                    artifact
-                )
-                if issue is not None or candidate is None:
-                    return False
                 owner_ids = (
                     *self._directed_ancestor_ids(self._graph, agent_id),
                     agent_id,
@@ -9940,30 +10308,85 @@ class AgentWorkflowEnv:
                     execution,
                     owner_ids,
                 )
+                relevant_memory_ids = self._qa_memory_relevant_ids_for_agents(
+                    execution.outputs,
+                    owner_ids,
+                )
+                expected_source_task_ids = (
+                    self._qa_memory_expected_source_ids_for_agents(
+                        execution.output_metadata,
+                        owner_ids,
+                    )
+                )
+                candidate, issue = self._reasoner_candidate_for_current_dataset(
+                    artifact,
+                    read_evidence_texts=evidence_texts,
+                    qa_memory_relevant_memory_ids=relevant_memory_ids,
+                    qa_memory_expected_source_task_ids=expected_source_task_ids,
+                )
+                if issue is not None or candidate is None:
+                    return False
                 return bool(evidence_texts) and (
                     self._reasoner_evidence_provenance_issue(
                         artifact,
                         evidence_texts,
                         require_answer_binding=True,
                         original_question=hotpotqa_question_scope(self._problem),
-                        qa_memory_relevant_memory_ids=(
-                            self._qa_memory_relevant_ids_for_agents(
-                                execution.outputs,
-                                owner_ids,
-                            )
-                        ),
+                        qa_memory_relevant_memory_ids=relevant_memory_ids,
                         qa_memory_expected_source_task_ids=(
-                            self._qa_memory_expected_source_ids_for_agents(
-                                execution.output_metadata,
-                                owner_ids,
-                            )
+                            expected_source_task_ids
                         ),
                     )
                     is None
                 )
             if role_family == "verifier":
+                exact_source_canonical_answer = None
+                cached_execution = self._cached_progressive_execution()
+                for reasoner_id in self._directed_ancestor_ids(
+                    self._graph,
+                    agent_id,
+                ):
+                    if (
+                        self._graph.get_node(reasoner_id).role_family or ""
+                    ).casefold() != "reasoner":
+                        continue
+                    owner_ids = (
+                        *self._directed_ancestor_ids(self._graph, reasoner_id),
+                        reasoner_id,
+                    )
+                    read_texts = (
+                        self._successful_read_texts_for_agents(
+                            cached_execution,
+                            owner_ids,
+                        )
+                        if cached_execution is not None
+                        else ()
+                    )
+                    exact_source_canonical_answer = (
+                        self._exact_source_qa_memory_canonical_answer(
+                            self._progressive_outputs.get(reasoner_id, ""),
+                            read_texts,
+                            qa_memory_relevant_memory_ids=(
+                                self._qa_memory_relevant_ids_for_agents(
+                                    self._progressive_outputs,
+                                    owner_ids,
+                                )
+                            ),
+                            qa_memory_expected_source_task_ids=(
+                                self._qa_memory_expected_source_ids_for_agents(
+                                    self._progressive_output_metadata,
+                                    owner_ids,
+                                )
+                            ),
+                        )
+                    )
+                    if exact_source_canonical_answer is not None:
+                        break
                 verifier_candidate, verifier_issue = self._verifier_candidate(
-                    artifact
+                    artifact,
+                    exact_source_canonical_answer=(
+                        exact_source_canonical_answer
+                    ),
                 )
                 if verifier_issue is not None or verifier_candidate is None:
                     return False
@@ -10081,11 +10504,6 @@ class AgentWorkflowEnv:
                     and fallback_issue is None
                     and fallback_candidate is not None
                 )
-            candidate, issue = self._reasoner_candidate_for_current_dataset(
-                artifact
-            )
-            if issue is not None or candidate is None:
-                return False
             evidence_texts: list[str] = []
             assert self.required_evidence_tool_id is not None
             for owner_id in (
@@ -10107,6 +10525,28 @@ class AgentWorkflowEnv:
                     )
                     if evidence_text is not None:
                         evidence_texts.append(evidence_text)
+            owner_ids = (
+                agent_id,
+                *self._graph.directed_predecessors(agent_id),
+            )
+            relevant_memory_ids = self._qa_memory_relevant_ids_for_agents(
+                self._progressive_outputs,
+                owner_ids,
+            )
+            expected_source_task_ids = (
+                self._qa_memory_expected_source_ids_for_agents(
+                    self._progressive_output_metadata,
+                    owner_ids,
+                )
+            )
+            candidate, issue = self._reasoner_candidate_for_current_dataset(
+                artifact,
+                read_evidence_texts=evidence_texts,
+                qa_memory_relevant_memory_ids=relevant_memory_ids,
+                qa_memory_expected_source_task_ids=expected_source_task_ids,
+            )
+            if issue is not None or candidate is None:
+                return False
             return bool(evidence_texts) and self._reasoner_evidence_provenance_issue(
                 artifact,
                 evidence_texts,
@@ -10114,24 +10554,8 @@ class AgentWorkflowEnv:
                     self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
                 ),
                 original_question=hotpotqa_question_scope(self._problem),
-                qa_memory_relevant_memory_ids=(
-                    self._qa_memory_relevant_ids_for_agents(
-                        self._progressive_outputs,
-                        (
-                            agent_id,
-                            *self._graph.directed_predecessors(agent_id),
-                        ),
-                    )
-                ),
-                qa_memory_expected_source_task_ids=(
-                    self._qa_memory_expected_source_ids_for_agents(
-                        self._progressive_output_metadata,
-                        (
-                            agent_id,
-                            *self._graph.directed_predecessors(agent_id),
-                        ),
-                    )
-                ),
+                qa_memory_relevant_memory_ids=relevant_memory_ids,
+                qa_memory_expected_source_task_ids=expected_source_task_ids,
             ) is None
         if role_family == "verifier":
             reasoner_ids = tuple(
@@ -10174,11 +10598,51 @@ class AgentWorkflowEnv:
                     and verifier_issue is None
                     and verifier_candidate == reasoner_candidate
                 )
-            verifier_candidate, verifier_issue = self._verifier_candidate(artifact)
+            reasoner_owner_ids = (
+                reasoner_ids[0],
+                *self._graph.directed_predecessors(reasoner_ids[0]),
+            )
+            reasoner_read_texts = self._successful_read_texts_for_agents(
+                self._cached_progressive_execution(),
+                reasoner_owner_ids,
+            ) if self._cached_progressive_execution() is not None else ()
+            relevant_memory_ids = self._qa_memory_relevant_ids_for_agents(
+                self._progressive_outputs,
+                reasoner_owner_ids,
+            )
+            expected_source_task_ids = (
+                self._qa_memory_expected_source_ids_for_agents(
+                    self._progressive_output_metadata,
+                    reasoner_owner_ids,
+                )
+            )
+            exact_source_canonical_answer = (
+                self._exact_source_qa_memory_canonical_answer(
+                    reasoner_artifact,
+                    reasoner_read_texts,
+                    qa_memory_relevant_memory_ids=relevant_memory_ids,
+                    qa_memory_expected_source_task_ids=(
+                        expected_source_task_ids
+                    ),
+                )
+            )
+            verifier_candidate, verifier_issue = self._verifier_candidate(
+                artifact,
+                exact_source_canonical_answer=(
+                    exact_source_canonical_answer
+                ),
+            )
             if verifier_issue is not None or verifier_candidate is None:
                 return False
             reasoner_candidate, reasoner_issue = (
-                self._reasoner_candidate_for_current_dataset(reasoner_artifact)
+                self._reasoner_candidate_for_current_dataset(
+                    reasoner_artifact,
+                    read_evidence_texts=reasoner_read_texts,
+                    qa_memory_relevant_memory_ids=relevant_memory_ids,
+                    qa_memory_expected_source_task_ids=(
+                        expected_source_task_ids
+                    ),
+                )
             )
             return (
                 reasoner_issue is None
@@ -10221,8 +10685,45 @@ class AgentWorkflowEnv:
                     )
                 )
             else:
+                exact_source_canonical_answer = None
+                if len(reasoner_ids) == 1:
+                    reasoner_id = reasoner_ids[0]
+                    reasoner_owner_ids = (
+                        reasoner_id,
+                        *self._graph.directed_predecessors(reasoner_id),
+                    )
+                    cached_execution = self._cached_progressive_execution()
+                    reasoner_read_texts = (
+                        self._successful_read_texts_for_agents(
+                            cached_execution,
+                            reasoner_owner_ids,
+                        )
+                        if cached_execution is not None
+                        else ()
+                    )
+                    exact_source_canonical_answer = (
+                        self._exact_source_qa_memory_canonical_answer(
+                            self._progressive_outputs.get(reasoner_id, ""),
+                            reasoner_read_texts,
+                            qa_memory_relevant_memory_ids=(
+                                self._qa_memory_relevant_ids_for_agents(
+                                    self._progressive_outputs,
+                                    reasoner_owner_ids,
+                                )
+                            ),
+                            qa_memory_expected_source_task_ids=(
+                                self._qa_memory_expected_source_ids_for_agents(
+                                    self._progressive_output_metadata,
+                                    reasoner_owner_ids,
+                                )
+                            ),
+                        )
+                    )
                 verifier_candidate, verifier_issue = self._verifier_candidate(
-                    verifier_artifact
+                    verifier_artifact,
+                    exact_source_canonical_answer=(
+                        exact_source_canonical_answer
+                    ),
                 )
             wrapper = re.fullmatch(
                 r"\s*<answer>(.*?)</answer>\s*",

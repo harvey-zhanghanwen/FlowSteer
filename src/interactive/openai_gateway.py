@@ -931,27 +931,18 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             else ""
         )
         if semantic_lineage:
-            common = FORMAT_PROMPT.format(
-                problem_description=(
-                    "the formatting-only transfer of one explicit Candidate answer"
-                ),
-                solution=solution,
-            ) + (
-                (
+            if hotpot_semantic:
+                common = FORMAT_PROMPT.format(
+                    problem_description=(
+                        "the formatting-only transfer of one explicit Candidate answer"
+                    ),
+                    solution=solution,
+                ) + (
                     "\nFor this AgentGraph terminal protocol, the rules below take "
                     "precedence over every normalization or transformation example "
                     "above. The solution must be a Verifier artifact whose "
                     "`Verification status:` is exactly `supported`. "
-                )
-                if hotpot_semantic
-                else (
-                    "\nFor this role-conditional QA terminal protocol, the rules "
-                    "below take precedence over every normalization or "
-                    "transformation example above. The solution must contain one "
-                    "explicit routed semantic candidate. "
-                )
-            ) + (
-                (
+                ) + (
                     "Copy character-for-character only the value following its "
                     "single `Candidate answer:` label; never select another name "
                     "or value, and never change an alias, abbreviation, unit, "
@@ -960,16 +951,29 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                     "explanation. If the supported status or exactly one Candidate "
                     "answer is absent, return exactly <answer></answer>."
                 )
-                if hotpot_semantic
-                else (
-                    "Copy character-for-character only its candidate value; never "
-                    "select another name or value, and never change an alias, "
-                    "abbreviation, unit, date, spelling, or symbolic form. Enclose "
-                    "that exact copied value in exactly one <answer>...</answer> "
-                    "wrapper, with no explanation. If one explicit candidate is "
-                    "absent, return exactly <answer></answer>."
+            else:
+                # FlowSteer's Format Operator call boundary is retained: one
+                # completed upstream solution is passed to one terminal Format
+                # node.  Its generic FORMAT_PROMPT requires the shortest answer
+                # span, which is incompatible with TriviaQA records whose one
+                # canonical answer contains several jointly requested fields.
+                # Use the existing role-conditional exact-copy contract without
+                # the destructive shortest-span examples.
+                common = (
+                    "The terminal semantic candidate has ALREADY been computed "
+                    "in this single routed Verifier artifact:\n\n"
+                    f"{solution}\n\n"
+                    "Your ONLY job is exact serialization. Copy "
+                    "character-for-character the complete value following the "
+                    "single `Candidate answer:` label. The value may be a long "
+                    "or multi-part answer; do not shorten, summarize, "
+                    "canonicalize, reselect, or omit any requested field; never "
+                    "change an alias, abbreviation, unit, date, spelling, or "
+                    "symbolic form. Enclose that complete unchanged value in "
+                    "exactly one <answer>...</answer> wrapper, with no text "
+                    "outside it. If one explicit Candidate answer is absent, "
+                    "return exactly <answer></answer>."
                 )
-            )
         else:
             common = FORMAT_PROMPT.format(
                 problem_description=request.problem,

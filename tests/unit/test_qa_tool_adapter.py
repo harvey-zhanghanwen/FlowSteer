@@ -27,6 +27,7 @@ from src.interactive.qa_tool_adapter import (
     _controlled_relation_paraphrase,
     _factual_transition_strategy_identification,
     _factual_strategy_semantics_verified,
+    _qa_memory_answer_proposition,
     _location_containment_lineage_issue,
     _location_resolution_answer_field_constraint,
     _missing_question_named_constraints,
@@ -34,6 +35,7 @@ from src.interactive.qa_tool_adapter import (
     _public_search_candidate_compatibility,
     _query_replaces_relation_surface,
     _proposition_preserves_requested_relation,
+    _relation_surface_matches_evidence,
     _relation_surface_rewrite_query_candidates,
     _question_entity_anchor_tokens,
     _question_named_constraint_tokens,
@@ -103,6 +105,114 @@ class FakeIndex:
 
 
 class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
+    def test_qamemory_schema_projects_bounded_copular_locative(self) -> None:
+        memory_id = "qa-memory-airport-state"
+        retrieval_artifact = json.dumps(
+            {
+                "candidates": [
+                    {
+                        "canonical_answer": "Rhode Island",
+                        "memory_id": memory_id,
+                        "paraphrase_answer_statement": (
+                            "The airport is in Rhode Island."
+                        ),
+                    }
+                ],
+                "question_scope": (
+                    "Theodore Francis international airport is in which US state?"
+                ),
+                "relevant_memory_ids": [memory_id],
+                "retrieval_status": "evidence_found",
+            }
+        )
+        receipts = (
+            {
+                "tool_id": "triviaqa.qa_memory",
+                "error_type": None,
+                "request": {"action": "search"},
+            },
+            {
+                "tool_id": "triviaqa.qa_memory",
+                "error_type": None,
+                "request": {"action": "read"},
+            },
+        )
+        agent_request = AgentRequest(
+            request_id="trivia:copular-locative",
+            run_id="trivia",
+            graph_revision=1,
+            problem=(
+                "Theodore Francis international airport is in which US state?"
+            ),
+            agent=AgentNode(
+                "reasoner",
+                "model",
+                "bind grounded evidence to the answer slot",
+                role_family="reasoner",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            upstream=(
+                UpstreamMessage(
+                    "retriever",
+                    "reasoner",
+                    retrieval_artifact,
+                    graph_revision=1,
+                    tool_receipts=receipts,
+                ),
+            ),
+        )
+
+        self.assertEqual(
+            {
+                "subject": "The airport",
+                "relation": "is in",
+                "object_or_attribute_value": "Rhode Island",
+                "evidence_span": "The airport is in Rhode Island.",
+                "answer_field": "object_or_attribute_value",
+            },
+            _qa_memory_answer_proposition(agent_request),
+        )
+
+    def test_structured_relation_snake_case_uses_lexical_boundaries(self) -> None:
+        self.assertTrue(
+            _relation_surface_matches_evidence(
+                "born_in",
+                "Arnold Schwarzenegger was born in Austria.",
+            )
+        )
+        self.assertTrue(
+            _relation_surface_matches_evidence(
+                "occurred_on",
+                "The ceremony occurred on 8 May 1945.",
+            )
+        )
+        for decade_surface in ("1950s", "'50s", "1950–1959"):
+            with self.subTest(decade_surface=decade_surface):
+                self.assertTrue(
+                    _relation_surface_matches_evidence(
+                        "born_in_decade",
+                        f"Arnold Schwarzenegger was born in the {decade_surface}.",
+                    )
+                )
+
+        # A bare year is not itself a decade surface, and a decade mention
+        # without the predicate head cannot ground the structured relation.
+        self.assertFalse(
+            _relation_surface_matches_evidence(
+                "born_in_decade",
+                "Arnold Schwarzenegger was born in 1955.",
+            )
+        )
+        self.assertFalse(
+            _relation_surface_matches_evidence(
+                "born_in_decade",
+                "The 1950s were a decade of change.",
+            )
+        )
+
     async def test_model_visible_continuation_drops_stale_and_collapses_duplicate_errors(
         self,
     ) -> None:

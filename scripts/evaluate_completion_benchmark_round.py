@@ -2061,6 +2061,7 @@ def _report(
         "protocol_equivalent_to_direct": bool(
             bounded.get("protocol_equivalent_to_direct", False)
         ),
+        "evaluation_scope": bounded.get("evaluation_scope"),
         "comparison_interpretation": (
             "paired_architecture_comparison"
             if bounded.get("protocol_equivalent_to_direct") is True
@@ -2150,8 +2151,32 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         if report.get("protocol_equivalent_to_direct") is True
         else "Direct and AgentGraph are separate protocols; their delta is descriptive, not a paired causal estimate."
     )
+    full_qa_memory_direct = bool(
+        report.get("dataset_key") == "triviaqa"
+        and report.get("evaluation_scope") == "in_database_transductive"
+    )
+    report_title = (
+        "全量 TriviaQA Q–A memory 条件下的直接准确率"
+        if full_qa_memory_direct
+        else f"{report['dataset']} Architecture Validation"
+    )
+    direct_label = (
+        "Qwen3.5-9B 闭卷 Direct（question-only 对照）"
+        if full_qa_memory_direct
+        else "Qwen3.5-9B Direct Local Baseline"
+    )
+    graph_label = (
+        "全量 TriviaQA Q–A memory + AgentGraph Tool 检索直接准确率"
+        if full_qa_memory_direct
+        else "AgentGraph"
+    )
+    delta_label = (
+        "QA-memory AgentGraph − 闭卷 Direct"
+        if full_qa_memory_direct
+        else "AgentGraph - Direct"
+    )
     if tuple(report["agentgraph_minus_direct"]) == ("exact_match", "token_f1"):
-        return f"""# {report['dataset']} Architecture Validation
+        return f"""# {report_title}
 
 Fixed {report['project_split']} samples: **{report['sample_count']}**. No training, GRPO, backward pass, optimizer update, LoRA publication, Bayesian update, or Skill publication ran. {skill_sentence}
 
@@ -2159,10 +2184,10 @@ Native metrics: **exact_match** and **token_f1** (`{report['metric_scope']}`). A
 
 | Condition | Completed | Evaluator valid | Strict EM | Strict F1 |
 |---|---:|---:|---:|---:|
-| Qwen3.5-9B Direct Local Baseline | {direct['completed']} | {direct['evaluator_valid']} | {100 * float(direct['strict_exact_match']):.2f}% | {100 * float(direct['strict_token_f1']):.2f}% |
-| AgentGraph | {graph['completed']} | {graph['evaluator_valid']} | {100 * float(graph['strict_exact_match']):.2f}% | {100 * float(graph['strict_token_f1']):.2f}% |
+| {direct_label} | {direct['completed']} | {direct['evaluator_valid']} | {100 * float(direct['strict_exact_match']):.2f}% | {100 * float(direct['strict_token_f1']):.2f}% |
+| {graph_label} | {graph['completed']} | {graph['evaluator_valid']} | {100 * float(graph['strict_exact_match']):.2f}% | {100 * float(graph['strict_token_f1']):.2f}% |
 
-AgentGraph - Direct: **{100 * float(report['agentgraph_minus_direct']['exact_match']):+.2f} EM**, **{100 * float(report['agentgraph_minus_direct']['token_f1']):+.2f} F1**.
+{delta_label}: **{100 * float(report['agentgraph_minus_direct']['exact_match']):+.2f} EM**, **{100 * float(report['agentgraph_minus_direct']['token_f1']):+.2f} F1**.
 
 {protocol_sentence}
 
