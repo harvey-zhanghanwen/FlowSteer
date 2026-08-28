@@ -33,6 +33,7 @@ def request(
     role_family: str | None = None,
     problem: str = "Solve the task",
     upstream_artifact: str = "evidence",
+    upstream_tool_receipts: tuple[dict[str, object], ...] = (),
     semantic_protocol: str = "none",
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL,
 ) -> AgentRequest:
@@ -75,6 +76,7 @@ def request(
                 upstream_artifact,
                 graph_revision=1,
                 request_or_dependency="verify carefully",
+                tool_receipts=upstream_tool_receipts,
             ),
         ),
         own_draft="own" if phase is ExecutionPhase.REVISION else None,
@@ -90,6 +92,21 @@ def request(
             if phase is ExecutionPhase.REVISION
             else None
         ),
+    )
+
+
+def qa_memory_tool_receipts() -> tuple[dict[str, object], ...]:
+    return (
+        {
+            "tool_id": "triviaqa.qa_memory",
+            "error_type": None,
+            "request": {"action": "search"},
+        },
+        {
+            "tool_id": "triviaqa.qa_memory",
+            "error_type": None,
+            "request": {"action": "read"},
+        },
     )
 
 
@@ -726,6 +743,367 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             payload["response_format"]["json_schema"],
             {"name": "skillev_action", "schema": schema, "strict": True},
+        )
+
+    def test_tool_less_qa_reasoner_reuses_strict_artifact_schema(self) -> None:
+        item = request(
+            is_output_agent=False,
+            role_family="reasoner",
+            problem="Where in England was Dame Judi Dench born?",
+            semantic_protocol="qa_verified_answer_lineage_v2",
+            upstream_artifact=json.dumps(
+                {
+                    "question_scope": (
+                        "Where in England was Dame Judi Dench born?"
+                    ),
+                    "retrieval_status": "evidence_found",
+                }
+            ),
+        )
+
+        payload = OpenAICompatibleGateway().request_payload(item)
+
+        response_format = payload["response_format"]
+        self.assertEqual("json_schema", response_format["type"])
+        self.assertEqual(
+            "skillev_reasoner_artifact",
+            response_format["json_schema"]["name"],
+        )
+        self.assertTrue(response_format["json_schema"]["strict"])
+        schema = response_format["json_schema"]["schema"]
+        self.assertEqual(
+            {
+                "question_scope",
+                "answer_slot",
+                "evidence_propositions",
+                "multi_hop_chain",
+                "candidate_answer",
+                "evidence",
+            },
+            set(schema["required"]),
+        )
+        answer_slot = schema["properties"]["answer_slot"]
+        self.assertEqual(
+            "location",
+            answer_slot["properties"]["answer_type"]["const"],
+        )
+        self.assertEqual(
+            "single",
+            answer_slot["properties"]["answer_cardinality"]["const"],
+        )
+        proposition = schema["properties"]["evidence_propositions"][
+            "items"
+        ]
+        self.assertEqual(
+            {
+                "subject",
+                "relation",
+                "object_or_attribute_value",
+                "qualifiers",
+                "evidence_span",
+            },
+            set(proposition["required"]),
+        )
+        self.assertIn(
+            "do not leave the requested value only in qualifiers",
+            proposition["properties"]["object_or_attribute_value"][
+                "description"
+            ],
+        )
+        self.assertIn(
+            "encode that requested value as the answer-bearing proposition's "
+            "object_or_attribute_value",
+            payload["messages"][0]["content"],
+        )
+
+    def test_tool_less_date_reasoner_uses_routed_qa_memory_constraint(
+        self,
+    ) -> None:
+        item = request(
+            is_output_agent=False,
+            role_family="reasoner",
+            problem=(
+                "In which decade did Billboard magazine first publish an "
+                "American hit chart?"
+            ),
+            semantic_protocol="qa_verified_answer_lineage_v2",
+            upstream_tool_receipts=qa_memory_tool_receipts(),
+            upstream_artifact=json.dumps(
+                {
+                    "question_scope": (
+                        "In which decade did Billboard magazine first publish "
+                        "an American hit chart?"
+                    ),
+                    "retrieval_status": "evidence_found",
+                    "relevant_memory_ids": ["memory-1"],
+                    "candidates": [
+                        {
+                            "memory_id": "memory-1",
+                            "canonical_answer": "30s",
+                            "paraphrase_answer_statement": (
+                                "The decade in which Billboard magazine first "
+                                "published an American hit chart is 30s."
+                            ),
+                        },
+                        {
+                            "memory_id": "memory-2",
+                            "canonical_answer": "Dancing Queen",
+                        },
+                    ],
+                }
+            ),
+        )
+
+        payload = OpenAICompatibleGateway().request_payload(item)
+        schema = payload["response_format"]["json_schema"]["schema"]
+        answer_slot = schema["properties"]["answer_slot"]["properties"]
+        proposition = schema["properties"]["evidence_propositions"][
+            "items"
+        ]["properties"]
+
+        self.assertEqual("date", answer_slot["answer_type"]["const"])
+        self.assertEqual(
+            "object_or_attribute_value",
+            answer_slot["answer_field"]["const"],
+        )
+        self.assertEqual(
+            "30s",
+            proposition["object_or_attribute_value"]["const"],
+        )
+        self.assertEqual(
+            "30s",
+            schema["properties"]["candidate_answer"]["const"],
+        )
+
+    def test_tool_less_reasoner_binds_answer_leading_qa_memory_statement(
+        self,
+    ) -> None:
+        item = request(
+            is_output_agent=False,
+            role_family="reasoner",
+            problem=(
+                "From which country did Angola achieve independence in 1975?"
+            ),
+            semantic_protocol="qa_verified_answer_lineage_v2",
+            upstream_tool_receipts=qa_memory_tool_receipts(),
+            upstream_artifact=json.dumps(
+                {
+                    "retrieval_status": "evidence_found",
+                    "relevant_memory_ids": ["memory-portugal"],
+                    "candidates": [
+                        {
+                            "memory_id": "memory-portugal",
+                            "canonical_answer": "Portugal",
+                            "paraphrase_answer_statement": (
+                                "Portugal is the country from which Angola "
+                                "achieved independence in 1975."
+                            ),
+                        }
+                    ],
+                }
+            ),
+        )
+        item = replace(item, upstream=(replace(
+            item.upstream[0],
+            message_type="evidence",
+        ),))
+
+        schema = OpenAICompatibleGateway().request_payload(item)[
+            "response_format"
+        ]["json_schema"]["schema"]
+        answer_slot = schema["properties"]["answer_slot"]["properties"]
+        propositions = schema["properties"]["evidence_propositions"]
+        proposition = propositions["items"]["properties"]
+
+        self.assertEqual("subject", answer_slot["answer_field"]["const"])
+        self.assertEqual(0, answer_slot["proposition_index"]["const"])
+        self.assertEqual(1, propositions["maxItems"])
+        self.assertEqual("Portugal", proposition["subject"]["const"])
+        self.assertEqual("is", proposition["relation"]["const"])
+        self.assertEqual(
+            "the country from which Angola achieved independence in 1975",
+            proposition["object_or_attribute_value"]["const"],
+        )
+        self.assertEqual(
+            "Portugal",
+            schema["properties"]["candidate_answer"]["const"],
+        )
+
+    def test_tool_less_reasoner_binds_answer_trailing_qa_memory_statement(
+        self,
+    ) -> None:
+        statement = "The actual first name of Bruce Willis is Walter."
+        item = request(
+            is_output_agent=False,
+            role_family="reasoner",
+            problem="What is Bruce Willis' real first name?",
+            semantic_protocol="qa_verified_answer_lineage_v2",
+            upstream_tool_receipts=qa_memory_tool_receipts(),
+            upstream_artifact=json.dumps(
+                {
+                    "retrieval_status": "evidence_found",
+                    "relevant_memory_ids": ["memory-walter"],
+                    "candidates": [
+                        {
+                            "memory_id": "memory-walter",
+                            "canonical_answer": "Walter",
+                            "paraphrase_answer_statement": statement,
+                        }
+                    ],
+                }
+            ),
+        )
+
+        schema = OpenAICompatibleGateway().request_payload(item)[
+            "response_format"
+        ]["json_schema"]["schema"]
+        answer_slot = schema["properties"]["answer_slot"]["properties"]
+        proposition = schema["properties"]["evidence_propositions"][
+            "items"
+        ]["properties"]
+
+        self.assertEqual(
+            "object_or_attribute_value",
+            answer_slot["answer_field"]["const"],
+        )
+        self.assertEqual(
+            "The actual first name of Bruce Willis",
+            proposition["subject"]["const"],
+        )
+        self.assertEqual("is", proposition["relation"]["const"])
+        self.assertEqual(
+            "Walter",
+            proposition["object_or_attribute_value"]["const"],
+        )
+        self.assertEqual(statement, proposition["evidence_span"]["const"])
+        self.assertEqual(
+            "Walter",
+            schema["properties"]["candidate_answer"]["const"],
+        )
+
+    def test_tool_less_reasoner_binds_answer_subject_active_statement(
+        self,
+    ) -> None:
+        statement = "The Chicago Bears won Super Bowl XX."
+        item = request(
+            is_output_agent=False,
+            role_family="reasoner",
+            problem="Who won Super Bowl XX?",
+            semantic_protocol="qa_verified_answer_lineage_v2",
+            upstream_tool_receipts=qa_memory_tool_receipts(),
+            upstream_artifact=json.dumps(
+                {
+                    "retrieval_status": "evidence_found",
+                    "relevant_memory_ids": ["memory-bears"],
+                    "candidates": [
+                        {
+                            "memory_id": "memory-bears",
+                            "canonical_answer": "Chicago Bears",
+                            "paraphrase_answer_statement": statement,
+                        }
+                    ],
+                }
+            ),
+        )
+
+        schema = OpenAICompatibleGateway().request_payload(item)[
+            "response_format"
+        ]["json_schema"]["schema"]
+        answer_slot = schema["properties"]["answer_slot"]["properties"]
+        proposition = schema["properties"]["evidence_propositions"][
+            "items"
+        ]["properties"]
+
+        self.assertEqual("subject", answer_slot["answer_field"]["const"])
+        self.assertEqual("Chicago Bears", proposition["subject"]["const"])
+        self.assertEqual("won", proposition["relation"]["const"])
+        self.assertEqual(
+            "Super Bowl XX",
+            proposition["object_or_attribute_value"]["const"],
+        )
+
+    def test_qa_memory_constraint_requires_one_routed_relevant_record(
+        self,
+    ) -> None:
+        artifact = {
+            "retrieval_status": "knowledge_base_coverage_failure",
+            "relevant_memory_ids": [],
+            "candidates": [
+                {
+                    "memory_id": "memory-a",
+                    "canonical_answer": "Answer A",
+                    "paraphrase_answer_statement": "The answer is Answer A.",
+                }
+            ],
+        }
+        item = request(
+            is_output_agent=False,
+            role_family="reasoner",
+            semantic_protocol="qa_verified_answer_lineage_v2",
+            upstream_tool_receipts=qa_memory_tool_receipts(),
+            upstream_artifact=json.dumps(artifact),
+        )
+        schema = OpenAICompatibleGateway().request_payload(item)[
+            "response_format"
+        ]["json_schema"]["schema"]
+        self.assertNotIn(
+            "const",
+            schema["properties"]["candidate_answer"],
+        )
+
+        artifact["retrieval_status"] = "evidence_found"
+        artifact["relevant_memory_ids"] = ["memory-a", "memory-b"]
+        artifact["candidates"].append(
+            {
+                "memory_id": "memory-b",
+                "canonical_answer": "Answer B",
+                "paraphrase_answer_statement": "The answer is Answer B.",
+            }
+        )
+        item = replace(item, upstream=(replace(
+            item.upstream[0],
+            content=json.dumps(artifact),
+        ),))
+        schema = OpenAICompatibleGateway().request_payload(item)[
+            "response_format"
+        ]["json_schema"]["schema"]
+        self.assertNotIn(
+            "const",
+            schema["properties"]["candidate_answer"],
+        )
+
+    def test_qa_memory_constraint_requires_targeted_agent_relation(self) -> None:
+        item = request(
+            is_output_agent=False,
+            role_family="reasoner",
+            semantic_protocol="qa_verified_answer_lineage_v2",
+            upstream_tool_receipts=qa_memory_tool_receipts(),
+            upstream_artifact=json.dumps(
+                {
+                    "retrieval_status": "evidence_found",
+                    "relevant_memory_ids": ["memory-a"],
+                    "candidates": [
+                        {
+                            "memory_id": "memory-a",
+                            "canonical_answer": "Answer A",
+                            "paraphrase_answer_statement": (
+                                "The answer is Answer A."
+                            ),
+                        }
+                    ],
+                }
+            ),
+        )
+        item = replace(item, upstream=(replace(
+            item.upstream[0],
+            target_agent_id="different-agent",
+        ),))
+        schema = OpenAICompatibleGateway().request_payload(item)[
+            "response_format"
+        ]["json_schema"]["schema"]
+        self.assertNotIn(
+            "const",
+            schema["properties"]["candidate_answer"],
         )
 
 

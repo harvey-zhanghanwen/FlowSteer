@@ -151,6 +151,8 @@ def _ordered_top_k_fixture(
         "retrieval_query": query,
         "top_k": top_k,
         "candidates": candidates,
+        "retrieval_status": "evidence_found",
+        "relevant_memory_ids": memory_ids,
     }
     return search, reads, artifact
 
@@ -744,6 +746,7 @@ def _assert_ordered_top_k_projection_and_k_completeness() -> None:
     assert projection["successful_read_count"] == 3
     assert projection["successful_search_count"] == 1
     assert projection["qa_tool_action_count"] == 4
+    assert projection["artifact_fields_exact"] is True
     assert projection["one_search_plus_k_ordered_reads"] is True
     assert projection["ordered_memory_ids_match"] is True
     assert projection["rank_similarity_exact"] is True

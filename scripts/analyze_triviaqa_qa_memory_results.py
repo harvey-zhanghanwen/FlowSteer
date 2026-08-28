@@ -88,6 +88,14 @@ QA_MEMORY_BATCH_ARTIFACT_FIELDS = (
     "retrieval_query",
     "top_k",
     "candidates",
+    "retrieval_status",
+    "relevant_memory_ids",
+)
+QA_MEMORY_BATCH_LEGACY_ARTIFACT_FIELDS = (
+    "question_scope",
+    "retrieval_query",
+    "top_k",
+    "candidates",
 )
 QA_MEMORY_BATCH_CANDIDATE_FIELDS = (
     "rank",
@@ -802,9 +810,10 @@ def _native_artifact_receipt_projections(
                 )
 
             question = base._mapping(trajectory.get("task")).get("question")
-            artifact_fields_exact = set(artifact) == set(
-                QA_MEMORY_BATCH_ARTIFACT_FIELDS
-            )
+            artifact_fields_exact = frozenset(artifact) in {
+                frozenset(QA_MEMORY_BATCH_ARTIFACT_FIELDS),
+                frozenset(QA_MEMORY_BATCH_LEGACY_ARTIFACT_FIELDS),
+            }
             search_query_matches = bool(
                 latest_search is not None
                 and artifact.get("retrieval_query") == latest_search.get("query")
@@ -1638,10 +1647,35 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
     terminal = base._mapping(report.get("terminal"))
     control = base._mapping(report.get("control_plane_and_tool_routing"))
     assertions = base._mapping(control.get("assertions"))
+    database_direct_condition = (
+        metrics.get("scope") == "in_database_transductive"
+    )
+    report_title = (
+        "# 全量 TriviaQA Q–A memory 条件下的直接准确率"
+        if database_direct_condition
+        else "# TriviaQA QA-memory 正式结果分析"
+    )
+    graph_label = (
+        "全量 TriviaQA Q–A memory + AgentGraph Tool 检索"
+        "（直接准确率）"
+        if database_direct_condition
+        else "AgentGraph"
+    )
+    comparison_label = (
+        "QA-memory AgentGraph − 闭卷 Direct"
+        if database_direct_condition
+        else "AgentGraph − Direct"
+    )
     if run.get("status") == "complete":
         delta_note = (
             "该差值来自同一固定 128 条完整正式结果；"
             f"评估口径为 `{metrics.get('scope')}`。"
+            + (
+                "该条件结果名称为“全量 TriviaQA Q–A memory 条件下的"
+                "直接准确率”。"
+                if database_direct_condition
+                else ""
+            )
         )
     else:
         delta_note = (
@@ -1650,18 +1684,18 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
             "不是完整 128 条正式结果。"
         )
     lines = [
-        "# TriviaQA QA-memory 正式结果分析",
+        report_title,
         "",
         f"状态：**{run.get('status')}**；manifest：`{run.get('manifest_status')}`。本报告仅分析已落盘 paired result、trajectory、Tool receipt 与 evaluator receipt，不调用模型或评测服务。",
         "",
-        "## Direct / AgentGraph 指标",
+        "## 闭卷 Direct 对照 / QA-memory AgentGraph 直接准确率",
         "",
         "| 条件 | 固定分母 | 完成 | evaluator 有效 | 严格 EM | 严格 F1 |",
         "| --- | ---: | ---: | ---: | ---: | ---: |",
-        f"| Direct | {direct.get('denominator')} | {direct.get('completed')} | {direct.get('evaluator_valid')} | {_percentage(direct.get('strict_exact_match'))} | {_percentage(direct.get('strict_token_f1'))} |",
-        f"| AgentGraph | {graph.get('denominator')} | {graph.get('completed')} | {graph.get('evaluator_valid')} | {_percentage(graph.get('strict_exact_match'))} | {_percentage(graph.get('strict_token_f1'))} |",
+        f"| Qwen3.5-9B 闭卷 Direct（question-only 对照） | {direct.get('denominator')} | {direct.get('completed')} | {direct.get('evaluator_valid')} | {_percentage(direct.get('strict_exact_match'))} | {_percentage(direct.get('strict_token_f1'))} |",
+        f"| {graph_label} | {graph.get('denominator')} | {graph.get('completed')} | {graph.get('evaluator_valid')} | {_percentage(graph.get('strict_exact_match'))} | {_percentage(graph.get('strict_token_f1'))} |",
         "",
-        f"AgentGraph − Direct：**{_percentage(delta.get('exact_match'))} EM**，**{_percentage(delta.get('token_f1'))} F1**。{delta_note}",
+        f"{comparison_label}：**{_percentage(delta.get('exact_match'))} EM**，**{_percentage(delta.get('token_f1'))} F1**。{delta_note}",
         "",
         "## Terminal 与三项边界断言",
         "",

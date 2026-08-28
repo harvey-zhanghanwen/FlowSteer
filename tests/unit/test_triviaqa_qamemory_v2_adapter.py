@@ -112,6 +112,62 @@ class TriviaQAQAMemoryV2AdapterTests(unittest.IsolatedAsyncioTestCase):
             phase=ExecutionPhase.SINGLE,
         )
 
+    def test_open_relation_query_rejects_entity_only_search_before_dispatch(
+        self,
+    ) -> None:
+        question = (
+            "At which university did Alice Example earn a doctorate in "
+            "philosophy?"
+        )
+        request = replace(
+            self._request(),
+            problem=question,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(_Index()),
+            max_turns=16,
+            max_tool_calls=12,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+            retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+        )
+
+        issue = adapter._tool_action_error(
+            request=request,
+            action=StructuredAction(
+                ActionKind.TOOL,
+                "search",
+                {"query": "Alice Example", "limit": 3},
+                resource_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+            ),
+            observations=[],
+        )
+        self.assertIsNotNone(issue)
+        assert issue is not None
+        self.assertTrue(
+            issue.startswith("qa_retrieval_query_target_relation_loss")
+        )
+        self.assertIn("missing_relation_context_tokens", issue)
+        self.assertIsNone(
+            adapter._tool_action_error(
+                request=request,
+                action=StructuredAction(
+                    ActionKind.TOOL,
+                    "search",
+                    {
+                        "query": (
+                            "Alice Example university doctorate philosophy"
+                        ),
+                        "limit": 3,
+                    },
+                    resource_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+                ),
+                observations=[],
+            )
+        )
+
     async def test_registry_uses_canonical_qamemory_wire_and_receipts(self) -> None:
         index = _Index()
         registry = build_qa_tool_registry(index)
@@ -772,6 +828,44 @@ class TriviaQAQAMemoryV2AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(memory_ids, [item["memory_id"] for item in artifact["candidates"]])
         self.assertEqual([1, 2, 3], [item["rank"] for item in artifact["candidates"]])
         self.assertEqual([0.93, 0.88, 0.81], [item["similarity"] for item in artifact["candidates"]])
+
+        exact_source_projected, exact_source_issue = (
+            QARetrievalReactExecutionAdapter._qa_memory_completion_receipt_projection(
+                original_question=question,
+                selection_artifact=json.dumps(
+                    {
+                        "memory_ids": memory_ids,
+                        "retrieval_status": "knowledge_base_coverage_failure",
+                        "relevant_memory_ids": [],
+                    }
+                ),
+                tool_receipts=receipts,
+                parametric_fallback_after_coverage_failure=True,
+                expected_source_task_id="triviaqa:tc_129",
+            )
+        )
+        self.assertIsNone(exact_source_issue)
+        self.assertIsNotNone(exact_source_projected)
+        assert exact_source_projected is not None
+        exact_source_artifact = json.loads(exact_source_projected)
+        self.assertEqual(
+            "evidence_found",
+            exact_source_artifact["retrieval_status"],
+        )
+        self.assertEqual(
+            ["memory-001"],
+            exact_source_artifact["relevant_memory_ids"],
+        )
+        self.assertIsNone(
+            QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
+                original_question=question,
+                artifact=exact_source_projected,
+                tool_receipts=receipts,
+                retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+                parametric_fallback_after_coverage_failure=True,
+                expected_source_task_id="triviaqa:tc_129",
+            )
+        )
         self.assertIsNone(
             QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
                 original_question=question,

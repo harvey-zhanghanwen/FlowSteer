@@ -39,6 +39,7 @@ from src.interactive.agent_workflow_env import (
     _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
     _QA_LOCATION_REASONER_RECOVERY_COMPLETION,
     _QA_LOCATION_REASONER_RECOVERY_CONTRACT,
+    _ReadReceiptText,
     _evidence_span_matches_read,
 )
 from src.interactive.director import director_validate_live_action_target_domains
@@ -8089,6 +8090,122 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             env.model_admissible_action_types(),
         )
 
+    async def test_successful_isolated_replacement_routes_before_missing_role_add(
+        self,
+    ) -> None:
+        """A completed replacement closes its ADD domain and routes next."""
+
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "failed_reader",
+                    "cheap",
+                    "retrieve grounded evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="retrieval_evidence",
+                ),
+                AgentNode(
+                    "reasoner",
+                    "balanced",
+                    "bind grounded evidence to the requested answer slot",
+                    role_family="reasoner",
+                    allowed_tools=(),
+                    execution_mode="reasoning",
+                    artifact_type="semantic_candidate",
+                ),
+                AgentNode(
+                    "verifier",
+                    "balanced",
+                    "verify evidence and semantic answer lineage",
+                    role_family="verifier",
+                    allowed_tools=(),
+                    execution_mode="reasoning",
+                    artifact_type="verified_semantic_answer",
+                ),
+                AgentNode(
+                    "replacement_reader",
+                    "cheap",
+                    "retrieve replacement grounded evidence",
+                    role_family="evidence_retriever",
+                    allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
+                    execution_mode="react",
+                    artifact_type="retrieval_evidence",
+                ),
+            ],
+            [AgentRelation("failed_reader", "reasoner", True, False)],
+        )
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="What is the capital of France?",
+            execute_on_edit=False,
+            max_agents=8,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+            require_format_agent=True,
+        )
+        env._failed_agent_ids.add("failed_reader")
+        env._repair_exhausted_agent_ids.add("failed_reader")
+        env._latest_failure_record_by_agent["failed_reader"] = (
+            _test_retrieval_failure_record(
+                graph,
+                agent_id="failed_reader",
+                strategies=("initial_retrieval",),
+                passage_ids=("failed-public",),
+            )
+        )
+        env._progressive_outputs["replacement_reader"] = (
+            _test_evidence_retriever_artifact("replacement-public")
+        )
+        env._progressive_output_metadata["replacement_reader"] = {
+            "tool_receipts": [_test_read_receipt("replacement-public")]
+        }
+
+        expected_route = {
+            "source_id": "replacement_reader",
+            "target_id": "reasoner",
+            "source_to_target": True,
+            "target_to_source": False,
+        }
+        self.assertEqual(
+            {},
+            env._repair_exhausted_auxiliary_replacement_domains(),
+        )
+        self.assertEqual(
+            [expected_route],
+            env._required_evidence_ingress_relation_candidates(),
+        )
+        self.assertEqual(
+            ("set_relation",),
+            env.model_admissible_action_types(),
+        )
+        self.assertEqual(
+            [expected_route],
+            env.model_admissible_action_targets()["set_relation"][
+                "candidates"
+            ],
+        )
+
+        routed = await env.step(
+            json.dumps({"action": "set_relation", **expected_route})
+        )
+        self.assertTrue(routed.accepted, routed.feedback)
+        self.assertEqual(
+            ("add_subgraph",),
+            env.model_admissible_action_types(),
+        )
+        self.assertEqual(
+            ["format"],
+            env.model_admissible_action_targets()["add_subgraph"][
+                "admitted_new_role_families"
+            ],
+        )
+
     def test_multigeneration_replacement_handoff_uses_most_advanced_public_state(
         self,
     ) -> None:
@@ -8919,6 +9036,277 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             original_question=question,
         )
         self.assertIn("do not preserve the requested relation", unrelated or "")
+
+    def test_reasoner_accepts_relation_split_across_relevant_qamemory_pair(
+        self,
+    ) -> None:
+        question = (
+            "Which innovation for the car was developed by Prince Henry of "
+            "Prussia in 1911?"
+        )
+        evidence_span = (
+            "The innovation developed by Prince Henry of Prussia in 1911 is "
+            "Windshield wipers."
+        )
+        memory_id = "qa-memory-car-innovation"
+        receipt = {
+            "tool_id": "triviaqa.qa_memory",
+            "tool_version": "test-v1",
+            "request": {
+                "action": "read",
+                "arguments": {"memory_id": memory_id},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "memory_id": memory_id,
+                    "memory": {
+                        "memory_id": memory_id,
+                        "title": (
+                            "What car innovation was created by Prince Henry "
+                            "of Prussia in 1911?"
+                        ),
+                        "text": (
+                            "Question: What car innovation was created by "
+                            "Prince Henry of Prussia in 1911?\nAnswer: "
+                            + evidence_span
+                        ),
+                        "paraphrase_question": (
+                            "What car innovation was created by Prince Henry "
+                            "of Prussia in 1911?"
+                        ),
+                        "paraphrase_answer_statement": evidence_span,
+                    },
+                },
+                "completed": True,
+            },
+            "error_type": None,
+        }
+        read_text = AgentWorkflowEnv._successful_read_text(
+            receipt,
+            "triviaqa.qa_memory",
+        )
+        self.assertIsNotNone(read_text)
+        assert read_text is not None
+        artifact = json.dumps(
+            {
+                "question_scope": question,
+                "answer_slot": {
+                    "answer_type": "entity",
+                    "answer_cardinality": "single",
+                    "qualifiers": [
+                        "developed by Prince Henry of Prussia",
+                        "in 1911",
+                    ],
+                    "proposition_index": 0,
+                    "answer_field": "object_or_attribute_value",
+                },
+                "evidence_propositions": [
+                    {
+                        "subject": (
+                            "The innovation developed by Prince Henry of "
+                            "Prussia in 1911"
+                        ),
+                        "relation": "is",
+                        "object_or_attribute_value": "Windshield wipers",
+                        "qualifiers": [],
+                        "evidence_span": evidence_span,
+                    }
+                ],
+                "multi_hop_chain": [
+                    "Prince Henry of Prussia developed the innovation in 1911"
+                ],
+                "candidate_answer": "Windshield wipers",
+                "evidence": [evidence_span],
+            }
+        )
+
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact,
+                [read_text],
+                require_answer_binding=True,
+                original_question=question,
+                qa_memory_relevant_memory_ids=[memory_id],
+            )
+        )
+        unrelated = AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+            artifact,
+            [read_text],
+            require_answer_binding=True,
+            original_question=question,
+            qa_memory_relevant_memory_ids=["different-memory"],
+        )
+        self.assertIn("do not preserve the requested relation", unrelated or "")
+
+    def test_reasoner_accepts_exact_source_semantic_qamemory_paraphrase(
+        self,
+    ) -> None:
+        question = "Which country is Europe's largest silk producer?"
+        paraphrase_question = (
+            "Which nation serves as Europe's biggest silk manufacturer?"
+        )
+        evidence_span = (
+            "Italy is the nation that serves as Europe's biggest silk "
+            "manufacturer."
+        )
+        memory_id = "qa-memory-silk-producer"
+        source_task_id = "triviaqa:tc_silk"
+        receipt = {
+            "tool_id": "triviaqa.qa_memory",
+            "tool_version": "test-v1",
+            "request": {
+                "action": "read",
+                "arguments": {"memory_id": memory_id},
+            },
+            "result": {
+                "value": {
+                    "operation": "read",
+                    "memory_id": memory_id,
+                    "memory": {
+                        "memory_id": memory_id,
+                        "source_train_task_id": source_task_id,
+                        "canonical_answer": "Italy",
+                        "title": paraphrase_question,
+                        "text": (
+                            f"Question: {paraphrase_question}\n"
+                            f"Answer: {evidence_span}"
+                        ),
+                        "paraphrase_question": paraphrase_question,
+                        "paraphrase_answer_statement": evidence_span,
+                        "paraphrase_provenance": {
+                            "canonical_span_preserved": True,
+                            "paraphrase_method": (
+                                "semantic-preserving-question-and-answer-"
+                                "paraphrase"
+                            ),
+                        },
+                    },
+                },
+                "completed": True,
+            },
+            "error_type": None,
+        }
+        read_text = AgentWorkflowEnv._successful_read_text(
+            receipt,
+            "triviaqa.qa_memory",
+        )
+        self.assertIsNotNone(read_text)
+        assert read_text is not None
+        artifact = json.dumps(
+            {
+                "question_scope": question,
+                "answer_slot": {
+                    "answer_type": "entity",
+                    "answer_cardinality": "single",
+                    "qualifiers": [],
+                    "proposition_index": 0,
+                    "answer_field": "subject",
+                },
+                "evidence_propositions": [
+                    {
+                        "subject": "Italy",
+                        "relation": "is",
+                        "object_or_attribute_value": (
+                            "the nation that serves as Europe's biggest silk "
+                            "manufacturer"
+                        ),
+                        "qualifiers": [],
+                        "evidence_span": evidence_span,
+                    }
+                ],
+                "multi_hop_chain": [evidence_span],
+                "candidate_answer": "Italy",
+                "evidence": [evidence_span],
+            }
+        )
+
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact,
+                [read_text],
+                require_answer_binding=True,
+                original_question=question,
+                qa_memory_relevant_memory_ids=[memory_id],
+                qa_memory_expected_source_task_ids=[source_task_id],
+            )
+        )
+        wrong_source = AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+            artifact,
+            [read_text],
+            require_answer_binding=True,
+            original_question=question,
+            qa_memory_relevant_memory_ids=[memory_id],
+            qa_memory_expected_source_task_ids=["triviaqa:different"],
+        )
+        self.assertIn(
+            "do not preserve the requested relation",
+            wrong_source or "",
+        )
+
+    def test_reasoner_exact_source_qamemory_binds_possessive_entity(self) -> None:
+        question = "Which prince is Queen Elizabeth II's youngest son?"
+        evidence_span = "Edward is the youngest son of Queen Elizabeth II."
+        memory_id = "qa-memory-youngest-son"
+        source_task_id = "triviaqa:tc_youngest_son"
+        artifact = json.dumps(
+            {
+                "question_scope": question,
+                "answer_slot": {
+                    "answer_type": "entity",
+                    "answer_cardinality": "single",
+                    "qualifiers": [],
+                    "proposition_index": 0,
+                    "answer_field": "subject",
+                },
+                "evidence_propositions": [
+                    {
+                        "subject": "Edward",
+                        "relation": "is",
+                        "object_or_attribute_value": (
+                            "the youngest son of Queen Elizabeth II"
+                        ),
+                        "qualifiers": [],
+                        "evidence_span": evidence_span,
+                    }
+                ],
+                "multi_hop_chain": [evidence_span],
+                "candidate_answer": "Edward",
+                "evidence": [evidence_span],
+            }
+        )
+
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact,
+                [
+                    _ReadReceiptText(
+                        (
+                            "Question: Which prince is Queen Elizabeth II's "
+                            "youngest offspring?\nAnswer: " + evidence_span
+                        ),
+                        passage_title=(
+                            "Which prince is Queen Elizabeth II's youngest "
+                            "offspring?"
+                        ),
+                        tool_id="triviaqa.qa_memory",
+                        record_id=memory_id,
+                        paraphrase_question=(
+                            "Which prince is Queen Elizabeth II's youngest "
+                            "offspring?"
+                        ),
+                        paraphrase_answer_statement=evidence_span,
+                        source_train_task_id=source_task_id,
+                        canonical_answer="Edward",
+                        semantic_preserving_paraphrase=True,
+                    )
+                ],
+                require_answer_binding=True,
+                original_question=question,
+                qa_memory_relevant_memory_ids=[memory_id],
+                qa_memory_expected_source_task_ids=[source_task_id],
+            )
+        )
 
     def test_reasoner_entity_gate_accepts_only_receipt_title_bound_alias(
         self,

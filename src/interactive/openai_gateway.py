@@ -412,7 +412,11 @@ _QA_REASONER_PROTOCOL = (
     "proposition and answer_field selects its subject or "
     "object_or_attribute_value; candidate_answer must equal that selected value, "
     "except for a deterministic year-to-decade normalization when the original "
-    "question explicitly requests a decade. "
+    "question explicitly requests a decade. When the question asks for a date, "
+    "year, decade, number, or quantity, encode that requested value as the "
+    "answer-bearing proposition's object_or_attribute_value and bind answer_slot "
+    "to it; do not leave the requested value only in qualifiers while the object "
+    "field contains a different relation argument. "
     + _QA_COMPLETE_ENTITY_SURFACE_RULE
     + "If the retrieved evidence does not bind both entity identity and target "
     "relation, do not guess or fabricate a candidate; continue the admitted "
@@ -625,6 +629,74 @@ def _has_parametric_fallback_candidate(request: AgentRequest) -> bool:
         ):
             return True
     return False
+
+
+def _tool_less_reasoner_response_schema(
+    request: AgentRequest,
+) -> Mapping[str, object] | None:
+    """Reuse the SkillFlow strict artifact schema for a reasoning Reasoner.
+
+    The ReAct adapter already attaches this schema to its ``complete`` action.
+    A TriviaQA worker Reasoner is intentionally Tool-less, so the same schema
+    has to be attached directly to its provider request rather than wrapped in
+    a StructuredAction envelope.
+    """
+
+    execution_mode = getattr(
+        request.agent.execution_mode,
+        "value",
+        request.agent.execution_mode,
+    )
+    if (
+        execution_mode != "reasoning"
+        or (request.agent.role_family or "").casefold() != "reasoner"
+        or request.semantic_protocol
+        not in {
+            "hotpotqa_verified_answer_slot_v1",
+            "qa_verified_answer_lineage_v2",
+        }
+    ):
+        return None
+    if (
+        request.semantic_protocol == "qa_verified_answer_lineage_v2"
+        and _has_qa_memory_coverage_failure(request)
+    ):
+        from .task_dataset import (
+            qa_answer_cardinality_constraint,
+            qa_answer_type_constraint,
+            qa_question_scope,
+        )
+
+        return {
+            "type": "object",
+            "required": [
+                "question_scope",
+                "retrieval_status",
+                "answer_source",
+                "answer_type",
+                "answer_cardinality",
+                "candidate_answer",
+            ],
+            "properties": {
+                "question_scope": {"const": qa_question_scope(request.problem)},
+                "retrieval_status": {
+                    "const": "knowledge_base_coverage_failure"
+                },
+                "answer_source": {"const": "parametric_knowledge"},
+                "answer_type": {
+                    "const": qa_answer_type_constraint(request.problem)
+                },
+                "answer_cardinality": {
+                    "const": qa_answer_cardinality_constraint(request.problem)
+                },
+                "candidate_answer": {"type": "string", "minLength": 1},
+            },
+            "additionalProperties": False,
+        }
+
+    from .qa_tool_adapter import qa_reasoner_artifact_json_schema
+
+    return qa_reasoner_artifact_json_schema(request)
 
 
 def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
@@ -1063,6 +1135,7 @@ class OpenAICompatibleGateway:
                 "enable_thinking": normalized == "true"
             }
         response_schema_text = metadata.get("response_json_schema")
+        response_schema: Mapping[str, object] | None = None
         if response_schema_text is not None:
             if not isinstance(response_schema_text, str) or not response_schema_text.strip():
                 raise OpenAICompatibleGatewayError(
@@ -1078,13 +1151,20 @@ class OpenAICompatibleGateway:
                 raise OpenAICompatibleGatewayError(
                     "model metadata response_json_schema must decode to an object"
                 )
+        else:
+            response_schema = _tool_less_reasoner_response_schema(request)
+        if response_schema is not None:
             # DIRECT_REUSE: SkillFlow runtime/openai_provider.py sends the
             # request-scoped ModelRequest.response_schema through the standard
             # OpenAI structured-output boundary.
             payload["response_format"] = {
                 "json_schema": {
-                    "name": "skillev_action",
-                    "schema": response_schema,
+                    "name": (
+                        "skillev_action"
+                        if response_schema_text is not None
+                        else "skillev_reasoner_artifact"
+                    ),
+                    "schema": dict(response_schema),
                     "strict": True,
                 },
                 "type": "json_schema",

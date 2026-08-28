@@ -24,6 +24,7 @@ from src.interactive.qa_tool_adapter import (
     QARetrievalReactExecutionAdapter,
     QA_RETRIEVAL_TOOL_ID,
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+    _controlled_relation_paraphrase,
     _factual_transition_strategy_identification,
     _factual_strategy_semantics_verified,
     _location_containment_lineage_issue,
@@ -32,6 +33,7 @@ from src.interactive.qa_tool_adapter import (
     _public_read_transition_mirror,
     _public_search_candidate_compatibility,
     _query_replaces_relation_surface,
+    _proposition_preserves_requested_relation,
     _relation_surface_rewrite_query_candidates,
     _question_entity_anchor_tokens,
     _question_named_constraint_tokens,
@@ -4556,6 +4558,37 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual((), candidates)
 
+    def test_open_relation_candidate_rejects_same_entity_wrong_fact(
+        self,
+    ) -> None:
+        question = (
+            "At which university did Alice Example earn a doctorate in "
+            "philosophy?"
+        )
+        supported = _public_search_candidate_compatibility(
+            original_question=question,
+            title=(
+                "At which university did Alice Example receive a doctorate "
+                "in philosophy?"
+            ),
+            snippet=(
+                "Example University is where Alice Example earned a doctorate "
+                "in philosophy."
+            ),
+            require_entity_relation_compatibility=True,
+        )
+        same_entity_wrong_fact = _public_search_candidate_compatibility(
+            original_question=question,
+            title="Alice Example",
+            snippet=(
+                "Alice Example served as minister for public information."
+            ),
+            require_entity_relation_compatibility=True,
+        )
+
+        self.assertTrue(supported[0])
+        self.assertFalse(same_entity_wrong_fact[0])
+
     def test_ordinal_read_domain_keeps_entity_title_when_snippet_is_truncated(
         self,
     ) -> None:
@@ -9046,6 +9079,97 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(detail)
         assert detail is not None
         self.assertIn("target_relation must preserve", detail)
+
+    def test_publication_release_relation_paraphrase_preserves_public_context(
+        self,
+    ) -> None:
+        question = (
+            "In which decade did Billboard magazine first publish an American "
+            "hit chart?"
+        )
+        evidence = (
+            "The decade in which Billboard magazine initially released an "
+            "American hit chart is the 30s."
+        )
+
+        self.assertTrue(
+            _controlled_relation_paraphrase(
+                question_relation="first publish an American hit chart",
+                evidence_predicate="initially released",
+                original_question=question,
+                evidence_span=evidence,
+            )
+        )
+        self.assertFalse(
+            _controlled_relation_paraphrase(
+                question_relation="first publish an American hit chart",
+                evidence_predicate="initially released",
+                original_question=question,
+                evidence_span="The detainee was initially released from custody.",
+            )
+        )
+
+    def test_identity_alias_relation_paraphrase_excludes_known_for(self) -> None:
+        question = "How is Joan Molinsky better known?"
+        evidence = "Joan Molinsky is recognized as Joan Rivers."
+
+        self.assertTrue(
+            _controlled_relation_paraphrase(
+                question_relation="better known",
+                evidence_predicate="is recognized as",
+                original_question=question,
+                evidence_span=evidence,
+            )
+        )
+        self.assertFalse(
+            _controlled_relation_paraphrase(
+                question_relation="known for",
+                evidence_predicate="is recognized as",
+                original_question="What is Joan Molinsky known for?",
+                evidence_span=evidence,
+            )
+        )
+
+    def test_copular_proposition_preserves_relation_carried_by_subject(
+        self,
+    ) -> None:
+        self.assertTrue(
+            _proposition_preserves_requested_relation(
+                requested_relation="What is Bruce Willis' real first name?",
+                subject="The actual first name of Bruce Willis",
+                predicate="is",
+                object_or_attribute_value="Walter",
+                original_question="What is Bruce Willis' real first name?",
+                evidence_span=(
+                    "The actual first name of Bruce Willis is Walter."
+                ),
+            )
+        )
+
+    def test_copular_proposition_ignores_interrogative_relation_head(
+        self,
+    ) -> None:
+        self.assertTrue(
+            _proposition_preserves_requested_relation(
+                requested_relation=(
+                    "Which was the first European country to abolish capital "
+                    "punishment?"
+                ),
+                subject="Norway",
+                predicate="was",
+                object_or_attribute_value=(
+                    "the first European country to abolish capital punishment"
+                ),
+                original_question=(
+                    "Which was the first European country to abolish capital "
+                    "punishment?"
+                ),
+                evidence_span=(
+                    "Norway was the first European country to abolish capital "
+                    "punishment."
+                ),
+            )
+        )
 
     def test_evidence_retriever_accepts_title_bound_pronoun_and_explicit_sequence_onset(
         self,

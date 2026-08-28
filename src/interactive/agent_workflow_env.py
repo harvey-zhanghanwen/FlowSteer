@@ -241,15 +241,36 @@ class _ReadReceiptText(str):
     """
 
     passage_title: Optional[str]
+    tool_id: Optional[str]
+    record_id: Optional[str]
+    paraphrase_question: Optional[str]
+    paraphrase_answer_statement: Optional[str]
+    source_train_task_id: Optional[str]
+    canonical_answer: Optional[str]
+    semantic_preserving_paraphrase: bool
 
     def __new__(
         cls,
         text: str,
         *,
         passage_title: Optional[str] = None,
+        tool_id: Optional[str] = None,
+        record_id: Optional[str] = None,
+        paraphrase_question: Optional[str] = None,
+        paraphrase_answer_statement: Optional[str] = None,
+        source_train_task_id: Optional[str] = None,
+        canonical_answer: Optional[str] = None,
+        semantic_preserving_paraphrase: bool = False,
     ) -> "_ReadReceiptText":
         value = super().__new__(cls, text)
         value.passage_title = passage_title
+        value.tool_id = tool_id
+        value.record_id = record_id
+        value.paraphrase_question = paraphrase_question
+        value.paraphrase_answer_statement = paraphrase_answer_statement
+        value.source_train_task_id = source_train_task_id
+        value.canonical_answer = canonical_answer
+        value.semantic_preserving_paraphrase = semantic_preserving_paraphrase
         return value
 
 
@@ -984,6 +1005,9 @@ class AgentWorkflowEnv:
         auxiliary_replacement_domains = (
             self._repair_exhausted_auxiliary_replacement_domains()
         )
+        required_evidence_ingress_candidates = (
+            self._required_evidence_ingress_relation_candidates()
+        )
 
         if (
             dirty_replacement_ids
@@ -996,6 +1020,17 @@ class AgentWorkflowEnv:
             # the next FlowSteer edit on another augmentation or on a blocked
             # downstream Agent which merely lacks that artifact.
             return (AgentActionType.MODIFY_AGENT.value,)
+
+        if (
+            required_evidence_ingress_candidates
+            and AgentActionType.SET_RELATION.value
+            in self._allowed_action_type_set
+        ):
+            # A successful isolated replacement is an executed functional
+            # unit, not another missing semantic responsibility. Route its
+            # receipt-grounded artifact before exposing ADD again, even while
+            # the failed generation remains in recovery state.
+            return (AgentActionType.SET_RELATION.value,)
 
         missing_role_families = self._missing_semantic_role_families()
         if (
@@ -1030,26 +1065,6 @@ class AgentWorkflowEnv:
                 # artifact. Missing downstream responsibilities cannot bypass
                 # Evidence Grounding, so the live Canvas domain is exhausted.
                 return ()
-            required_evidence_ingress_candidates = (
-                self._required_evidence_ingress_relation_candidates()
-            )
-            if (
-                not bool(
-                    self._failed_agent_ids
-                    or self._repair_exhausted_agent_ids
-                )
-                and required_evidence_ingress_candidates
-                and AgentActionType.SET_RELATION.value
-                in self._allowed_action_type_set
-            ):
-                # Match authoritative Canvas admission: after a Retriever has
-                # materialized a valid public artifact, route that evidence
-                # into the existing Reasoner before adding another semantic
-                # responsibility.  A typed failure with a missing role keeps
-                # the preserve/repair ADD boundary above, exactly as
-                # ``_semantic_edit_issue_for`` requires.  This only orders two
-                # live FlowSteer edits; it does not prescribe a topology.
-                return (AgentActionType.SET_RELATION.value,)
             # A partial executable Canvas must first materialize every required
             # semantic responsibility. This is a state-conditioned ADD domain,
             # not a fixed Agent count, order, edge set, or topology: one ADD may
@@ -2991,6 +3006,15 @@ class AgentWorkflowEnv:
         capacity_recovery_ids = set(
             self._capacity_blocking_failed_auxiliary_delete_ids()
         )
+        successful_replacement_domains = {
+            (
+                (
+                    self._graph.get_node(agent_id).role_family or ""
+                ).casefold(),
+                self._graph.get_node(agent_id).artifact_type.casefold(),
+            )
+            for agent_id in self._successful_auxiliary_replacement_agent_ids()
+        }
         domains: dict[str, list[str]] = {}
         failed_generations: dict[tuple[str, str], list[str]] = {}
         for node in self._graph.nodes:
@@ -3008,6 +3032,13 @@ class AgentWorkflowEnv:
             ).append(node.id)
 
         for (role_family, artifact_type), agent_ids in failed_generations.items():
+            if (role_family, artifact_type) in successful_replacement_domains:
+                # The preceding FlowSteer ADD boundary has already executed a
+                # same-responsibility replacement and SkillFlow's completion
+                # contract has accepted its public artifact. The next Canvas
+                # edit must route that artifact rather than repeat the completed
+                # isolated execution boundary.
+                continue
             # Only the newest failed generation can justify another
             # replacement. An older incomplete schedule must not remain a
             # permanently reusable ADD ticket after a newer generation stalls.
@@ -6860,11 +6891,20 @@ class AgentWorkflowEnv:
             # wire format is JSON.  Preserve the exact field/value tree before
             # falling back to the legacy flat labelled parser; all normal
             # semantic and evidence-lineage validation still runs below.
-            try:
-                yaml_value = yaml.safe_load(text)
-            except yaml.YAMLError:
-                yaml_value = None
-            parsed = yaml_value if isinstance(yaml_value, Mapping) else None
+            if required_fields == _VERIFIER_SEMANTIC_FIELDS:
+                # A Verifier artifact is a flat labelled wire.  Let the
+                # labelled parser below preserve candidate_answer as text;
+                # YAML would coerce a bare date/number such as ``1914`` into
+                # an integer before the Verifier contract can validate it.
+                parsed = None
+            else:
+                try:
+                    yaml_value = yaml.safe_load(text)
+                except yaml.YAMLError:
+                    yaml_value = None
+                parsed = (
+                    yaml_value if isinstance(yaml_value, Mapping) else None
+                )
         aliases = {"fact_propositions": "evidence_propositions"}
         optional_fields = (
             {"evidence", "repair_diagnosis", "reasoning"}
@@ -7394,6 +7434,29 @@ class AgentWorkflowEnv:
             return str(status)
         return None
 
+    @staticmethod
+    def _qa_memory_relevant_memory_ids(artifact: object) -> tuple[str, ...]:
+        """Return the ordered worker-selected QA-memory identifiers."""
+
+        if not isinstance(artifact, str) or not artifact.strip():
+            return ()
+        try:
+            parsed = json.loads(artifact)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ()
+        if not isinstance(parsed, Mapping):
+            return ()
+        raw_ids = parsed.get("relevant_memory_ids")
+        if not isinstance(raw_ids, list) or any(
+            not isinstance(memory_id, str) or not memory_id.strip()
+            for memory_id in raw_ids
+        ):
+            return ()
+        memory_ids = tuple(memory_id.strip() for memory_id in raw_ids)
+        if len(memory_ids) != len(set(memory_ids)):
+            return ()
+        return memory_ids
+
     def _parametric_fallback_reasoner_candidate(
         self,
         artifact: str,
@@ -7631,7 +7694,61 @@ class AgentWorkflowEnv:
             if isinstance(raw_title, str) and raw_title.strip()
             else None
         )
-        return _ReadReceiptText(text, passage_title=passage_title)
+        record_id_field = (
+            "memory_id" if set(arguments) == {"memory_id"} else "passage_id"
+        )
+        raw_record_id = record.get(record_id_field)
+        record_id = (
+            raw_record_id.strip()
+            if isinstance(raw_record_id, str) and raw_record_id.strip()
+            else None
+        )
+        raw_paraphrase_question = record.get("paraphrase_question")
+        paraphrase_question = (
+            raw_paraphrase_question.strip()
+            if isinstance(raw_paraphrase_question, str)
+            and raw_paraphrase_question.strip()
+            else None
+        )
+        raw_answer_statement = record.get("paraphrase_answer_statement")
+        paraphrase_answer_statement = (
+            raw_answer_statement.strip()
+            if isinstance(raw_answer_statement, str)
+            and raw_answer_statement.strip()
+            else None
+        )
+        raw_source_task_id = record.get("source_train_task_id")
+        source_train_task_id = (
+            raw_source_task_id.strip()
+            if isinstance(raw_source_task_id, str)
+            and raw_source_task_id.strip()
+            else None
+        )
+        raw_canonical_answer = record.get("canonical_answer")
+        canonical_answer = (
+            raw_canonical_answer.strip()
+            if isinstance(raw_canonical_answer, str)
+            and raw_canonical_answer.strip()
+            else None
+        )
+        paraphrase_provenance = record.get("paraphrase_provenance")
+        semantic_preserving_paraphrase = bool(
+            isinstance(paraphrase_provenance, Mapping)
+            and paraphrase_provenance.get("canonical_span_preserved") is True
+            and paraphrase_provenance.get("paraphrase_method")
+            == "semantic-preserving-question-and-answer-paraphrase"
+        )
+        return _ReadReceiptText(
+            text,
+            passage_title=passage_title,
+            tool_id=required_tool_id,
+            record_id=record_id,
+            paraphrase_question=paraphrase_question,
+            paraphrase_answer_statement=paraphrase_answer_statement,
+            source_train_task_id=source_train_task_id,
+            canonical_answer=canonical_answer,
+            semantic_preserving_paraphrase=semantic_preserving_paraphrase,
+        )
 
     @classmethod
     def _reasoner_evidence_provenance_issue(
@@ -7641,6 +7758,8 @@ class AgentWorkflowEnv:
         *,
         require_answer_binding: bool = False,
         original_question: Optional[str] = None,
+        qa_memory_relevant_memory_ids: Sequence[str] = (),
+        qa_memory_expected_source_task_ids: Sequence[str] = (),
     ) -> Optional[str]:
         """Validate proposition spans against successful read provenance.
 
@@ -7668,6 +7787,76 @@ class AgentWorkflowEnv:
             _relation_surface_matches_evidence,
             _relation_surfaces_share_content,
         )
+
+        relevant_memory_ids = frozenset(qa_memory_relevant_memory_ids)
+        expected_source_task_ids = frozenset(
+            qa_memory_expected_source_task_ids
+        )
+        candidate_answer = fields.get("candidate_answer")
+
+        def paired_qa_memory_provenance_valid(
+            proposition: Mapping[str, object],
+        ) -> bool:
+            """Validate one proposition against its routed paired-QA receipt.
+
+            TriviaQA QA-memory stores a meaning-preserving paraphrase question
+            together with its answer statement.  A statement may omit a topic
+            modifier that remains explicit in its paired question.  Admit that
+            split realization only when the statement is the exact evidence
+            span of a worker read whose memory_id the worker marked relevant,
+            and the combined public Q-A record preserves the original
+            question's relation and scope under the existing lexical gate. An
+            exact-source record may additionally rely on its materialized
+            semantic-preserving paraphrase provenance, but only when its
+            canonical answer equals the current Reasoner candidate.
+            """
+
+            if not original_question or not relevant_memory_ids:
+                return False
+            evidence_span = proposition.get("evidence_span")
+            if not isinstance(evidence_span, str) or not evidence_span.strip():
+                return False
+            for read_text in read_evidence_texts:
+                if not isinstance(read_text, _ReadReceiptText):
+                    continue
+                if (
+                    read_text.tool_id != _TRIVIAQA_QA_MEMORY_TOOL_ID
+                    or read_text.record_id not in relevant_memory_ids
+                    or not isinstance(read_text.paraphrase_question, str)
+                    or not read_text.paraphrase_question.strip()
+                    or not isinstance(
+                        read_text.paraphrase_answer_statement,
+                        str,
+                    )
+                    or not read_text.paraphrase_answer_statement.strip()
+                    or not _evidence_span_matches_read(
+                        evidence_span,
+                        read_text.paraphrase_answer_statement,
+                    )
+                ):
+                    continue
+                paired_surface = (
+                    f"{read_text.paraphrase_question} "
+                    f"{read_text.paraphrase_answer_statement}"
+                )
+                lexical_relation_preserved = (
+                    _relation_surface_matches_evidence(
+                        original_question,
+                        paired_surface,
+                    )
+                )
+                exact_source_paraphrase = bool(
+                    expected_source_task_ids
+                    and read_text.source_train_task_id
+                    in expected_source_task_ids
+                    and read_text.semantic_preserving_paraphrase
+                    and isinstance(candidate_answer, str)
+                    and candidate_answer.strip()
+                    and read_text.canonical_answer == candidate_answer
+                )
+                if lexical_relation_preserved or exact_source_paraphrase:
+                    return True
+            return False
 
         for index, proposition in enumerate(propositions):
             if not isinstance(proposition, Mapping):
@@ -7779,6 +7968,11 @@ class AgentWorkflowEnv:
                 )
                 or _proposition_preserves_requested_relation(
                     requested_relation=original_question,
+                    subject=(
+                        proposition["subject"]
+                        if isinstance(proposition.get("subject"), str)
+                        else ""
+                    ),
                     predicate=proposition["relation"],
                     object_or_attribute_value=proposition[
                         "object_or_attribute_value"
@@ -7786,6 +7980,7 @@ class AgentWorkflowEnv:
                     original_question=original_question,
                     evidence_span=proposition["evidence_span"],
                 )
+                or paired_qa_memory_provenance_valid(proposition)
             )
         ) if original_question else tuple(propositions)
         if not relation_aligned_propositions:
@@ -7961,7 +8156,10 @@ class AgentWorkflowEnv:
                         _canonical_evidence_text(argument)
                     )
 
-            if not seeded_argument_aliases:
+            if (
+                not seeded_argument_aliases
+                and not paired_qa_memory_provenance_valid(selected)
+            ):
                 return (
                     "Reasoner requested-relation proposition has no deterministic "
                     "entity binding: its non-answer proposition argument does not "
@@ -8211,6 +8409,49 @@ class AgentWorkflowEnv:
                     texts.append(text)
         return tuple(texts)
 
+    def _qa_memory_relevant_ids_for_agents(
+        self,
+        outputs: Mapping[str, str],
+        agent_ids: Sequence[str],
+    ) -> tuple[str, ...]:
+        """Collect worker-selected memory ids from routed Retriever artifacts."""
+
+        memory_ids: set[str] = set()
+        for agent_id in agent_ids:
+            if not self._graph.has_node(agent_id):
+                continue
+            node = self._graph.get_node(agent_id)
+            if (node.role_family or "").casefold() != "evidence_retriever":
+                continue
+            memory_ids.update(
+                self._qa_memory_relevant_memory_ids(outputs.get(agent_id))
+            )
+        return tuple(sorted(memory_ids))
+
+    def _qa_memory_expected_source_ids_for_agents(
+        self,
+        output_metadata: Mapping[str, Mapping[str, object]],
+        agent_ids: Sequence[str],
+    ) -> tuple[str, ...]:
+        """Collect task ids bound to validated worker QA-memory requests."""
+
+        source_ids: set[str] = set()
+        for agent_id in agent_ids:
+            if not self._graph.has_node(agent_id):
+                continue
+            node = self._graph.get_node(agent_id)
+            if (node.role_family or "").casefold() != "evidence_retriever":
+                continue
+            metadata = output_metadata.get(agent_id)
+            raw_source_id = (
+                metadata.get("qa_memory_query_task_id")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            if isinstance(raw_source_id, str) and raw_source_id.strip():
+                source_ids.add(raw_source_id.strip())
+        return tuple(sorted(source_ids))
+
     def _role_conditional_semantic_issue(
         self,
         execution: AgentRuntimeResult,
@@ -8278,6 +8519,18 @@ class AgentWorkflowEnv:
                     owner_texts,
                     require_answer_binding=True,
                     original_question=hotpotqa_question_scope(self._problem),
+                    qa_memory_relevant_memory_ids=(
+                        self._qa_memory_relevant_ids_for_agents(
+                            execution.outputs,
+                            evidence_owner_ids,
+                        )
+                    ),
+                    qa_memory_expected_source_task_ids=(
+                        self._qa_memory_expected_source_ids_for_agents(
+                            execution.output_metadata,
+                            evidence_owner_ids,
+                        )
+                    ),
                 )
                 if provenance_issue is not None:
                     return (
@@ -8493,6 +8746,9 @@ class AgentWorkflowEnv:
             for receipt in raw_receipts
             if isinstance(receipt, Mapping)
         )
+        query_task_id = retriever_metadata.get("qa_memory_query_task_id")
+        if not isinstance(query_task_id, str) or not query_task_id.strip():
+            query_task_id = None
 
         from .qa_tool_adapter import QARetrievalReactExecutionAdapter
 
@@ -8505,6 +8761,7 @@ class AgentWorkflowEnv:
                 parametric_fallback_after_coverage_failure=(
                     self.parametric_fallback_after_coverage_failure
                 ),
+                expected_source_task_id=query_task_id,
             )
         )
         if completion_issue is not None:
@@ -8570,6 +8827,7 @@ class AgentWorkflowEnv:
                     parametric_fallback_after_coverage_failure=(
                         self.parametric_fallback_after_coverage_failure
                     ),
+                    expected_source_task_id=query_task_id,
                 )
             )
             if routed_issue is None:
@@ -8663,6 +8921,8 @@ class AgentWorkflowEnv:
         if verifier_artifact is None:
             return f"Verifier {verifier_id!r} has no current verification artifact"
         valid_qa_memory_retriever_statuses: dict[str, str] = {}
+        valid_qa_memory_relevant_ids: set[str] = set()
+        valid_qa_memory_source_task_ids: set[str] = set()
         if self.semantic_protocol == _QA_SEMANTIC_PROTOCOL:
             # NECESSARY_ADAPTATION: TriviaQA's evidence-grounding boundary is
             # an executed data dependency rather than a Director prompt
@@ -8693,6 +8953,26 @@ class AgentWorkflowEnv:
                     )
                     if ingress_issue is None:
                         valid_retriever_ingress = True
+                        valid_qa_memory_relevant_ids.update(
+                            self._qa_memory_relevant_memory_ids(
+                                execution.outputs.get(predecessor_id)
+                            )
+                        )
+                        retriever_metadata = execution.output_metadata.get(
+                            predecessor_id
+                        )
+                        raw_source_task_id = (
+                            retriever_metadata.get("qa_memory_query_task_id")
+                            if isinstance(retriever_metadata, Mapping)
+                            else None
+                        )
+                        if (
+                            isinstance(raw_source_task_id, str)
+                            and raw_source_task_id.strip()
+                        ):
+                            valid_qa_memory_source_task_ids.add(
+                                raw_source_task_id.strip()
+                            )
                         if self.parametric_fallback_after_coverage_failure:
                             retrieval_status = self._qa_memory_retrieval_status(
                                 execution.outputs.get(predecessor_id)
@@ -8935,6 +9215,12 @@ class AgentWorkflowEnv:
                 self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
             ),
             original_question=hotpotqa_question_scope(self._problem),
+            qa_memory_relevant_memory_ids=tuple(
+                sorted(valid_qa_memory_relevant_ids)
+            ),
+            qa_memory_expected_source_task_ids=tuple(
+                sorted(valid_qa_memory_source_task_ids)
+            ),
         )
         if provenance_issue is not None:
             completion_only_repair = (
@@ -8967,6 +9253,12 @@ class AgentWorkflowEnv:
                 self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
             ),
             original_question=hotpotqa_question_scope(self._problem),
+            qa_memory_relevant_memory_ids=tuple(
+                sorted(valid_qa_memory_relevant_ids)
+            ),
+            qa_memory_expected_source_task_ids=tuple(
+                sorted(valid_qa_memory_source_task_ids)
+            ),
         )
         if verifier_lineage_issue is not None:
             return (
@@ -9654,6 +9946,18 @@ class AgentWorkflowEnv:
                         evidence_texts,
                         require_answer_binding=True,
                         original_question=hotpotqa_question_scope(self._problem),
+                        qa_memory_relevant_memory_ids=(
+                            self._qa_memory_relevant_ids_for_agents(
+                                execution.outputs,
+                                owner_ids,
+                            )
+                        ),
+                        qa_memory_expected_source_task_ids=(
+                            self._qa_memory_expected_source_ids_for_agents(
+                                execution.output_metadata,
+                                owner_ids,
+                            )
+                        ),
                     )
                     is None
                 )
@@ -9721,6 +10025,16 @@ class AgentWorkflowEnv:
                 retrieval_tool_id=self.required_evidence_tool_id,
                 parametric_fallback_after_coverage_failure=(
                     self.parametric_fallback_after_coverage_failure
+                ),
+                expected_source_task_id=(
+                    metadata.get("qa_memory_query_task_id")
+                    if self.required_evidence_tool_id
+                    == _TRIVIAQA_QA_MEMORY_TOOL_ID
+                    and isinstance(
+                        metadata.get("qa_memory_query_task_id"),
+                        str,
+                    )
+                    else None
                 ),
             )
             return completion_issue is None
@@ -9800,6 +10114,24 @@ class AgentWorkflowEnv:
                     self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
                 ),
                 original_question=hotpotqa_question_scope(self._problem),
+                qa_memory_relevant_memory_ids=(
+                    self._qa_memory_relevant_ids_for_agents(
+                        self._progressive_outputs,
+                        (
+                            agent_id,
+                            *self._graph.directed_predecessors(agent_id),
+                        ),
+                    )
+                ),
+                qa_memory_expected_source_task_ids=(
+                    self._qa_memory_expected_source_ids_for_agents(
+                        self._progressive_output_metadata,
+                        (
+                            agent_id,
+                            *self._graph.directed_predecessors(agent_id),
+                        ),
+                    )
+                ),
             ) is None
         if role_family == "verifier":
             reasoner_ids = tuple(
@@ -10216,6 +10548,7 @@ class AgentWorkflowEnv:
             and missing_role_families
             and bool(self._failed_agent_ids or self._repair_exhausted_agent_ids)
             and not replacement_domains
+            and not self._required_evidence_ingress_relation_candidates()
         ):
             sampled_role_families = tuple(
                 (spec.role_family or "").casefold() for spec in action.agents

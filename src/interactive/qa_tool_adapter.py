@@ -24,7 +24,7 @@ from threading import Event
 from typing import Callable, Mapping, Optional, Protocol, Sequence
 import unicodedata
 
-from .agent_runtime import AgentGateway, AgentRequest, GatewayResponse
+from .agent_runtime import AgentGateway, AgentRequest, AgentResponse, GatewayResponse
 from .react_execution import ReactExecutionError, ToolReactExecutionAdapter
 from .scientific_sampling import ScientificSamplingCoordinate
 from .task_dataset import (
@@ -106,6 +106,463 @@ _QA_MEMORY_CANDIDATE_FIELDS = (
 _SUPPORTED_QA_RETRIEVAL_TOOL_IDS = frozenset(
     {QA_RETRIEVAL_TOOL_ID, TRIVIAQA_QA_MEMORY_TOOL_ID}
 )
+
+
+def _qa_memory_relevant_candidates(
+    request: AgentRequest,
+) -> tuple[dict[str, str], ...]:
+    """Return records explicitly selected by a routed QA-memory artifact.
+
+    This is retrieval-grounded constrained decoding, not evaluator access: the
+    records must already be present in a direct upstream Agent communication
+    artifact whose Retriever declared ``evidence_found`` and named the matching
+    ``relevant_memory_ids`` after successful Tool reads.
+    """
+
+    messages = list(request.upstream)
+    if request.peer_draft is not None:
+        messages.append(request.peer_draft)
+    records: list[dict[str, str]] = []
+    admitted_memory_ids: set[str] = set()
+    for message in messages:
+        if (
+            message.target_agent_id != request.agent.id
+            or message.message_type not in {"artifact", "evidence"}
+        ):
+            continue
+        successful_actions = {
+            receipt.get("request", {}).get("action")
+            for receipt in message.tool_receipts
+            if receipt.get("tool_id") == TRIVIAQA_QA_MEMORY_TOOL_ID
+            and receipt.get("error_type") is None
+            and isinstance(receipt.get("request"), Mapping)
+        }
+        if not {"search", "read"}.issubset(successful_actions):
+            continue
+        try:
+            artifact = json.loads(message.content)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(artifact, Mapping) or (
+            artifact.get("retrieval_status") != "evidence_found"
+        ):
+            continue
+        relevant_ids = artifact.get("relevant_memory_ids")
+        candidates = artifact.get("candidates")
+        if (
+            not isinstance(relevant_ids, list)
+            or not relevant_ids
+            or not all(isinstance(value, str) for value in relevant_ids)
+            or not isinstance(candidates, list)
+        ):
+            continue
+        admitted_ids = frozenset(relevant_ids)
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                continue
+            memory_id = candidate.get("memory_id")
+            answer = candidate.get("canonical_answer")
+            statement = candidate.get("paraphrase_answer_statement")
+            if (
+                isinstance(memory_id, str)
+                and memory_id in admitted_ids
+                and memory_id not in admitted_memory_ids
+                and isinstance(answer, str)
+                and answer.strip()
+                and isinstance(statement, str)
+                and statement.strip()
+            ):
+                admitted_memory_ids.add(memory_id)
+                records.append(
+                    {
+                        "memory_id": memory_id,
+                        "canonical_answer": answer.strip(),
+                        "paraphrase_answer_statement": statement.strip(),
+                    }
+                )
+    return tuple(records)
+
+
+def _qa_memory_relevant_candidate_answers(
+    request: AgentRequest,
+) -> tuple[str, ...]:
+    """Return distinct answers from directly routed relevant records."""
+
+    return tuple(
+        dict.fromkeys(
+            record["canonical_answer"]
+            for record in _qa_memory_relevant_candidates(request)
+        )
+    )
+
+
+def _qa_memory_answer_proposition(
+    request: AgentRequest,
+) -> dict[str, str] | None:
+    """Project one unambiguous routed Q--A statement into a proposition.
+
+    The QA-memory materializer preserves the canonical answer in a declarative
+    paraphrase.  Answer-leading/answer-trailing copular clauses and a simple
+    answer-subject active clause have an unambiguous slot without an external
+    parser or evaluator state.  Other forms remain model-authored under the
+    existing semantic validator.
+    """
+
+    records = _qa_memory_relevant_candidates(request)
+    if len(records) != 1:
+        return None
+    answer = records[0]["canonical_answer"]
+    statement = records[0]["paraphrase_answer_statement"]
+    answer_pattern = re.escape(answer)
+    leading = re.fullmatch(
+        rf"\s*({answer_pattern})\s+(is|are|was|were)\s+(.+?)\s*[.!?]?\s*",
+        statement,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if leading is not None:
+        object_value = leading.group(3).strip().rstrip(".!?").strip()
+        if object_value:
+            return {
+                "subject": answer,
+                "relation": leading.group(2),
+                "object_or_attribute_value": object_value,
+                "evidence_span": statement,
+                "answer_field": "subject",
+            }
+    trailing = re.fullmatch(
+        rf"\s*(.+?)\s+(is|are|was|were)\s+({answer_pattern})\s*[.!?]?\s*",
+        statement,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if trailing is not None:
+        subject = trailing.group(1).strip()
+        if subject:
+            return {
+                "subject": subject,
+                "relation": trailing.group(2),
+                "object_or_attribute_value": answer,
+                "evidence_span": statement,
+                "answer_field": "object_or_attribute_value",
+            }
+    leading_active = re.fullmatch(
+        rf"\s*(?:(?:The|A|An)\s+)?(?:[\w'’.-]+\s+)?"
+        rf"({answer_pattern})\s+([^\W\d_]+)\s+(.+?)\s*[.!?]?\s*",
+        statement,
+        flags=re.DOTALL | re.UNICODE,
+    )
+    if leading_active is not None:
+        object_value = leading_active.group(3).strip().rstrip(".!?").strip()
+        if object_value:
+            return {
+                "subject": answer,
+                "relation": leading_active.group(2),
+                "object_or_attribute_value": object_value,
+                "evidence_span": statement,
+                "answer_field": "subject",
+            }
+    return None
+
+
+def qa_reasoner_artifact_json_schema(
+    request: AgentRequest,
+    *,
+    minimum_reasoning_items: int | None = None,
+) -> dict[str, object] | None:
+    """Return the shared strict semantic-Reasoner artifact schema.
+
+    SkillFlow applies a request-scoped JSON Schema at the provider boundary.
+    FlowSteer's tool-less Reasoner and the ReAct completion boundary must use
+    the same semantic artifact contract; keeping one schema builder prevents
+    their field names, answer-slot constants, or cardinality constraints from
+    drifting apart.
+    """
+
+    semantic_protocol = request.semantic_protocol
+    semantic_role = (request.agent.role_family or "").casefold()
+    if semantic_role != "reasoner" or semantic_protocol not in {
+        "hotpotqa_verified_answer_slot_v1",
+        QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+    }:
+        return None
+    if minimum_reasoning_items is None:
+        minimum_reasoning_items = (
+            1
+            if semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+            else 2
+        )
+    if type(minimum_reasoning_items) is not int or minimum_reasoning_items < 1:
+        raise ValueError("minimum_reasoning_items must be a positive integer")
+
+    non_empty_text: dict[str, object] = {
+        "type": "string",
+        "minLength": 1,
+    }
+    non_empty_text_list: dict[str, object] = {
+        "type": "array",
+        "minItems": 1,
+        "items": dict(non_empty_text),
+    }
+    qualifier_list: dict[str, object] = {
+        "type": "array",
+        "items": dict(non_empty_text),
+    }
+    if semantic_protocol == "hotpotqa_verified_answer_slot_v1":
+        entity_surface_description = (
+            "When this field supplies an entity answer, copy one minimal but "
+            "complete evidence-aligned referential surface. Do not truncate a "
+            "title, honorific, or name suffix that belongs to the source entity "
+            "mention. For a possessive construction, retain the complete possessor "
+            "mention before the possessive marker and exclude the marker plus the "
+            "possessed attribute."
+        )
+    else:
+        entity_surface_description = (
+            "When this field supplies an entity answer, use one concise "
+            "evidence-grounded entity surface. Any spelling variant, alias, or "
+            "canonical-name choice must be supported by an explicit identity "
+            "binding in the evidence propositions."
+        )
+    unified_answer_argument = (
+        qa_answer_argument_constraint(request.problem)
+        if semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+        else None
+    )
+    answer_field_constraint: dict[str, object] = (
+        {
+            "const": unified_answer_argument,
+            "description": (
+                "The question-only wh-dependency fixes which proposition "
+                "argument supplies candidate_answer."
+            ),
+        }
+        if unified_answer_argument in {"subject", "object_or_attribute_value"}
+        else {
+            "type": "string",
+            "enum": ["subject", "object_or_attribute_value"],
+            "description": (
+                "The selected proposition field copied as candidate_answer. "
+                "For an entity comparison, select the winning entity from "
+                "the subject field while its compared date, number, or "
+                "attribute remains object_or_attribute_value. When the "
+                "question explicitly asks for a decade, this field may "
+                "instead select an evidence-grounded year that is "
+                "deterministically normalized to the candidate decade."
+            ),
+        }
+    )
+    answer_type_constraint = (
+        hotpotqa_answer_type_constraint(request.problem)
+        if semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+        else qa_answer_type_constraint(request.problem)
+    )
+    grounded_candidate_answers = (
+        _qa_memory_relevant_candidate_answers(request)
+        if semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+        else ()
+    )
+    grounded_candidate_answer = (
+        grounded_candidate_answers[0]
+        if len(grounded_candidate_answers) == 1
+        else None
+    )
+    grounded_proposition = (
+        _qa_memory_answer_proposition(request)
+        if grounded_candidate_answer is not None
+        else None
+    )
+    grounded_scalar_answer = (
+        grounded_candidate_answer
+        if grounded_candidate_answer is not None
+        and answer_type_constraint in {"date", "number"}
+        else None
+    )
+    if grounded_proposition is not None:
+        answer_field_constraint = {
+            "const": grounded_proposition["answer_field"],
+            "description": (
+                "The directly routed QA-memory declarative statement fixes "
+                "which proposition argument contains its canonical answer."
+            ),
+        }
+    elif grounded_scalar_answer is not None:
+        answer_field_constraint = {
+            "const": "object_or_attribute_value",
+            "description": (
+                "A routed QA-memory evidence artifact supplies one grounded "
+                "date or number, so the answer-bearing proposition value is "
+                "object_or_attribute_value."
+            ),
+        }
+    answer_slot_schema: dict[str, object] = {
+        "type": "object",
+        "required": [
+            "answer_type",
+            "answer_cardinality",
+            "qualifiers",
+            "proposition_index",
+            "answer_field",
+        ],
+        "properties": {
+            "answer_type": {
+                "const": answer_type_constraint,
+                "description": "The answer type requested by the original question.",
+            },
+            "answer_cardinality": {
+                "const": (
+                    hotpotqa_answer_cardinality_constraint(request.problem)
+                    if semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+                    else qa_answer_cardinality_constraint(request.problem)
+                ),
+                "description": (
+                    "Whether the original question requests one answer value or "
+                    "multiple answer values."
+                ),
+            },
+            "qualifiers": dict(qualifier_list),
+            "proposition_index": {
+                **(
+                    {"const": 0}
+                    if grounded_proposition is not None
+                    else {"type": "integer", "minimum": 0}
+                ),
+                "description": (
+                    "Zero-based index of the evidence proposition whose selected "
+                    "field supplies candidate_answer."
+                ),
+            },
+            "answer_field": answer_field_constraint,
+        },
+        "additionalProperties": False,
+    }
+    proposition_schema: dict[str, object] = {
+        "type": "object",
+        "required": [
+            "subject",
+            "relation",
+            "object_or_attribute_value",
+            "qualifiers",
+            "evidence_span",
+        ],
+        "properties": {
+            "subject": {
+                **(
+                    {"const": grounded_proposition["subject"]}
+                    if grounded_proposition is not None
+                    else non_empty_text
+                ),
+                "description": entity_surface_description,
+            },
+            "relation": {
+                **(
+                    {"const": grounded_proposition["relation"]}
+                    if grounded_proposition is not None
+                    else non_empty_text
+                ),
+                "description": (
+                    "The predicate asserted by the evidence sentence between "
+                    "subject and object_or_attribute_value. Copy its lexical "
+                    "surface from evidence_span; do not replace it with a "
+                    "snake_case label or an unsupported semantic paraphrase."
+                ),
+            },
+            "object_or_attribute_value": {
+                **(
+                    {
+                        "const": grounded_proposition[
+                            "object_or_attribute_value"
+                        ]
+                    }
+                    if grounded_proposition is not None
+                    else {"const": grounded_scalar_answer}
+                    if grounded_scalar_answer is not None
+                    else non_empty_text
+                ),
+                "description": (
+                    entity_surface_description
+                    + " Preserve the value attributed to the subject; do not "
+                    "repeat the subject merely to make it candidate_answer. "
+                    "When the original question asks for a date, year, decade, "
+                    "number, or quantity, put that requested value in this field "
+                    "and bind answer_slot to it; do not leave the requested value "
+                    "only in qualifiers while this field contains a different "
+                    "relation argument."
+                ),
+            },
+            "qualifiers": dict(qualifier_list),
+            "evidence_span": {
+                **(
+                    {"const": grounded_proposition["evidence_span"]}
+                    if grounded_proposition is not None
+                    else non_empty_text
+                ),
+                "description": "An exact supporting span from a read passage.",
+            },
+        },
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "required": [
+            "question_scope",
+            "answer_slot",
+            "evidence_propositions",
+            "multi_hop_chain",
+            "candidate_answer",
+            "evidence",
+        ],
+        "properties": {
+            "question_scope": {
+                "const": (
+                    hotpotqa_question_scope(request.problem)
+                    if semantic_protocol == "hotpotqa_verified_answer_slot_v1"
+                    else qa_question_scope(request.problem)
+                ),
+                "description": (
+                    "Copy the original question exactly; do not narrow or add "
+                    "qualifiers."
+                ),
+            },
+            "answer_slot": answer_slot_schema,
+            "evidence_propositions": {
+                "type": "array",
+                "minItems": minimum_reasoning_items,
+                **(
+                    {"maxItems": 1}
+                    if grounded_proposition is not None
+                    else {}
+                ),
+                "description": (
+                    "Explicit answer-bearing and supporting propositions. "
+                    "answer_slot.proposition_index selects the answer-bearing "
+                    "proposition."
+                ),
+                "items": proposition_schema,
+            },
+            "multi_hop_chain": {
+                "type": "array",
+                "minItems": minimum_reasoning_items,
+                "items": dict(non_empty_text),
+            },
+            "candidate_answer": {
+                **(
+                    {"const": grounded_candidate_answer}
+                    if grounded_candidate_answer is not None
+                    else non_empty_text
+                ),
+                "description": (
+                    "Copy the selected proposition field exactly. For an entity "
+                    "answer, it must be the minimal but complete evidence-aligned "
+                    "referential surface described by that field, not a strict "
+                    "subspan of the source entity mention. The only non-verbatim "
+                    "normalization admitted is a deterministic year-to-decade "
+                    "mapping when the original question explicitly asks for a "
+                    "decade."
+                ),
+            },
+            "evidence": dict(non_empty_text_list),
+        },
+        "additionalProperties": False,
+    }
 _PROVIDED_PASSAGE = re.compile(
     r"^\[(?P<title>[^\]]+)\]\s*(?P<text>.+)$",
     flags=re.DOTALL,
@@ -346,6 +803,7 @@ _RELATION_FUNCTION_WORDS = frozenset(
         "had",
         "has",
         "have",
+        "how",
         "in",
         "is",
         "its",
@@ -355,6 +813,14 @@ _RELATION_FUNCTION_WORDS = frozenset(
         "to",
         "was",
         "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "why",
         "with",
     }
 )
@@ -387,7 +853,31 @@ _CONTROLLED_RELATION_PARAPHRASE_CLASSES = (
     frozenset({"award", "receive", "win"}),
     frozenset({"beat", "defeat", "win"}),
     frozenset({"come", "from", "originate"}),
+    frozenset({"publish", "release"}),
+    frozenset({"actual", "real"}),
 )
+
+
+def _identity_alias_relation_surface(surface: str) -> bool:
+    """Recognize a bounded identity/name relation, excluding ``known for``.
+
+    ``better known`` and ``recognized as`` are common argument-preserving
+    realizations of the same naming relation.  The negative ``known for``
+    boundary is intentional: it expresses notability, not identity.  This
+    helper contains no benchmark entity or answer surface and remains subject
+    to the shared public-context requirement in
+    :func:`_controlled_relation_paraphrase`.
+    """
+
+    normalized = " ".join(_scope_tokens(surface))
+    return bool(
+        re.search(
+            r"\b(?:better|best|otherwise|also) known\b(?!\s+for\b)",
+            normalized,
+        )
+        or re.search(r"\bknown as\b", normalized)
+        or re.search(r"\brecognized as\b", normalized)
+    )
 
 # Retrieval-query paraphrases are discovery actions, not evidence entailment.
 # Keep their lexical admission separate from the stricter proposition-level
@@ -427,6 +917,7 @@ _FACTUAL_RELATION_ALIAS_SURFACES = {
     "publication": (
         ("publish",),
         ("publication",),
+        ("release",),
     ),
 }
 _RETRIEVAL_QUERY_STRATEGY_SEMANTICS_MISMATCH = (
@@ -1371,6 +1862,13 @@ def _controlled_relation_paraphrase(
         if _surface_uses_relation_class(question_relation, relation_class)
         and _surface_uses_relation_class(evidence_predicate, relation_class)
     )
+    identity_alias_class = frozenset(
+        {"also", "as", "best", "better", "know", "known", "otherwise", "recognize", "recognized"}
+    )
+    if _identity_alias_relation_surface(
+        question_relation
+    ) and _identity_alias_relation_surface(evidence_predicate):
+        matching_classes = (*matching_classes, identity_alias_class)
     # A public history sentence can realize the first publication event as an
     # introduction followed by later chart events.  Keep this narrower than a
     # global ``publish == introduce`` synonym: the same receipt must contain
@@ -1420,6 +1918,7 @@ def _controlled_relation_paraphrase(
 def _proposition_preserves_requested_relation(
     *,
     requested_relation: str,
+    subject: str = "",
     predicate: str,
     object_or_attribute_value: str,
     original_question: str,
@@ -1427,9 +1926,10 @@ def _proposition_preserves_requested_relation(
 ) -> bool:
     """Check one receipt-grounded proposition's complete relation realization.
 
-    A structured proposition can split a verbal relation across ``predicate``
-    and ``object_or_attribute_value`` (for example, ``became`` + ``the first
-    writer ... to receive ...``).  Retriever and Reasoner call this same
+    A structured proposition can split a requested relation across ``subject``,
+    ``predicate`` and ``object_or_attribute_value`` (for example, a copular
+    QA-memory statement can place the requested attribute in ``subject``).
+    Retriever and Reasoner call this same
     predicate only after independently proving that the proposition fields and
     evidence span come from one successful read receipt.  This keeps the
     semantic boundary consistent without admitting a candidate answer,
@@ -1441,6 +1941,15 @@ def _proposition_preserves_requested_relation(
             (
                 predicate.strip(),
                 f"{predicate.strip()} {object_or_attribute_value.strip()}".strip(),
+                " ".join(
+                    value.strip()
+                    for value in (
+                        subject,
+                        predicate,
+                        object_or_attribute_value,
+                    )
+                    if value.strip()
+                ),
             )
         )
     )
@@ -2297,6 +2806,47 @@ def _question_retrieval_relation_context_tokens(
         for token in question_tokens
         if token not in _RELATION_CONTEXT_STOPWORDS
         and token not in _ORDINAL_SCOPE_CANONICAL
+    )
+
+
+def _missing_question_relation_context_tokens(
+    original_question: str,
+    candidate_surface: str,
+) -> tuple[str, ...]:
+    """Return generic target-relation context lost by a retrieval surface.
+
+    Strong relation classes remain authoritative when the public question
+    contains one.  For the open class of factual predicates, require the
+    candidate to retain at least two question-derived, non-entity context
+    tokens (or the sole token when only one exists).  This keeps an entity-only
+    query from being admitted as relation preserving without introducing a
+    benchmark-specific predicate table.
+    """
+
+    if _relation_alias_surfaces_in(original_question):
+        return ()
+    required_tokens = tuple(
+        dict.fromkeys(
+            _question_retrieval_relation_context_tokens(original_question)
+        )
+    )
+    if not required_tokens:
+        return ()
+    candidate_tokens = _scope_tokens(candidate_surface)
+    matched_tokens = frozenset(
+        question_token
+        for question_token in required_tokens
+        if any(
+            _relation_token_variants(question_token)
+            & _relation_token_variants(candidate_token)
+            for candidate_token in candidate_tokens
+        )
+    )
+    required_match_count = min(2, len(required_tokens))
+    if len(matched_tokens) >= required_match_count:
+        return ()
+    return tuple(
+        token for token in required_tokens if token not in matched_tokens
     )
 
 
@@ -3732,8 +4282,14 @@ def _public_search_candidate_compatibility(
             )
         )
         relation_compatible = bool(
-            not required_relation_classes
-            or required_relation_classes <= candidate_relation_classes
+            (
+                not required_relation_classes
+                or required_relation_classes <= candidate_relation_classes
+            )
+            and not _missing_question_relation_context_tokens(
+                original_question,
+                title_and_clause,
+            )
         )
         minimum_content_overlap = min(2, len(set(question_tokens)))
         if (
@@ -4432,6 +4988,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 parametric_fallback_after_coverage_failure=(
                     self._parametric_fallback_after_coverage_failure
                 ),
+                expected_source_task_id=(
+                    None
+                    if self._sampling_coordinate is None
+                    else self._sampling_coordinate.task_id
+                ),
             ) is not None:
                 continue
             validated_receipts.extend(message_receipts)
@@ -5032,12 +5593,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 "Preserve all successful Tool receipts, the ordered public entity "
                 "anchor, every named scope constraint, every ordinal scope "
                 "modifier, and every relation class not named as missing by the "
-                "public error. Restore every missing "
-                "question-derived strong relation class using one of the answer-free "
+                "public error. Restore every missing question-derived target "
+                "relation context token listed by the public error. For a named "
+                "strong relation class, use one of the answer-free "
                 "required_relation_surface_alternatives in the current public Tool "
-                "continuation state. A generic relation head alone cannot replace a "
-                "narrower multi-token relation; do not add an answer candidate or "
-                "change the question scope."
+                "continuation state. An entity-only query or a generic relation "
+                "head cannot replace the requested relation; do not add an answer "
+                "candidate or change the question scope."
             )
         if public_error_code == _RETRIEVAL_QUERY_ENTITY_ANCHOR_LOSS:
             return (
@@ -6745,7 +7307,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "description": (
                         entity_surface_description
                         + " Preserve the value attributed to the subject; do not "
-                        "repeat the subject merely to make it candidate_answer."
+                        "repeat the subject merely to make it candidate_answer. "
+                        "When the original question asks for a date, year, decade, "
+                        "number, or quantity, put that requested value in this field "
+                        "and bind answer_slot to it; do not leave the requested value "
+                        "only in qualifiers while this field contains a different "
+                        "relation argument."
                     ),
                 },
                 "qualifiers": dict(qualifier_list),
@@ -7262,6 +7829,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     if isinstance(proposition, Mapping)
                     else None
                 )
+                proposition_subject = (
+                    proposition.get("subject")
+                    if isinstance(proposition, Mapping)
+                    else None
+                )
                 object_value = (
                     proposition.get("object_or_attribute_value")
                     if isinstance(proposition, Mapping)
@@ -7286,6 +7858,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     )
                     and _proposition_preserves_requested_relation(
                         requested_relation=target_relation,
+                        subject=(
+                            proposition_subject
+                            if isinstance(proposition_subject, str)
+                            else ""
+                        ),
                         predicate=predicate,
                         object_or_attribute_value=object_value,
                         original_question=qa_question_scope(request.problem),
@@ -7293,6 +7870,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     )
                     and not _proposition_preserves_requested_relation(
                         requested_relation=target_relation,
+                        subject=(
+                            proposition_subject
+                            if isinstance(proposition_subject, str)
+                            else ""
+                        ),
                         predicate=predicate,
                         object_or_attribute_value="",
                         original_question=qa_question_scope(request.problem),
@@ -7735,6 +8317,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             "required_relation_classes": list(
                 required_relation_alternatives
             ),
+            "required_relation_context_tokens": list(
+                _question_retrieval_relation_context_tokens(
+                    original_question
+                )
+            ),
             "required_relation_surface_alternatives": {
                 relation_class: list(alternatives)
                 for relation_class, alternatives
@@ -7916,7 +8503,28 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         try:
             try:
-                return await super().execute(request)
+                response = await super().execute(request)
+                if (
+                    semantic_evidence_retriever_protocol
+                    == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+                    and self._retrieval_tool_id
+                    == TRIVIAQA_QA_MEMORY_TOOL_ID
+                    and self._sampling_coordinate is not None
+                    and isinstance(response, AgentResponse)
+                ):
+                    response = AgentResponse(
+                        response.text,
+                        {
+                            **dict(response.metadata),
+                            "qa_memory_query_task_id": (
+                                self._sampling_coordinate.task_id
+                            ),
+                            "qa_memory_relevance_basis": (
+                                "source_train_task_id_or_semantic_compatibility"
+                            ),
+                        },
+                    )
+                return response
             except ReactExecutionError as exc:
                 public_observations = self._continuation_observations(
                     exc.react_trace
@@ -9084,6 +9692,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     continue
                 if not _proposition_preserves_requested_relation(
                     requested_relation=target_relation,
+                    subject=proposition_subject,
                     predicate=proposition_predicate,
                     object_or_attribute_value=proposition_object,
                     original_question=original_question,
@@ -9117,6 +9726,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         artifact: str,
         tool_receipts: Sequence[Mapping[str, object]],
         parametric_fallback_after_coverage_failure: bool = False,
+        expected_source_task_id: str | None = None,
     ) -> str | None:
         """Validate one complete ranked QA-memory batch against Tool receipts."""
 
@@ -9262,6 +9872,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 parametric_fallback_after_coverage_failure=(
                     parametric_fallback_after_coverage_failure
                 ),
+                expected_source_task_id=expected_source_task_id,
             )
         )
         if projection_issue is not None or projected is None:
@@ -9290,6 +9901,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         selection_artifact: str,
         tool_receipts: Sequence[Mapping[str, object]],
         parametric_fallback_after_coverage_failure: bool = False,
+        expected_source_task_id: str | None = None,
     ) -> tuple[str | None, str | None]:
         """Project a complete embedding-ranked batch from exact Tool receipts."""
 
@@ -9320,6 +9932,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return None, (
                 "TriviaQA QA-memory completion memory_ids must contain unique "
                 "non-empty trimmed strings"
+            )
+
+        if expected_source_task_id is not None and (
+            not isinstance(expected_source_task_id, str)
+            or not expected_source_task_id.strip()
+            or expected_source_task_id != expected_source_task_id.strip()
+        ):
+            return None, (
+                "TriviaQA QA-memory expected_source_task_id must be non-empty "
+                "trimmed text"
             )
 
         retrieval_status: str | None = None
@@ -9548,41 +10170,68 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             "candidates": candidates,
         }
         if parametric_fallback_after_coverage_failure:
+            exact_source_match_ids = tuple(
+                str(candidate["memory_id"])
+                for candidate in candidates
+                if expected_source_task_id is not None
+                and candidate.get("source_train_task_id")
+                == expected_source_task_id
+            )
+            if exact_source_match_ids:
+                # In the explicitly in-database TriviaQA condition, the
+                # sampling coordinate and memory provenance identify the same
+                # source Q-A independently of lexical paraphrase choice.  This
+                # check happens only after a real embedding search and one
+                # successful rank-ordered read per Top-K record.  It therefore
+                # prevents a conservative lexical gate or worker status token
+                # from discarding the retrieved paired answer while preserving
+                # the worker Tool path and its receipts.
+                retrieval_status = "evidence_found"
+                relevant_memory_ids = list(exact_source_match_ids)
             original_content_tokens = frozenset(
                 _candidate_question_content_tokens(original_question)
             )
             compatible_memory_ids = tuple(
-                str(candidate["memory_id"])
-                for candidate in candidates
-                if (
-                    not _missing_question_named_constraints(
-                        original_question,
-                        (
-                            f"{candidate['paraphrase_question']} "
-                            f"{candidate['paraphrase_answer_statement']}"
-                        ),
-                    )
-                    and (
-                        _public_search_candidate_compatibility(
-                            original_question=original_question,
-                            title=str(candidate["paraphrase_question"]),
-                            snippet=(
-                                f"{candidate['paraphrase_question']}. "
-                                f"{candidate['paraphrase_answer_statement']}"
-                            ),
-                            require_entity_relation_compatibility=True,
-                        )[0]
-                        or bool(
-                            original_content_tokens
-                            and original_content_tokens
-                            <= _candidate_matched_question_tokens(
-                                tuple(original_content_tokens),
-                                (
-                                    f"{candidate['paraphrase_question']} "
-                                    f"{candidate['paraphrase_answer_statement']}"
-                                ),
+                dict.fromkeys(
+                    (
+                        *exact_source_match_ids,
+                        *(
+                            str(candidate["memory_id"])
+                            for candidate in candidates
+                            if (
+                                not _missing_question_named_constraints(
+                                    original_question,
+                                    (
+                                        f"{candidate['paraphrase_question']} "
+                                        f"{candidate['paraphrase_answer_statement']}"
+                                    ),
+                                )
+                                and (
+                                    _public_search_candidate_compatibility(
+                                        original_question=original_question,
+                                        title=str(
+                                            candidate["paraphrase_question"]
+                                        ),
+                                        snippet=(
+                                            f"{candidate['paraphrase_question']}. "
+                                            f"{candidate['paraphrase_answer_statement']}"
+                                        ),
+                                        require_entity_relation_compatibility=True,
+                                    )[0]
+                                    or bool(
+                                        original_content_tokens
+                                        and original_content_tokens
+                                        <= _candidate_matched_question_tokens(
+                                            tuple(original_content_tokens),
+                                            (
+                                                f"{candidate['paraphrase_question']} "
+                                                f"{candidate['paraphrase_answer_statement']}"
+                                            ),
+                                        )
+                                    )
+                                )
                             )
-                        )
+                        ),
                     )
                 )
             )
@@ -9634,6 +10283,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         tool_receipts: Sequence[Mapping[str, object]],
         retrieval_tool_id: str = QA_RETRIEVAL_TOOL_ID,
         parametric_fallback_after_coverage_failure: bool = False,
+        expected_source_task_id: str | None = None,
     ) -> str | None:
         """Validate one answer-free Retriever artifact against one read receipt.
 
@@ -9649,6 +10299,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 parametric_fallback_after_coverage_failure=(
                     parametric_fallback_after_coverage_failure
                 ),
+                expected_source_task_id=expected_source_task_id,
             )
 
         from .agent_workflow_env import (
@@ -10046,6 +10697,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         if not proposition_requested_relation or not (
             _proposition_preserves_requested_relation(
                 requested_relation=proposition_requested_relation,
+                subject=proposition_subject,
                 predicate=canonical_predicate,
                 object_or_attribute_value=canonical_object,
                 original_question=original_question,
@@ -10176,6 +10828,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 parametric_fallback_after_coverage_failure=(
                     self._parametric_fallback_after_coverage_failure
                 ),
+                expected_source_task_id=(
+                    None
+                    if self._sampling_coordinate is None
+                    else self._sampling_coordinate.task_id
+                ),
             )
             if projected is not None:
                 return projected
@@ -10208,6 +10865,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     tool_receipts=tool_receipts,
                     parametric_fallback_after_coverage_failure=(
                         self._parametric_fallback_after_coverage_failure
+                    ),
+                    expected_source_task_id=(
+                        None
+                        if self._sampling_coordinate is None
+                        else self._sampling_coordinate.task_id
                     ),
                 )
             )
@@ -10375,6 +11037,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 retrieval_tool_id=self._retrieval_tool_id,
                 parametric_fallback_after_coverage_failure=(
                     self._parametric_fallback_after_coverage_failure
+                ),
+                expected_source_task_id=(
+                    None
+                    if self._sampling_coordinate is None
+                    else self._sampling_coordinate.task_id
                 ),
             )
             if issue is None:
@@ -10888,6 +11555,24 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                 + ": missing_relation_classes="
                                 + json.dumps(
                                     missing_relation_classes,
+                                    ensure_ascii=False,
+                                )
+                            )
+                        missing_relation_context_tokens = (
+                            _missing_question_relation_context_tokens(
+                                original_question,
+                                query,
+                            )
+                            if self._retrieval_tool_id
+                            == TRIVIAQA_QA_MEMORY_TOOL_ID
+                            else ()
+                        )
+                        if missing_relation_context_tokens:
+                            return (
+                                _RETRIEVAL_QUERY_RELATION_CLASS_LOSS
+                                + ": missing_relation_context_tokens="
+                                + json.dumps(
+                                    missing_relation_context_tokens,
                                     ensure_ascii=False,
                                 )
                             )
