@@ -114,9 +114,27 @@ _ANSWER_VERIFICATION_FIELDS = frozenset(
 )
 
 _LEXICAL_TOKEN = re.compile(r"[^\W_]+(?:['’-][^\W_]+)*", re.UNICODE)
-_NUMBER_OR_DATE_TOKEN = re.compile(r"\b(?:\d[\d,./-]*|[IVXLCDM]{2,})\b")
-_DOUBLE_QUOTED_SPAN = re.compile(r'"([^\"]+)"')
-_SINGLE_QUOTED_SPAN = re.compile(r"(?<!\w)'([^']+)'(?!\w)")
+_NUMBER_OR_DATE_TOKEN = re.compile(
+    r"\b(?:\d(?:[\d,./-]*\d)?|[IVXLCDM]{2,})\b"
+)
+_DOUBLE_QUOTED_SPAN = re.compile(r'"([^\"]+)"|“([^”]+)”')
+_SINGLE_QUOTED_SPAN = re.compile(
+    r"(?<!\w)'([^']+)'(?!\w)|(?<!\w)‘([^’]+)’(?!\w)"
+)
+_LEADING_DOT_LITERAL = re.compile(
+    r"(?<!\w)\.([^\W_]+(?:['’-][^\W_]+)*)",
+    re.UNICODE,
+)
+_LEADING_INTERROGATIVE_CONTRACTION = re.compile(
+    r"(?:what|which|who|whom|whose|where|when|why|how)"
+    r"(?:['’](?:d|ll|re|s|ve))",
+    re.IGNORECASE,
+)
+_OBSERVED_RESPONSE_KEY_TYPOS = {
+    ".paraphrase_question": "paraphrase_question",
+    ".paraphrase_answer_statement": "paraphrase_answer_statement",
+    "parphrase_question": "paraphrase_question",
+}
 _QUESTION_SLOT_TOKEN = re.compile(
     r"\b(?:what|which|who|whom|whose|where|when|why|how)\b",
     re.IGNORECASE,
@@ -1021,6 +1039,11 @@ def _capitalized_identity_tokens(question: str) -> frozenset[str]:
                 and token.casefold() not in _FUNCTION_WORDS
                 and not (
                     index == 0
+                    and _LEADING_INTERROGATIVE_CONTRACTION.fullmatch(token)
+                    is not None
+                )
+                and not (
+                    index == 0
                     and token.casefold()
                     in {
                         "identify",
@@ -1085,11 +1108,50 @@ def _quoted_spans(text: str) -> frozenset[str]:
         and '""' in normalized
     ):
         normalized = normalized[1:-1].replace('""', '"')
-    spans = [match.strip() for match in _DOUBLE_QUOTED_SPAN.findall(normalized)]
+    spans = [
+        next(group for group in match.groups() if group is not None).strip()
+        for match in _DOUBLE_QUOTED_SPAN.finditer(normalized)
+    ]
     spans.extend(
-        match.strip() for match in _SINGLE_QUOTED_SPAN.findall(normalized)
+        next(group for group in match.groups() if group is not None).strip()
+        for match in _SINGLE_QUOTED_SPAN.finditer(normalized)
     )
     return frozenset(span for span in spans if span)
+
+
+def _lexical_replacement_source_tokens(
+    source: TriviaQATrainSource,
+) -> frozenset[str]:
+    """Return mutable source wording shared by generation and repair.
+
+    Numeric/date strings, quoted content, and leading-dot literals are literal
+    dataset constraints, not synonym targets.  Tokenize their full spans with
+    the same lexer used for the candidate pool so punctuation inside a date or
+    number cannot leave a partially eligible token behind.
+    """
+
+    question = source.original_question
+    protected_tokens = set(_capitalized_identity_tokens(question))
+    protected_tokens.update(_content_token_counts(source.canonical_answer))
+    question_tokens = _LEXICAL_TOKEN.findall(question)
+    if (
+        question_tokens
+        and _LEADING_INTERROGATIVE_CONTRACTION.fullmatch(question_tokens[0])
+        is not None
+    ):
+        protected_tokens.add(question_tokens[0].casefold())
+    for token_match in _LEXICAL_TOKEN.finditer(question):
+        if _NUMBER_OR_DATE_TOKEN.search(token_match.group(0)) is not None:
+            protected_tokens.add(token_match.group(0).casefold())
+    protected_spans = list(_quoted_spans(question))
+    protected_spans.extend(_LEADING_DOT_LITERAL.findall(question))
+    for span in protected_spans:
+        protected_tokens.update(
+            token.casefold() for token in _LEXICAL_TOKEN.findall(span)
+        )
+    return frozenset(
+        set(_content_token_counts(question)) - protected_tokens
+    )
 
 
 def _quoted_scope_preserved(original: str, paraphrase: str) -> bool:
@@ -1200,9 +1262,7 @@ def build_paraphrase_messages(source: TriviaQATrainSource) -> list[dict[str, str
             - set(_content_token_counts(source.original_question))
         ),
         "lexical_replacement_source_tokens": sorted(
-            set(_content_token_counts(source.original_question))
-            - set(_capitalized_identity_tokens(source.original_question))
-            - set(_content_token_counts(source.canonical_answer))
+            _lexical_replacement_source_tokens(source)
         ),
     }
     return [
@@ -1333,24 +1393,45 @@ def build_answer_repair_messages(
     ]
 
 
+def _normalize_observed_response_keys(
+    value: object,
+    *,
+    expected_fields: frozenset[str],
+    response_name: str,
+) -> Mapping[str, object]:
+    """Normalize only known structured-output typos without key collisions."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{response_name} fields are incompatible")
+    normalized: dict[str, object] = {}
+    for raw_field, field_value in value.items():
+        if not isinstance(raw_field, str):
+            raise ValueError(f"{response_name} fields are incompatible")
+        normalized_field = _OBSERVED_RESPONSE_KEY_TYPOS.get(
+            raw_field,
+            raw_field,
+        )
+        if (
+            normalized_field not in expected_fields
+            or normalized_field in normalized
+        ):
+            raise ValueError(f"{response_name} fields are incompatible")
+        normalized[normalized_field] = field_value
+    if frozenset(normalized) != expected_fields:
+        raise ValueError(f"{response_name} fields are incompatible")
+    return normalized
+
+
 def parse_answer_repair_response(text: str) -> str:
     try:
         value = json.loads(str(text).strip())
     except json.JSONDecodeError as exc:
         raise ValueError("answer repair response is not strict JSON") from exc
-    if (
-        isinstance(value, Mapping)
-        and set(value) == {".paraphrase_answer_statement"}
-    ):
-        value = {
-            "paraphrase_answer_statement": value[
-                ".paraphrase_answer_statement"
-            ]
-        }
-    if not isinstance(value, Mapping) or set(value) != {
-        "paraphrase_answer_statement"
-    }:
-        raise ValueError("answer repair response fields are incompatible")
+    value = _normalize_observed_response_keys(
+        value,
+        expected_fields=frozenset({"paraphrase_answer_statement"}),
+        response_name="answer repair response",
+    )
     statement = value["paraphrase_answer_statement"]
     if not isinstance(statement, str) or not statement.strip():
         raise ValueError("answer repair statement must be non-empty text")
@@ -1402,19 +1483,18 @@ def parse_question_repair_response(
         value = json.loads(str(text).strip())
     except json.JSONDecodeError as exc:
         raise ValueError("question repair response is not strict JSON") from exc
-    if not isinstance(value, Mapping):
-        raise ValueError("question repair response fields are incompatible")
-    question_fields = {
-        field for field in ("paraphrase_question", "parphrase_question")
-        if field in value
-    }
-    if (
-        len(question_fields) != 1
-        or set(value) - question_fields
-        != {"replaced_source_token", "replacement_phrase"}
-    ):
-        raise ValueError("question repair response fields are incompatible")
-    question = value[next(iter(question_fields))]
+    value = _normalize_observed_response_keys(
+        value,
+        expected_fields=frozenset(
+            {
+                "paraphrase_question",
+                "replaced_source_token",
+                "replacement_phrase",
+            }
+        ),
+        response_name="question repair response",
+    )
+    question = value["paraphrase_question"]
     if not isinstance(question, str) or not question.strip():
         raise ValueError("question repair must be non-empty text")
     replaced = value["replaced_source_token"]
@@ -1684,35 +1764,22 @@ def reject_exact_question_identity_shortcut(
 
 
 def _decode_paraphrase_object(text: str) -> Mapping[str, object]:
-    """Decode the exact Qwen paraphrase object and one observed key typo."""
+    """Decode the exact Qwen paraphrase object and observed key typos."""
 
     try:
         value = json.loads(str(text).strip())
     except json.JSONDecodeError as exc:
         raise ValueError("paraphrase response is not strict JSON") from exc
-    # Qwen3.5 can serialize the declared key with one leading dot while still
-    # returning an otherwise exact JSON object.  Normalize only this observed
-    # structured-output typo; all content and semantic admission checks below
-    # remain fail-closed.
-    if (
-        isinstance(value, Mapping)
-        and set(value) == {
-            ".paraphrase_question",
-            "paraphrase_answer_statement",
-        }
-    ):
-        value = {
-            "paraphrase_question": value[".paraphrase_question"],
-            "paraphrase_answer_statement": value[
-                "paraphrase_answer_statement"
-            ],
-        }
-    if not isinstance(value, Mapping) or set(value) != {
-        "paraphrase_question",
-        "paraphrase_answer_statement",
-    }:
-        raise ValueError("paraphrase response fields are incompatible")
-    return value
+    # Normalize only the three observed structured-output typos.  The shared
+    # normalizer rejects unknown keys and any alias/canonical collision before
+    # the complete deterministic admission gate runs below.
+    return _normalize_observed_response_keys(
+        value,
+        expected_fields=frozenset(
+            {"paraphrase_question", "paraphrase_answer_statement"}
+        ),
+        response_name="paraphrase response",
+    )
 
 
 def parse_paraphrase_response(
@@ -2258,9 +2325,7 @@ class LocalQwen35Paraphraser:
         seed: int,
     ) -> str:
         eligible_source_tokens = sorted(
-            set(_content_token_counts(source.original_question))
-            - set(_capitalized_identity_tokens(source.original_question))
-            - set(_content_token_counts(source.canonical_answer))
+            _lexical_replacement_source_tokens(source)
         )
         last_error: ValueError | None = None
         for offset, required_source_token in enumerate(
@@ -2439,20 +2504,8 @@ class LocalQwen35Paraphraser:
                                 "than only reordering it: "
                                 + json.dumps(
                                     sorted(
-                                        set(
-                                            _content_token_counts(
-                                                source.original_question
-                                            )
-                                        )
-                                        - set(
-                                            _capitalized_identity_tokens(
-                                                source.original_question
-                                            )
-                                        )
-                                        - set(
-                                            _content_token_counts(
-                                                source.canonical_answer
-                                            )
+                                        _lexical_replacement_source_tokens(
+                                            source
                                         )
                                     ),
                                     ensure_ascii=False,

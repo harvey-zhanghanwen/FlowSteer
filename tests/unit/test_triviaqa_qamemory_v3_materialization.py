@@ -466,6 +466,31 @@ def test_response_parser_normalizes_observed_qwen_leading_dot_key() -> None:
 
 
 @pytest.mark.parametrize(
+    ("question_key", "statement_key"),
+    (
+        ("parphrase_question", "paraphrase_answer_statement"),
+        ("paraphrase_question", ".paraphrase_answer_statement"),
+        (".paraphrase_question", ".paraphrase_answer_statement"),
+    ),
+)
+def test_response_parser_normalizes_known_typos_one_to_one(
+    question_key: str,
+    statement_key: str,
+) -> None:
+    response = json.dumps(
+        {
+            question_key: "Name the river holding the Kariba Dam.",
+            statement_key: "The Kariba Dam was built on the Zambezi river.",
+        }
+    )
+
+    question, statement = parse_paraphrase_response(response, _source())
+
+    assert question == "Name the river holding the Kariba Dam."
+    assert statement.endswith("Zambezi river.")
+
+
+@pytest.mark.parametrize(
     "fields",
     (
         {
@@ -476,6 +501,29 @@ def test_response_parser_normalizes_observed_qwen_leading_dot_key() -> None:
             ".paraphrase_question": "Which Gloria helped establish Ms magazine?",
             "paraphrase_question": "Which Gloria helped establish Ms magazine?",
             "paraphrase_answer_statement": "Steinem co-founded Ms magazine.",
+        },
+        {
+            "parphrase_question": "Name the river holding the Kariba Dam.",
+            "paraphrase_question": "Name the river holding the Kariba Dam.",
+            "paraphrase_answer_statement": (
+                "The Kariba Dam was built on the Zambezi river."
+            ),
+        },
+        {
+            "paraphrase_question": "Name the river holding the Kariba Dam.",
+            ".paraphrase_answer_statement": (
+                "The Kariba Dam was built on the Zambezi river."
+            ),
+            "paraphrase_answer_statement": (
+                "The Kariba Dam was built on the Zambezi river."
+            ),
+        },
+        {
+            "paraphrase_question": "Name the river holding the Kariba Dam.",
+            "paraphrase_answer_statement": (
+                "The Kariba Dam was built on the Zambezi river."
+            ),
+            "extra": True,
         },
     ),
 )
@@ -581,6 +629,19 @@ def test_v10_answer_repair_normalizes_only_observed_leading_dot_key() -> None:
                     "..paraphrase_answer_statement": (
                         "Steinem co-founded Ms magazine."
                     )
+                }
+            )
+        )
+    with pytest.raises(ValueError, match="fields are incompatible"):
+        parse_answer_repair_response(
+            json.dumps(
+                {
+                    ".paraphrase_answer_statement": (
+                        "Steinem co-founded Ms magazine."
+                    ),
+                    "paraphrase_answer_statement": (
+                        "Steinem co-founded Ms magazine."
+                    ),
                 }
             )
         )
@@ -717,6 +778,60 @@ def test_v10_quoted_attribution_preserves_explicit_answer_type() -> None:
         ),
         source,
     )
+
+
+def test_quoted_scope_supports_curly_quotes_and_preserves_exact_content() -> None:
+    assert _quoted_scope_preserved(
+        "Who recorded ‘Blue Moon’?",
+        "Name the performer who released 'Blue Moon'.",
+    )
+    assert _quoted_scope_preserved(
+        "Who wrote “The Left Hand”?",
+        'Name the author of "The Left Hand".',
+    )
+    assert not _quoted_scope_preserved(
+        "Who recorded ‘Blue Moon’?",
+        "Name the performer who released 'Blue moon'.",
+    )
+    assert not _quoted_scope_preserved(
+        "Who wrote “The Left Hand”?",
+        'Name the author of "The Right Hand".',
+    )
+
+
+def test_parser_enforces_exact_curly_quoted_content() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:curly_quote",
+        base_task_id="triviaqa:curly_quote",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="Who recorded ‘Blue Moon’?",
+        canonical_answer="Example Singer",
+        native_split="train",
+    )
+    accepted = {
+        "paraphrase_question": (
+            "Name the performer who released 'Blue Moon'."
+        ),
+        "paraphrase_answer_statement": (
+            "Example Singer recorded Blue Moon."
+        ),
+    }
+
+    parse_paraphrase_response(json.dumps(accepted), source)
+    with pytest.raises(ValueError, match="invented quoted content"):
+        parse_paraphrase_response(
+            json.dumps(
+                {
+                    **accepted,
+                    "paraphrase_question": (
+                        "Name the performer who released 'Blue moon'."
+                    ),
+                }
+            ),
+            source,
+        )
 
 
 def test_v5_parser_rejects_word_order_only_rewrite() -> None:
@@ -1259,6 +1374,72 @@ def test_v9_generation_payload_names_eligible_lexical_replacements() -> None:
         eligible_source_tokens=payload["lexical_replacement_source_tokens"],
         required_source_token=repair_payload["required_source_token_to_replace"],
     ).endswith("Andy Warhol?")
+
+
+def test_lexical_eligibility_excludes_all_literal_constraint_families() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:literal_eligibility",
+        base_task_id="triviaqa:literal_eligibility",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=(
+            "Which 10-year program did Project Orion use at .example for "
+            "“hidden phrase” in 1999-2000?"
+        ),
+        canonical_answer="Program Result",
+        native_split="train",
+    )
+    generation_payload = json.loads(
+        build_paraphrase_messages(source)[1]["content"]
+    )
+    repair_payload = json.loads(
+        build_question_repair_messages(
+            source,
+            rejected_question=source.original_question,
+        )[1]["content"]
+    )
+
+    assert generation_payload["immutable_number_or_date_tokens"] == [
+        "10",
+        "1999-2000",
+    ]
+    assert generation_payload["immutable_quoted_spans"] == ["hidden phrase"]
+    assert generation_payload["lexical_replacement_source_tokens"] == ["use"]
+    assert repair_payload["lexical_replacement_source_tokens"] == (
+        generation_payload["lexical_replacement_source_tokens"]
+    )
+    assert repair_payload["required_source_token_to_replace"] == "use"
+
+
+def test_leading_interrogative_contraction_is_not_an_entity_or_repair_target() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:interrogative_contraction",
+        base_task_id="triviaqa:interrogative_contraction",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="What's the capital of Kenya?",
+        canonical_answer="Nairobi",
+        native_split="train",
+    )
+    payload = json.loads(build_paraphrase_messages(source)[1]["content"])
+
+    assert payload["immutable_original_entity_tokens"] == ["Kenya"]
+    assert payload["lexical_replacement_source_tokens"] == ["capital"]
+    question, statement = parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": "Name Kenya's capital.",
+                "paraphrase_answer_statement": (
+                    "Nairobi is the capital of Kenya."
+                ),
+            }
+        ),
+        source,
+    )
+    assert question == "Name Kenya's capital."
+    assert statement.startswith("Nairobi")
 
 
 def test_v7_answer_verifier_binds_canonical_to_original_wh_slot() -> None:
