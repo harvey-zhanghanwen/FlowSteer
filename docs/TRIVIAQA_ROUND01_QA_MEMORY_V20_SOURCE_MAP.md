@@ -65,3 +65,19 @@ Search. The additions to the Round-01 Canvas configuration are therefore only
   Director/Canvas fields and the minimal QA-memory boundary.
 - `--prepare-only` validates the runner configuration and freezes the same
   sequential 128-item held-out selection without calling a model or API.
+
+## Paired-QA memory examples
+
+Every embedding document uses the manifest template
+`Question: {paraphrase_question}\nAnswer: {paraphrase_answer_statement}`.  The
+question and answer therefore remain paired inside one training-memory record.
+
+| Source train task | Original QA | Indexed memory QA |
+| --- | --- | --- |
+| `triviaqa:tc_224` | Q: Which British general was killed at Khartoum in 1885? A: `Gordon` (plus the dataset's accepted aliases) | Q: Identify the British general who died in Khartoum during 1885. A: The answer is Gordon. |
+| `triviaqa:tc_225` | Q: On the border of which two countries is Victoria Falls? A: `Zambia and Zimbabwe` | Q: Between which two nations is Victoria Falls situated? A: The answer is Zambia and Zimbabwe. |
+| `triviaqa:tc_227` | Q: What is the name of the volcanic valley that runs from the Sinai peninsula to central Mozambique? A: `Great Rift Valley` (plus the dataset's accepted aliases) | Q: What is the name of the volcanic valley extending from the Sinai peninsula to central Mozambique? A: The answer is Great Rift Valley. |
+
+The index contains 512 memories from 512 unique training tasks, with no cycled
+record.  Validation content is not indexed; the fixed held-out partition has
+128 tasks.
