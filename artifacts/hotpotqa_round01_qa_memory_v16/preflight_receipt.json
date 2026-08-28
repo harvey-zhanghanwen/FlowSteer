@@ -1,0 +1,48 @@
+{
+  "adapter_name": "theta_smoke_step_000001",
+  "canary_succeeded": true,
+  "checkpoint_path": "/ssd1/iclr/1/FlowSteer/artifacts/agentgraph_smoke/checkpoint_final/supervisor_lora/step_000001_20260815T071303632043Z/theta",
+  "completed_at": "2026-08-28T05:13:29.984473+00:00",
+  "director_request_boundary": {
+    "allowed_tools": [],
+    "director_tool_calls": 0,
+    "forbidden_fields_present": [],
+    "retrieval_payload_present": false
+  },
+  "duration_seconds": 0.07961083110421896,
+  "evaluator_known_answer": {
+    "details": {
+      "accepted_answer_count": 1,
+      "raw_prediction": "<answer>Arthur's Magazine</answer>",
+      "scored_prediction": "Arthur's Magazine",
+      "structured_answer_extracted": true
+    },
+    "evaluator_version": "hotpotqa.official.answer.v1",
+    "metrics": {
+      "exact_match": 1.0,
+      "token_f1": 1.0
+    },
+    "reason": "evaluated",
+    "reward": 1.0,
+    "valid": true
+  },
+  "loaded_now": false,
+  "models_after": [
+    "supervisor_theta",
+    "theta_smoke_step_000001"
+  ],
+  "models_before": [
+    "supervisor_theta",
+    "theta_smoke_step_000001"
+  ],
+  "policy_published": false,
+  "request_attempts": {
+    "canary": 1,
+    "models_after": 1,
+    "models_before": 1
+  },
+  "started_at": "2026-08-28T05:13:29.904858+00:00",
+  "status": "ready",
+  "success": true,
+  "training_performed": false
+}
