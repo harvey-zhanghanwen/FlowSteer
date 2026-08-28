@@ -484,7 +484,15 @@ def _has_qa_memory_coverage_failure(request: AgentRequest) -> bool:
     """Recognize an all-Retriever typed QA-memory coverage diagnosis."""
 
     valid_statuses: list[str] = []
-    for message in request.upstream:
+    messages = [*request.upstream]
+    if request.phase is ExecutionPhase.REVISION and request.peer_draft is not None:
+        # FlowSteer's finite bidirectional block carries the peer's current
+        # artifact in the revision envelope rather than duplicating it in
+        # ``upstream``.  Treat that explicit communication edge as control
+        # input for protocol selection, while retaining the same typed artifact
+        # and Tool-receipt admission checks below.
+        messages.append(request.peer_draft)
+    for message in messages:
         if (
             not isinstance(message.artifact_version, str)
             or not message.artifact_version.strip()
@@ -581,7 +589,10 @@ def _qa_memory_receipts_complete_for_coverage_failure(
 def _has_parametric_fallback_candidate(request: AgentRequest) -> bool:
     """Recognize the exact Reasoner fallback control fields for Verifier routing."""
 
-    for message in request.upstream:
+    messages = [*request.upstream]
+    if request.phase is ExecutionPhase.REVISION and request.peer_draft is not None:
+        messages.append(request.peer_draft)
+    for message in messages:
         if (
             not isinstance(message.artifact_version, str)
             or not message.artifact_version.strip()

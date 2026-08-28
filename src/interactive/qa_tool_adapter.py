@@ -14,6 +14,7 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from functools import lru_cache
 import inspect
 import json
 from pathlib import Path
@@ -1252,6 +1253,12 @@ def _relation_token_variants(token: str) -> frozenset[str]:
 
     normalized = token.casefold()
     variants = {normalized}
+    # Possessive inflection is lexical morphology, not an entity alias.  Keep
+    # the published surface while also admitting its possessor base so a
+    # question anchor such as ``Prince's`` can bind the answer-free query
+    # surface ``Prince``.  This does not consult a corpus record or evaluator.
+    if len(normalized) > 2 and normalized.endswith(("'s", "’s")):
+        variants.add(normalized[:-2])
     irregular = _RELATION_IRREGULAR_LEMMAS.get(normalized)
     if irregular is not None:
         variants.add(irregular)
@@ -3672,6 +3679,7 @@ def _candidate_matched_question_tokens(
     )
 
 
+@lru_cache(maxsize=4096)
 def _public_search_candidate_compatibility(
     *,
     original_question: str,
@@ -7001,6 +7009,38 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return schema
         argument_properties = arguments.get("properties")
         if not isinstance(argument_properties, dict):
+            return schema
+        if (
+            action_name == "complete"
+            and request.semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
+            and (request.agent.role_family or "").casefold()
+            == "evidence_retriever"
+            and self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+            and self._parametric_fallback_after_coverage_failure
+        ):
+            state = self._required_evidence_state(request, observations)
+            repair_code = state.semantic_repair_error_code or ""
+            if "TriviaQA QA-memory evidence_found is inadmissible" in repair_code:
+                value_schema = argument_properties.get("value")
+                value_properties = (
+                    value_schema.get("properties")
+                    if isinstance(value_schema, dict)
+                    else None
+                )
+                if isinstance(value_properties, dict):
+                    # The complete top-k has already been searched and read.
+                    # The receipt validator established that none of the
+                    # selected Q-A records preserves the public entity and
+                    # requested relation, so the repair turn can only report
+                    # the typed coverage failure.  Retrieval evidence and rank
+                    # remain unchanged; no evaluator/private answer is used.
+                    value_properties["retrieval_status"] = {
+                        "const": _KNOWLEDGE_BASE_COVERAGE_FAILURE,
+                    }
+                    value_properties["relevant_memory_ids"] = {
+                        "type": "array",
+                        "maxItems": 0,
+                    }
             return schema
         if (
             action_name == "search"

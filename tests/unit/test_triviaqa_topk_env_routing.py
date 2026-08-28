@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 import unittest
 
 from src.interactive.agent_action_parser import AgentAction, AgentActionType
@@ -23,6 +24,9 @@ from src.interactive.qa_tool_adapter import (
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     QARetrievalReactExecutionAdapter,
     TRIVIAQA_QA_MEMORY_TOOL_ID,
+    _question_entity_anchor_tokens,
+    _surface_binds_entity_anchor,
+    build_qa_tool_registry,
 )
 
 
@@ -426,6 +430,42 @@ class TriviaQATopKEnvRoutingTests(unittest.TestCase):
         self.assertIn('answer_type exactly to "entity"', reasoner_prompt)
         self.assertIn('answer_cardinality exactly to "single"', reasoner_prompt)
 
+        reasoner_revision_request = AgentRequest(
+            request_id="reasoner-revision-request",
+            run_id="prompt-test",
+            graph_revision=graph.revision,
+            problem=_QUESTION,
+            agent=graph.get_node("reasoner"),
+            model=model,
+            provider=provider,
+            phase=ExecutionPhase.REVISION,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            own_draft=json.dumps(
+                {
+                    "question_scope": _QUESTION,
+                    "retrieval_status": "knowledge_base_coverage_failure",
+                    "answer_source": "parametric_knowledge",
+                    "answer_type": "entity",
+                    "answer_cardinality": "single",
+                    "candidate_answer": "Ada",
+                }
+            ),
+            peer_draft=UpstreamMessage(
+                "retriever",
+                "reasoner",
+                artifact,
+                artifact_type="text",
+                tool_receipts=receipts,
+                artifact_version="retriever:revision:v1",
+            ),
+        )
+        revision_reasoner_prompt = "\n".join(
+            message["content"]
+            for message in build_agent_messages(reasoner_revision_request)
+        )
+        self.assertIn("parametric knowledge", revision_reasoner_prompt)
+        self.assertIn("mandatory local QA-memory search", revision_reasoner_prompt)
+
         reasoner_artifact = json.dumps(
             {
                 "question_scope": _QUESTION,
@@ -463,6 +503,45 @@ class TriviaQATopKEnvRoutingTests(unittest.TestCase):
         )
         self.assertIn("evidence_supported to false", verifier_prompt)
         self.assertIn("parametric_fallback", verifier_prompt)
+
+        verifier_revision_request = AgentRequest(
+            request_id="verifier-revision-request",
+            run_id="prompt-test",
+            graph_revision=graph.revision,
+            problem=_QUESTION,
+            agent=graph.get_node("verifier"),
+            model=model,
+            provider=provider,
+            phase=ExecutionPhase.REVISION,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            own_draft=json.dumps(
+                {
+                    "question_scope": _QUESTION,
+                    "retrieval_status": "knowledge_base_coverage_failure",
+                    "answer_source": "parametric_knowledge",
+                    "candidate_answer": "Ada",
+                    "evidence_supported": False,
+                    "entity_relation_consistent": True,
+                    "scope_preserved": True,
+                    "answer_type_cardinality_correct": True,
+                    "verification_status": "parametric_fallback",
+                }
+            ),
+            peer_draft=UpstreamMessage(
+                "reasoner",
+                "verifier",
+                reasoner_artifact,
+                artifact_type="reasoning_artifact",
+                tool_receipts=receipts,
+                artifact_version="reasoner:revision:v1",
+            ),
+        )
+        revision_verifier_prompt = "\n".join(
+            message["content"]
+            for message in build_agent_messages(verifier_revision_request)
+        )
+        self.assertIn("evidence_supported to false", revision_verifier_prompt)
+        self.assertIn("parametric_fallback", revision_verifier_prompt)
 
         untyped_request = AgentRequest(
             request_id="untyped-reasoner-request",
@@ -589,6 +668,130 @@ class TriviaQATopKEnvRoutingTests(unittest.TestCase):
         self.assertIsNone(projected)
         self.assertIsNotNone(issue)
         self.assertIn("evidence_found is inadmissible", issue)
+
+    def test_possessive_public_entity_anchor_admits_possessor_query(self) -> None:
+        question = "What was Prince's last No 1 of the 80s?"
+        entity_anchor = _question_entity_anchor_tokens(question)
+        self.assertEqual(("prince's",), entity_anchor)
+        self.assertTrue(
+            _surface_binds_entity_anchor(
+                "Prince last No 1 80s",
+                entity_anchor,
+            )
+        )
+
+    def test_false_evidence_found_repair_schema_forces_coverage_failure(
+        self,
+    ) -> None:
+        class _Index:
+            manifest = SimpleNamespace(
+                corpus_name="triviaqa-frozen-train-qa-memory",
+                corpus_version="qa-memory-test-corpus",
+                index_id="qa-memory-test-index",
+                format="flowsteer.triviaqa.qa-memory-embedding-index.v1",
+                retrieval_backend="test",
+                tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+                frozen_top_k=3,
+            )
+
+            def search(self, query: str, *, limit: int) -> tuple[object, ...]:
+                del query, limit
+                return ()
+
+            def read(self, passage_id: str) -> object:
+                raise AssertionError(passage_id)
+
+            def close(self) -> None:
+                return None
+
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=_UnusedGateway(),
+            tool_registry=build_qa_tool_registry(
+                _Index(),
+                dataset_scope=("triviaqa",),
+                tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+            ),
+            max_turns=7,
+            max_tool_calls=6,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+            parametric_fallback_after_coverage_failure=True,
+            retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+        )
+        request = AgentRequest(
+            request_id="retriever-repair-request",
+            run_id="prompt-test",
+            graph_revision=1,
+            problem="Which country does the airline LACSA come from?",
+            agent=AgentNode(
+                "retriever",
+                "fake-model",
+                "retrieve the matching Q-A memory",
+                role_family="evidence_retriever",
+                execution_mode="react",
+                allowed_tools=(TRIVIAQA_QA_MEMORY_TOOL_ID,),
+            ),
+            model=ModelSpec("fake-model", "fake"),
+            provider=ProviderSpec("fake", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        observations = []
+        for receipt in _receipts():
+            receipt_request = receipt["request"]
+            receipt_value = json.loads(
+                json.dumps(receipt["result"]["value"])
+            )
+            if receipt_request["action"] == "search":
+                receipt_value["passage_ids"] = list(
+                    receipt_value["memory_ids"]
+                )
+                for hit in receipt_value["hits"]:
+                    hit["passage_id"] = hit["memory_id"]
+            else:
+                receipt_value["passage_id"] = receipt_value["memory_id"]
+                receipt_value["passage"] = dict(receipt_value["memory"])
+            observations.append(
+                {
+                    "observation_status": "success",
+                    "executed_action": {
+                        "kind": "tool",
+                        "name": receipt_request["action"],
+                        "resource_id": TRIVIAQA_QA_MEMORY_TOOL_ID,
+                        "arguments": receipt_request["arguments"],
+                    },
+                    "result": receipt_value,
+                }
+            )
+        observations.append(
+            {
+                "observation_status": "schema_invalid",
+                "public_error_code": (
+                    "qa_semantic_artifact_invalid: TriviaQA QA-memory "
+                    "evidence_found is inadmissible because the selected record "
+                    "does not preserve the public question's named entity/scope "
+                    "and target relation"
+                ),
+            }
+        )
+
+        schema = adapter._state_conditioned_response_schema(
+            request,
+            observations,
+        )
+        self.assertIsNotNone(schema)
+        assert schema is not None
+        value_properties = schema["properties"]["arguments"]["properties"][
+            "value"
+        ]["properties"]
+        self.assertEqual(
+            {"const": "knowledge_base_coverage_failure"},
+            value_properties["retrieval_status"],
+        )
+        self.assertEqual(
+            {"type": "array", "maxItems": 0},
+            value_properties["relevant_memory_ids"],
+        )
 
     def test_tool_first_coverage_failure_admits_parametric_child_reasoner(
         self,
