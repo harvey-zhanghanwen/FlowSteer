@@ -237,6 +237,24 @@ _SOURCE_VIEW_SENTENCE_INTERROGATIVE = re.compile(
 _SOURCE_VIEW_DIGIT_MOJIBAKE_MULTIPLY = re.compile(
     r"(?<=\d)\u0102\u0097(?=\d)"
 )
+# These repairs are deliberately bound to the complete observed surface or a
+# corpus-unique syntactic frame.  Broader suffix/token splitting would corrupt
+# names such as Glenis, Boris, Dennis, and Ennis.
+_SOURCE_VIEW_TRUNCATED_WHICH = re.compile(
+    r"^Whic(?=\s+(?:is|are|was|were|did|does|do|has|have|had)\b)"
+)
+_SOURCE_VIEW_FUSED_BY_WHAT = re.compile(
+    r"^Bywhat(?=\s+name\s+(?:is|was)\b)"
+)
+_SOURCE_VIEW_FUSED_CALCANEUS_IS = re.compile(
+    r"\bCalcaneusis(?=\s+the\s+medical\s+name\b)"
+)
+_SOURCE_VIEW_FUSED_EGO_FIRST = re.compile(
+    r"\begofirst(?=\s+appeared\b)"
+)
+_SOURCE_VIEW_STRAY_INITIAL_PERIOD = re.compile(
+    r"^\.(?: )?(?=[A-Z][a-z])"
+)
 _SOURCE_VIEW_TRAILING_CLOSERS = "\"\u201d\u2019')]}"
 
 
@@ -279,6 +297,17 @@ def _source_transport_question_view(question: str) -> str:
     view = _decode_csv_transport_wrapper(question)
     view = view.replace("\u0085", "\u2026").replace("\u00a0", " ")
     view = _SOURCE_VIEW_DIGIT_MOJIBAKE_MULTIPLY.sub("\u00d7", view)
+    # The initial-period guard excludes ellipses, lower-case internet domain
+    # labels such as .za/.uk, and all-uppercase dot-prefixed identifiers.
+    view = _SOURCE_VIEW_STRAY_INITIAL_PERIOD.sub("", view, count=1)
+    view = _SOURCE_VIEW_TRUNCATED_WHICH.sub("Which", view, count=1)
+    view = _SOURCE_VIEW_FUSED_BY_WHAT.sub("By what", view, count=1)
+    view = _SOURCE_VIEW_FUSED_CALCANEUS_IS.sub(
+        "Calcaneus is",
+        view,
+        count=1,
+    )
+    view = _SOURCE_VIEW_FUSED_EGO_FIRST.sub("ego first", view, count=1)
 
     explicit_interrogative = bool(
         _SOURCE_VIEW_INTERROGATIVE_START.search(view.lstrip())

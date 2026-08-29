@@ -127,6 +127,48 @@ def _source() -> TriviaQATrainSource:
                 "English. What is the word?"
             ),
         ),
+        (
+            "Whic is the most northerly racecourse in the UK?",
+            "Which is the most northerly racecourse in the UK?",
+        ),
+        (
+            (
+                "Bywhat name was Sir Francis Drake's ship known before he "
+                "circumnavigated the world?"
+            ),
+            (
+                "By what name was Sir Francis Drake's ship known before he "
+                "circumnavigated the world?"
+            ),
+        ),
+        (
+            "The Calcaneusis the medical name for which bone in the human body?",
+            "The Calcaneus is the medical name for which bone in the human body?",
+        ),
+        (
+            (
+                "She and her alto egofirst appeared in 1941 in 'All Star "
+                "Comics', the creation of Chester Gould. Who is she?"
+            ),
+            (
+                "She and her alto ego first appeared in 1941 in 'All Star "
+                "Comics', the creation of Chester Gould. Who is she?"
+            ),
+        ),
+        (
+            ". Bill Waddington played which Coronation Street character?",
+            "Bill Waddington played which Coronation Street character?",
+        ),
+        (
+            (
+                ".North Yorkshire in terms of area is England's largest "
+                "county. Which is the second largest?"
+            ),
+            (
+                "North Yorkshire in terms of area is England's largest "
+                "county. Which is the second largest?"
+            ),
+        ),
     ),
 )
 def test_source_transport_view_normalizes_only_observed_transport_forms(
@@ -170,6 +212,17 @@ def test_source_transport_view_normalizes_only_observed_transport_forms(
             "Who Kicked the Hornets’ Nest"
         ),
         "Apt 56B, Whitehaven Mansions, Sandhurst Sq, London",
+        ".za is the internet code for which country?",
+        ".uk is the network identifier for the United Kingdom?",
+        "... a mineral, varieties of which include emerald and aquamarine?",
+        "Glenis the Guinea Pig is which rodent superstar's girlfriend?",
+        "Boris the Animal appeared in which film?",
+        "Who did Dennis the Menace irritate more than anyone else?",
+        "Of which Irish county is Ennis the county town?",
+        "Whic male member i missing from the following list?",
+        "Who’s resignation speech included the quoted lines?",
+        "Which is the heaviest? An Ice Hockey Puck or a Baseball?",
+        "Who asked, `Aren't most of you descended from pirates??",
     ),
 )
 def test_source_transport_view_stays_fail_closed_for_ambiguous_sources(
