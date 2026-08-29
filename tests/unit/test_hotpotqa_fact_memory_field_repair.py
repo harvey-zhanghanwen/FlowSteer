@@ -56,6 +56,15 @@ def _clause_fact_verification(**overrides: bool) -> dict[str, bool]:
     return value
 
 
+def _binary_fact_verification(**overrides: bool) -> dict[str, bool]:
+    value = {
+        name: True
+        for name in materializer._REQUIRED_BINARY_FACT_VERIFICATION_FIELDS
+    }
+    value.update(overrides)
+    return value
+
+
 def _sidecar(
     source: HotpotQATrainQASource,
     *,
@@ -601,7 +610,8 @@ def test_binary_answer_uses_polarity_binding_and_strict_verifier_contract(
             contract = str(kwargs["contract"])
             assert "scope-preserving negation" in contract
             assert "not both P" in contract
-            return _fact_verification(), {"request_id": request_id}
+            assert "source_proposition_preserved" in contract
+            return _binary_fact_verification(), {"request_id": request_id}
         raise AssertionError(f"unexpected request: {request_id}")
 
     monkeypatch.setattr(materializer, "_generate_json", fake_generate_json)

@@ -54,10 +54,10 @@ from src.interactive.hotpotqa_qa_memory_index import (  # noqa: E402
 )
 
 
-PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v11"
-PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v11"
+PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v12"
+PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v12"
 PARAPHRASE_PROVENANCE = (
-    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v11"
+    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v12"
 )
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
 
@@ -115,6 +115,17 @@ CLAUSE_FACT_VERIFICATION_SCHEMA = _json_schema(
         "no_new_fact": {"type": "boolean"},
     }
 )
+BINARY_FACT_VERIFICATION_SCHEMA = _json_schema(
+    {
+        "fact_declarative": {"type": "boolean"},
+        "fact_self_contained": {"type": "boolean"},
+        "source_proposition_preserved": {"type": "boolean"},
+        "binary_polarity_preserved": {"type": "boolean"},
+        "quantifier_scope_preserved": {"type": "boolean"},
+        "no_qa_wire_format": {"type": "boolean"},
+        "no_new_fact_or_relation": {"type": "boolean"},
+    }
+)
 _REQUIRED_QUESTION_VERIFICATION_FIELDS = tuple(
     QUESTION_VERIFICATION_SCHEMA["required"]
 )
@@ -123,6 +134,9 @@ _REQUIRED_FACT_VERIFICATION_FIELDS = tuple(
 )
 _REQUIRED_CLAUSE_FACT_VERIFICATION_FIELDS = tuple(
     CLAUSE_FACT_VERIFICATION_SCHEMA["required"]
+)
+_REQUIRED_BINARY_FACT_VERIFICATION_FIELDS = tuple(
+    BINARY_FACT_VERIFICATION_SCHEMA["required"]
 )
 _RELATION_REBUILD_REJECTION_MARKERS = (
     "fact_supported_by_qa",
@@ -1151,18 +1165,26 @@ async def _materialize_one(
                     clause_verification = (
                         binding_mode == "declarative_clause_paraphrase"
                     )
+                    binary_verification = (
+                        binding_mode == "binary_polarity_binding"
+                    )
                     fact_verification_schema = (
                         CLAUSE_FACT_VERIFICATION_SCHEMA
                         if clause_verification
-                        else FACT_VERIFICATION_SCHEMA
+                        else (
+                            BINARY_FACT_VERIFICATION_SCHEMA
+                            if binary_verification
+                            else FACT_VERIFICATION_SCHEMA
+                        )
                     )
                     required_fact_verification_fields = (
                         _REQUIRED_CLAUSE_FACT_VERIFICATION_FIELDS
                         if clause_verification
-                        else _REQUIRED_FACT_VERIFICATION_FIELDS
-                    )
-                    binary_verification = (
-                        binding_mode == "binary_polarity_binding"
+                        else (
+                            _REQUIRED_BINARY_FACT_VERIFICATION_FIELDS
+                            if binary_verification
+                            else _REQUIRED_FACT_VERIFICATION_FIELDS
+                        )
                     )
                     fact_verification_contract = (
                         "Verify only whether the proposed fact is a semantic "
@@ -1182,15 +1204,18 @@ async def _materialize_one(
                         "is a label: yes means the complete source proposition is "
                         "affirmed; no means its scope-preserving negation. A correct "
                         "negative proposition need not contain the literal token "
-                        "'no'. Set canonical_span_preserved_when_required true when "
-                        "the binary polarity is correctly realized, and set "
-                        "answer_slot_bound true when the full source proposition and "
-                        "its polarity are bound. Preserve quantifier scope: 'not "
-                        "both P' is not equivalent to 'neither is P'. The fact must "
-                        "also be declarative, self-contained, supported only by the "
-                        "source proposition plus its binary label, free of Q-A wire, "
-                        "and add no relation. Evaluate every boolean independently "
-                        "and return only JSON."
+                        "'no'. Treat original_question plus its authoritative binary "
+                        "label as the complete source of support; do not fact-check "
+                        "it from world knowledge. Set source_proposition_preserved "
+                        "true only when all entities, predicates, comparison axes, "
+                        "and constraints remain intact. Set binary_polarity_preserved "
+                        "true only for the label's exact polarity. Preserve quantifier "
+                        "scope: 'not both P' is not equivalent to 'neither is P'. "
+                        "Reject any claim assigning which individual fails unless "
+                        "the source proposition and label establish that assignment. "
+                        "The fact must also be declarative, self-contained, free of "
+                        "Q-A wire, and add no fact or relation. Evaluate every "
+                        "boolean independently and return only JSON."
                         if binary_verification
                         else
                         "Verify only the proposed answer-slot fact. It must be "
