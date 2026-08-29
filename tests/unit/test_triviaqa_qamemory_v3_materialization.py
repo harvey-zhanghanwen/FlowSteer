@@ -62,6 +62,11 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _eating_relation_analogue_pair,
     _darts_shanghai_analogue_pair,
     _acted_role_analogue_pair,
+    _first_word_relation_pair,
+    _name_given_relation_pair,
+    _simple_np_terminal_copular_pair,
+    _object_wh_represent_pair,
+    _fronted_domain_passive_pair,
     _fronted_context_subject_wh_pair,
     _leading_copular_object_wh_pair,
     _network_identifier_contrast_pair,
@@ -3934,6 +3939,159 @@ def test_source_backed_analogue_pairs_reenter_full_admission(
 )
 def test_source_backed_analogue_pairs_reject_other_relations(helper, original: str) -> None:
     assert helper(_semantic_source(original, "Example")) is None
+
+
+@pytest.mark.parametrize(
+    ("helper", "original", "canonical", "expected_question", "expected_fact"),
+    (
+        (
+            _first_word_relation_pair,
+            (
+                "What's the first word of Richard Marx's Right Here Waiting "
+                "For You?"
+            ),
+            "Oceans",
+            (
+                "What is the initial word of Richard Marx's Right Here Waiting "
+                "For You?"
+            ),
+            (
+                "The first word of Richard Marx's Right Here Waiting For You "
+                "is Oceans."
+            ),
+        ),
+        (
+            _name_given_relation_pair,
+            "What name is given to the full moon after a Harvest Moon?",
+            "Hunter’s Moon",
+            "What designation is given to the full moon after a Harvest Moon?",
+            (
+                "The name given to the full moon after a Harvest Moon is "
+                "Hunter’s Moon."
+            ),
+        ),
+        (
+            _simple_np_terminal_copular_pair,
+            "The Internet TLD for Albania is what?",
+            ".AL",
+            "Identify the Internet TLD for Albania.",
+            "The Internet TLD for Albania is .AL.",
+        ),
+        (
+            _object_wh_represent_pair,
+            "What does the internet top level domain '.cat' represent?",
+            "Catalan",
+            "Identify what the internet top level domain '.cat' represents.",
+            "The internet top level domain '.cat' represents Catalan.",
+        ),
+        (
+            _object_wh_represent_pair,
+            "What does c represent in the equation e = mc*2?",
+            "Speed of light",
+            "Identify what c represents in the equation e = mc*2.",
+            "c represents Speed of light in the equation e = mc*2.",
+        ),
+        (
+            _fronted_domain_passive_pair,
+            (
+                "In internet domain names what country is represented by the "
+                "domain code '.dk'?"
+            ),
+            "DENMARK",
+            (
+                "In internet domain names, identify the country that is "
+                "represented by the domain code '.dk'."
+            ),
+            (
+                "In internet domain names, DENMARK is represented by the "
+                "domain code '.dk'."
+            ),
+        ),
+    ),
+)
+def test_bounded_residual_relation_pairs_reenter_full_admission(
+    helper,
+    original: str,
+    canonical: str,
+    expected_question: str,
+    expected_fact: str,
+) -> None:
+    source = _semantic_source(original, canonical)
+
+    pair = helper(source)
+
+    assert pair == (expected_question, expected_fact)
+    assert _deterministic_strict_pair(source) == pair
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": expected_question,
+                "paraphrase_answer_statement": expected_fact,
+            },
+            ensure_ascii=False,
+        ),
+        source,
+    ) == pair
+    assert (
+        validate_self_contained_declarative_fact(source, expected_fact)
+        == expected_fact
+    )
+
+
+@pytest.mark.parametrize(
+    ("helper", "original"),
+    (
+        (
+            _first_word_relation_pair,
+            "What was Maggie Simpson's first word?",
+        ),
+        (
+            _first_word_relation_pair,
+            "What are the first words of the US Declaration of Independence?",
+        ),
+        (
+            _name_given_relation_pair,
+            "What collective name is given to the first ten amendments?",
+        ),
+        (
+            _name_given_relation_pair,
+            "Which two-word name is given to INVICTA?",
+        ),
+        (
+            _simple_np_terminal_copular_pair,
+            "If a person is Esotropic, they are what?",
+        ),
+        (
+            _simple_np_terminal_copular_pair,
+            "The ball-shaped roots of turnips, carrots, and beets are what?",
+        ),
+        (
+            _object_wh_represent_pair,
+            "On an Ordnance Survey map, what does 'PA' represent?",
+        ),
+        (
+            _object_wh_represent_pair,
+            "Which element does 'K' represent in the Periodic Table?",
+        ),
+        (
+            _fronted_domain_passive_pair,
+            "What does the internet top level domain '.cat' represent?",
+        ),
+        (
+            _fronted_domain_passive_pair,
+            (
+                "In internet domain names what island is represented by the "
+                "domain code '.dk'?"
+            ),
+        ),
+    ),
+)
+def test_bounded_residual_relation_pairs_reject_nearby_shapes(
+    helper,
+    original: str,
+) -> None:
+    assert helper(_semantic_source(original, "Example")) is None
+
 
 def test_listed_choice_detection_normalizes_apostrophe_glyphs() -> None:
     augmented = _augment_listed_choice_answer_statement(

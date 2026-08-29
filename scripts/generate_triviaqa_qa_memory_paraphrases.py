@@ -4252,6 +4252,185 @@ def _acted_role_analogue_pair(source: TriviaQATrainSource) -> tuple[str, str] | 
         f"{actor} played the role of {source.canonical_answer} in {work}{year}"
     )
 
+
+def _first_word_relation_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind one singular ``first word of`` relation to its value."""
+
+    original = " ".join(source.original_question.split())
+    if (
+        _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+        or len(_LEXICAL_TOKEN.findall(source.canonical_answer)) != 1
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?i:what(?:['’]s|\s+is))\s+the\s+first\s+word\s+of\s+"
+        r"(?P<referent>[^?]{1,240})\?",
+        original,
+    )
+    if match is None:
+        return None
+    referent = match.group("referent")
+    question = _finish_deterministic_question_candidate(
+        source,
+        f"What is the initial word of {referent}?",
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"The first word of {referent} is {source.canonical_answer}"
+    )
+
+
+def _name_given_relation_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind the exact leading ``What name is given to`` construction."""
+
+    original = " ".join(source.original_question.split())
+    if (
+        _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?i:what name is given to)\s+(?P<referent>[^?]{1,500})\?",
+        original,
+    )
+    if match is None:
+        return None
+    referent = match.group("referent")
+    question = _finish_deterministic_question_candidate(
+        source,
+        f"What designation is given to {referent}?",
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"The name given to {referent} is {source.canonical_answer}"
+    )
+
+
+_SIMPLE_NP_COPULAR_CLAUSE = re.compile(
+    r"\b(?:and|or|if|that|when|where|which|who|whom|whose)\b",
+    re.IGNORECASE,
+)
+
+
+def _simple_np_terminal_copular_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind terminal ``The <simple NP> <copula> what`` without a clause."""
+
+    original = " ".join(source.original_question.split())
+    if (
+        _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?P<subject>The [^,;:?!]{1,240})\s+"
+        r"(?P<copula>is|was|are|were)\s+what\?",
+        original,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    subject = match.group("subject")
+    if (
+        not subject.startswith("The ")
+        or _SIMPLE_NP_COPULAR_CLAUSE.search(subject) is not None
+    ):
+        return None
+    question = _finish_deterministic_question_candidate(
+        source,
+        _declarative_statement(f"Identify the {subject[4:]}"),
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"{subject} {match.group('copula')} {source.canonical_answer}"
+    )
+
+
+def _object_wh_represent_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind one object-WH under singular do-support ``represent``."""
+
+    original = " ".join(source.original_question.split())
+    if (
+        _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+        or _COORDINATED_QUESTION_SLOT.search(original) is not None
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?i:what does)\s+(?P<subject>[^?]{1,240}?)\s+represent"
+        r"(?P<context>(?:\s+(?:as|at|for|in|on|within)\s+[^?]+)?)\?",
+        original,
+    )
+    if match is None:
+        return None
+    subject = match.group("subject")
+    context = match.group("context")
+    question = _finish_deterministic_question_candidate(
+        source,
+        _declarative_statement(
+            f"Identify what {subject} represents{context}"
+        ),
+    )
+    if question is None:
+        return None
+    # Preserve lower-case scientific symbols (for example ``c``) exactly;
+    # ``_declarative_statement`` sentence-cases only an initial article.
+    return question, _declarative_statement(
+        f"{subject} represents {source.canonical_answer}{context}"
+    )
+
+
+def _fronted_domain_passive_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind the domain-code country slot in one exact fronted passive."""
+
+    original = " ".join(source.original_question.split())
+    if (
+        _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+        or _COORDINATED_QUESTION_SLOT.search(original) is not None
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?P<context>In internet domain names)\s+what\s+"
+        r"(?P<head>country|nation)\s+(?P<copula>is|was)\s+"
+        r"represented by\s+(?P<agent>the domain code\s+"
+        r"(?:'[.][a-z]{2}'|‘[.][a-z]{2}’|\"[.][a-z]{2}\"|[.][a-z]{2}))\?",
+        original,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    context = match.group("context")
+    head = match.group("head")
+    copula = match.group("copula")
+    agent = match.group("agent")
+    question = _finish_deterministic_question_candidate(
+        source,
+        _declarative_statement(
+            f"{context}, identify the {head} that {copula} represented by "
+            f"{agent}"
+        ),
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"{context}, {source.canonical_answer} {copula} represented by {agent}"
+    )
+
+
 def _deterministic_strict_pair(
     source: TriviaQATrainSource,
 ) -> tuple[str, str] | None:
@@ -4273,6 +4452,11 @@ def _deterministic_strict_pair(
         _eating_relation_analogue_pair(source),
         _darts_shanghai_analogue_pair(source),
         _acted_role_analogue_pair(source),
+        _first_word_relation_pair(source),
+        _name_given_relation_pair(source),
+        _simple_np_terminal_copular_pair(source),
+        _object_wh_represent_pair(source),
+        _fronted_domain_passive_pair(source),
     ):
         if analogue_pair is not None:
             candidates.append(analogue_pair)
