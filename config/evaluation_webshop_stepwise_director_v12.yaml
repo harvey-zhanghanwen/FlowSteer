@@ -1,6 +1,6 @@
 # WebShop stepwise Director v12: atomic execution profile and visible option state.
 #
-# This prepare-only condition preserves v11's fixed 128-task split, seed, Direct
+# This evaluation condition preserves v11's fixed 128-task split, seed, Direct
 # reuse, native evaluator, action budget and local Qwen3.5-9B model. WebShop
 # ADD/MODIFY commits execution_mode plus allowed_tools atomically. Each public
 # Action--Observation returns the original goal and current state; the next
@@ -48,7 +48,7 @@ webshop_evaluation:
   protocol_equivalent_to_direct: false
   direct_contract: "Return exactly one currently admissible native WebShop action."
   direct_generation_seed: 20260825
-  direct_reused_from: "artifacts/webshop_initial_adapter_v5/development/direct_predictions.jsonl"
+  direct_reused_from: "${FLOWSTEER_WEBSHOP_DIRECT_PREDICTIONS_PATH:-artifacts/webshop_initial_adapter_v5/development/direct_predictions.jsonl}"
 
 environment_runtime:
   enabled: true
