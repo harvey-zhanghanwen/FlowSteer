@@ -53,10 +53,10 @@ from src.interactive.hotpotqa_qa_memory_index import (  # noqa: E402
 )
 
 
-PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v9"
-PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v9"
+PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v10"
+PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v10"
 PARAPHRASE_PROVENANCE = (
-    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v9"
+    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v10"
 )
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
 
@@ -1213,6 +1213,19 @@ async def _materialize_one(
                     "attempt_receipts": attempt_receipts,
                     "completed_at": _utc_now(),
                 }
+
+        if generation_round + 1 < generation_rounds:
+            # A generation round is an independent bounded proposal, not an
+            # alias for more repairs of the same rejected surface.  Preserve
+            # the complete receipt history, but reset both fields so the next
+            # round performs a fresh joint semantic rewrite under a new seed.
+            question = None
+            fact = None
+            question_admitted = False
+            fact_admitted = False
+            question_rejection = "not-yet-validated"
+            fact_rejection = "not-yet-validated"
+            force_fact_reconstruction = False
 
     raise FactMaterializationRejected(
         source.source_train_task_id, attempt_receipts

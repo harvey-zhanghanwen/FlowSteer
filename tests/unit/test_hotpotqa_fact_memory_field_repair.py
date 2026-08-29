@@ -160,6 +160,61 @@ def test_field_level_repair_preserves_admitted_question_and_repairs_only_fact(
     assert attempts[1]["fact"]["preserved_from_prior_attempt"] is False
 
 
+def test_generation_round_starts_with_fresh_joint_proposal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(9)
+    generation_calls = 0
+
+    async def fake_generate_json(**kwargs: object):
+        nonlocal generation_calls
+        request_id = str(kwargs["request_id"])
+        if ":generate:" in request_id:
+            generation_calls += 1
+            if generation_calls == 1:
+                return {
+                    "paraphrase_question": "Which individual wrote Atlas?",
+                    "fact_statement": (
+                        "Question: Who authored Atlas? Answer: Ada Lovelace."
+                    ),
+                }, {"request_id": request_id}
+            return {
+                "paraphrase_question": "Name the individual who wrote Atlas.",
+                "fact_statement": "Ada Lovelace authored Atlas.",
+            }, {"request_id": request_id}
+        if "verify-question" in request_id:
+            return _question_verification(), {"request_id": request_id}
+        if "verify-fact" in request_id:
+            return _fact_verification(), {"request_id": request_id}
+        raise AssertionError(f"unexpected request: {request_id}")
+
+    monkeypatch.setattr(materializer, "_generate_json", fake_generate_json)
+    candidate, receipt = asyncio.run(
+        materializer._materialize_one(
+            source,
+            index=0,
+            model=object(),
+            provider=object(),
+            seed=53,
+            max_attempts=1,
+            generation_rounds=2,
+        )
+    )
+
+    assert generation_calls == 2
+    assert candidate["paraphrase_question"] == (
+        "Name the individual who wrote Atlas."
+    )
+    assert candidate["fact_statement"] == "Ada Lovelace authored Atlas."
+    assert receipt["generation_round"] == 2
+    attempts = receipt["attempt_receipts"]
+    assert attempts[0]["fact"]["deterministic_or_verification_error"].endswith(
+        "fact_statement contains a Question/Answer wire"
+    )
+    assert attempts[1]["question"]["preserved_from_prior_attempt"] is False
+    assert attempts[1]["fact"]["preserved_from_prior_attempt"] is False
+
+
 @pytest.mark.parametrize(
     ("source", "paraphrase", "fact", "expected_mode"),
     (
