@@ -43,6 +43,7 @@ class EnvironmentExecutionError(RuntimeError):
         *,
         environment_reset_receipt: Optional[Mapping[str, object]] = None,
         environment_receipts: Sequence[Mapping[str, object]] = (),
+        environment_current_state: Optional[Mapping[str, object]] = None,
         evaluator_environment_trace: Sequence[Mapping[str, object]] = (),
         tool_receipts: Sequence[Mapping[str, object]] = (),
         model_calls: Sequence[Mapping[str, object]] = (),
@@ -62,6 +63,11 @@ class EnvironmentExecutionError(RuntimeError):
         )
         self.environment_receipts = tuple(
             dict(item) for item in environment_receipts
+        )
+        self.environment_current_state = (
+            None
+            if environment_current_state is None
+            else dict(environment_current_state)
         )
         self.evaluator_environment_trace = tuple(
             dict(item) for item in evaluator_environment_trace
@@ -917,6 +923,11 @@ def _public_transition_summary(
         if item.get("state_advanced") is True
         and isinstance(item.get("action"), str)
     ]
+    attempted = [
+        item
+        for item in receipts
+        if isinstance(item.get("action"), str)
+    ]
     recent_actions = [str(item["action"]) for item in completed[-8:]]
     latest = receipts[-1] if receipts else None
     observation_changed: Optional[bool] = None
@@ -952,17 +963,25 @@ def _public_transition_summary(
         latest_action = latest["action"]
         latest_pre_observation = latest.get("observation")
         latest_next_observation = latest.get("next_observation")
-        for item in completed:
+        for item in attempted:
             if (
                 item.get("action") == latest_action
                 and item.get("observation") == latest_pre_observation
                 and item.get("next_observation") == latest_next_observation
             ):
                 repeated_state_action_count += 1
+    recent_transitions = [
+        (
+            str(item["action"]),
+            item.get("observation"),
+            item.get("next_observation"),
+        )
+        for item in completed[-4:]
+    ]
     action_cycle = bool(
-        len(recent_actions) >= 4
-        and recent_actions[-4] == recent_actions[-2]
-        and recent_actions[-3] == recent_actions[-1]
+        len(recent_transitions) == 4
+        and recent_transitions[-4] == recent_transitions[-2]
+        and recent_transitions[-3] == recent_transitions[-1]
     )
     no_progress_reasons: list[str] = []
     if repeated_state_action_count >= 2:
@@ -970,9 +989,29 @@ def _public_transition_summary(
     if action_cycle:
         no_progress_reasons.append("action_cycle")
 
+    # SkillFlow conditions every next Action on public observed history.  Keep
+    # a bounded state--action visit projection so revisiting a state exposes
+    # which Actions have already been tried from the same public precondition,
+    # before the Agent blindly repeats one.  This is advisory public history;
+    # it neither masks a legal native action nor recommends an alternative.
+    previous_actions_reversed: list[str] = []
+    seen_actions: set[str] = set()
+    for item in reversed(attempted):
+        action = str(item["action"])
+        if item.get("observation") != observation or action in seen_actions:
+            continue
+        previous_actions_reversed.append(action)
+        seen_actions.add(action)
+        if len(previous_actions_reversed) == 8:
+            break
+    previous_actions_from_current_state = list(
+        reversed(previous_actions_reversed)
+    )
+
     summary: dict[str, object] = {
         "latest_transition": latest_transition,
         "recent_actions": recent_actions,
+        "previous_actions_from_current_state": previous_actions_from_current_state,
         "no_progress": {
             "detected": bool(no_progress_reasons),
             "reasons": no_progress_reasons,
@@ -1131,6 +1170,13 @@ def _public_state_feedback(
     recent_actions = completed_actions[-6:]
     if recent_actions:
         lines.append("Recent executed actions: " + " | ".join(recent_actions) + ".")
+    previous_from_state = progress.get("previous_actions_from_current_state")
+    if isinstance(previous_from_state, (list, tuple)) and previous_from_state:
+        lines.append(
+            "Previously executed actions from this same public state: "
+            + " | ".join(str(value) for value in previous_from_state)
+            + "."
+        )
     no_progress = progress.get("no_progress")
     if isinstance(no_progress, Mapping) and no_progress.get("detected") is True:
         lines.append(
@@ -1209,8 +1255,12 @@ def _action_prompt(
         f"Admissible actions:\n{actions}\n\n"
         "Apply one ReAct control cycle: condition the next Action on the "
         "original task, current Agent contract and preceding Observation. "
-        "Emit only the Action; the Runtime returns its Observation to the "
-        "Director before another Canvas decision.\n\n"
+        "After each Observation, update the next Action from public state. "
+        "Do not repeat a previously executed Action when its public "
+        "preconditions have not changed. Treat a failed Tool call as public "
+        "evidence, revise the next Action, and preserve the current Agent and "
+        "episode. Emit only the Action; the Runtime returns its Observation "
+        "to the Director before another Canvas decision.\n\n"
         f"{format_instruction}"
         + (
             ""
@@ -1431,6 +1481,7 @@ class EnvironmentExecutionAdapter:
         return {
             "environment_reset_receipt": dict(state.reset_receipt),
             "environment_receipts": tuple(dict(item) for item in state.receipts),
+            "environment_current_state": self._current_public_state(state),
             "evaluator_environment_trace": tuple(
                 dict(item) for item in state.evaluator_trace
             ),
@@ -1610,6 +1661,28 @@ class EnvironmentExecutionAdapter:
         )
         state.tool_receipts.append(tool_receipt.to_value())
         if result is None:
+            state.turns_used = turn
+            state.receipts.append(
+                {
+                    "receipt_type": "environment_transition",
+                    "environment_episode_id": state.episode_id,
+                    "environment_id": session.environment_id,
+                    "turn": turn,
+                    "environment_revision_before": previous_revision,
+                    "environment_revision_after": episode.revision,
+                    "observation": previous_observation,
+                    "admissible_actions": list(admissible_actions),
+                    "raw_model_output": raw_action,
+                    "action": action,
+                    "next_observation": episode.observation,
+                    "next_admissible_actions": list(admissible_actions),
+                    "terminal": state.terminal,
+                    "state_advanced": False,
+                    "observation_status": "tool_error",
+                    "tool_error_type": tool_receipt.error_type or "unknown_error",
+                    "public_state": public_state,
+                }
+            )
             raise EnvironmentExecutionError(
                 "registered environment tool failed with "
                 f"{tool_receipt.error_type or 'unknown_error'}"
@@ -1729,6 +1802,7 @@ class EnvironmentExecutionAdapter:
                     " ".join(str(exc).split()) or "environment execution failed",
                     environment_reset_receipt=metadata["environment_reset_receipt"],
                     environment_receipts=metadata["environment_receipts"],
+                    environment_current_state=metadata["environment_current_state"],
                     evaluator_environment_trace=metadata[
                         "evaluator_environment_trace"
                     ],

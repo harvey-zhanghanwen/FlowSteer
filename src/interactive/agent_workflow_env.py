@@ -785,10 +785,11 @@ class AgentWorkflowEnv:
         if len(owners) != 1:
             return None
         actor_id = owners[0]
-        metadata = self._progressive_output_metadata.get(actor_id)
-        if not isinstance(metadata, Mapping):
-            return None
+        metadata = self._progressive_output_metadata.get(actor_id, {})
         raw_state = metadata.get("environment_current_state")
+        if not isinstance(raw_state, Mapping):
+            continuation = self._failure_continuations.get(actor_id, {})
+            raw_state = continuation.get("environment_current_state")
         if not isinstance(raw_state, Mapping):
             return None
         allowed_fields = (
@@ -5413,6 +5414,9 @@ class AgentWorkflowEnv:
                 ]
                 if public_items:
                     result[field_name] = public_items
+        raw_current_state = record.metadata.get("environment_current_state")
+        if isinstance(raw_current_state, Mapping):
+            result["environment_current_state"] = dict(raw_current_state)
         has_public_tool_state = any(
             field_name in result for field_name in ("react_trace", "tool_receipts")
         )

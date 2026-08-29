@@ -1,0 +1,33 @@
+# Frozen WebShop v11 Executor catalog.  The v7 formal receipt records local
+# Qwen3.5-9B as the only successfully executed model across all 1,052 Agent
+# calls; remote catalog arms produced provider failures.  Freeze the proven
+# arm before the 128-task batch instead of changing availability mid-rollout.
+providers:
+  - provider_id: "local-director"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:8015/v1"
+    max_concurrency: 32
+
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-director"
+    model_name: "supervisor_theta"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    context_window: 8192
+    metadata:
+      family: "qwen"
+      profile: "provider=local-director;locality=local;instruction=chat;context=8192;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-20"
+      canary_source: "artifacts/model_capability_canary/local_qwen35_9b_nonthinking_20260820.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      coding_capable: "true"
+      coding_capability_scope: "structured-action-and-unified-diff-format"
+      chat_template_enable_thinking: "false"
+      sampling_backend: "sglang"
+      deployment_locality: "local"
+      supports_top_k: "true"
+      max_tokens: "4096"

@@ -139,6 +139,92 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(2, no_progress["repeated_state_action_count"])
 
+    def test_revisited_public_state_exposes_prior_actions_without_false_loop(
+        self,
+    ) -> None:
+        receipts = (
+            {
+                "state_advanced": True,
+                "action": "search[blue steel table]",
+                "observation": "Search page",
+                "next_observation": "Results page",
+                "observation_status": "success",
+                "terminal": False,
+            },
+            {
+                "state_advanced": True,
+                "action": "click[Back to Search]",
+                "observation": "Results page",
+                "next_observation": "Search page",
+                "observation_status": "success",
+                "terminal": False,
+            },
+        )
+
+        summary = _public_transition_summary(
+            task_family="webshop",
+            observation="Search page",
+            receipts=receipts,
+        )
+
+        self.assertEqual(
+            ["search[blue steel table]"],
+            summary["previous_actions_from_current_state"],
+        )
+        self.assertFalse(summary["no_progress"]["detected"])
+
+    def test_action_cycle_and_state_memory_are_transition_conditioned(self) -> None:
+        def transition(action: str, before: str, after: str) -> dict[str, object]:
+            return {
+                "state_advanced": True,
+                "action": action,
+                "observation": before,
+                "next_observation": after,
+                "observation_status": "success",
+                "terminal": False,
+            }
+
+        different_states = (
+            transition("click[A]", "state-0", "state-1"),
+            transition("click[B]", "state-1", "state-2"),
+            transition("click[A]", "state-2", "state-3"),
+            transition("click[B]", "state-3", "state-4"),
+        )
+        different_summary = _public_transition_summary(
+            task_family="webshop",
+            observation="state-4",
+            receipts=different_states,
+        )
+        self.assertFalse(different_summary["no_progress"]["action_cycle"])
+
+        repeated_cycle = (
+            transition("click[A]", "state-0", "state-1"),
+            transition("click[B]", "state-1", "state-0"),
+            transition("click[A]", "state-0", "state-1"),
+            transition("click[B]", "state-1", "state-0"),
+        )
+        repeated_summary = _public_transition_summary(
+            task_family="webshop",
+            observation="state-0",
+            receipts=repeated_cycle,
+        )
+        self.assertTrue(repeated_summary["no_progress"]["action_cycle"])
+
+        state_visits = [
+            transition(f"search[q{index}]", "Search page", f"Results {index}")
+            for index in range(9)
+        ]
+        state_visits.append(transition("search[q0]", "Search page", "Results 0"))
+        memory_summary = _public_transition_summary(
+            task_family="webshop",
+            observation="Search page",
+            receipts=state_visits,
+        )
+        self.assertEqual(
+            [*(f"search[q{index}]" for index in range(2, 9)), "search[q0]"],
+            memory_summary["previous_actions_from_current_state"],
+        )
+
     async def test_agent_runtime_admits_and_executes_registered_environment_tool(
         self,
     ) -> None:
@@ -421,7 +507,101 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(error.tool_receipts))
         self.assertEqual(1, len(error.model_calls))
         self.assertEqual("room zero", error.environment_reset_receipt["observation"])
+        self.assertEqual("look", error.environment_current_state["last_action"])
+        self.assertEqual("room one", error.environment_current_state["current_observation"])
+        self.assertEqual(1, error.environment_current_state["turns_used"])
 
+    async def test_failed_webshop_action_returns_state_and_goal_to_canvas(self) -> None:
+        class FailingWebShopSession(FakeSession):
+            environment_id = "fake:webshop:tool-error"
+            task_family = "webshop"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = {
+                    "has_search_bar": True,
+                    "clickables": [],
+                }
+
+            def reset(self) -> str:
+                self.reset_count += 1
+                return "Search page"
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                raise TimeoutError("environment backend timeout")
+
+        session = FailingWebShopSession()
+        gateway = SequenceGateway(["search[blue steel table]"])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=2,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        instruction = "buy a blue steel table"
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem=instruction,
+            recovery_policy="preserve_diagnose_repair_augment",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "continue",
+                "finish",
+            ),
+        )
+
+        added = await canvas.step(
+            json.dumps(
+                {
+                    "action": "add_agent",
+                    "agent_id": "actor",
+                    "model_id": "m",
+                    "contract": "Act from the current public environment state.",
+                    "execution_mode": "react",
+                    "allowed_tools": [environment.tool_id],
+                }
+            )
+        )
+
+        self.assertTrue(added.accepted)
+        state = canvas.public_environment_state()
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(instruction, state["original_task_instruction"])
+        self.assertEqual("search[blue steel table]", state["last_action"])
+        self.assertEqual("tool_error", state["observation_status"])
+        self.assertFalse(state["state_advanced"])
+        self.assertEqual("Search page", state["current_observation"])
+        self.assertEqual(1, state["turns_used"])
+        self.assertEqual(1, state["remaining_action_budget"])
+        latest = state["public_progress"]["latest_transition"]
+        self.assertEqual("search[blue steel table]", latest["action"])
+        self.assertTrue(latest["result_is_current_state"])
+        self.assertIn("modify_agent", canvas.model_admissible_action_types())
+        self.assertNotIn("delete_agent", canvas.model_admissible_action_types())
+        self.assertIn("actor", {node.id for node in canvas.graph.nodes})
+        self.assertNotIn("reward", str(state))
+        self.assertNotIn("graded_score", str(state))
+        self.assertNotIn("'won'", str(state))
     async def test_canvas_finish_accepts_terminal_or_budget_truncation(self) -> None:
         for raw_action, expected_terminal in (("look", False), ("finish", True)):
             with self.subTest(raw_action=raw_action):
@@ -1101,6 +1281,16 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Current Agent contract:", gateway.requests[-1].problem)
         self.assertIn("Do not repeat an unchanged option", gateway.requests[-1].problem)
         self.assertIn("Apply one ReAct control cycle", gateway.requests[-1].problem)
+        self.assertIn(
+            "Do not repeat a previously executed Action when its public "
+            "preconditions have not changed",
+            gateway.requests[-1].problem,
+        )
+        self.assertIn(
+            "preserve the current Agent and episode",
+            gateway.requests[-1].problem,
+        )
+
         self.assertNotIn("Execution interface:", gateway.requests[-1].problem)
         self.assertNotIn("graded_score", str(canvas.public_environment_state()))
 

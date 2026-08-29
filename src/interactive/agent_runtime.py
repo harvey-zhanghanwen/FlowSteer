@@ -422,6 +422,7 @@ def _public_failure_metadata(exc: BaseException) -> Mapping[str, object]:
         "retry_receipts",
         "environment_reset_receipt",
         "environment_receipts",
+        "environment_current_state",
         "evaluator_environment_trace",
     ):
         value = getattr(exc, field_name, None)
