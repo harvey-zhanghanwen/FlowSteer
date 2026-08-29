@@ -17,8 +17,9 @@ fixed 128-task HotpotQA evaluator panel.
 | Separate question/fact verification, field-level repair, and generation-round retry | SkillFlow/TriviaQA `generate_triviaqa_qa_memory_paraphrases.py::{_repair_paraphrase_question,_repair_answer_statement}` and its independent semantic/answer verification | Thin adaptation |
 | Materialization HTTP worker pool sized by configured concurrency | SkillFlow/TriviaQA `ThreadPoolExecutor(max_workers=args.concurrency)` materialization loop | Direct reuse |
 | Source identity preservation, semantic fact verification, and resume revalidation | SkillFlow/TriviaQA `parse_paraphrase_response`, `_identity_token_preserved`, independent answer verifier, and rejected-source retry partition | Thin adaptation; removes capitalization-as-NER novelty inference |
-| Attached/range numeric surface normalization (`a2002`, `1980-1991`) | TriviaQA immutable numeric/date admission boundary | Necessary HotpotQA adaptation over numeric atoms; semantic constraints remain verifier-gated |
-| Source-aware clausal answer binding | SkillFlow/TriviaQA `_clausal_canonical_relation_statement` | Direct narrow-pattern reuse; all other answers use answer-slot binding |
+| Attached/range/abbreviated numeric surface normalization (`a2002`, `1980-1991`, `WWII`) | TriviaQA immutable numeric/date admission boundary | Necessary HotpotQA adaptation over numeric keys; repeated references do not invent a new constraint, semantic constraints remain verifier-gated |
+| Source-aware clausal answer binding | SkillFlow/TriviaQA `_clausal_canonical_relation_statement` | Direct narrow-pattern reuse plus necessary HotpotQA support for punctuated full-sentence canonical answers; all other answers use answer-slot binding |
+| Single-token ordinary answer realization (`American`/`America`, `Danish`/`Denmark`) | TriviaQA independent semantic answer verifier | Necessary HotpotQA adaptation: multi-token identity lineage stays deterministic; single-token equivalence remains verifier-gated |
 | Development-only Top-K selection | SkillFlow/TriviaQA fact-memory Top-K selector (`k={1,2,3,5}`, smallest `k` at maximal Recall) | Thin adaptation |
 | Global 97,852-record fact manifest/index wrapper | SkillFlow passage record plus FlowSteer normalized embedding index | Necessary scale adapter |
 

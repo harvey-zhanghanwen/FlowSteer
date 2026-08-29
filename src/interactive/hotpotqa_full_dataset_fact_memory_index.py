@@ -64,7 +64,13 @@ _LEXICAL_TOKEN = re.compile(r"[^\W_]+(?:['’-][^\W_]+)*", re.UNICODE)
 # changed, added, or removed numbers still fail deterministically.
 _ARABIC_NUMBER_ATOM = re.compile(r"(?<!\d)\d[\d,]*(?!\d)")
 _ROMAN_NUMERAL_TOKEN = re.compile(r"\b[IVXLCDM]{2,}\b")
+_WORLD_WAR_ABBREVIATION = re.compile(r"\bWW(?P<roman>I{1,3})\b", re.IGNORECASE)
 _QUOTED_SPAN = re.compile(r'"([^\"]+)"|“([^”]+)”|(?<!\w)[\'‘]([^\'’]+)[\'’](?!\w)')
+_FINITE_CLAUSE_VERB = re.compile(
+    r"\b(?:is|are|was|were|has|have|had|does|do|did|can|could|may|"
+    r"might|must|shall|should|will|would)\b",
+    re.IGNORECASE,
+)
 _FUNCTION_WORDS = frozenset(
     {
         "a", "an", "and", "are", "as", "at", "be", "been", "being",
@@ -158,7 +164,15 @@ def _number_or_date_counts(text: str) -> Counter[str]:
         match.group(0).casefold()
         for match in _ROMAN_NUMERAL_TOKEN.finditer(text)
     )
+    values.extend(
+        match.group("roman").casefold()
+        for match in _WORLD_WAR_ABBREVIATION.finditer(text)
+    )
     return Counter(values)
+
+
+def _number_or_date_keys(text: str) -> frozenset[str]:
+    return frozenset(_number_or_date_counts(text))
 
 
 def _quoted_spans(text: str) -> frozenset[str]:
@@ -197,9 +211,18 @@ def canonical_answer_is_declarative_clause(
 
     normalized = " ".join(_required_text(answer, "canonical_answer").split())
     answer_tokens = _lexical_tokens(normalized)
+    # NECESSARY_HOTPOT_ADAPTATION: unlike TriviaQA, some HotpotQA canonical
+    # answers are complete punctuated sentences.  Terminal-period + finite
+    # predicate is a fail-closed sentence signal that does not classify
+    # unpunctuated song/film titles containing auxiliaries as propositions.
     if (
-        question is None
-        or len(answer_tokens) < 3
+        len(answer_tokens) >= 3
+        and normalized.endswith(".")
+        and _FINITE_CLAUSE_VERB.search(normalized) is not None
+    ):
+        return True
+    if question is None or (
+        len(answer_tokens) < 3
         or answer_tokens[0].casefold()
         not in {"he", "i", "it", "she", "they", "we", "you"}
     ):
@@ -229,7 +252,7 @@ def validate_hotpotqa_question_rewrite(
     # capitalization-only heuristic is not an entity recognizer and wrongly
     # rejects valid rewrites such as ``American`` -> ``U.S.``.  Deterministic
     # admission remains strict for numbers/dates and answer leakage.
-    if _number_or_date_counts(source.question) != _number_or_date_counts(question):
+    if _number_or_date_keys(source.question) != _number_or_date_keys(question):
         raise ValueError(
             "paraphrase_question changed an immutable number or date"
         )
@@ -267,11 +290,11 @@ def validate_hotpotqa_fact_statement(
     # material, while the separate fact semantic verifier rejects unsupported
     # entities.  The removed novelty heuristic falsely rejected source tokens
     # whose case changed at sentence boundaries (``korea`` -> ``Korea``).
-    allowed_numbers = _number_or_date_counts(
+    allowed_numbers = _number_or_date_keys(
         f"{source.question} {source.canonical_answer}"
     )
-    observed_numbers = _number_or_date_counts(fact)
-    if any(observed_numbers[token] > allowed_numbers[token] for token in observed_numbers):
+    observed_numbers = _number_or_date_keys(fact)
+    if not observed_numbers.issubset(allowed_numbers):
         raise ValueError("fact_statement introduced a number or date")
     canonical = " ".join(source.canonical_answer.split())
     if canonical_answer_is_declarative_clause(
@@ -287,7 +310,7 @@ def validate_hotpotqa_fact_statement(
             raise ValueError(
                 "fact_statement removed an immutable entity from the answer clause"
             )
-        if _number_or_date_counts(canonical) != _number_or_date_counts(fact):
+        if _number_or_date_keys(canonical) != _number_or_date_keys(fact):
             raise ValueError(
                 "fact_statement changed a number or date in the answer clause"
             )
@@ -304,21 +327,23 @@ def validate_hotpotqa_fact_statement(
             for token in _lexical_tokens(canonical)
             if token.casefold() in required_answer_identities
         )
-        if _missing_identity_tokens(canonical, fact):
+        if (
+            len(required_answer_identities) >= 2
+            and _missing_identity_tokens(canonical, fact)
+        ):
             raise ValueError(
                 "fact_statement removed immutable answer tokens"
             )
-        if required_identity_sequence and not _contains_ordered_tokens(
-            fact, required_identity_sequence
+        if (
+            len(required_answer_identities) >= 2
+            and required_identity_sequence
+            and not _contains_ordered_tokens(fact, required_identity_sequence)
         ):
             raise ValueError(
                 "fact_statement changed immutable answer token order"
             )
-        observed_fact_numbers = _number_or_date_counts(fact)
-        if any(
-            observed_fact_numbers[token] < count
-            for token, count in required_answer_numbers.items()
-        ):
+        observed_fact_numbers = _number_or_date_keys(fact)
+        if not frozenset(required_answer_numbers).issubset(observed_fact_numbers):
             raise ValueError(
                 "fact_statement removed a number or date from the answer"
             )

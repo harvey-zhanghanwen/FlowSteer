@@ -331,6 +331,69 @@ def test_ordinary_answer_head_may_be_semantically_realized() -> None:
     )
     assert materialize_hotpotqa_declarative_facts((quoted,), (quoted_value,))
 
+    demonym = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:demonym",
+        base_task_id="hotpotqa:demonym",
+        cycled=False,
+        question="12 Stones and Halestorm are bands from which country?",
+        canonical_answer="American",
+    )
+    demonym_value = _materialization(
+        demonym,
+        fact="12 Stones and Halestorm are bands from America.",
+    )
+    demonym_value["paraphrase_question"] = (
+        "From which nation do the groups 12 Stones and Halestorm originate?"
+    )
+    assert materialize_hotpotqa_declarative_facts(
+        (demonym,), (demonym_value,)
+    )
+
+
+def test_complete_sentence_answer_and_repeated_numeric_reference() -> None:
+    sentence = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:sentence-answer",
+        base_task_id="hotpotqa:sentence-answer",
+        cycled=False,
+        question=(
+            "Who was responsible for a commemorative half dollar struck by "
+            "the Philadelphia Mint in 1936?"
+        ),
+        canonical_answer=(
+            "Melish was responsible for two United States commemorative coin "
+            "issues, the Cincinnati Musical Center half dollar and the "
+            "Cleveland Centennial half dollar."
+        ),
+    )
+    assert fact_index.canonical_answer_is_declarative_clause(
+        sentence.canonical_answer,
+        question=sentence.question,
+    )
+
+    world_war = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:wwii",
+        base_task_id="hotpotqa:wwii",
+        cycled=False,
+        question=(
+            "Which group won WWII in the alternate universe of the August "
+            "2009 Raven Software game?"
+        ),
+        canonical_answer="Nazis",
+    )
+    value = _materialization(
+        world_war,
+        fact=(
+            "The Raven Software game released in August 2009 depicts the Nazis "
+            "winning World War II; its alternate history repeats the World War "
+            "II premise."
+        ),
+    )
+    value["paraphrase_question"] = (
+        "In Raven Software's August 2009 alternate-history game, which group "
+        "is victorious in World War II?"
+    )
+    assert materialize_hotpotqa_declarative_facts((world_war,), (value,))
+
 
 def test_materializer_has_no_fallback_option() -> None:
     parser = materializer._parser()
