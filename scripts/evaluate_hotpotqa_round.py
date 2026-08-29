@@ -395,6 +395,51 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return values
 
 
+def _retrieval_evidence_names(
+    retrieval_config: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Return the existing retrieval evidence channels required by a corpus."""
+
+    corpus_kind = retrieval_config.get("corpus_kind")
+    if corpus_kind == "full_dataset_fact_memory":
+        return (
+            "retrieval_profile_selection",
+            "retrieval_index_manifest",
+            "paraphrase_manifest",
+        )
+    if corpus_kind == "transductive_qa_memory":
+        return ("retrieval_index_manifest", "paraphrase_manifest")
+    evidence_names = [
+        "retrieval_profile_selection",
+        "retrieval_index_manifest",
+        "retrieval_index_smoke",
+        "retrieval_index_rebuild_smoke",
+    ]
+    if corpus_kind == "train_qa_memory":
+        evidence_names.append("paraphrase_manifest")
+    return tuple(evidence_names)
+
+
+def _validate_full_dataset_top_k_freeze(
+    retrieval_config: Mapping[str, Any],
+    index_manifest: Mapping[str, Any],
+    top_k_selection: Mapping[str, Any],
+) -> None:
+    """Require the development selection, final index, and runner to agree."""
+
+    selected_top_k = top_k_selection.get("selected_top_k")
+    configured_top_k = retrieval_config.get("search_top_k")
+    indexed_top_k = index_manifest.get("frozen_top_k")
+    if (
+        type(selected_top_k) is not int
+        or selected_top_k != configured_top_k
+        or indexed_top_k != configured_top_k
+    ):
+        raise HotpotRoundError(
+            "fact-memory selected, configured, and indexed Top-K differ"
+        )
+
+
 def _atomic_jsonl(path: Path, values: Sequence[Mapping[str, Any]]) -> None:
     temporary = path.with_name(f".{path.name}.partial")
     _write_jsonl(temporary, values)
@@ -1712,26 +1757,9 @@ async def run_hotpot_round(
         retrieval_config = _mapping(
             config["qa_embedding_retrieval"], "qa_embedding_retrieval"
         )
-        evidence_names = [
-            "retrieval_profile_selection",
-            "retrieval_index_manifest",
-            "retrieval_index_smoke",
-            "retrieval_index_rebuild_smoke",
-        ]
-        if retrieval_config.get("corpus_kind") in {
-            "train_qa_memory",
-            "transductive_qa_memory",
-            "full_dataset_fact_memory",
-        }:
-            evidence_names.append("paraphrase_manifest")
-        if retrieval_config.get("corpus_kind") in {
-            "transductive_qa_memory",
-            "full_dataset_fact_memory",
-        }:
-            evidence_names = [
-                "retrieval_index_manifest",
-                "paraphrase_manifest",
-            ]
+        # Reuse the existing retrieval-profile evidence channel for the
+        # SkillFlow/TriviaQA development-only frozen Top-K receipt.
+        evidence_names = _retrieval_evidence_names(retrieval_config)
         required_retrieval_artifacts = {
             name: paths[name]
             for name in evidence_names
@@ -1758,6 +1786,13 @@ async def run_hotpot_round(
         }:
             index_manifest = _read_json(paths["retrieval_index_manifest"])
             paraphrase_manifest = _read_json(paths["paraphrase_manifest"])
+            if retrieval_config.get("corpus_kind") == "full_dataset_fact_memory":
+                top_k_selection = _read_json(paths["retrieval_profile_selection"])
+                _validate_full_dataset_top_k_freeze(
+                    retrieval_config,
+                    index_manifest,
+                    top_k_selection,
+                )
             boundary = _mapping(
                 report["retrieval_execution_boundary"],
                 "retrieval_execution_boundary",

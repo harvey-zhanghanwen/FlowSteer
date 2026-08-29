@@ -1,6 +1,7 @@
-# HotpotQA Round-01 highest-profile architecture with the explicitly
-# in-database full native train+validation declarative-fact memory. Only worker
-# Agents can search/read it; the Director remains on the control plane.
+# Temporary Top-K profile-selection index build. This is an exact copy of the
+# final v21 evaluation profile except for index_dir, search_top_k, and the
+# retrieval index manifest path. It must never be used as the final evaluator
+# profile.
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
   name: "hotpotqa_round01_full_dataset_fact_memory_v21"
@@ -69,14 +70,14 @@ qa_embedding_retrieval:
   development_sample_count: 64
   paraphrase_materialization_path: "data/hotpotqa_full_dataset_fact_memory_v1/fact_provenance_sidecar.jsonl"
   paraphrase_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/materialization_manifest.json"
-  index_dir: "data/hotpotqa_full_dataset_fact_memory_v1/index_topk3"
+  index_dir: "data/hotpotqa_full_dataset_fact_memory_v1/index_topk5"
   embedding_model: "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5"
   embedding_model_id: "BAAI/bge-base-en-v1.5"
   embedding_device: "cpu"
   normalize_embeddings: true
   similarity: "cosine"
-  # Frozen only after architecture-development source IDs compare k={1,2,3,5}.
-  search_top_k: 3
+  # Temporary maximum candidate index for development-only selection.
+  search_top_k: 5
   profile_candidate_top_k: [1, 2, 3, 5]
   max_turns_per_agent_call: 7
   max_tool_calls_per_agent_call: 6
@@ -96,7 +97,7 @@ storage:
   wrong_demos_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/wrong_demos.jsonl"
   error_demos_path: "reports/hotpotqa_round01_full_dataset_fact_memory_v21/error_demos.jsonl"
   retrieval_profile_selection_path: "data/hotpotqa_full_dataset_fact_memory_v1/top_k_selection.json"
-  retrieval_index_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/index_topk3/manifest.json"
+  retrieval_index_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/index_topk5/manifest.json"
   paraphrase_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/materialization_manifest.json"
   manifest_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/run_manifest.json"
   preflight_receipt_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/preflight_receipt.json"

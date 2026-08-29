@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import dataclass
 import importlib.util
 from pathlib import Path
@@ -111,6 +112,12 @@ class HotpotQARound01FullDatasetFactMemoryV21ProfileTests(unittest.TestCase):
                 / "config/evaluation_hotpotqa_round01_full_dataset_fact_memory_v21.yaml"
             ).read_text(encoding="utf-8")
         )
+        cls.topk5_build = yaml.safe_load(
+            (
+                ROOT
+                / "config/build_hotpotqa_round01_full_dataset_fact_memory_topk5_v21.yaml"
+            ).read_text(encoding="utf-8")
+        )
 
     def test_round01_architecture_is_preserved_except_fact_tool_identity(self) -> None:
         self.assertEqual(self.v19["director"], self.candidate["director"])
@@ -155,6 +162,55 @@ class HotpotQARound01FullDatasetFactMemoryV21ProfileTests(unittest.TestCase):
             "public_task_dynamic_full_dataset_fact_memory_search_read",
             _RUNNER._input_context(self.candidate),
         )
+
+    def test_temporary_topk5_build_changes_only_index_freeze_fields(self) -> None:
+        expected = copy.deepcopy(self.candidate)
+        expected["qa_embedding_retrieval"]["index_dir"] = (
+            "data/hotpotqa_full_dataset_fact_memory_v1/index_topk5"
+        )
+        expected["qa_embedding_retrieval"]["search_top_k"] = 5
+        expected["storage"]["retrieval_index_manifest_path"] = (
+            "data/hotpotqa_full_dataset_fact_memory_v1/index_topk5/manifest.json"
+        )
+
+        self.assertEqual(expected, self.topk5_build)
+        _RUNNER.validate_hotpot_config(self.topk5_build)
+
+    def test_final_profile_records_and_requires_topk_selection_evidence(self) -> None:
+        selection_path = (
+            ROOT
+            / "data/hotpotqa_full_dataset_fact_memory_v1/top_k_selection.json"
+        )
+        paths = _RUNNER._paths(self.candidate, ROOT)
+
+        self.assertEqual(selection_path, paths["retrieval_profile_selection"])
+        self.assertEqual(
+            (
+                "retrieval_profile_selection",
+                "retrieval_index_manifest",
+                "paraphrase_manifest",
+            ),
+            _RUNNER._retrieval_evidence_names(
+                self.candidate["qa_embedding_retrieval"]
+            ),
+        )
+
+    def test_final_topk_must_match_selection_and_index_manifest(self) -> None:
+        retrieval = self.candidate["qa_embedding_retrieval"]
+        _RUNNER._validate_full_dataset_top_k_freeze(
+            retrieval,
+            {"frozen_top_k": 3},
+            {"selected_top_k": 3},
+        )
+        with self.assertRaisesRegex(
+            _RUNNER.HotpotRoundError,
+            "selected, configured, and indexed Top-K differ",
+        ):
+            _RUNNER._validate_full_dataset_top_k_freeze(
+                retrieval,
+                {"frozen_top_k": 3},
+                {"selected_top_k": 5},
+            )
 
     def test_registry_exposes_fact_only_search_and_read(self) -> None:
         registry = build_hotpotqa_embedding_tool_registry(
