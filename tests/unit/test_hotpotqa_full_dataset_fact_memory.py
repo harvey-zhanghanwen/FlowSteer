@@ -573,6 +573,131 @@ def test_unbound_interrogative_answer_slot_is_not_a_fact() -> None:
     )
 
 
+def test_numeric_atoms_normalize_words_year_lists_and_world_war_case() -> None:
+    assert fact_index._number_or_date_keys("DID this happen in 1904?") == {
+        "1904"
+    }
+    assert fact_index._number_or_date_keys("Did this happen in 1904?") == {
+        "1904"
+    }
+    assert fact_index._number_or_date_keys("1991,1995,1999") == {
+        "1991",
+        "1995",
+        "1999",
+    }
+    assert fact_index._number_or_date_keys("1991, 1995, and 1999") == {
+        "1991",
+        "1995",
+        "1999",
+    }
+    assert fact_index._number_or_date_keys("world War ii") == {"ii"}
+    assert fact_index._number_or_date_keys("World War II") == {"ii"}
+
+
+@pytest.mark.parametrize(
+    ("question", "answer", "fact"),
+    (
+        (
+            "Jodie Resther starred in which horror television series?",
+            "Are You Afraid of the Dark?",
+            "Jodie Resther starred in Are You Afraid of the Dark?",
+        ),
+        (
+            "Which documentary included Jimmy Page?",
+            "It Might Get Loud",
+            "It Might Get Loud included Jimmy Page.",
+        ),
+        (
+            "Are Will Durant and Margaret Mitchell both novelists?",
+            "no",
+            "Will Durant and Margaret Mitchell were not both novelists.",
+        ),
+        (
+            "Which film starred Darren McGavin?",
+            "Home Is Where the Hart Is",
+            "Darren McGavin starred in Home Is Where the Hart Is.",
+        ),
+    ),
+)
+def test_canonical_title_or_entity_surface_is_not_an_interrogative_gate(
+    question: str,
+    answer: str,
+    fact: str,
+) -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:title-boundary",
+        base_task_id="hotpotqa:title-boundary",
+        cycled=False,
+        question=question,
+        canonical_answer=answer,
+    )
+    assert fact_index.validate_hotpotqa_fact_statement(source, fact) == fact
+
+
+def test_named_work_is_not_clause_and_clause_may_retain_question_dates() -> None:
+    assert not fact_index.canonical_answer_is_declarative_clause(
+        "My Name Is Bill W.",
+        question="What 1989 movie did James Scott Bumgarner appear in?",
+    )
+    question = (
+        "Which party represents the district containing a village with a "
+        "population of 3,103 in the 2010 Census?"
+    )
+    answer = "He is a Republican."
+    assert fact_index.canonical_answer_is_declarative_clause(
+        answer,
+        question=question,
+    )
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:clause-question-date",
+        base_task_id="hotpotqa:clause-question-date",
+        cycled=False,
+        question=question,
+        canonical_answer=answer,
+    )
+    fact = (
+        "The district containing the village with a population of 3,103 in "
+        "the 2010 Census is represented by a Republican."
+    )
+    assert fact_index.validate_hotpotqa_fact_statement(source, fact) == fact
+
+
+def test_unbound_pronoun_still_fails_when_not_a_canonical_title() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:unbound-pronoun",
+        base_task_id="hotpotqa:unbound-pronoun",
+        cycled=False,
+        question="Who authored Atlas?",
+        canonical_answer="Ada Lovelace",
+    )
+    with pytest.raises(ValueError, match="unbound anaphoric subject"):
+        fact_index.validate_hotpotqa_fact_statement(
+            source,
+            "She authored Atlas.",
+        )
+
+
+@pytest.mark.parametrize(
+    "fact",
+    (
+        "Did Ada Lovelace author Atlas.",
+        "Did Jodie Resther star in Are You Afraid of the Dark?",
+    ),
+)
+def test_leading_auxiliary_question_is_not_masked_by_title(
+    fact: str,
+) -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:auxiliary-question",
+        base_task_id="hotpotqa:auxiliary-question",
+        cycled=False,
+        question="Did Jodie Resther star in a horror series?",
+        canonical_answer="Are You Afraid of the Dark?",
+    )
+    with pytest.raises(ValueError, match="must be declarative"):
+        fact_index.validate_hotpotqa_fact_statement(source, fact)
+
+
 def test_materializer_has_no_fallback_option() -> None:
     parser = materializer._parser()
     option_strings = {

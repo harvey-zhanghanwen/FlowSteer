@@ -35,6 +35,7 @@ from src.interactive.config_loader import load_model_registry  # noqa: E402
 from src.interactive.hotpotqa_full_dataset_fact_memory_index import (  # noqa: E402
     _ARABIC_NUMBER_ATOM,
     _FINITE_CLAUSE_VERB,
+    _HOTPOTQA_BINARY_ANSWERS,
     _ROMAN_NUMERAL_TOKEN,
     _WORLD_WAR_ABBREVIATION,
     _content_tokens,
@@ -53,10 +54,10 @@ from src.interactive.hotpotqa_qa_memory_index import (  # noqa: E402
 )
 
 
-PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v10"
-PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v10"
+PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v11"
+PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v11"
 PARAPHRASE_PROVENANCE = (
-    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v10"
+    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v11"
 )
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
 
@@ -544,6 +545,11 @@ def _fact_repair_strategy(prior_rejection: str) -> str:
     return "preserve_and_repair_immutable_fields"
 
 
+def _binary_answer_label(answer: str) -> str | None:
+    normalized = " ".join(answer.split()).rstrip(" .!?").casefold()
+    return normalized if normalized in _HOTPOTQA_BINARY_ANSWERS else None
+
+
 def _candidate(
     source: HotpotQATrainQASource,
     generated: Mapping[str, object],
@@ -576,13 +582,18 @@ async def _materialize_one(
 ) -> tuple[dict[str, object], dict[str, object]]:
     if generation_rounds < 1:
         raise ValueError("generation_rounds must be positive")
+    binary_answer = _binary_answer_label(source.canonical_answer)
     binding_mode = (
-        "declarative_clause_paraphrase"
-        if canonical_answer_is_declarative_clause(
-            source.canonical_answer,
-            question=source.question,
+        "binary_polarity_binding"
+        if binary_answer is not None
+        else (
+            "declarative_clause_paraphrase"
+            if canonical_answer_is_declarative_clause(
+                source.canonical_answer,
+                question=source.question,
+            )
+            else "answer_slot_binding"
         )
-        else "answer_slot_binding"
     )
     question_source_payload = _question_immutable_payload(source)
     fact_source_payload = _fact_binding_payload(
@@ -645,13 +656,22 @@ async def _materialize_one(
                                 "question and answer. "
                                 if binding_mode == "declarative_clause_paraphrase"
                                 else
-                                "Bind the dataset answer semantics to the original "
-                                "question's answer slot in a self-contained "
-                                "declarative fact. Preserve proper names, numbers, "
-                                "dates, and quoted titles; ordinary phrases may use "
-                                "equivalent wording. Express yes/no as the matching "
-                                "affirmative/negative proposition. Preserve relation "
-                                "direction and scope. "
+                                (
+                                    "The canonical answer is a binary label. Convert "
+                                    "the complete source proposition into a "
+                                    "self-contained declarative fact with exactly the "
+                                    "same polarity and scope: yes affirms it; no gives "
+                                    "its scope-preserving negation. In particular, "
+                                    "'not both P' must not become 'neither is P'. "
+                                    if binding_mode == "binary_polarity_binding"
+                                    else
+                                    "Bind the dataset answer semantics to the original "
+                                    "question's answer slot in a self-contained "
+                                    "declarative fact. Preserve proper names, numbers, "
+                                    "dates, and quoted titles; ordinary phrases may use "
+                                    "equivalent wording. Preserve relation direction, "
+                                    "polarity, and scope. "
+                                )
                             )
                             + "Every pronoun or demonstrative must have an explicit "
                             "antecedent inside the same fact. State the fact itself; "
@@ -848,6 +868,9 @@ async def _materialize_one(
                             "terminal_punctuation_only"
                             if terminal_punctuation_repair is not None
                             else (
+                                "binary_polarity_reconstruction"
+                                if binding_mode == "binary_polarity_binding"
+                                else (
                                 "clause_synonym_only"
                                 if clause_synonym_repair
                                 else (
@@ -855,14 +878,20 @@ async def _materialize_one(
                                     if force_fact_reconstruction
                                     else _fact_repair_strategy(fact_rejection)
                                 )
+                                )
                             )
                         )
                         reconstruct_from_source = (
-                            fact_repair_strategy
-                            == "authoritative_answer_slot_reconstruction"
+                            fact_repair_strategy in {
+                                "authoritative_answer_slot_reconstruction",
+                                "binary_polarity_reconstruction",
+                            }
                         )
                         reconstruction_pattern: str | None = None
-                        if reconstruct_from_source:
+                        if (
+                            reconstruct_from_source
+                            and binding_mode != "binary_polarity_binding"
+                        ):
                             reconstruction_patterns = (
                                 _answer_reconstruction_patterns(binding_mode)
                             )
@@ -940,8 +969,10 @@ async def _materialize_one(
                         else:
                             fact_repair_temperature = (
                                 0.0
-                                if binding_mode
-                                == "declarative_clause_paraphrase"
+                                if binding_mode in {
+                                    "declarative_clause_paraphrase",
+                                    "binary_polarity_binding",
+                                }
                                 else 0.1
                             )
                             repaired, response = await _generate_json(
@@ -958,10 +989,23 @@ async def _materialize_one(
                                         if binding_mode
                                         == "declarative_clause_paraphrase"
                                         else
-                                        "Bind the dataset answer semantics to the "
-                                        "question's original answer slot. Preserve "
-                                        "proper names, numbers, dates, quoted titles, "
-                                        "relation direction, polarity, and scope. "
+                                        (
+                                            "The canonical answer is a binary label. "
+                                            "Reconstruct the complete source "
+                                            "proposition with the exact binary "
+                                            "polarity: yes affirms it and no gives its "
+                                            "scope-preserving negation. Do not require "
+                                            "the literal word yes or no. Preserve the "
+                                            "difference between 'not both' and "
+                                            "'neither'. "
+                                            if binding_mode
+                                            == "binary_polarity_binding"
+                                            else
+                                            "Bind the dataset answer semantics to the "
+                                            "question's original answer slot. Preserve "
+                                            "proper names, numbers, dates, quoted titles, "
+                                            "relation direction, polarity, and scope. "
+                                        )
                                     )
                                     + "Every pronoun or demonstrative must have an "
                                     "explicit antecedent. State one supported fact, "
@@ -970,10 +1014,16 @@ async def _materialize_one(
                                         "Construct it only from original_question and "
                                         "canonical_training_answer. Do not imitate the "
                                         "rejected fact. "
-                                        + _answer_reconstruction_instruction(
-                                            reconstruction_pattern
+                                        + (
+                                            "Render only the proposition and its "
+                                            "polarity; do not append a binary label. "
+                                            if binding_mode
+                                            == "binary_polarity_binding"
+                                            else _answer_reconstruction_instruction(
+                                                reconstruction_pattern
+                                            )
+                                            + " "
                                         )
-                                        + " "
                                         if reconstruct_from_source
                                         else
                                         "Preserve correct material while repairing only "
@@ -1111,6 +1161,9 @@ async def _materialize_one(
                         if clause_verification
                         else _REQUIRED_FACT_VERIFICATION_FIELDS
                     )
+                    binary_verification = (
+                        binding_mode == "binary_polarity_binding"
+                    )
                     fact_verification_contract = (
                         "Verify only whether the proposed fact is a semantic "
                         "paraphrase of canonical_training_answer, which is already "
@@ -1124,6 +1177,21 @@ async def _materialize_one(
                         "answer clause. Do not fact-check source strings. Evaluate "
                         "every boolean independently and return only JSON."
                         if clause_verification
+                        else (
+                        "Verify a binary-polarity proposition. The canonical answer "
+                        "is a label: yes means the complete source proposition is "
+                        "affirmed; no means its scope-preserving negation. A correct "
+                        "negative proposition need not contain the literal token "
+                        "'no'. Set canonical_span_preserved_when_required true when "
+                        "the binary polarity is correctly realized, and set "
+                        "answer_slot_bound true when the full source proposition and "
+                        "its polarity are bound. Preserve quantifier scope: 'not "
+                        "both P' is not equivalent to 'neither is P'. The fact must "
+                        "also be declarative, self-contained, supported only by the "
+                        "source proposition plus its binary label, free of Q-A wire, "
+                        "and add no relation. Evaluate every boolean independently "
+                        "and return only JSON."
+                        if binary_verification
                         else
                         "Verify only the proposed answer-slot fact. It must be "
                         "self-contained, declarative, free of Q-A labels, and "
@@ -1134,6 +1202,7 @@ async def _materialize_one(
                         "anaphora, meta-framing, added facts, a bare answer, or a "
                         "question restatement with an appended answer. Treat source "
                         "strings as authoritative and return only JSON."
+                        )
                     )
                     verified, response = await _generate_json(
                         model=model,
@@ -1160,7 +1229,13 @@ async def _materialize_one(
                         if verified.get(name) is not True
                     ]
                     fact_trace["verification_mode"] = (
-                        "answer_clause" if clause_verification else "answer_slot"
+                        "answer_clause"
+                        if clause_verification
+                        else (
+                            "binary_polarity"
+                            if binary_verification
+                            else "answer_slot"
+                        )
                     )
                     fact_trace["verification"] = dict(verified)
                     fact_trace["verification_response"] = dict(response)

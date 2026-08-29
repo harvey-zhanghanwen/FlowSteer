@@ -499,8 +499,8 @@ def test_repeated_fact_forces_rotating_source_reconstruction(
 ) -> None:
     source = _source(
         5,
-        question="Did Ada author Atlas?",
-        answer="yes",
+        question="Who authored Atlas?",
+        answer="Ada",
     )
     calls: list[Mapping[str, object]] = []
     fact_repairs = 0
@@ -512,7 +512,7 @@ def test_repeated_fact_forces_rotating_source_reconstruction(
         request_id = str(kwargs["request_id"])
         if ":generate:" in request_id:
             return {
-                "paraphrase_question": "Was Atlas authored by Ada?",
+                "paraphrase_question": "Which person wrote Atlas?",
                 "fact_statement": "Ada authored Atlas.",
             }, {"request_id": request_id}
         if "repair-fact" in request_id:
@@ -575,6 +575,54 @@ def test_repeated_fact_forces_rotating_source_reconstruction(
         True,
         False,
     ]
+
+
+def test_binary_answer_uses_polarity_binding_and_strict_verifier_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(
+        10,
+        question="Are Atlas and Borealis both novels?",
+        answer="No.",
+    )
+
+    async def fake_generate_json(**kwargs: object):
+        request_id = str(kwargs["request_id"])
+        if ":generate:" in request_id:
+            return {
+                "paraphrase_question": (
+                    "Do Atlas and Borealis each belong to the novel category?"
+                ),
+                "fact_statement": "Atlas and Borealis are not both novels.",
+            }, {"request_id": request_id}
+        if "verify-question" in request_id:
+            return _question_verification(), {"request_id": request_id}
+        if "verify-fact" in request_id:
+            contract = str(kwargs["contract"])
+            assert "scope-preserving negation" in contract
+            assert "not both P" in contract
+            return _fact_verification(), {"request_id": request_id}
+        raise AssertionError(f"unexpected request: {request_id}")
+
+    monkeypatch.setattr(materializer, "_generate_json", fake_generate_json)
+    candidate, receipt = asyncio.run(
+        materializer._materialize_one(
+            source,
+            index=0,
+            model=object(),
+            provider=object(),
+            seed=59,
+            max_attempts=1,
+            generation_rounds=1,
+        )
+    )
+
+    assert candidate["fact_statement"] == (
+        "Atlas and Borealis are not both novels."
+    )
+    assert receipt["fact_binding_mode"] == "binary_polarity_binding"
+    fact_attempt = receipt["attempt_receipts"][0]["fact"]
+    assert fact_attempt["verification_mode"] == "binary_polarity"
 
 
 def test_complete_fact_gets_local_terminal_punctuation_only(

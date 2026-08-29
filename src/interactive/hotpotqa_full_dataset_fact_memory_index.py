@@ -66,7 +66,16 @@ _ARABIC_NUMBER_ATOM = re.compile(r"(?<!\d)\d[\d,]*(?!\d)")
 _DATE_COMMA_SEPARATOR = re.compile(
     r"(?<!\d)(?P<day>\d{1,2}),(?P<year>\d{4})(?!\d)"
 )
+_YEAR_COMMA_SEPARATOR = re.compile(r"(?P<year>\d{4}),(?=\d{4}\b)")
 _ROMAN_NUMERAL_TOKEN = re.compile(r"\b[IVXLCDM]{2,}\b")
+_VALID_ROMAN_NUMERAL = re.compile(
+    r"M{0,4}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})"
+    r"(?:IX|IV|V?I{0,3})"
+)
+_WORLD_WAR_ROMAN_TOKEN = re.compile(
+    r"\bworld\s+war\s+(?P<roman>[ivxlcdm]+)\b",
+    re.IGNORECASE,
+)
 _WORLD_WAR_ABBREVIATION = re.compile(r"\bWW(?P<roman>I{1,3})\b", re.IGNORECASE)
 _QUOTED_SPAN = re.compile(r'"([^\"]+)"|“([^”]+)”|(?<!\w)[\'‘]([^\'’]+)[\'’](?!\w)')
 _FINITE_CLAUSE_VERB = re.compile(
@@ -96,6 +105,12 @@ _FACT_UNBOUND_ANSWER_SLOT = re.compile(
     r"\b(?:is|are|was|were)\s+(?:which|what)\s+"
     r"(?:person|individual|entity|thing|place|city|country|state|year|date|"
     r"number|film|movie|song|book|work|organization|company|team|one)\b)",
+    re.IGNORECASE,
+)
+_FACT_LEADING_INTERROGATIVE = re.compile(
+    r"^(?:who|what|which|where|when|why|how|name|identify|"
+    r"are|can|could|did|do|does|had|has|have|is|should|"
+    r"was|were|will|would)\b",
     re.IGNORECASE,
 )
 # DIRECT_REUSE: TriviaQA ``_FACT_QA_WRAPPER`` with a necessary HotpotQA
@@ -131,6 +146,11 @@ _HOTPOTQA_BINARY_BOTH_QUESTION = re.compile(
     re.IGNORECASE,
 )
 _HOTPOTQA_BINARY_ANSWERS = frozenset({"yes", "no"})
+_NAMED_WORK_QUESTION = re.compile(
+    r"\b(?:what|which)\b[^?]{0,100}\b(?:movie|film|book|novel|song|album|"
+    r"series|show|play|game|work|title)\b",
+    re.IGNORECASE,
+)
 _FUNCTION_WORDS = frozenset(
     {
         "a", "an", "and", "are", "as", "at", "be", "been", "being",
@@ -224,14 +244,29 @@ def _number_or_date_counts(text: str) -> Counter[str]:
         r"\g<day> \g<year>",
         text,
     )
+    normalized_text = _YEAR_COMMA_SEPARATOR.sub(
+        r"\g<year> ",
+        normalized_text,
+    )
     values = [
         match.group(0).replace(",", "")
         for match in _ARABIC_NUMBER_ATOM.finditer(normalized_text)
     ]
-    values.extend(
-        match.group(0).casefold()
-        for match in _ROMAN_NUMERAL_TOKEN.finditer(text)
-    )
+    world_war_spans: list[tuple[int, int]] = []
+    for match in _WORLD_WAR_ROMAN_TOKEN.finditer(text):
+        roman = match.group("roman")
+        if _VALID_ROMAN_NUMERAL.fullmatch(roman.upper()):
+            values.append(roman.casefold())
+            world_war_spans.append(match.span("roman"))
+    for match in _ROMAN_NUMERAL_TOKEN.finditer(text):
+        if any(
+            start <= match.start() and match.end() <= end
+            for start, end in world_war_spans
+        ):
+            continue
+        roman = match.group(0)
+        if _VALID_ROMAN_NUMERAL.fullmatch(roman):
+            values.append(roman.casefold())
     values.extend(
         match.group("roman").casefold()
         for match in _WORLD_WAR_ABBREVIATION.finditer(text)
@@ -255,9 +290,12 @@ def _contains_ordered_tokens(text: str, required: Sequence[str]) -> bool:
 
     if not required:
         return True
-    observed = iter(token.casefold() for token in _lexical_tokens(text))
+    observed = iter(
+        token.casefold().replace("’", "'")
+        for token in _lexical_tokens(text)
+    )
     for required_token in required:
-        folded = required_token.casefold()
+        folded = required_token.casefold().replace("’", "'")
         if not any(token == folded for token in observed):
             return False
     return True
@@ -280,6 +318,28 @@ def _contains_contiguous_lexical_surface(text: str, required_text: str) -> bool:
     )
 
 
+def _leading_will_is_source_entity(source_question: str, fact: str) -> bool:
+    """Distinguish a source-mentioned ``Will <Surname>`` from auxiliary will."""
+
+    match = re.match(r"^(?P<name>Will\s+[A-Z][^\W_]+)\b", fact)
+    if match is None:
+        return False
+    source_position = source_question.casefold().find(
+        match.group("name").casefold()
+    )
+    if source_position <= 0:
+        return False
+    remainder = fact[match.end() :].lstrip()
+    return bool(
+        re.match(
+            r"^(?:,|and\b|or\b|is\b|are\b|was\b|were\b|has\b|have\b|"
+            r"had\b|[A-Za-z][^\W_]+(?:ed|ing)\b)",
+            remainder,
+            re.IGNORECASE,
+        )
+    )
+
+
 def canonical_answer_is_declarative_clause(
     answer: str,
     *,
@@ -296,6 +356,21 @@ def canonical_answer_is_declarative_clause(
 
     normalized = " ".join(_required_text(answer, "canonical_answer").split())
     answer_tokens = _lexical_tokens(normalized)
+    normalized_label = normalized.rstrip(" .!?").casefold()
+    if normalized_label in _HOTPOTQA_BINARY_ANSWERS:
+        return False
+    if answer_tokens and answer_tokens[0].casefold() in {
+        "am", "are", "be", "been", "being", "can", "could", "did",
+        "do", "does", "had", "has", "have", "is", "may", "might",
+        "must", "shall", "should", "was", "were", "will", "would",
+    }:
+        return False
+    if (
+        question is not None
+        and len(answer_tokens) <= 10
+        and _NAMED_WORK_QUESTION.search(question) is not None
+    ):
+        return False
     if question is not None:
         normalized_question = " ".join(
             _required_text(question, "question").split()
@@ -313,6 +388,9 @@ def canonical_answer_is_declarative_clause(
     if (
         len(answer_tokens) >= 3
         and normalized.endswith(".")
+        and _FINITE_CLAUSE_VERB.search(normalized) is not None
+    ) or (
+        len(answer_tokens) >= 12
         and _FINITE_CLAUSE_VERB.search(normalized) is not None
     ):
         return True
@@ -369,20 +447,48 @@ def validate_hotpotqa_fact_statement(
     fact = " ".join(_required_text(fact_statement, "fact_statement").split())
     if _FACT_QA_WRAPPER.search(fact):
         raise ValueError("fact_statement contains a Question/Answer wire")
+    canonical = " ".join(source.canonical_answer.split())
+    canonical_is_clause = canonical_answer_is_declarative_clause(
+        canonical,
+        question=source.question,
+    )
+    canonical_surface = canonical.rstrip(" .!?")
+    structural_fact = fact
+    if canonical_surface and not canonical_is_clause:
+        structural_fact = re.sub(
+            rf"(?<!\w){re.escape(canonical_surface)}(?:[.!?])?(?!\w)",
+            "CanonicalEntity",
+            structural_fact,
+            flags=re.IGNORECASE,
+        )
     terminal_surface = fact.rstrip('"\'’”)]} ')
-    if terminal_surface.endswith("?") or re.match(
-        r"^(?:who|what|which|where|when|why|how|name|identify|"
-        r"are|can|could|did|do|does|had|has|have|is|should|"
-        r"was|were|will|would)\b",
-        fact,
-        re.IGNORECASE,
+    title_terminal_question = (
+        not canonical_is_clause
+        and canonical.rstrip().endswith("?")
+        and fact.rstrip().casefold().endswith(canonical.rstrip().casefold())
+    )
+    leading_interrogative = _FACT_LEADING_INTERROGATIVE.match(
+        structural_fact
+    )
+    if (
+        (terminal_surface.endswith("?") and not title_terminal_question)
+        or (
+            leading_interrogative is not None
+            and not _leading_will_is_source_entity(
+                source.question,
+                structural_fact,
+            )
+        )
     ):
         raise ValueError("fact_statement must be declarative")
-    if _FACT_ANAPHORIC_SUBJECT.match(fact):
+    if _FACT_ANAPHORIC_SUBJECT.match(structural_fact):
         raise ValueError("fact_statement begins with an unbound anaphoric subject")
-    if _FACT_UNBOUND_ANSWER_SLOT.search(fact):
+    if _FACT_UNBOUND_ANSWER_SLOT.search(structural_fact):
         raise ValueError("fact_statement contains an unbound interrogative answer slot")
-    if not fact.rstrip('"\'’”)]} ').endswith((".", "!")):
+    if (
+        not fact.rstrip('"\'’”)]} ').endswith((".", "!"))
+        and not title_terminal_question
+    ):
         raise ValueError("fact_statement must be a complete declarative sentence")
     # Raw source questions are provenance-only.  A yes/no question can look
     # declarative after changing only its terminal punctuation, so use the
@@ -403,7 +509,6 @@ def validate_hotpotqa_fact_statement(
     observed_numbers = _number_or_date_keys(fact)
     if not observed_numbers.issubset(allowed_numbers):
         raise ValueError("fact_statement introduced a number or date")
-    canonical = " ".join(source.canonical_answer.split())
     # The raw canonical answer is provenance-only.  Even when it already
     # looks like a complete sentence, it cannot be the indexed fact payload;
     # require a distinct semantic realization for every answer type.
@@ -420,16 +525,15 @@ def validate_hotpotqa_fact_statement(
         raise ValueError(
             "fact_statement is identical to the canonical answer"
         )
-    if canonical_answer_is_declarative_clause(
-        canonical,
-        question=source.question,
-    ):
+    if canonical_is_clause:
         required_answer_identities = _identity_tokens(canonical)
         if _missing_identity_tokens(canonical, fact):
             raise ValueError(
                 "fact_statement removed an immutable entity from the answer clause"
             )
-        if _number_or_date_keys(canonical) != _number_or_date_keys(fact):
+        if not _number_or_date_keys(canonical).issubset(
+            _number_or_date_keys(fact)
+        ):
             raise ValueError(
                 "fact_statement changed a number or date in the answer clause"
             )
@@ -442,9 +546,11 @@ def validate_hotpotqa_fact_statement(
         required_answer_identities = _identity_tokens(canonical)
         required_answer_numbers = _number_or_date_counts(canonical)
         required_identity_sequence = tuple(
-            token
-            for token in _lexical_tokens(canonical)
-            if token.casefold() in required_answer_identities
+            dict.fromkeys(
+                token.casefold().replace("’", "'")
+                for token in _lexical_tokens(canonical)
+                if token.casefold() in required_answer_identities
+            )
         )
         if (
             len(required_answer_identities) >= 2
