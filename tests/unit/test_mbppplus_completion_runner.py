@@ -10,6 +10,7 @@ from unittest.mock import patch
 from src.interactive.config_loader import load_yaml
 from src.interactive.records import TaskRecord
 from src.interactive.task_evaluator import MBPPPLUS_EVALUATOR_VERSION
+from scripts.train_agentgraph_smoke import _terminal_artifact_validator_for
 
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -38,13 +39,28 @@ def _task(number: int = 2) -> TaskRecord:
 
 
 def test_mbppplus_config_is_evaluation_only_and_bounded_to_fixed_100():
-    config = load_yaml(_ROOT / "config" / "evaluation_mbppplus_initial_v1.yaml")
+    config = load_yaml(
+        _ROOT / "config" / "evaluation_mbppplus_runtime_contract_v3.yaml"
+    )
 
     _MODULE.validate_completion_benchmark_config(config)
     assert config["mbppplus_evaluation"]["sample_count"] == 100
     assert config["grpo"]["enabled"] is False
     assert config["grpo"]["max_optimizer_updates"] == 0
     assert config["skills"]["enabled"] is False
+    assert (
+        config["director"]["sampling_schema_version"]
+        == "agentgraph.model-admissible-action-mask.v3"
+    )
+    assert config["agent_graph"]["actions"][0] == "add_subgraph"
+    assert (
+        config["mbppplus_evaluation"]["runtime_contract_profile"]
+        == "complete_source_live_targets_v3"
+    )
+    assert (
+        config["agent_graph"]["model_catalog_path"]
+        == "config/model_catalog_multidataset_tool_v8.yaml"
+    )
 
     invalid = deepcopy(config)
     invalid["mbppplus_evaluation"]["sample_count"] = 101
@@ -64,16 +80,51 @@ def test_mbppplus_config_is_evaluation_only_and_bounded_to_fixed_100():
     else:  # pragma: no cover - fail-closed guard
         raise AssertionError("MBPP+ config without official EvalPlus was accepted")
 
+    legacy_mask = deepcopy(config)
+    legacy_mask["director"]["sampling_schema_version"] = (
+        "agentgraph.model-admissible-action-mask.v2"
+    )
+    try:
+        _MODULE.validate_completion_benchmark_config(legacy_mask)
+    except Exception as exc:
+        assert "live_action_target_schema" in str(exc)
+    else:  # pragma: no cover - fail-closed guard
+        raise AssertionError("MBPP+ config with action mask v2 was accepted")
+
+    scalar_edits = deepcopy(config)
+    scalar_edits["agent_graph"]["actions"][0] = "add_agent"
+    try:
+        _MODULE.validate_completion_benchmark_config(scalar_edits)
+    except Exception as exc:
+        assert "functional_unit_canvas_edits" in str(exc)
+    else:  # pragma: no cover - fail-closed guard
+        raise AssertionError("MBPP+ config with scalar add_agent was accepted")
+
 
 def test_mbppplus_workflow_problem_only_specifies_terminal_artifact():
     problem = _MODULE._workflow_problem(_task(), {})
 
-    assert "complete Python source file" in problem
+    assert "raw complete Python source" in problem
     assert "`similar_elements`" in problem
+    assert "no Markdown fences or prose" in problem
+    assert "must not rename" in problem
     assert "repository patch" in problem
     for fixed_role in ("Coder", "Reviewer", "Tester"):
         assert fixed_role not in problem
     assert "Coder -> Reviewer -> Tester" not in problem
+
+
+def test_mbppplus_terminal_validator_uses_only_public_entry_point():
+    validator = _terminal_artifact_validator_for(_task())
+
+    assert validator is not None
+    assert validator("def similar_elements(a, b):\n    return ()\n") is None
+    assert "exact public entry point" in str(
+        validator("def renamed(a, b):\n    return ()\n")
+    )
+    assert "not valid Python source" in str(
+        validator("def similar_elements(:\n    pass\n")
+    )
 
 
 def test_mbppplus_evaluator_version_and_callback_are_terminal_only():

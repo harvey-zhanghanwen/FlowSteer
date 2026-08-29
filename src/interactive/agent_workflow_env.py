@@ -379,6 +379,9 @@ class AgentWorkflowEnv:
         artifact_candidate_extractor: Optional[
             Callable[[str], tuple[Optional[str], bool, Optional[str]]]
         ] = None,
+        terminal_artifact_validator: Optional[
+            Callable[[str], Optional[str]]
+        ] = None,
     ) -> None:
         if runtime is None and gateway is None:
             raise AgentWorkflowStateError("gateway or runtime is required")
@@ -462,6 +465,12 @@ class AgentWorkflowEnv:
             raise AgentWorkflowStateError(
                 "artifact_candidate_extractor must be callable or None"
             )
+        if terminal_artifact_validator is not None and not callable(
+            terminal_artifact_validator
+        ):
+            raise AgentWorkflowStateError(
+                "terminal_artifact_validator must be callable or None"
+            )
         if allowed_actions is None:
             resolved_allowed_actions = tuple(item.value for item in AgentActionType)
         else:
@@ -503,6 +512,7 @@ class AgentWorkflowEnv:
             else required_evidence_tool_id.strip()
         )
         self.artifact_candidate_extractor = artifact_candidate_extractor
+        self.terminal_artifact_validator = terminal_artifact_validator
         self.allowed_action_types = resolved_allowed_actions
         self._allowed_action_type_set = frozenset(resolved_allowed_actions)
         self.parser = AgentActionParser()
@@ -3816,6 +3826,7 @@ class AgentWorkflowEnv:
             recovery_policy=self.recovery_policy,
             required_evidence_tool_id=self.required_evidence_tool_id,
             artifact_candidate_extractor=self.artifact_candidate_extractor,
+            terminal_artifact_validator=self.terminal_artifact_validator,
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
@@ -4554,17 +4565,25 @@ class AgentWorkflowEnv:
         an admissible action instead of an XML answer.
         """
 
-        if not self.require_exact_answer_tag:
-            return None
-        tag_count, exact_wrapper, non_empty = _answer_protocol_state(answer)
-        if exact_wrapper and non_empty:
-            return None
-        return (
-            "terminal answer must be exactly one non-empty "
-            f"<answer>...</answer> wrapper; answer_tag_count={tag_count}, "
-            f"exact_single_answer_tag={exact_wrapper}, non_empty={non_empty}; "
-            "modify the Output Agent contract/model or graph before retrying"
-        )
+        if self.require_exact_answer_tag:
+            tag_count, exact_wrapper, non_empty = _answer_protocol_state(answer)
+            if not (exact_wrapper and non_empty):
+                return (
+                    "terminal answer must be exactly one non-empty "
+                    f"<answer>...</answer> wrapper; answer_tag_count={tag_count}, "
+                    f"exact_single_answer_tag={exact_wrapper}, non_empty={non_empty}; "
+                    "modify the Output Agent contract/model or graph before retrying"
+                )
+        if self.terminal_artifact_validator is not None:
+            issue = self.terminal_artifact_validator(answer)
+            if issue is not None and (
+                not isinstance(issue, str) or not issue.strip()
+            ):
+                raise AgentWorkflowStateError(
+                    "terminal_artifact_validator must return non-empty text or None"
+                )
+            return issue
+        return None
 
     def _allows_unconsumed_auxiliary_terminal_reachability(
         self,

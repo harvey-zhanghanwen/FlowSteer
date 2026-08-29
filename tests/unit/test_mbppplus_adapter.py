@@ -8,6 +8,7 @@ from src.interactive.mbppplus_adapter import (
     MBPPPLUS_EVALUATOR_VERSION,
     MBPPPlusEvaluatorUnavailable,
     MBPPPlusOfficialEvaluator,
+    validate_mbppplus_public_source,
 )
 from src.interactive.records import TaskRecord
 from src.interactive.task_evaluator import evaluate_task
@@ -34,14 +35,6 @@ class FakeEvalPlus:
         self.output_not_none_tasks = ()
         self.runtime_version = "0.3.1"
         self.dataset_version = "v0.2.0"
-
-    @staticmethod
-    def sanitize(*, code: str, entrypoint: str) -> str:
-        return (
-            code.replace("```python", "")
-            .replace("```", "")
-            .strip()
-        )
 
     @staticmethod
     def get_groundtruth(problems, cache_key, output_not_none_tasks):
@@ -100,6 +93,34 @@ class FakeEvalPlus:
 
 
 class MBPPPlusOfficialEvaluatorTests(unittest.IsolatedAsyncioTestCase):
+    def test_public_source_validator_checks_syntax_and_exact_entry_point(self) -> None:
+        self.assertIsNone(
+            validate_mbppplus_public_source(
+                "def solve(a):\n    return a\n",
+                "solve",
+            )
+        )
+        self.assertIn(
+            "exact public entry point",
+            str(
+                validate_mbppplus_public_source(
+                    "def renamed(a):\n    return a\n",
+                    "solve",
+                )
+            ),
+        )
+        self.assertIn(
+            "not valid Python source",
+            str(validate_mbppplus_public_source("```python\npass\n```", "solve")),
+        )
+        self.assertIsNone(
+            validate_mbppplus_public_source(
+                "def solve(a, b):\n    return 0\n\n"
+                "def solve(a):\n    return a\n",
+                "solve",
+            )
+        )
+
     def backend(
         self,
         root: Path,
@@ -141,11 +162,33 @@ class MBPPPlusOfficialEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["base_passed"])
         self.assertTrue(result["plus_passed"])
         self.assertEqual(1.0, result["pass_at_1"])
-        self.assertTrue(result["format_diagnostics"]["sanitization_changed"])
+        self.assertEqual(
+            "none",
+            result["format_diagnostics"]["submission_transformation"],
+        )
+        self.assertEqual(
+            "```python\ndef solve():\n    return 1\n```",
+            fake.calls[0]["solution"],
+        )
         self.assertNotIn("hidden", repr(result).lower())
         self.assertEqual("mbpp", fake.calls[0]["dataset"])
         self.assertFalse(fake.calls[0]["base_only"])
         self.assertTrue(fake.calls[0]["fast_check"])
+
+    async def test_complete_source_is_not_rewritten_before_official_evaluation(
+        self,
+    ) -> None:
+        source = (
+            "def solve(a, b, c, d):\n"
+            "    return 0\n\n"
+            "def solve(a, b, c):\n"
+            "    return 1\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            backend, fake = self.backend(Path(directory))
+            await backend.evaluate(record("Mbpp/2"), source)
+
+        self.assertEqual(source, fake.calls[0]["solution"])
 
     async def test_plus_failure_is_zero_and_hidden_details_are_not_returned(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -208,7 +251,7 @@ class MBPPPlusTaskEvaluatorDispatchTests(unittest.IsolatedAsyncioTestCase):
                 "plus_passed": True,
                 "pass_at_1": 1.0,
                 "format_diagnostics": {
-                    "sanitization_changed": True,
+                    "submission_transformation": "none",
                     "entry_point": "solve",
                     "hidden_inputs": ["must-not-pass-through"],
                 },

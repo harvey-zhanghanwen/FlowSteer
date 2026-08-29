@@ -56,6 +56,9 @@ from src.interactive.config_loader import (
     load_yaml,
     validate_agent_graph_config,
 )
+from src.interactive.director import (
+    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
+)
 from src.interactive.graph_diagnostics import (
     aggregate_trajectory_diagnostics,
     diagnose_trajectory,
@@ -297,9 +300,38 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         )
     if dataset_key == "mbpp_plus":
         evaluation = _mapping(config.get("evaluation"), "evaluation")
+        agent_graph = _mapping(config.get("agent_graph"), "agent_graph")
         checks["evaluation.evalplus_enabled"] = (
             evaluation.get("evalplus_enabled") is True
         )
+        runtime_contract_profile = bounded.get("runtime_contract_profile")
+        checks["mbpp_plus.runtime_contract_profile"] = (
+            runtime_contract_profile
+            in {
+                None,
+                "complete_source_live_targets_v2",
+                "complete_source_live_targets_v3",
+            }
+        )
+        if runtime_contract_profile in {
+            "complete_source_live_targets_v2",
+            "complete_source_live_targets_v3",
+        }:
+            checks["mbpp_plus.live_action_target_schema"] = (
+                director.get("sampling_schema_version")
+                == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            )
+            checks["mbpp_plus.functional_unit_canvas_edits"] = (
+                agent_graph.get("actions")
+                == [
+                    "add_subgraph",
+                    "modify_agent",
+                    "delete_agent",
+                    "set_relation",
+                    "set_output",
+                    "finish",
+                ]
+            )
         for field_name in (
             "evalplus_runtime_path",
             "evalplus_dataset_path",

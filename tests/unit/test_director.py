@@ -2092,8 +2092,26 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         )
         relation_branch = add_schema["properties"]["relations"]["items"]["anyOf"][0]
         self.assertEqual(
-            ["reasoner", "node_1"],
-            relation_branch["properties"]["source_id"]["enum"],
+            {"const": "reasoner"},
+            relation_branch["properties"]["source_id"],
+        )
+        self.assertEqual(
+            {"const": "node_1"},
+            relation_branch["properties"]["target_id"],
+        )
+        self.assertEqual(1, add_schema["properties"]["relations"]["maxItems"])
+        relation_pairs = {
+            (
+                branch["properties"]["source_id"]["const"],
+                branch["properties"]["target_id"]["const"],
+            )
+            for branch in add_schema["properties"]["relations"]["items"][
+                "anyOf"
+            ]
+        }
+        self.assertEqual(
+            {("reasoner", "node_1"), ("node_1", "reasoner")},
+            relation_pairs,
         )
         self.assertEqual(
             ["reasoner", "node_1"],
@@ -2206,6 +2224,124 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "admissible-v3:add_subgraph",
             request["action_schema_branch"],
         )
+
+    def test_generic_v3_add_relation_schema_excludes_invalid_endpoint_pairs(
+        self,
+    ) -> None:
+        def domains(existing_agent_ids: list[str]) -> dict[str, object]:
+            return {
+                "add_subgraph": {
+                    "min_new_agents": 1,
+                    "max_new_agents": 3,
+                    "existing_agent_ids": existing_agent_ids,
+                    "semantic_protocol": "none",
+                    "required_agent_fields": [
+                        "agent_id",
+                        "model_id",
+                        "contract",
+                        "allowed_tools",
+                        "execution_mode",
+                    ],
+                    "model_ids": ["qwen"],
+                    "registered_execution_profiles": [
+                        {"execution_mode": "reasoning", "allowed_tools": []}
+                    ],
+                    "endpoint_scope": {
+                        "relation_endpoint_sources": [
+                            "existing_agent_ids",
+                            "same_action_agent_ids",
+                        ],
+                        "output_agent_id_sources": [
+                            "existing_agent_ids",
+                            "same_action_agent_ids",
+                        ],
+                    },
+                }
+            }
+
+        def agent(agent_id: str) -> dict[str, object]:
+            return {
+                "agent_id": agent_id,
+                "model_id": "qwen",
+                "contract": "produce the requested public artifact",
+                "allowed_tools": [],
+                "execution_mode": "reasoning",
+            }
+
+        isolated_agent_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains([]),
+                add_agents=[agent("node_1")],
+            )
+        )
+        self.assertEqual(
+            0,
+            isolated_agent_schema["properties"]["relations"]["maxItems"],
+        )
+
+        new_pair_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains([]),
+                add_agents=[agent("node_1"), agent("node_2")],
+            )
+        )
+        new_pair_relations = [
+            {
+                key: value["const"]
+                for key, value in branch["properties"].items()
+            }
+            for branch in new_pair_schema["properties"]["relations"]["items"][
+                "anyOf"
+            ]
+        ]
+        self.assertEqual(
+            {
+                ("node_1", "node_2", True, False),
+                ("node_2", "node_1", True, False),
+                ("node_1", "node_2", True, True),
+            },
+            {
+                (
+                    relation["source_id"],
+                    relation["target_id"],
+                    relation["source_to_target"],
+                    relation["target_to_source"],
+                )
+                for relation in new_pair_relations
+            },
+        )
+
+        existing_pair_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains(["existing_a", "existing_b"]),
+                add_agents=[agent("node_1")],
+            )
+        )
+        existing_pair_relations = [
+            (
+                branch["properties"]["source_id"]["const"],
+                branch["properties"]["target_id"]["const"],
+            )
+            for branch in existing_pair_schema["properties"]["relations"][
+                "items"
+            ]["anyOf"]
+        ]
+        self.assertEqual(
+            1,
+            existing_pair_schema["properties"]["relations"]["maxItems"],
+        )
+        self.assertEqual(4, len(existing_pair_relations))
+        self.assertTrue(
+            all(
+                source_id != target_id
+                for source_id, target_id in existing_pair_relations
+            )
+        )
+        self.assertNotIn(("existing_a", "existing_b"), existing_pair_relations)
+        self.assertNotIn(("existing_b", "existing_a"), existing_pair_relations)
 
     def test_role_conditional_qa_schema_preserves_execution_profile_pairs(
         self,

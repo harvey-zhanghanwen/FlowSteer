@@ -1784,9 +1784,8 @@ async def _evaluate_mbpp_plus(
     if isinstance(raw_diagnostics, Mapping):
         for key in (
             "raw_prediction_empty",
-            "sanitized_prediction_empty",
-            "sanitization_changed",
-            "sanitized_character_count",
+            "submission_character_count",
+            "submission_transformation",
             "entry_point",
         ):
             if key in raw_diagnostics:

@@ -1,0 +1,34 @@
+# Authenticated successor to the receipt-pruned local-only v7 catalog.
+# Model identity, capability metadata, endpoint, and selection weights are
+# unchanged. The only adaptation is the existing project SGLANG_API_KEY
+# environment-variable reference required by the current local Supervisor.
+providers:
+  - provider_id: "local-director"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:8015/v1"
+    api_key_env: "SGLANG_API_KEY"
+    max_concurrency: 32
+
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-director"
+    model_name: "supervisor_theta"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    context_window: 32768
+    metadata:
+      family: "qwen"
+      profile: "provider=local-director;locality=local;instruction=chat;context=32768;capabilities=text,structured-action,coding-format"
+      capability_canary: "passed_2026-08-20"
+      canary_source: "artifacts/model_capability_canary/local_qwen35_9b_nonthinking_20260820.json"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      coding_capable: "true"
+      coding_capability_scope: "structured-action-and-unified-diff-format"
+      chat_template_enable_thinking: "false"
+      sampling_backend: "sglang"
+      deployment_locality: "local"
+      supports_top_k: "true"
+      max_tokens: "4096"

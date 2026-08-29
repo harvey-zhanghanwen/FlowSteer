@@ -12,6 +12,7 @@ receipts.  They remain inside the evaluator process and EvalPlus cache.
 from __future__ import annotations
 
 import asyncio
+import ast
 from dataclasses import dataclass
 import importlib
 import os
@@ -24,7 +25,9 @@ from typing import Any, Callable, Mapping, Sequence
 from .records import TaskRecord
 
 
-MBPPPLUS_OFFICIAL_PROTOCOL = "evalplus.mbpp-plus.pass-at-1.v0.3.1"
+MBPPPLUS_OFFICIAL_PROTOCOL = (
+    "evalplus.mbpp-plus.pass-at-1.v0.3.1.complete-source.v2"
+)
 MBPPPLUS_EVALUATOR_VERSION = MBPPPLUS_OFFICIAL_PROTOCOL
 _OFFICIAL_RUNTIME_LOCK = threading.RLock()
 _TASK_ID_PATTERN = re.compile(r"(?:^|:)(Mbpp/\d+)$", re.IGNORECASE)
@@ -34,9 +37,43 @@ class MBPPPlusEvaluatorUnavailable(RuntimeError):
     """The configured official EvalPlus runtime cannot evaluate MBPP+."""
 
 
+def validate_mbppplus_public_source(
+    source: str,
+    entry_point: str,
+) -> str | None:
+    """Validate only the public MBPP+ terminal interface before FINISH.
+
+    This check deliberately does not execute code or inspect official tests.
+    It ensures that the terminal artifact is raw Python source and that it
+    retains the public entry point supplied with the task. Multiple top-level
+    definitions are legal Python; the official evaluator receives the whole
+    source and therefore owns their normal execution semantics.
+    """
+
+    if not isinstance(source, str) or not source.strip():
+        return "terminal artifact must be a non-empty complete Python source file"
+    if not isinstance(entry_point, str) or not entry_point.strip():
+        raise ValueError("MBPP+ public entry_point must be non-empty text")
+    try:
+        module = ast.parse(source)
+    except SyntaxError as exc:
+        location = f" at line {exc.lineno}" if exc.lineno is not None else ""
+        return f"terminal artifact is not valid Python source{location}: {exc.msg}"
+    required_name = entry_point.strip()
+    if not any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == required_name
+        for node in module.body
+    ):
+        return (
+            "terminal artifact must define the exact public entry point "
+            f"{required_name!r} at module scope; do not rename the function"
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class _OfficialEvalPlusRuntime:
-    sanitize: Callable[..., str]
     get_groundtruth: Callable[..., Mapping[str, Any]]
     check_correctness: Callable[..., Mapping[str, Any]]
     pass_status: str
@@ -155,7 +192,6 @@ class MBPPPlusOfficialEvaluator:
                         "another EvalPlus runtime is already imported in this process"
                     )
 
-                sanitize_module = importlib.import_module("evalplus.sanitize")
                 data_module = importlib.import_module("evalplus.data")
                 mbpp_module = importlib.import_module("evalplus.data.mbpp")
                 data_utils_module = importlib.import_module("evalplus.data.utils")
@@ -194,7 +230,6 @@ class MBPPPlusOfficialEvaluator:
                 )
 
             runtime = _OfficialEvalPlusRuntime(
-                sanitize=sanitize_module.sanitize,
                 get_groundtruth=evaluate_module.get_groundtruth,
                 check_correctness=evaluate_module.check_correctness,
                 pass_status=str(eval_module.PASS),
@@ -268,20 +303,12 @@ class MBPPPlusOfficialEvaluator:
                 "official MBPP+ task has no entry_point"
             )
 
+        # EvalPlus 0.3.1's official evaluate.py passes a complete ``solution``
+        # directly to check_correctness. SkillFlow's sealed MBPP+ worker does
+        # the same. Sanitizing here changed Python program semantics (notably
+        # when a later definition intentionally replaces an earlier one) and
+        # therefore was not an evaluator-neutral adapter operation.
         raw_prediction = str(prediction)
-        try:
-            sanitized_solution = runtime.sanitize(
-                code=raw_prediction,
-                entrypoint=entry_point,
-            )
-        except Exception as exc:
-            raise MBPPPlusEvaluatorUnavailable(
-                f"official EvalPlus sanitizer failed: {type(exc).__name__}"
-            ) from exc
-        if not isinstance(sanitized_solution, str):
-            raise MBPPPlusEvaluatorUnavailable(
-                "official EvalPlus sanitizer returned a non-string result"
-            )
 
         expected_output = self._expected_output(
             task_id,
@@ -292,7 +319,7 @@ class MBPPPlusOfficialEvaluator:
             "mbpp",
             0,
             dict(problem),
-            sanitized_solution,
+            raw_prediction,
             dict(expected_output),
             base_only=False,
             fast_check=True,
@@ -329,9 +356,8 @@ class MBPPPlusOfficialEvaluator:
             "pass_at_1": float(plus_pass_at_1),
             "format_diagnostics": {
                 "raw_prediction_empty": not bool(raw_prediction.strip()),
-                "sanitized_prediction_empty": not bool(sanitized_solution.strip()),
-                "sanitization_changed": sanitized_solution != raw_prediction,
-                "sanitized_character_count": len(sanitized_solution),
+                "submission_character_count": len(raw_prediction),
+                "submission_transformation": "none",
                 "entry_point": entry_point,
             },
             "evaluator_protocol": MBPPPLUS_OFFICIAL_PROTOCOL,
@@ -401,4 +427,5 @@ __all__ = [
     "MBPPPLUS_OFFICIAL_PROTOCOL",
     "MBPPPlusEvaluatorUnavailable",
     "MBPPPlusOfficialEvaluator",
+    "validate_mbppplus_public_source",
 ]

@@ -25,6 +25,7 @@ from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
 from src.interactive.agent_runtime import AgentRuntime
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.aime2026_adapter import extract_aime2026_candidate
+from src.interactive.mbppplus_adapter import validate_mbppplus_public_source
 from src.interactive.config_loader import (
     ConfigurationError,
     load_model_registry,
@@ -469,20 +470,14 @@ def _workflow_problem(
             "and no explanation."
         )
     if source_key == "mbpp_plus":
-        entry_point = task.metadata.get("entry_point")
-        if not isinstance(entry_point, str) or not entry_point.strip():
-            payload = task.metadata.get("evaluator_payload", {})
-            entry_point = (
-                payload.get("entry_point") if isinstance(payload, Mapping) else None
-            )
-        if not isinstance(entry_point, str) or not entry_point.strip():
-            raise ConfigurationError(
-                f"MBPP+ task {task.task_id!r} has no public entry_point"
-            )
+        entry_point = _mbppplus_public_entry_point(task)
         return (
             f"{task.question}\n\n"
-            "Terminal artifact: return one complete Python source file that "
-            f"defines the required entry point `{entry_point.strip()}`. The "
+            "Terminal artifact: return raw complete Python source with no "
+            "Markdown fences or prose. It must define and preserve the exact "
+            f"public entry point `{entry_point}` and the task's stated argument "
+            "interface. Agent contracts may delegate work but must not rename "
+            "or change that public interface. The "
             "terminal artifact is Python source, not a repository patch, a test "
             "status, or a prose-only answer."
         )
@@ -517,6 +512,33 @@ def _workflow_problem(
         "actions. The Output Agent must satisfy this action contract: "
         f"{contract.strip()} Do not return a prose answer or product summary."
     )
+
+
+def _mbppplus_public_entry_point(task: TaskRecord) -> str:
+    entry_point = task.metadata.get("entry_point")
+    if not isinstance(entry_point, str) or not entry_point.strip():
+        payload = task.metadata.get("evaluator_payload", {})
+        entry_point = (
+            payload.get("entry_point") if isinstance(payload, Mapping) else None
+        )
+    if not isinstance(entry_point, str) or not entry_point.strip():
+        raise ConfigurationError(
+            f"MBPP+ task {task.task_id!r} has no public entry_point"
+        )
+    return entry_point.strip()
+
+
+def _terminal_artifact_validator_for(
+    task: TaskRecord,
+) -> Optional[Callable[[str], Optional[str]]]:
+    if _dataset_key(task) != "mbpp_plus":
+        return None
+    entry_point = _mbppplus_public_entry_point(task)
+
+    def validate(source: str) -> Optional[str]:
+        return validate_mbppplus_public_source(source, entry_point)
+
+    return validate
 
 
 def _environment_replay_trace_from_runtime(
@@ -3358,7 +3380,7 @@ class LiveSmokeBackend:
             # but must never resume through the legacy stateless callback.
             run_graph=None if environment_settings is not None else run_graph,
             swe_harness=self.swe_harness,
-            mbppplus_harness=self.mbppplus_harness,
+            mbppplus_harness=getattr(self, "mbppplus_harness", None),
             max_environment_steps=int(
                 configured_steps.get(
                     source_key,
@@ -3691,6 +3713,9 @@ class LiveSmokeBackend:
                     extract_aime2026_candidate
                     if _dataset_key(task) == "aime_2026"
                     else None
+                ),
+                terminal_artifact_validator=(
+                    _terminal_artifact_validator_for(task)
                 ),
                 allowed_actions=(
                     tuple(str(value) for value in graph_config["actions"])

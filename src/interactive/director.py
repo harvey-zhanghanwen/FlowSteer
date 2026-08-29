@@ -2213,6 +2213,67 @@ def director_live_add_subgraph_relation_candidates(
     )
 
 
+def _director_live_generic_add_subgraph_relation_candidates(
+    action_target_domains: Mapping[str, Any],
+    agents: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Enumerate parser-valid relations incident to this ADD transaction.
+
+    Generic AgentGraph tasks do not impose role-specific dataflow.  The live
+    schema therefore exposes both directed orientations for every endpoint
+    pair incident to a newly declared Agent.  A reciprocal relation is exposed
+    only when both endpoints are new; an existing/new relation can still be
+    made reciprocal by a later Canvas-validated ``set_relation`` action after
+    execution feedback.  Exact candidates prevent self-loops and duplicate
+    unordered endpoint pairs from reaching the action parser without choosing
+    a workflow topology for the Director.
+    """
+
+    normalized_agents = _live_add_subgraph_agents(
+        action_target_domains,
+        agents,
+    )
+    domain = action_target_domains["add_subgraph"]
+    if verified_qa_semantic_protocol(domain.get("semantic_protocol")):
+        return ()
+    if _live_add_subgraph_isolated_boundary(domain):
+        return ()
+    new_agent_ids = [agent["agent_id"] for agent in normalized_agents]
+    new_ids = set(new_agent_ids)
+    endpoint_ids = [*domain["existing_agent_ids"], *new_agent_ids]
+    candidates: list[dict[str, Any]] = []
+    for source_index, source_id in enumerate(endpoint_ids):
+        for target_id in endpoint_ids[source_index + 1 :]:
+            if source_id not in new_ids and target_id not in new_ids:
+                continue
+            candidates.extend(
+                (
+                    {
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "source_to_target": True,
+                        "target_to_source": False,
+                    },
+                    {
+                        "source_id": target_id,
+                        "target_id": source_id,
+                        "source_to_target": True,
+                        "target_to_source": False,
+                    },
+                )
+            )
+            if source_id in new_ids and target_id in new_ids:
+                candidates.append(
+                    {
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "source_to_target": True,
+                        "target_to_source": True,
+                    }
+                )
+    return tuple(candidates)
+
+
 def director_live_add_subgraph_agent_declarations_from_text(
     text: str,
     action_target_domains: Mapping[str, Any],
@@ -2504,13 +2565,47 @@ def director_live_action_parameter_json_schema_text(
                 else {"type": "null"}
             )
         else:
-            relation_items = schema["properties"]["relations"]["items"]
-            for branch in relation_items["anyOf"]:
-                branch["properties"]["source_id"] = {"enum": endpoint_ids}
-                branch["properties"]["target_id"] = {"enum": endpoint_ids}
-            schema["properties"]["output_agent_id"] = {
-                "anyOf": [{"enum": endpoint_ids}, {"type": "null"}]
-            }
+            relation_candidates = (
+                _director_live_generic_add_subgraph_relation_candidates(
+                    action_target_domains,
+                    normalized_agents,
+                )
+            )
+            if relation_candidates:
+                schema["properties"]["relations"] = {
+                    "type": "array",
+                    "maxItems": 1,
+                    "uniqueItems": True,
+                    "items": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": [
+                                    "source_id",
+                                    "target_id",
+                                    "source_to_target",
+                                    "target_to_source",
+                                ],
+                                "properties": {
+                                    key: {"const": value}
+                                    for key, value in candidate.items()
+                                },
+                            }
+                            for candidate in relation_candidates
+                        ]
+                    },
+                }
+            else:
+                schema["properties"]["relations"] = {
+                    "type": "array",
+                    "maxItems": 0,
+                }
+            schema["properties"]["output_agent_id"] = (
+                {"type": "null"}
+                if isolated_boundary
+                else {"anyOf": [{"enum": endpoint_ids}, {"type": "null"}]}
+            )
     elif action == "modify_agent":
         if modify_field not in DIRECTOR_MODIFY_AGENT_FIELDS:
             raise ValueError("modify_agent v3 parameter phase requires a live field")
@@ -3499,7 +3594,7 @@ class AgentGraphOrchestrator:
         # FINISH or repeatedly modifying the Formatter.
         if (
             verified_qa_semantic_protocol(self.semantic_protocol)
-            or env.runtime.dataset_id == "swe_bench"
+            or env.runtime.dataset_id in {"swe_bench", "mbpp_plus"}
         ):
             payload["finish_admissibility"] = _director_neutral_state_projection(
                 env.finish_admissibility()

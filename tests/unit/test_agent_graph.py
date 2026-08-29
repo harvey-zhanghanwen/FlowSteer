@@ -1627,6 +1627,55 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("<answer>Paris</answer>", finished.final_answer)
         self.assertEqual(2, len(gateway.requests))
 
+    async def test_terminal_artifact_validator_repairs_output_without_deleting_graph(
+        self,
+    ) -> None:
+        registry = make_registry()
+        gateway = _SequenceGateway(
+            [
+                "def renamed(value):\n    return value\n",
+                "def solve(value):\n    return value\n",
+            ]
+        )
+
+        def require_public_entry_point(source: str) -> str | None:
+            if "def solve(" not in source:
+                return "terminal artifact must define public entry point 'solve'"
+            return None
+
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="Write solve(value).",
+            execute_on_edit=True,
+            terminal_artifact_validator=require_public_entry_point,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced",'
+            '"contract":"write the requested complete source"}'
+        )
+        await env.step('{"action":"set_output","agent_id":"a"}')
+
+        admission = env.finish_admissibility()
+        self.assertFalse(admission["admissible"])
+        self.assertEqual("terminal_protocol", admission["stage"])
+        rejected = await env.step('{"action":"finish"}')
+        self.assertFalse(rejected.accepted)
+        self.assertIn("public entry point 'solve'", rejected.feedback)
+        self.assertTrue(env.graph.has_node("a"))
+        self.assertEqual("a", env.graph.output_agent_id)
+
+        repaired = await env.step(
+            '{"action":"modify_agent","agent_id":"a",'
+            '"contract":"preserve public entry point solve and return complete source"}'
+        )
+        self.assertTrue(repaired.accepted)
+        finished = await env.step('{"action":"finish"}')
+        self.assertTrue(finished.accepted)
+        self.assertIn("def solve", str(finished.final_answer))
+        self.assertEqual(("a",), tuple(node.id for node in env.graph.nodes))
+
     async def test_exact_answer_protocol_rejects_multiple_and_nested_wrappers(self) -> None:
         for answer, tag_count in (
             ("<answer>Paris</answer><answer>Lyon</answer>", 2),
