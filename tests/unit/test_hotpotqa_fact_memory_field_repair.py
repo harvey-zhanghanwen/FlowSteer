@@ -354,6 +354,144 @@ def test_fact_repair_strategy_reconstructs_semantics_but_preserves_immutable_fix
     ) == "preserve_and_repair_immutable_fields"
 
 
+def test_question_synonym_only_repair_rewrites_authoritative_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(
+        4,
+        question="In 2012, who authored Atlas?",
+        answer="Ada Lovelace",
+    )
+    calls: list[Mapping[str, object]] = []
+
+    async def fake_generate_json(**kwargs: object):
+        calls.append(dict(kwargs))
+        request_id = str(kwargs["request_id"])
+        if ":generate:" in request_id:
+            return {
+                "paraphrase_question": "In 2013, which person wrote Atlas?",
+                "fact_statement": "Ada Lovelace authored Atlas.",
+            }, {"request_id": request_id}
+        if "repair-question-synonym" in request_id:
+            return {
+                "source_token": "authored",
+                "replacement_phrase": "wrote",
+            }, {"request_id": request_id}
+        if "repair-question" in request_id:
+            return {
+                "paraphrase_question": "In 2012, which person wrote Atlas?",
+            }, {"request_id": request_id}
+        if "verify-question" in request_id:
+            return _question_verification(), {"request_id": request_id}
+        if "verify-fact" in request_id:
+            return _fact_verification(), {"request_id": request_id}
+        raise AssertionError(f"unexpected request: {request_id}")
+
+    monkeypatch.setattr(materializer, "_generate_json", fake_generate_json)
+    candidate, receipt = asyncio.run(
+        materializer._materialize_one(
+            source,
+            index=0,
+            model=object(),
+            provider=object(),
+            seed=31,
+            max_attempts=2,
+            generation_rounds=1,
+        )
+    )
+
+    assert candidate["paraphrase_question"] == "In 2012, who wrote Atlas?"
+    assert candidate["paraphrase_question"] != source.question
+    synonym_call = next(
+        call
+        for call in calls
+        if "repair-question-synonym" in str(call["request_id"])
+    )
+    synonym_payload = json.loads(str(synonym_call["problem"]))
+    assert synonym_payload["required_source_token"] == "authored"
+    assert "rejected_question" not in synonym_payload
+    second_attempt = receipt["attempt_receipts"][1]["question"]
+    assert second_attempt["repair_mode"] == "synonym_only"
+    assert "structured_repair_error" in second_attempt
+    assert second_attempt["failed_fields"] == []
+
+
+def test_repeated_fact_forces_rotating_source_reconstruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(
+        5,
+        question="Did Ada author Atlas?",
+        answer="yes",
+    )
+    calls: list[Mapping[str, object]] = []
+    fact_repairs = 0
+
+    async def fake_generate_json(**kwargs: object):
+        nonlocal fact_repairs
+        calls.append(dict(kwargs))
+        request_id = str(kwargs["request_id"])
+        if ":generate:" in request_id:
+            return {
+                "paraphrase_question": "Was Atlas authored by Ada?",
+                "fact_statement": "Did Ada author Atlas.",
+            }, {"request_id": request_id}
+        if "repair-fact" in request_id:
+            fact_repairs += 1
+            return {
+                "fact_statement": (
+                    "Did Ada author Atlas."
+                    if fact_repairs == 1
+                    else "Ada authored Atlas."
+                )
+            }, {"request_id": request_id}
+        if "verify-question" in request_id:
+            return _question_verification(), {"request_id": request_id}
+        if "verify-fact" in request_id:
+            return _fact_verification(), {"request_id": request_id}
+        raise AssertionError(f"unexpected request: {request_id}")
+
+    monkeypatch.setattr(materializer, "_generate_json", fake_generate_json)
+    candidate, receipt = asyncio.run(
+        materializer._materialize_one(
+            source,
+            index=0,
+            model=object(),
+            provider=object(),
+            seed=37,
+            max_attempts=3,
+            generation_rounds=1,
+        )
+    )
+
+    assert candidate["fact_statement"] == "Ada authored Atlas."
+    repair_calls = [
+        call for call in calls if "repair-fact" in str(call["request_id"])
+    ]
+    repair_payloads = [
+        json.loads(str(call["problem"])) for call in repair_calls
+    ]
+    assert [
+        payload["answer_reconstruction_pattern"]
+        for payload in repair_payloads
+    ] == [
+        "literal_answer_slot_substitution",
+        "relative_clause_binding",
+    ]
+    assert all("rejected_fact" not in payload for payload in repair_payloads)
+    attempts = receipt["attempt_receipts"]
+    assert [attempt["fact"]["candidate_number"] for attempt in attempts] == [
+        1,
+        2,
+        3,
+    ]
+    assert [attempt["fact"]["candidate_repeated"] for attempt in attempts] == [
+        False,
+        True,
+        False,
+    ]
+
+
 def test_rejected_materialization_receipt_persists_candidate_and_failed_fields(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

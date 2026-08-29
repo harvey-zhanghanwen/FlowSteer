@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from itertools import islice
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Mapping, Sequence
 
@@ -51,10 +52,10 @@ from src.interactive.hotpotqa_qa_memory_index import (  # noqa: E402
 )
 
 
-PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v5"
-PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v5"
+PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v6"
+PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v6"
 PARAPHRASE_PROVENANCE = (
-    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v5"
+    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v6"
 )
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
 
@@ -68,6 +69,12 @@ QUESTION_REPAIR_SCHEMA = _json_schema(
     {
         "paraphrase_question": {"type": "string", "minLength": 1},
         "replaced_source_token": {"type": "string", "minLength": 1},
+        "replacement_phrase": {"type": "string", "minLength": 1},
+    }
+)
+SYNONYM_REPAIR_SCHEMA = _json_schema(
+    {
+        "source_token": {"type": "string", "minLength": 1},
         "replacement_phrase": {"type": "string", "minLength": 1},
     }
 )
@@ -116,6 +123,12 @@ _RELATION_REBUILD_REJECTION_MARKERS = (
     "must be declarative",
     "must be a complete declarative sentence",
     "begins with an unbound anaphoric subject",
+)
+_ANSWER_RECONSTRUCTION_PATTERNS = (
+    "literal_answer_slot_substitution",
+    "relative_clause_binding",
+    "fronted_canonical_span",
+    "clausal_statement_paraphrase",
 )
 
 
@@ -306,6 +319,85 @@ def _parse_question_repair(
     return question
 
 
+def _parse_synonym_repair(
+    generated: Mapping[str, object],
+    *,
+    required_source_token: str,
+) -> str:
+    """DIRECT_REUSE of TriviaQA's synonym-only repair receipt boundary."""
+
+    source_token = _generated_text(generated, "source_token")
+    replacement = _generated_text(generated, "replacement_phrase")
+    if source_token.casefold() != required_source_token.casefold():
+        raise ValueError("synonym repair source token is incompatible")
+    if replacement.casefold() == required_source_token.casefold():
+        raise ValueError("synonym repair did not change lexical wording")
+    return replacement
+
+
+def _replace_source_token_once(
+    source_question: str,
+    *,
+    source_token: str,
+    replacement_phrase: str,
+) -> str:
+    """Apply one boundary-safe replacement to the authoritative question."""
+
+    pattern = re.compile(
+        rf"(?<!\w){re.escape(source_token)}(?!\w)",
+        re.IGNORECASE,
+    )
+    candidate, count = pattern.subn(
+        replacement_phrase,
+        source_question,
+        count=1,
+    )
+    if count != 1 or candidate.casefold() == source_question.casefold():
+        raise ValueError("synonym repair did not rewrite the source question")
+    return " ".join(candidate.split())
+
+
+def _answer_reconstruction_patterns(binding_mode: str) -> tuple[str, ...]:
+    if binding_mode == "declarative_clause_paraphrase":
+        return (
+            "clausal_statement_paraphrase",
+            "literal_answer_slot_substitution",
+            "relative_clause_binding",
+            "fronted_canonical_span",
+        )
+    return _ANSWER_RECONSTRUCTION_PATTERNS
+
+
+def _answer_reconstruction_instruction(pattern: str) -> str:
+    instructions = {
+        "literal_answer_slot_substitution": (
+            "Copy the source relation and replace only the complete wh-constituent "
+            "with the canonical answer semantics, then convert interrogative "
+            "punctuation and word order to one declarative sentence."
+        ),
+        "relative_clause_binding": (
+            "Use a relation-bearing relative clause: 'The <answer type> that "
+            "<source predicate> is/was <canonical answer semantics>.' Preserve the "
+            "source predicate, arguments, tense, scope, and constraints."
+        ),
+        "fronted_canonical_span": (
+            "When the canonical span is prepositional or possessive, keep that span "
+            "intact at the front and render the remaining source subject and "
+            "predicate in declarative order; otherwise keep it intact as the "
+            "answer-slot complement."
+        ),
+        "clausal_statement_paraphrase": (
+            "When the canonical answer is already a clause, paraphrase that clause "
+            "as one self-contained proposition; resolve only a leading pronoun to "
+            "the explicit source subject and add no other relation."
+        ),
+    }
+    try:
+        return instructions[pattern]
+    except KeyError as exc:
+        raise ValueError("unknown answer reconstruction pattern") from exc
+
+
 def _fact_repair_strategy(prior_rejection: str) -> str:
     normalized = prior_rejection.casefold()
     if any(
@@ -368,6 +460,10 @@ async def _materialize_one(
     question_rejection = "not yet generated"
     fact_rejection = "not yet generated"
     question_repair_count = 0
+    fact_reconstruction_count = 0
+    fact_candidate_count = 0
+    fact_candidate_keys: set[str] = set()
+    force_fact_reconstruction = False
     attempt_receipts: list[dict[str, object]] = []
 
     for generation_round in range(generation_rounds):
@@ -450,6 +546,15 @@ async def _materialize_one(
                         generated, "paraphrase_question"
                     )
                     fact = _generated_text(generated, "fact_statement")
+                    fact_candidate_key = fact.casefold()
+                    fact_candidate_repeated = (
+                        fact_candidate_key in fact_candidate_keys
+                    )
+                    fact_candidate_count += 1
+                    fact_candidate_keys.add(fact_candidate_key)
+                    force_fact_reconstruction = fact_candidate_repeated
+                    fact_trace["candidate_repeated"] = fact_candidate_repeated
+                    fact_trace["candidate_number"] = fact_candidate_count
                     trace["joint_generation_response"] = dict(
                         generation_receipt
                     )
@@ -473,51 +578,96 @@ async def _materialize_one(
                             question_repair_count % len(eligible_source_tokens)
                         ]
                         question_repair_count += 1
-                        repaired, response = await _generate_json(
-                            model=model,
-                            provider=provider,
-                            schema=QUESTION_REPAIR_SCHEMA,
-                            contract=(
-                                "Repair only the HotpotQA question paraphrase. "
-                                "Preserve every entity, relation, scope, constraint, "
-                                "multi-hop path, answer slot, name, number, date, "
-                                "and quoted span. Replace at least one non-entity "
-                                "word or phrase; changing only word order is invalid. "
-                                "Treat the immutable fields as exact dataset strings; "
-                                "never correct, replace, delete, or complete them from "
-                                "world knowledge. Do not use any forbidden canonical "
-                                "token or reveal the answer. Replace the supplied "
-                                "required_source_token_to_replace, or a phrase that "
-                                "contains it, with a genuine equivalent expression. "
-                                "Report that exact source token and the replacement "
-                                "phrase in the structured response. Return only JSON."
-                            ),
-                            problem=_problem_payload(
-                                {
-                                    **question_source_payload,
-                                    "rejected_question": question or "",
-                                    "prior_admission_result": question_rejection,
-                                    "lexical_replacement_source_tokens": list(
-                                        eligible_source_tokens
-                                    ),
-                                    "required_source_token_to_replace": (
-                                        required_source_token
-                                    ),
-                                }
-                            ),
-                            request_id=(
-                                f"hotpotqa-full-dataset-fact:{index:06d}:"
-                                f"round:{generation_round:02d}:"
-                                f"repair-question:{attempt:02d}"
-                            ),
-                            seed=request_seed,
-                            temperature=0.0,
-                        )
-                        question = _parse_question_repair(
-                            repaired,
-                            eligible_source_tokens=eligible_source_tokens,
-                            required_source_token=required_source_token,
-                        )
+                        try:
+                            repaired, response = await _generate_json(
+                                model=model,
+                                provider=provider,
+                                schema=QUESTION_REPAIR_SCHEMA,
+                                contract=(
+                                    "Repair only the HotpotQA question paraphrase. "
+                                    "Preserve every entity, relation, scope, constraint, "
+                                    "multi-hop path, answer slot, name, number, date, "
+                                    "and quoted span. Replace at least one non-entity "
+                                    "word or phrase; changing only word order is invalid. "
+                                    "Treat the immutable fields as exact dataset strings; "
+                                    "never correct, replace, delete, or complete them from "
+                                    "world knowledge. Do not use any forbidden canonical "
+                                    "token or reveal the answer. Replace the supplied "
+                                    "required_source_token_to_replace, or a phrase that "
+                                    "contains it, with a genuine equivalent expression. "
+                                    "Report that exact source token and the replacement "
+                                    "phrase in the structured response. Return only JSON."
+                                ),
+                                problem=_problem_payload(
+                                    {
+                                        **question_source_payload,
+                                        "rejected_question": question or "",
+                                        "prior_admission_result": question_rejection,
+                                        "lexical_replacement_source_tokens": list(
+                                            eligible_source_tokens
+                                        ),
+                                        "required_source_token_to_replace": (
+                                            required_source_token
+                                        ),
+                                    }
+                                ),
+                                request_id=(
+                                    f"hotpotqa-full-dataset-fact:{index:06d}:"
+                                    f"round:{generation_round:02d}:"
+                                    f"repair-question:{attempt:02d}"
+                                ),
+                                seed=request_seed,
+                                temperature=0.0,
+                            )
+                            question = _parse_question_repair(
+                                repaired,
+                                eligible_source_tokens=eligible_source_tokens,
+                                required_source_token=required_source_token,
+                            )
+                            question_trace["repair_mode"] = "structured_rewrite"
+                        except Exception as structured_exc:
+                            question_trace["structured_repair_error"] = (
+                                f"{type(structured_exc).__name__}: "
+                                f"{' '.join(str(structured_exc).split())}"
+                            )
+                            synonym, response = await _generate_json(
+                                model=model,
+                                provider=provider,
+                                schema=SYNONYM_REPAIR_SCHEMA,
+                                contract=(
+                                    "Produce only one context-appropriate synonym or "
+                                    "equivalent phrase for required_source_token as it "
+                                    "is used in original_question. Preserve part of "
+                                    "speech and meaning. Do not rewrite the question, "
+                                    "name the answer, replace an immutable field, or "
+                                    "return the same token. Return only JSON."
+                                ),
+                                problem=_problem_payload(
+                                    {
+                                        **question_source_payload,
+                                        "required_source_token": (
+                                            required_source_token
+                                        ),
+                                    }
+                                ),
+                                request_id=(
+                                    f"hotpotqa-full-dataset-fact:{index:06d}:"
+                                    f"round:{generation_round:02d}:"
+                                    f"repair-question-synonym:{attempt:02d}"
+                                ),
+                                seed=request_seed + 4,
+                                temperature=0.0,
+                            )
+                            replacement = _parse_synonym_repair(
+                                synonym,
+                                required_source_token=required_source_token,
+                            )
+                            question = _replace_source_token_once(
+                                source.question,
+                                source_token=required_source_token,
+                                replacement_phrase=replacement,
+                            )
+                            question_trace["repair_mode"] = "synonym_only"
                         question_trace["generation_response"] = dict(response)
                         question_trace["required_source_token_to_replace"] = (
                             required_source_token
@@ -531,13 +681,25 @@ async def _materialize_one(
                         )
                 if not fact_admitted:
                     try:
-                        fact_repair_strategy = _fact_repair_strategy(
-                            fact_rejection
+                        fact_repair_strategy = (
+                            "authoritative_answer_slot_reconstruction"
+                            if force_fact_reconstruction
+                            else _fact_repair_strategy(fact_rejection)
                         )
                         reconstruct_from_source = (
                             fact_repair_strategy
                             == "authoritative_answer_slot_reconstruction"
                         )
+                        reconstruction_pattern: str | None = None
+                        if reconstruct_from_source:
+                            reconstruction_patterns = (
+                                _answer_reconstruction_patterns(binding_mode)
+                            )
+                            reconstruction_pattern = reconstruction_patterns[
+                                fact_reconstruction_count
+                                % len(reconstruction_patterns)
+                            ]
+                            fact_reconstruction_count += 1
                         repaired, response = await _generate_json(
                             model=model,
                             provider=provider,
@@ -582,6 +744,10 @@ async def _materialize_one(
                                     "interrogative answer slot with the canonical "
                                     "answer semantics and convert the remaining source "
                                     "relation into declarative order. "
+                                    + _answer_reconstruction_instruction(
+                                        reconstruction_pattern
+                                    )
+                                    + " "
                                     if reconstruct_from_source
                                     else
                                     "Preserve correct material from the rejected fact "
@@ -600,6 +766,9 @@ async def _materialize_one(
                                         else {"rejected_fact": fact or ""}
                                     ),
                                     "fact_repair_strategy": fact_repair_strategy,
+                                    "answer_reconstruction_pattern": (
+                                        reconstruction_pattern
+                                    ),
                                     "prior_admission_result": fact_rejection,
                                 }
                             ),
@@ -612,8 +781,22 @@ async def _materialize_one(
                             temperature=0.0,
                         )
                         fact = _generated_text(repaired, "fact_statement")
+                        fact_candidate_key = fact.casefold()
+                        fact_candidate_repeated = (
+                            fact_candidate_key in fact_candidate_keys
+                        )
+                        fact_candidate_count += 1
+                        fact_candidate_keys.add(fact_candidate_key)
+                        force_fact_reconstruction = fact_candidate_repeated
+                        fact_trace["candidate_repeated"] = (
+                            fact_candidate_repeated
+                        )
+                        fact_trace["candidate_number"] = fact_candidate_count
                         fact_trace["generation_response"] = dict(response)
                         fact_trace["repair_strategy"] = fact_repair_strategy
+                        fact_trace["answer_reconstruction_pattern"] = (
+                            reconstruction_pattern
+                        )
                     except Exception as exc:
                         fact_trace["generation_error"] = (
                             f"{type(exc).__name__}: {' '.join(str(exc).split())}"
