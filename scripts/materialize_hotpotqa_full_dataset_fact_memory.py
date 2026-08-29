@@ -149,7 +149,10 @@ async def _materialize_one(
         raise ValueError("generation_rounds must be positive")
     binding_mode = (
         "declarative_clause_paraphrase"
-        if canonical_answer_is_declarative_clause(source.canonical_answer)
+        if canonical_answer_is_declarative_clause(
+            source.canonical_answer,
+            question=source.question,
+        )
         else "answer_slot_binding"
     )
     question: str | None = None

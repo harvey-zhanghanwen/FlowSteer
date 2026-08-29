@@ -157,11 +157,11 @@ def test_field_level_repair_preserves_admitted_question_and_repairs_only_fact(
         (
             _source(
                 1,
-                question="What happened to Alpha?",
-                answer="Alpha was founded in 1901.",
+                question="What disability did singer Al Hibbler have?",
+                answer="He was blind",
             ),
-            "Which event concerned Alpha?",
-            "In 1901, Alpha came into existence.",
+            "Which impairment did singer Al Hibbler live with?",
+            "He could not see.",
             "declarative_clause_paraphrase",
             "Dataset answer clause:",
         ),
@@ -365,4 +365,3 @@ def test_resume_revalidates_good_row_removes_stale_row_and_generates_only_pendin
     assert receipt_rows[alpha.source_train_task_id]["status"] == "resume_revalidated"
     assert receipt_rows[beta.source_train_task_id]["status"] == "accepted"
     assert receipt_rows[gamma.source_train_task_id]["status"] == "accepted"
-

@@ -232,7 +232,7 @@ def test_materialization_allows_quote_style_and_entity_description_rewrite() -> 
     assert admitted[0].fact_text == "The Example Band recorded 'The Track'."
 
 
-def test_materialization_rejects_added_entity_and_truncated_proper_name() -> None:
+def test_materialization_preserves_canonical_identity_without_capitalization_novelty() -> None:
     source = HotpotQATrainQASource(
         source_train_task_id="hotpotqa:immutable-answer",
         base_task_id="hotpotqa:immutable-answer",
@@ -240,12 +240,18 @@ def test_materialization_rejects_added_entity_and_truncated_proper_name() -> Non
         question="Who directed the Paris Opera Ballet?",
         canonical_answer="Rudolf Khametovich Nureyev",
     )
-    added_entity = _materialization(
+    capitalization_is_not_an_entity_recognizer = _materialization(
         source,
-        fact="Michelle Pfeiffer directed the Paris Opera Ballet.",
+        fact=(
+            "Rudolf Khametovich Nureyev and Michelle Pfeiffer directed the "
+            "Paris Opera Ballet."
+        ),
     )
-    with pytest.raises(ValueError, match="unsupported immutable entity"):
-        materialize_hotpotqa_declarative_facts((source,), (added_entity,))
+    # TriviaQA delegates unsupported-fact detection to the semantic verifier;
+    # deterministic projection must not infer entity novelty from title case.
+    materialize_hotpotqa_declarative_facts(
+        (source,), (capitalization_is_not_an_entity_recognizer,)
+    )
 
     truncated_name = _materialization(
         source,
@@ -253,6 +259,77 @@ def test_materialization_rejects_added_entity_and_truncated_proper_name() -> Non
     )
     with pytest.raises(ValueError, match="immutable answer tokens"):
         materialize_hotpotqa_declarative_facts((source,), (truncated_name,))
+
+
+def test_hotpot_numeric_surface_normalization_and_title_binding() -> None:
+    numeric = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:a2002",
+        base_task_id="hotpotqa:a2002",
+        cycled=False,
+        question=(
+            "Ted Sutton plays Sergeant Cunningham in a2002 film that stars "
+            "Mel Gibson as what character?"
+        ),
+        canonical_answer="Graham Hess",
+    )
+    value = _materialization(
+        numeric,
+        fact=(
+            "In the 2002 film featuring Ted Sutton as Sergeant Cunningham, "
+            "Mel Gibson portrays Graham Hess."
+        ),
+    )
+    value["paraphrase_question"] = (
+        "In the 2002 movie featuring Ted Sutton as Sergeant Cunningham, "
+        "which character is portrayed by Mel Gibson?"
+    )
+    assert materialize_hotpotqa_declarative_facts((numeric,), (value,))
+
+    title = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:title",
+        base_task_id="hotpotqa:title",
+        cycled=False,
+        question="Which song did the artist release?",
+        canonical_answer="I Knew You Were Trouble",
+    )
+    assert not fact_index.canonical_answer_is_declarative_clause(
+        title.canonical_answer,
+        question=title.question,
+    )
+
+
+def test_ordinary_answer_head_may_be_semantically_realized() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:dancer",
+        base_task_id="hotpotqa:dancer",
+        cycled=False,
+        question="Maurice Hines and his brother were famous for what?",
+        canonical_answer="dancer Gregory Hines",
+    )
+    value = _materialization(
+        source,
+        fact="Maurice Hines and his brother Gregory Hines were famous for dancing.",
+    )
+    value["paraphrase_question"] = (
+        "For what activity were Maurice Hines and his brother renowned?"
+    )
+    assert materialize_hotpotqa_declarative_facts((source,), (value,))
+
+    quoted = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:quoted-title",
+        base_task_id="hotpotqa:quoted-title",
+        cycled=False,
+        question="On which popular show did Alamgir serve as a judge?",
+        canonical_answer='"Music Icons"',
+    )
+    quoted_value = _materialization(
+        quoted,
+        fact="Alamgir served as a judge on the popular show Music Icons.",
+    )
+    quoted_value["paraphrase_question"] = (
+        "Which well-known program had Alamgir on its judging panel?"
+    )
+    assert materialize_hotpotqa_declarative_facts((quoted,), (quoted_value,))
 
 
 def test_materializer_has_no_fallback_option() -> None:

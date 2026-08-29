@@ -56,15 +56,15 @@ _FACT_FIELDS = frozenset({"memory_id", "fact_text"})
 # These checks stay outside the Agent-facing index and use Q-A only as source
 # provenance while deciding whether a generated fact may be projected.
 _LEXICAL_TOKEN = re.compile(r"[^\W_]+(?:['’-][^\W_]+)*", re.UNICODE)
-_NUMBER_OR_DATE_TOKEN = re.compile(
-    r"\b(?:\d(?:[\d,./-]*\d)?|[IVXLCDM]{2,})\b"
-)
+# NECESSARY_HOTPOT_ADAPTATION: the native corpus contains attached forms such
+# as ``a2002`` and equivalent range separators such as ``1980-1991`` versus
+# ``1980 to 1991``.  TriviaQA protects the entire surface token exactly; here
+# we retain that immutable-field boundary over the ordered numeric atoms so a
+# separator or an attached article cannot create a false rejection.  Actual
+# changed, added, or removed numbers still fail deterministically.
+_ARABIC_NUMBER_ATOM = re.compile(r"(?<!\d)\d[\d,]*(?!\d)")
+_ROMAN_NUMERAL_TOKEN = re.compile(r"\b[IVXLCDM]{2,}\b")
 _QUOTED_SPAN = re.compile(r'"([^\"]+)"|“([^”]+)”|(?<!\w)[\'‘]([^\'’]+)[\'’](?!\w)')
-_FINITE_CLAUSE_VERB = re.compile(
-    r"\b(?:is|are|was|were|has|have|had|does|do|did|can|could|may|"
-    r"might|must|shall|should|will|would)\b",
-    re.IGNORECASE,
-)
 _FUNCTION_WORDS = frozenset(
     {
         "a", "an", "and", "are", "as", "at", "be", "been", "being",
@@ -115,6 +115,52 @@ def _identity_tokens(text: str) -> frozenset[str]:
     return frozenset(identities)
 
 
+def _identity_token_preserved(
+    required: str,
+    observed_tokens: frozenset[str],
+) -> bool:
+    """DIRECT_REUSE of TriviaQA's case-insensitive identity check."""
+
+    normalized_required = required.replace("’", "'")
+    normalized_observed = frozenset(
+        token.replace("’", "'") for token in observed_tokens
+    )
+    if normalized_required in normalized_observed:
+        return True
+    if normalized_required.endswith("'s"):
+        return False
+    return f"{normalized_required}'s" in normalized_observed
+
+
+def _observed_content_tokens(text: str) -> frozenset[str]:
+    return frozenset(
+        token.casefold()
+        for token in _lexical_tokens(text)
+        if token.casefold() not in _FUNCTION_WORDS
+    )
+
+
+def _missing_identity_tokens(required_text: str, observed_text: str) -> frozenset[str]:
+    observed = _observed_content_tokens(observed_text)
+    return frozenset(
+        token
+        for token in _identity_tokens(required_text)
+        if not _identity_token_preserved(token, observed)
+    )
+
+
+def _number_or_date_counts(text: str) -> Counter[str]:
+    values = [
+        match.group(0).replace(",", "")
+        for match in _ARABIC_NUMBER_ATOM.finditer(text)
+    ]
+    values.extend(
+        match.group(0).casefold()
+        for match in _ROMAN_NUMERAL_TOKEN.finditer(text)
+    )
+    return Counter(values)
+
+
 def _quoted_spans(text: str) -> frozenset[str]:
     return frozenset(
         next(group for group in match.groups() if group is not None).strip()
@@ -135,13 +181,35 @@ def _contains_ordered_tokens(text: str, required: Sequence[str]) -> bool:
     return True
 
 
-def canonical_answer_is_declarative_clause(answer: str) -> bool:
-    """Classify an answer proposition without inspecting a task identity."""
+def canonical_answer_is_declarative_clause(
+    answer: str,
+    *,
+    question: str | None = None,
+) -> bool:
+    """Use TriviaQA's narrow, source-aware clausal answer-slot boundary.
+
+    DIRECT_REUSE: TriviaQA ``_clausal_canonical_relation_statement`` only
+    treats a pronoun-led canonical label as a clause when the source question
+    has the exact ``What <slot> did <subject> have?`` relation.  This avoids
+    misclassifying title spans such as ``I Knew You Were Trouble`` merely
+    because they contain an auxiliary verb.
+    """
 
     normalized = " ".join(_required_text(answer, "canonical_answer").split())
-    return len(_lexical_tokens(normalized)) >= 4 and bool(
-        _FINITE_CLAUSE_VERB.search(normalized)
-    )
+    answer_tokens = _lexical_tokens(normalized)
+    if (
+        question is None
+        or len(answer_tokens) < 3
+        or answer_tokens[0].casefold()
+        not in {"he", "i", "it", "she", "they", "we", "you"}
+    ):
+        return False
+    normalized_question = " ".join(_required_text(question, "question").split())
+    return re.fullmatch(
+        r"(?i:what)\s+(?P<slot>.+?)\s+(?i:did)\s+"
+        r"(?P<subject>.+?)\s+(?i:have)\?",
+        normalized_question,
+    ) is not None
 
 
 def validate_hotpotqa_question_rewrite(
@@ -161,9 +229,7 @@ def validate_hotpotqa_question_rewrite(
     # capitalization-only heuristic is not an entity recognizer and wrongly
     # rejects valid rewrites such as ``American`` -> ``U.S.``.  Deterministic
     # admission remains strict for numbers/dates and answer leakage.
-    if Counter(_NUMBER_OR_DATE_TOKEN.findall(source.question)) != Counter(
-        _NUMBER_OR_DATE_TOKEN.findall(question)
-    ):
+    if _number_or_date_counts(source.question) != _number_or_date_counts(question):
         raise ValueError(
             "paraphrase_question changed an immutable number or date"
         )
@@ -196,37 +262,32 @@ def validate_hotpotqa_fact_statement(
     if not fact.rstrip('"\'’”)]} ').endswith((".", "!")):
         raise ValueError("fact_statement must be a complete declarative sentence")
 
-    allowed_identities = _identity_tokens(
+    # DIRECT_REUSE: TriviaQA does not infer a new entity from capitalization
+    # in a generated fact.  Its deterministic gate preserves source identity
+    # material, while the separate fact semantic verifier rejects unsupported
+    # entities.  The removed novelty heuristic falsely rejected source tokens
+    # whose case changed at sentence boundaries (``korea`` -> ``Korea``).
+    allowed_numbers = _number_or_date_counts(
         f"{source.question} {source.canonical_answer}"
     )
-    novel_identities = _identity_tokens(fact) - allowed_identities
-    if novel_identities:
-        raise ValueError(
-            "fact_statement introduced an unsupported immutable entity token: "
-            + ", ".join(sorted(novel_identities))
-        )
-    allowed_numbers = Counter(
-        _NUMBER_OR_DATE_TOKEN.findall(
-            f"{source.question} {source.canonical_answer}"
-        )
-    )
-    observed_numbers = Counter(_NUMBER_OR_DATE_TOKEN.findall(fact))
+    observed_numbers = _number_or_date_counts(fact)
     if any(observed_numbers[token] > allowed_numbers[token] for token in observed_numbers):
         raise ValueError("fact_statement introduced a number or date")
     canonical = " ".join(source.canonical_answer.split())
-    if canonical_answer_is_declarative_clause(canonical):
+    if canonical_answer_is_declarative_clause(
+        canonical,
+        question=source.question,
+    ):
         if _normalized_text(fact) == _normalized_text(canonical):
             raise ValueError(
                 "clausal canonical answer must receive a semantic rewrite"
             )
         required_answer_identities = _identity_tokens(canonical)
-        if not required_answer_identities.issubset(_identity_tokens(fact)):
+        if _missing_identity_tokens(canonical, fact):
             raise ValueError(
                 "fact_statement removed an immutable entity from the answer clause"
             )
-        if Counter(_NUMBER_OR_DATE_TOKEN.findall(canonical)) != Counter(
-            _NUMBER_OR_DATE_TOKEN.findall(fact)
-        ):
+        if _number_or_date_counts(canonical) != _number_or_date_counts(fact):
             raise ValueError(
                 "fact_statement changed a number or date in the answer clause"
             )
@@ -237,20 +298,23 @@ def validate_hotpotqa_fact_statement(
         # requirement would reject valid transformations such as ``yes`` -> an
         # affirmative proposition and ``16-year-old`` -> ``16 years old``.
         required_answer_identities = _identity_tokens(canonical)
-        required_answer_numbers = Counter(
-            _NUMBER_OR_DATE_TOKEN.findall(canonical)
+        required_answer_numbers = _number_or_date_counts(canonical)
+        required_identity_sequence = tuple(
+            token
+            for token in _lexical_tokens(canonical)
+            if token.casefold() in required_answer_identities
         )
-        requires_literal_sequence = bool(
-            required_answer_identities
-            or _quoted_spans(canonical)
-        )
-        if requires_literal_sequence and not _contains_ordered_tokens(
-            fact, _lexical_tokens(canonical)
-        ):
+        if _missing_identity_tokens(canonical, fact):
             raise ValueError(
                 "fact_statement removed immutable answer tokens"
             )
-        observed_fact_numbers = Counter(_NUMBER_OR_DATE_TOKEN.findall(fact))
+        if required_identity_sequence and not _contains_ordered_tokens(
+            fact, required_identity_sequence
+        ):
+            raise ValueError(
+                "fact_statement changed immutable answer token order"
+            )
+        observed_fact_numbers = _number_or_date_counts(fact)
         if any(
             observed_fact_numbers[token] < count
             for token, count in required_answer_numbers.items()
