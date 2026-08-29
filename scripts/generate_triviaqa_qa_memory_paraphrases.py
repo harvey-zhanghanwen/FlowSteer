@@ -4023,6 +4023,235 @@ def _fronted_context_subject_wh_pair(
     )
 
 
+
+def _latin_translation_analogue_pair(source: TriviaQATrainSource) -> tuple[str, str] | None:
+    """Reuse the admitted Latin-translation relation and surface change."""
+    original = " ".join(source.original_question.split())
+    if _answer_slot_count(original) != 1:
+        return None
+    match = re.fullmatch(
+        r"What does the Latin phrase (?P<phrase>'[^']+'|‘[^’]+’) "
+        r"translate to in English\?", original, re.IGNORECASE
+    )
+    if match is None:
+        return None
+    phrase = match.group("phrase")
+    question = _finish_deterministic_question_candidate(
+        source, f"What is the English translation of the Latin phrase {phrase}?"
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"The English translation of the Latin phrase {phrase} is {source.canonical_answer}"
+    )
+
+
+def _circle_line_name_analogue_pair(source: TriviaQATrainSource) -> tuple[str, str] | None:
+    """Reuse the admitted ``joins`` to ``connects`` circle relation."""
+    original = " ".join(source.original_question.split())
+    if _answer_slot_count(original) != 1:
+        return None
+    if re.fullmatch(
+        r"What name is given to a straight line that joins any two points "
+        r"on the circumference of a circle\?", original, re.IGNORECASE
+    ):
+        question = _finish_deterministic_question_candidate(
+            source,
+            "What name is given to a straight line that connects any two "
+            "points on the circumference of a circle?",
+        )
+        if question is None:
+            return None
+        return question, _declarative_statement(
+            "The name given to a straight line that joins any two points on "
+            f"the circumference of a circle is {source.canonical_answer}"
+        )
+    if not re.fullmatch(
+        r"What is a line that joins two points of a circle\?", original, re.IGNORECASE
+    ):
+        return None
+    question = _finish_deterministic_question_candidate(
+        source, "What is a line that connects two points of a circle?"
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"The line that connects two points of a circle is {source.canonical_answer}"
+    )
+
+
+def _english_theatre_location_analogue_pair(source: TriviaQATrainSource) -> tuple[str, str] | None:
+    """Reuse the admitted ``find`` to ``locate`` theatre relation."""
+    original = " ".join(source.original_question.split())
+    if _answer_slot_count(original) != 1:
+        return None
+    match = re.fullmatch(
+        r"In which English town or city would you find "
+        r"(?P<theatre>the [^?]{1,80} theatre)\?", original, re.IGNORECASE
+    )
+    if match is None:
+        return None
+    theatre = match.group("theatre")
+    question = _finish_deterministic_question_candidate(
+        source, f"In which English town or city could you locate {theatre}?"
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(f"{theatre} is located in {source.canonical_answer}")
+
+
+def _alcock_brown_year_analogue_pair(source: TriviaQATrainSource) -> tuple[str, str] | None:
+    """Reuse the admitted Alcock-and-Brown year/crossing relation."""
+    original = " ".join(source.original_question.split())
+    if _answer_slot_count(original) != 1:
+        return None
+    match = re.fullmatch(
+        r"In which year did Alcock and Brown make (?P<event>their Atlantic crossing|"
+        r"the first non-stop trans- Atlantic flight)\?", original, re.IGNORECASE
+    )
+    if match is None:
+        return None
+    event = match.group("event")
+    question = _finish_deterministic_question_candidate(
+        source, f"During what year did Alcock and Brown complete {event}?"
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"The year Alcock and Brown completed {event} is {source.canonical_answer}"
+    )
+
+
+def _tells_lies_description_analogue_pair(source: TriviaQATrainSource) -> tuple[str, str] | None:
+    """Reuse the admitted ``lies`` to ``falsehoods`` description relation."""
+    original = " ".join(source.original_question.split())
+    if _answer_slot_count(original) != 1:
+        return None
+    if re.fullmatch(r"Someone who tells lies is what sort of person\?", original, re.IGNORECASE):
+        question = _finish_deterministic_question_candidate(
+            source, "Someone who tells falsehoods is what sort of person?"
+        )
+        if question is None:
+            return None
+        return question, _declarative_statement(
+            f"Someone who tells lies is a {source.canonical_answer} sort of person"
+        )
+    if not re.fullmatch(r"Someone who tells lies is said to be what\?", original, re.IGNORECASE):
+        return None
+    question = _finish_deterministic_question_candidate(
+        source, "Someone who tells falsehoods is said to be what?"
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"Someone who tells falsehoods is said to be {source.canonical_answer}"
+    )
+
+
+def _eating_relation_analogue_pair(source: TriviaQATrainSource) -> tuple[str, str] | None:
+    """Reuse the admitted ``eating`` to ``consuming`` food relation."""
+    original = " ".join(source.original_question.split())
+    if _answer_slot_count(original) != 1:
+        return None
+    match = re.fullmatch(
+        r"If you are eating (?P<food>salted, unfertilized sturgeon roe), "
+        r"what are you eating\?", original, re.IGNORECASE
+    )
+    if match is not None:
+        food = match.group("food")
+        question = _finish_deterministic_question_candidate(
+            source, f"If you are consuming {food}, what are you consuming?"
+        )
+        if question is None:
+            return None
+        return question, _declarative_statement(
+            f"If you are eating {food}, you are eating {source.canonical_answer}"
+        )
+    if not re.fullmatch(r"If you are eating tripe, what are you eating\?", original, re.IGNORECASE):
+        return None
+    question = _finish_deterministic_question_candidate(
+        source, "If you are consuming tripe, identify the organ you are consuming?"
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(f"The organ you are consuming is {source.canonical_answer}")
+
+
+def _darts_shanghai_analogue_pair(source: TriviaQATrainSource) -> tuple[str, str] | None:
+    """Reuse the admitted ``same`` to ``identical`` darts relation."""
+    original = " ".join(source.original_question.split())
+    if _answer_slot_count(original) != 1:
+        return None
+    if re.fullmatch(
+        r"What name is given to scoring a single, double and treble of the same "
+        r"number in three darts\?", original, re.IGNORECASE
+    ):
+        question = _finish_deterministic_question_candidate(
+            source,
+            "What name is given to scoring a single, double and treble of the "
+            "identical number in three darts?",
+        )
+        if question is None:
+            return None
+        return question, _declarative_statement(
+            "The name given to scoring a single, double and treble of the same "
+            f"number in three darts is {source.canonical_answer}"
+        )
+    if re.fullmatch(
+        r"What name is given in darts when a player hits a single, double and "
+        r"treble of the same number in his turn\?", original, re.IGNORECASE
+    ):
+        question = _finish_deterministic_question_candidate(
+            source,
+            "What name is given in darts when a player hits a single, double and "
+            "treble of the identical number in his turn?",
+        )
+        if question is None:
+            return None
+        return question, _declarative_statement(
+            "The name given in darts when a player hits a single, double and treble "
+            f"of the same number in his turn is {source.canonical_answer}"
+        )
+    if not re.fullmatch(
+        r"In darts, a three dart finish requiring a treble, single and double of "
+        r"the same number is given what name\?", original, re.IGNORECASE
+    ):
+        return None
+    question = _finish_deterministic_question_candidate(
+        source,
+        "In darts, a three dart finish requiring a treble, single and double of "
+        "the identical number is given what name?",
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        "In darts, the name given to a three dart finish requiring a treble, single "
+        f"and double of the same number is {source.canonical_answer}"
+    )
+
+
+def _acted_role_analogue_pair(source: TriviaQATrainSource) -> tuple[str, str] | None:
+    """Reuse the admitted ``part`` to ``role`` acting relation."""
+    original = " ".join(source.original_question.split())
+    if _answer_slot_count(original) != 1:
+        return None
+    match = re.fullmatch(
+        r"What part did (?P<actor>[^?]{1,80}?) play in "
+        r"(?P<work>'[^']+'|‘[^’]+’)(?P<year> \([0-9]{4}\))?\?",
+        original, re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    actor, work, year = match.group("actor"), match.group("work"), match.group("year") or ""
+    question = _finish_deterministic_question_candidate(
+        source, f"Which role did {actor} play in {work}{year}?"
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"{actor} played the role of {source.canonical_answer} in {work}{year}"
+    )
+
 def _deterministic_strict_pair(
     source: TriviaQATrainSource,
 ) -> tuple[str, str] | None:
@@ -4035,6 +4264,18 @@ def _deterministic_strict_pair(
     """
 
     candidates: list[tuple[str, str]] = []
+    for analogue_pair in (
+        _latin_translation_analogue_pair(source),
+        _circle_line_name_analogue_pair(source),
+        _english_theatre_location_analogue_pair(source),
+        _alcock_brown_year_analogue_pair(source),
+        _tells_lies_description_analogue_pair(source),
+        _eating_relation_analogue_pair(source),
+        _darts_shanghai_analogue_pair(source),
+        _acted_role_analogue_pair(source),
+    ):
+        if analogue_pair is not None:
+            candidates.append(analogue_pair)
     bounded_subject_wh = _bounded_subject_wh_pair(source)
     if bounded_subject_wh is not None:
         candidates.append(bounded_subject_wh)

@@ -54,6 +54,14 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _clausal_canonical_relation_statement,
     _capitalized_identity_tokens,
     _bounded_subject_wh_pair,
+    _latin_translation_analogue_pair,
+    _circle_line_name_analogue_pair,
+    _english_theatre_location_analogue_pair,
+    _alcock_brown_year_analogue_pair,
+    _tells_lies_description_analogue_pair,
+    _eating_relation_analogue_pair,
+    _darts_shanghai_analogue_pair,
+    _acted_role_analogue_pair,
     _fronted_context_subject_wh_pair,
     _leading_copular_object_wh_pair,
     _network_identifier_contrast_pair,
@@ -3675,6 +3683,257 @@ def test_fronted_context_subject_wh_pair_rejects_unproved_subjects(
 
     assert _fronted_context_subject_wh_pair(source) is None
 
+
+
+@pytest.mark.parametrize(
+    ("helper", "original", "canonical", "expected_question", "expected_fact"),
+    (
+        (
+            _latin_translation_analogue_pair,
+            "What does the Latin phrase ‘Ars gratia artis’ translate to in English?",
+            "Art for art’s sake",
+            "What is the English translation of the Latin phrase ‘Ars gratia artis’?",
+            "The English translation of the Latin phrase ‘Ars gratia artis’ is Art for art’s sake.",
+        ),
+        (
+            _latin_translation_analogue_pair,
+            "What does the Latin phrase 'ab initio' translate to in English?",
+            "From the beginning",
+            "What is the English translation of the Latin phrase 'ab initio'?",
+            "The English translation of the Latin phrase 'ab initio' is From the beginning.",
+        ),
+        (
+            _circle_line_name_analogue_pair,
+            (
+                "What name is given to a straight line that joins any two points "
+                "on the circumference of a circle?"
+            ),
+            "Chord",
+            (
+                "What name is given to a straight line that connects any two "
+                "points on the circumference of a circle?"
+            ),
+            (
+                "The name given to a straight line that joins any two points on "
+                "the circumference of a circle is Chord."
+            ),
+        ),
+        (
+            _circle_line_name_analogue_pair,
+            "What is a line that joins two points of a circle?",
+            "Chord",
+            "What is a line that connects two points of a circle?",
+            "The line that connects two points of a circle is Chord.",
+        ),
+        (
+            _english_theatre_location_analogue_pair,
+            "In which English town or city would you find the Hexagon theatre?",
+            "READING",
+            "In which English town or city could you locate the Hexagon theatre?",
+            "The Hexagon theatre is located in READING.",
+        ),
+        (
+            _english_theatre_location_analogue_pair,
+            "In which English town or city would you find the Marlowe theatre?",
+            "CANTERBURY",
+            "In which English town or city could you locate the Marlowe theatre?",
+            "The Marlowe theatre is located in CANTERBURY.",
+        ),
+        (
+            _alcock_brown_year_analogue_pair,
+            (
+                "In which year did Alcock and Brown make the first non-stop "
+                "trans- Atlantic flight?"
+            ),
+            "1919",
+            (
+                "During what year did Alcock and Brown complete the first non-stop "
+                "trans- Atlantic flight?"
+            ),
+            (
+                "The year Alcock and Brown completed the first non-stop trans- "
+                "Atlantic flight is 1919."
+            ),
+        ),
+        (
+            _alcock_brown_year_analogue_pair,
+            "In which year did Alcock and Brown make their Atlantic crossing?",
+            "1919",
+            "During what year did Alcock and Brown complete their Atlantic crossing?",
+            "The year Alcock and Brown completed their Atlantic crossing is 1919.",
+        ),
+        (
+            _tells_lies_description_analogue_pair,
+            "Someone who tells lies is what sort of person?",
+            "Mendacious",
+            "Someone who tells falsehoods is what sort of person?",
+            "Someone who tells lies is a Mendacious sort of person.",
+        ),
+        (
+            _tells_lies_description_analogue_pair,
+            "Someone who tells lies is said to be what?",
+            "Mendacious",
+            "Someone who tells falsehoods is said to be what?",
+            "Someone who tells falsehoods is said to be Mendacious.",
+        ),
+        (
+            _eating_relation_analogue_pair,
+            (
+                "If you are eating salted, unfertilized sturgeon roe, what are "
+                "you eating?"
+            ),
+            "Caviar",
+            (
+                "If you are consuming salted, unfertilized sturgeon roe, what are "
+                "you consuming?"
+            ),
+            (
+                "If you are eating salted, unfertilized sturgeon roe, you are "
+                "eating Caviar."
+            ),
+        ),
+        (
+            _eating_relation_analogue_pair,
+            "If you are eating tripe, what are you eating?",
+            "Stomach",
+            "If you are consuming tripe, identify the organ you are consuming?",
+            "The organ you are consuming is Stomach.",
+        ),
+        (
+            _darts_shanghai_analogue_pair,
+            (
+                "What name is given to scoring a single, double and treble of the "
+                "same number in three darts?"
+            ),
+            "Shanghai",
+            (
+                "What name is given to scoring a single, double and treble of the "
+                "identical number in three darts?"
+            ),
+            (
+                "The name given to scoring a single, double and treble of the same "
+                "number in three darts is Shanghai."
+            ),
+        ),
+        (
+            _darts_shanghai_analogue_pair,
+            (
+                "What name is given in darts when a player hits a single, double "
+                "and treble of the same number in his turn?"
+            ),
+            "Shanghai",
+            (
+                "What name is given in darts when a player hits a single, double "
+                "and treble of the identical number in his turn?"
+            ),
+            (
+                "The name given in darts when a player hits a single, double and "
+                "treble of the same number in his turn is Shanghai."
+            ),
+        ),
+        (
+            _darts_shanghai_analogue_pair,
+            (
+                "In darts, a three dart finish requiring a treble, single and "
+                "double of the same number is given what name?"
+            ),
+            "Shanghai",
+            (
+                "In darts, a three dart finish requiring a treble, single and "
+                "double of the identical number is given what name?"
+            ),
+            (
+                "In darts, the name given to a three dart finish requiring a "
+                "treble, single and double of the same number is Shanghai."
+            ),
+        ),
+        (
+            _acted_role_analogue_pair,
+            "What part did the late Kevin Lloyd play in ‘The Bill’?",
+            "Alfred ‘TOSH’ LINES",
+            "Which role did the late Kevin Lloyd play in ‘The Bill’?",
+            (
+                "The late Kevin Lloyd played the role of Alfred ‘TOSH’ LINES in "
+                "‘The Bill’."
+            ),
+        ),
+        (
+            _acted_role_analogue_pair,
+            "What part did Bill Travers play in ‘Born Free’ (1966)?",
+            "GEORGE ADAMSON",
+            "Which role did Bill Travers play in ‘Born Free’ (1966)?",
+            "Bill Travers played the role of GEORGE ADAMSON in ‘Born Free’ (1966).",
+        ),
+    ),
+)
+def test_source_backed_analogue_pairs_reenter_full_admission(
+    helper,
+    original: str,
+    canonical: str,
+    expected_question: str,
+    expected_fact: str,
+) -> None:
+    source = _semantic_source(original, canonical)
+
+    pair = helper(source)
+
+    assert pair == (expected_question, expected_fact)
+    assert _deterministic_strict_pair(source) == pair
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": expected_question,
+                "paraphrase_answer_statement": expected_fact,
+            },
+            ensure_ascii=False,
+        ),
+        source,
+    ) == pair
+    assert validate_self_contained_declarative_fact(source, expected_fact) == expected_fact
+
+
+@pytest.mark.parametrize(
+    ("helper", "original"),
+    (
+        (
+            _latin_translation_analogue_pair,
+            "What does the French phrase 'bon voyage' translate to in English?",
+        ),
+        (
+            _circle_line_name_analogue_pair,
+            "What name is given to an arc joining two points of a circle?",
+        ),
+        (
+            _english_theatre_location_analogue_pair,
+            "In which English town or city would you build the Marlowe theatre?",
+        ),
+        (
+            _alcock_brown_year_analogue_pair,
+            "In which year did Lindbergh make his Atlantic crossing?",
+        ),
+        (
+            _tells_lies_description_analogue_pair,
+            "Someone who writes lies is what sort of person?",
+        ),
+        (
+            _eating_relation_analogue_pair,
+            "If you are eating nori, what are you eating?",
+        ),
+        (
+            _darts_shanghai_analogue_pair,
+            (
+                "What name is given to scoring a single, double and treble of "
+                "different numbers in three darts?"
+            ),
+        ),
+        (
+            _acted_role_analogue_pair,
+            "What part did Bill Travers write in ‘Born Free’ (1966)?",
+        ),
+    ),
+)
+def test_source_backed_analogue_pairs_reject_other_relations(helper, original: str) -> None:
+    assert helper(_semantic_source(original, "Example")) is None
 
 def test_listed_choice_detection_normalizes_apostrophe_glyphs() -> None:
     augmented = _augment_listed_choice_answer_statement(
