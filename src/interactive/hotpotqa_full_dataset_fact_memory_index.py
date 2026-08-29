@@ -85,9 +85,22 @@ _FACT_ANAPHORIC_SUBJECT = re.compile(
 _FACT_QA_WRAPPER = re.compile(
     r"(?:\b(?:question|answer|prompt|response)\s*:|"
     r"\b(?:dataset\s+source\s+prompt|paired\s+response|"
-    r"corresponding\s+answer)\b|\bthe\s+answer\s+is\b|"
+    r"corresponding\s+answer|dataset\s+answer|hotpotqa\s+dataset)\b|"
+    r"\bthe\s+answer\s+is\b|"
     r"\b(?:the\s+)?(?:answer|subject)\s+(?:of|to)\s+"
-    r"(?:the\s+)?(?:question|query|inquiry)\b)",
+    r"(?:the\s+)?(?:question|query|inquiry)\b|"
+    r"\b(?:in\s+(?:the\s+)?question|"
+    r"(?:referenced|mentioned|described|identified)\s+(?:in|by)\s+"
+    r"(?:the\s+)?(?:(?:original|specific)\s+)?(?:question|query|inquiry)|"
+    r"(?:target|subject)\s+of\s+(?:the\s+)?"
+    r"(?:(?:original|specific)\s+|this\s+specific\s+(?:\w+\s+)?|a\s+)?"
+    r"(?:question|query|inquiry)|"
+    r"(?:the\s+)?question\s+(?:asks|is\s+asking)|"
+    r"(?:context|description)\s+(?:provided\s+)?(?:in|by)\s+"
+    r"(?:the\s+)?(?:question|query|inquiry)|"
+    r"in\s+(?:the\s+)?context\s+of\s+(?:the\s+)?"
+    r"(?:question|query|inquiry)|"
+    r"(?:have|has|associated\s+with)\s+(?:the\s+)?answer)\b)",
     re.IGNORECASE,
 )
 _FUNCTION_WORDS = frozenset(
@@ -214,6 +227,23 @@ def _contains_ordered_tokens(text: str, required: Sequence[str]) -> bool:
     return True
 
 
+def _contains_contiguous_lexical_surface(text: str, required_text: str) -> bool:
+    """Reject a complete raw source surface even when punctuation changes.
+
+    DIRECT_REUSE + NECESSARY_HOTPOT_ADAPTATION: TriviaQA's exact-question
+    shortcut gate rejects a complete source-question substring.  HotpotQA
+    generations can preserve that same surface while replacing ``?`` with a
+    colon/period and appending the answer, so compare contiguous lexical tokens.
+    """
+
+    observed = tuple(token.casefold() for token in _lexical_tokens(text))
+    required = tuple(token.casefold() for token in _lexical_tokens(required_text))
+    return bool(required) and any(
+        observed[index : index + len(required)] == required
+        for index in range(len(observed) - len(required) + 1)
+    )
+
+
 def canonical_answer_is_declarative_clause(
     answer: str,
     *,
@@ -307,10 +337,10 @@ def validate_hotpotqa_fact_statement(
     # Raw source questions are provenance-only.  A yes/no question can look
     # declarative after changing only its terminal punctuation, so use the
     # same ordered lexical boundary as the canonical-answer shortcut gate.
-    if tuple(token.casefold() for token in _lexical_tokens(fact)) == tuple(
-        token.casefold() for token in _lexical_tokens(source.question)
-    ):
-        raise ValueError("fact_statement is identical to the source question")
+    if _contains_contiguous_lexical_surface(fact, source.question):
+        raise ValueError(
+            "fact_statement contains the complete source question lexical surface"
+        )
 
     # DIRECT_REUSE: TriviaQA does not infer a new entity from capitalization
     # in a generated fact.  Its deterministic gate preserves source identity

@@ -234,7 +234,27 @@ def test_materialization_rejects_lexically_verbatim_yes_no_question() -> None:
         fact="Erin Wiedner and Monte Hellman are both film directors.",
     )
 
-    with pytest.raises(ValueError, match="identical to the source question"):
+    with pytest.raises(ValueError, match="complete source question lexical surface"):
+        materialize_hotpotqa_declarative_facts((source,), (candidate,))
+
+
+def test_materialization_rejects_verbatim_question_prefix_plus_answer() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:verbatim-prefix",
+        base_task_id="hotpotqa:verbatim-prefix",
+        cycled=False,
+        question="The Seattle University team plays in a complex known as?",
+        canonical_answer="the Seattle Center",
+    )
+    candidate = _materialization(
+        source,
+        fact=(
+            "The Seattle University team plays in a complex known as: "
+            "the Seattle Center."
+        ),
+    )
+
+    with pytest.raises(ValueError, match="complete source question lexical surface"):
         materialize_hotpotqa_declarative_facts((source,), (candidate,))
 
 
@@ -244,6 +264,17 @@ def test_materialization_rejects_lexically_verbatim_yes_no_question() -> None:
         "The answer to the question of whether both entities match is no.",
         "Ada Lovelace is the answer to the query about who authored the work.",
         "Ada Lovelace is the subject of the inquiry about the work's author.",
+        "The public university in the question is located in Boston.",
+        "The individual described in the original query was Ada Lovelace.",
+        "Ada Lovelace is the target of this specific query.",
+        "Ada Lovelace is the subject of this specific ranking query.",
+        "Ada Lovelace is the subject of a question asking about authorship.",
+        "The question asks whether both entities match.",
+        "The description provided in the query identifies Ada Lovelace.",
+        "Ada Lovelace appears in the context of the query.",
+        "The proposition is the one identified by the dataset answer.",
+        "The banjo appears directly behind another song on the HotpotQA dataset.",
+        "Both descriptions have the answer Ada Lovelace.",
     ),
 )
 def test_materialization_rejects_qa_meta_framing(fact: str) -> None:
