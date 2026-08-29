@@ -744,14 +744,22 @@ class HotpotQAFullDatasetFactMemoryIndex:
         # on the calling thread so the per-task Tool lifecycle owns no orphaned
         # default-executor thread at shutdown.
         query_vector = self._encode_query(query)
-        scored = [
-            (float(np.dot(self._embeddings[index], query_vector)), fact.memory_id)
-            for index, fact in enumerate(self._facts)
-        ]
-        scored.sort(key=lambda item: (-item[0], item[1]))
+        # DIRECT_REUSE: SkillFlow/TriviaQA fact-memory computes one dense
+        # matrix-vector product and then applies the same deterministic
+        # score/memory_id ordering.  Calling np.dot once per record adds a
+        # Python loop over the full 97,852-record corpus without changing the
+        # retrieval semantics.
+        scores = np.asarray(self._embeddings @ query_vector, dtype=np.float32)
+        order = sorted(
+            range(len(self._facts)),
+            key=lambda index: (
+                -float(scores[index]),
+                self._facts[index].memory_id,
+            ),
+        )[:k]
         hits: list[HotpotQADeclarativeFactSearchHit] = []
-        for rank, (similarity, memory_id) in enumerate(scored[:k], start=1):
-            fact = self._facts[self._memory_index[memory_id]]
+        for rank, index in enumerate(order, start=1):
+            fact = self._facts[index]
             snippet = fact.fact_text
             if len(snippet) > 320:
                 snippet = f"{snippet[:320]}…"
@@ -759,7 +767,7 @@ class HotpotQAFullDatasetFactMemoryIndex:
                 HotpotQADeclarativeFactSearchHit(
                     memory_id=fact.memory_id,
                     fact_snippet=snippet,
-                    similarity=similarity,
+                    similarity=float(scores[index]),
                     rank=rank,
                 )
             )
