@@ -13,6 +13,7 @@ import argparse
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from itertools import islice
 import json
 from pathlib import Path
 import sys
@@ -617,41 +618,70 @@ async def materialize(args: argparse.Namespace) -> dict[str, object]:
 
     failed_source_ids: list[str] = []
     checkpoint_size = max(args.checkpoint_every, args.concurrency)
-    for offset in range(0, len(pending), checkpoint_size):
-        chunk = pending[offset : offset + checkpoint_size]
-        results = await asyncio.gather(
-            *(generate(source) for source in chunk),
-            return_exceptions=True,
+    processed_since_checkpoint = 0
+    pending_iterator = iter(pending)
+    active: dict[asyncio.Task[object], HotpotQATrainQASource] = {}
+    for source in islice(pending_iterator, args.concurrency):
+        active[asyncio.create_task(generate(source))] = source
+    while active:
+        # DIRECT_REUSE: TriviaQA's SkillFlow-derived materializer uses a
+        # FIRST_COMPLETED rolling future pool.  Refill each completed slot
+        # immediately so a small number of bounded-repair tail cases cannot
+        # leave the GPU queue idle at a fixed chunk boundary.
+        done, _still_pending = await asyncio.wait(
+            tuple(active),
+            return_when=asyncio.FIRST_COMPLETED,
         )
-        for source, result in zip(chunk, results):
+        for task in done:
+            source = active.pop(task)
             source_id = source.source_train_task_id
-            if isinstance(result, BaseException):
+            try:
+                result = task.result()
+            except Exception as exc:
                 failed_source_ids.append(source_id)
                 rejection_receipt: dict[str, object] = {
                     "source_train_task_id": source_id,
                     "status": "rejected_after_bounded_attempts",
                     "evaluation_scope": FULL_DATASET_EVALUATION_SCOPE,
-                    "generation_error_type": type(result).__name__,
-                    "generation_error": " ".join(str(result).split())[:512],
+                    "generation_error_type": type(exc).__name__,
+                    "generation_error": " ".join(str(exc).split())[:512],
                     "completed_at": _utc_now(),
                 }
-                if isinstance(result, FactMaterializationRejected):
+                if isinstance(exc, FactMaterializationRejected):
                     rejection_receipt["attempt_receipts"] = list(
-                        result.attempt_receipts
+                        exc.attempt_receipts
                     )
                 receipts[source_id] = rejection_receipt
-                continue
-            candidate, receipt = result
-            accepted[source_id] = candidate
-            receipts[source_id] = receipt
-        _write_jsonl(
-            output_path,
-            [accepted[item] for item in ordered_ids if item in accepted],
-        )
-        _write_jsonl(
-            receipt_path,
-            [receipts[item] for item in ordered_ids if item in receipts],
-        )
+            else:
+                candidate, receipt = result
+                accepted[source_id] = candidate
+                receipts[source_id] = receipt
+            processed_since_checkpoint += 1
+            next_source = next(pending_iterator, None)
+            if next_source is not None:
+                active[asyncio.create_task(generate(next_source))] = next_source
+        if processed_since_checkpoint >= checkpoint_size or not active:
+            _write_jsonl(
+                output_path,
+                [accepted[item] for item in ordered_ids if item in accepted],
+            )
+            _write_jsonl(
+                receipt_path,
+                [receipts[item] for item in ordered_ids if item in receipts],
+            )
+            print(
+                json.dumps(
+                    {
+                        "checkpoint_accepted_count": len(accepted),
+                        "checkpoint_receipt_count": len(receipts),
+                        "rejected_source_count": len(failed_source_ids),
+                    },
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+            processed_since_checkpoint = 0
 
     if failed_source_ids:
         raise RuntimeError(

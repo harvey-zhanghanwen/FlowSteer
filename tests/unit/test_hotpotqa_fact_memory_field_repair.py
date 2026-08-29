@@ -365,3 +365,50 @@ def test_resume_revalidates_good_row_removes_stale_row_and_generates_only_pendin
     assert receipt_rows[alpha.source_train_task_id]["status"] == "resume_revalidated"
     assert receipt_rows[beta.source_train_task_id]["status"] == "accepted"
     assert receipt_rows[gamma.source_train_task_id]["status"] == "accepted"
+
+
+def test_materializer_rolling_pool_refills_before_slow_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = tuple(_source(index) for index in range(4))
+    monkeypatch.setattr(
+        materializer,
+        "load_hotpotqa_full_dataset_qa_sources",
+        lambda **_kwargs: HotpotQAFullDatasetQASources(sources, ()),
+    )
+    monkeypatch.setattr(materializer, "load_model_registry", lambda _path: _Registry())
+    release_first = asyncio.Event()
+    third_started = asyncio.Event()
+
+    async def fake_materialize_one(
+        source: HotpotQATrainQASource,
+        **_kwargs: object,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        if source is sources[0]:
+            await release_first.wait()
+        if source is sources[2]:
+            third_started.set()
+        return _sidecar(
+            source,
+            question="Which individual wrote Atlas?",
+            fact="Atlas was authored by Ada Lovelace.",
+        ), {
+            "source_train_task_id": source.source_train_task_id,
+            "status": "accepted",
+        }
+
+    monkeypatch.setattr(materializer, "_materialize_one", fake_materialize_one)
+    args = _args(tmp_path, count=4)
+    args.concurrency = 2
+    args.checkpoint_every = 2
+
+    async def exercise() -> dict[str, object]:
+        running = asyncio.create_task(materializer.materialize(args))
+        await asyncio.wait_for(third_started.wait(), timeout=1.0)
+        assert not release_first.is_set()
+        release_first.set()
+        return await running
+
+    manifest = asyncio.run(exercise())
+    assert manifest["accepted_count"] == 4
