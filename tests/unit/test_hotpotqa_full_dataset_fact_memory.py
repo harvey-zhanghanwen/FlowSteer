@@ -199,6 +199,62 @@ def test_materialization_rejects_verbatim_question_and_qa_wire() -> None:
 
 
 @pytest.mark.parametrize(
+    "pronoun",
+    ("It", "He", "She", "They", "This", "That", "These", "Those"),
+)
+def test_materialization_rejects_unbound_anaphoric_subject(pronoun: str) -> None:
+    source = _source(0, answer="Ada Lovelace")
+    candidate = _materialization(
+        source,
+        fact=f"{pronoun} authored the referenced work as Ada Lovelace.",
+    )
+
+    with pytest.raises(ValueError, match="unbound anaphoric subject"):
+        materialize_hotpotqa_declarative_facts((source,), (candidate,))
+
+
+def test_materialization_rejects_lexically_bare_canonical_answer() -> None:
+    source = _source(0, answer="The Right Stuff!")
+    candidate = _materialization(source, fact='"The Right Stuff."')
+
+    with pytest.raises(ValueError, match="identical to the canonical answer"):
+        materialize_hotpotqa_declarative_facts((source,), (candidate,))
+
+
+def test_materialization_rejects_lexically_verbatim_yes_no_question() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:verbatim-binary",
+        base_task_id="hotpotqa:verbatim-binary",
+        cycled=False,
+        question="Erin Wiedner and Monte Hellman are both film directors?",
+        canonical_answer="yes",
+    )
+    candidate = _materialization(
+        source,
+        fact="Erin Wiedner and Monte Hellman are both film directors.",
+    )
+
+    with pytest.raises(ValueError, match="identical to the source question"):
+        materialize_hotpotqa_declarative_facts((source,), (candidate,))
+
+
+@pytest.mark.parametrize(
+    "fact",
+    (
+        "The answer to the question of whether both entities match is no.",
+        "Ada Lovelace is the answer to the query about who authored the work.",
+        "Ada Lovelace is the subject of the inquiry about the work's author.",
+    ),
+)
+def test_materialization_rejects_qa_meta_framing(fact: str) -> None:
+    source = _source(0, answer="Ada Lovelace")
+    candidate = _materialization(source, fact=fact)
+
+    with pytest.raises(ValueError, match="Question/Answer wire"):
+        materialize_hotpotqa_declarative_facts((source,), (candidate,))
+
+
+@pytest.mark.parametrize(
     ("question", "answer", "paraphrase", "fact"),
     (
         (

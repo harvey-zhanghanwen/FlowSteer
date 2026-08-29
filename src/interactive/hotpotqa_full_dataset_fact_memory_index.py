@@ -71,6 +71,25 @@ _FINITE_CLAUSE_VERB = re.compile(
     r"might|must|shall|should|will|would)\b",
     re.IGNORECASE,
 )
+# DIRECT_REUSE: TriviaQA ``_FACT_ANAPHORIC_SUBJECT``.  A retrieval fact must
+# bind its subject inside the indexed sentence; a leading personal or
+# demonstrative pronoun otherwise depends on context that is absent from the
+# fact-only runtime record.
+_FACT_ANAPHORIC_SUBJECT = re.compile(
+    r"^(?:it|he|she|they|this|that|these|those)\b",
+    re.IGNORECASE,
+)
+# DIRECT_REUSE: TriviaQA ``_FACT_QA_WRAPPER`` with a necessary HotpotQA
+# extension for observed answer/query meta-framing.  The indexed payload must
+# state the underlying fact, not describe its role in a QA pair.
+_FACT_QA_WRAPPER = re.compile(
+    r"(?:\b(?:question|answer|prompt|response)\s*:|"
+    r"\b(?:dataset\s+source\s+prompt|paired\s+response|"
+    r"corresponding\s+answer)\b|\bthe\s+answer\s+is\b|"
+    r"\b(?:the\s+)?(?:answer|subject)\s+(?:of|to)\s+"
+    r"(?:the\s+)?(?:question|query|inquiry)\b)",
+    re.IGNORECASE,
+)
 _FUNCTION_WORDS = frozenset(
     {
         "a", "an", "and", "are", "as", "at", "be", "been", "being",
@@ -272,8 +291,7 @@ def validate_hotpotqa_fact_statement(
     """Admit one fact-only payload with no Q-A wire or unsupported entities."""
 
     fact = " ".join(_required_text(fact_statement, "fact_statement").split())
-    lowered = fact.casefold()
-    if re.search(r"\b(?:question|answer|prompt|response)\s*:", lowered):
+    if _FACT_QA_WRAPPER.search(fact):
         raise ValueError("fact_statement contains a Question/Answer wire")
     unquoted = _QUOTED_SPAN.sub(" quoted material ", fact)
     if "?" in unquoted or re.match(
@@ -282,8 +300,17 @@ def validate_hotpotqa_fact_statement(
         re.IGNORECASE,
     ):
         raise ValueError("fact_statement must be declarative")
+    if _FACT_ANAPHORIC_SUBJECT.match(fact):
+        raise ValueError("fact_statement begins with an unbound anaphoric subject")
     if not fact.rstrip('"\'’”)]} ').endswith((".", "!")):
         raise ValueError("fact_statement must be a complete declarative sentence")
+    # Raw source questions are provenance-only.  A yes/no question can look
+    # declarative after changing only its terminal punctuation, so use the
+    # same ordered lexical boundary as the canonical-answer shortcut gate.
+    if tuple(token.casefold() for token in _lexical_tokens(fact)) == tuple(
+        token.casefold() for token in _lexical_tokens(source.question)
+    ):
+        raise ValueError("fact_statement is identical to the source question")
 
     # DIRECT_REUSE: TriviaQA does not infer a new entity from capitalization
     # in a generated fact.  Its deterministic gate preserves source identity
@@ -300,7 +327,16 @@ def validate_hotpotqa_fact_statement(
     # The raw canonical answer is provenance-only.  Even when it already
     # looks like a complete sentence, it cannot be the indexed fact payload;
     # require a distinct semantic realization for every answer type.
-    if _normalized_text(fact) == _normalized_text(canonical):
+    # DIRECT_REUSE + NECESSARY_HOTPOT_ADAPTATION: TriviaQA's
+    # ``relation_bearing_answer_statement`` rejects a canonical span that
+    # differs only by surrounding punctuation.  HotpotQA generation may also
+    # change quote/comma punctuation while retaining the same bare lexical
+    # payload, so compare the complete ordered lexical surface as well.
+    if (
+        _normalized_text(fact) == _normalized_text(canonical)
+        or tuple(token.casefold() for token in _lexical_tokens(fact))
+        == tuple(token.casefold() for token in _lexical_tokens(canonical))
+    ):
         raise ValueError(
             "fact_statement is identical to the canonical answer"
         )

@@ -198,7 +198,10 @@ async def _materialize_one(
                             + (
                                 "The dataset answer is already a declarative clause; "
                                 "write a semantically equivalent self-contained "
-                                "declarative fact from that clause alone. Do not "
+                                "declarative fact. If the clause begins with an "
+                                "unbound pronoun, replace only that pronoun with the "
+                                "explicit subject already named in the source question. "
+                                "Use the question for no other inference and do not "
                                 "invent a relation between a possibly mismatched "
                                 "question and answer. "
                                 if binding_mode == "declarative_clause_paraphrase"
@@ -211,7 +214,10 @@ async def _materialize_one(
                                 "affirmative/negative proposition. Preserve relation "
                                 "direction and scope. "
                             )
-                            + "Do not add entities, aliases, facts, or Q-A labels. "
+                            + "Every pronoun or demonstrative must have an explicit "
+                            "antecedent inside the same fact. State the fact itself; "
+                            "do not describe an answer, question, query, or inquiry. "
+                            "Do not add entities, aliases, facts, or Q-A labels. "
                             "Return only the requested JSON fields."
                         ),
                         problem=(
@@ -287,10 +293,13 @@ async def _materialize_one(
                                 "Repair only one self-contained declarative fact. "
                                 + (
                                     "The dataset answer is a complete declarative "
-                                    "clause. Semantically paraphrase only that clause; "
+                                    "clause. Semantically paraphrase that clause; if it "
+                                    "begins with an unbound pronoun, replace only that "
+                                    "pronoun with the explicit subject already named in "
+                                    "the source question. Use the question for no other "
+                                    "inference; "
                                     "preserve all names, numbers, dates, quoted spans, "
-                                    "relations, and scope. Do not bind it to or infer "
-                                    "anything from the question. "
+                                    "relations, and scope. "
                                     if binding_mode
                                     == "declarative_clause_paraphrase"
                                     else
@@ -302,11 +311,15 @@ async def _materialize_one(
                                     "Copy the authoritative relation and scope; do not "
                                     "reverse arguments or add a fact. "
                                 )
-                                + "Do not add entities, aliases, or Q-A labels. "
+                                + "Every pronoun or demonstrative must have an explicit "
+                                "antecedent inside the same fact. State the fact itself; "
+                                "do not describe an answer, question, query, or inquiry. "
+                                "Do not add entities, aliases, or Q-A labels. "
                                 "Return only JSON."
                             ),
                             problem=(
                                 (
+                                    f"Source question:\n{source.question}\n\n"
                                     f"Dataset answer clause:\n"
                                     f"{source.canonical_answer}\n\n"
                                     if binding_mode
@@ -400,8 +413,10 @@ async def _materialize_one(
                             "be self-contained, declarative, free of Q-A labels, "
                             + (
                                 "and semantically equivalent to the supplied "
-                                "dataset answer clause alone. Do not require or "
-                                "invent a relation to the question. "
+                                "dataset answer clause. A leading pronoun may be "
+                                "resolved only to the explicit subject already named "
+                                "in the source question; do not use the question for "
+                                "any other inference or invent another relation. "
                                 if binding_mode
                                 == "declarative_clause_paraphrase"
                                 else
@@ -411,12 +426,15 @@ async def _materialize_one(
                                 "numbers, dates, and quoted titles must be preserved; "
                                 "ordinary phrases may use equivalent wording. "
                             )
-                            + "Reject added entities, aliases, facts, numbers, or "
+                            + "Reject any unresolved pronoun or demonstrative and any "
+                            "answer/question/query/inquiry meta-framing. Reject added "
+                            "entities, aliases, facts, numbers, or "
                             "dates. Evaluate every boolean independently and "
                             "return only JSON."
                         ),
                         problem=(
                             (
+                                f"Source question:\n{source.question}\n\n"
                                 f"Dataset answer clause:\n"
                                 f"{source.canonical_answer}\n\n"
                                 if binding_mode

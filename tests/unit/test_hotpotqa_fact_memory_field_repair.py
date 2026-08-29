@@ -159,18 +159,18 @@ def test_field_level_repair_preserves_admitted_question_and_repairs_only_fact(
                 1,
                 question="What disability did singer Al Hibbler have?",
                 answer="He was blind",
-            ),
-            "Which impairment did singer Al Hibbler live with?",
-            "He could not see.",
-            "declarative_clause_paraphrase",
-            "Dataset answer clause:",
+                ),
+                "Which impairment did singer Al Hibbler live with?",
+                "Singer Al Hibbler could not see.",
+                "declarative_clause_paraphrase",
+                "Dataset answer clause:",
         ),
         (
             _source(2),
             "Which individual wrote Atlas?",
             "Ada Lovelace authored Atlas.",
             "answer_slot_binding",
-            "Source question:",
+                "Dataset answer:\n",
         ),
     ),
 )
@@ -216,9 +216,10 @@ def test_clausal_answer_and_short_span_use_distinct_binding_modes(
     fact_verification = next(
         call for call in calls if "verify-fact" in str(call["request_id"])
     )
-    assert str(fact_verification["problem"]).startswith(fact_problem_prefix)
+    assert fact_problem_prefix in str(fact_verification["problem"])
     if expected_mode == "declarative_clause_paraphrase":
-        assert "Source question:" not in str(fact_verification["problem"])
+        assert "Source question:" in str(fact_verification["problem"])
+        assert source.question in str(fact_verification["problem"])
     else:
         assert source.canonical_answer in fact
 
