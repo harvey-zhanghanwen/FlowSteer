@@ -53,10 +53,10 @@ from src.interactive.hotpotqa_qa_memory_index import (  # noqa: E402
 )
 
 
-PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v8"
-PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v8"
+PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v9"
+PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v9"
 PARAPHRASE_PROVENANCE = (
-    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v8"
+    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v9"
 )
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
 

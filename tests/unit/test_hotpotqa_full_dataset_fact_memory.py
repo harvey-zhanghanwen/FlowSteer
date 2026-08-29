@@ -554,6 +554,25 @@ def test_internal_title_question_mark_is_declarative_but_terminal_is_not() -> No
         fact_index.validate_hotpotqa_fact_statement(source, "Did X?")
 
 
+def test_unbound_interrogative_answer_slot_is_not_a_fact() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:unbound-answer-slot",
+        base_task_id="hotpotqa:unbound-answer-slot",
+        cycled=False,
+        question="Atlas was authored by which person?",
+        canonical_answer="Ada Lovelace",
+    )
+    with pytest.raises(ValueError, match="unbound interrogative answer slot"):
+        fact_index.validate_hotpotqa_fact_statement(
+            source,
+            "Atlas was written by which person. Ada Lovelace was that person.",
+        )
+    assert fact_index.validate_hotpotqa_fact_statement(
+        source,
+        "Ada Lovelace was the person who wrote Atlas.",
+    )
+
+
 def test_materializer_has_no_fallback_option() -> None:
     parser = materializer._parser()
     option_strings = {

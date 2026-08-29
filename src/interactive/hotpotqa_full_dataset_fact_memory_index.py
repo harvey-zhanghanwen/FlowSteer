@@ -82,6 +82,22 @@ _FACT_ANAPHORIC_SUBJECT = re.compile(
     r"^(?:it|he|she|they|this|that|these|those)\b",
     re.IGNORECASE,
 )
+# A fact must bind the answer slot rather than preserve an interrogative
+# constituent inside an otherwise punctuated surface.  This rejects generated
+# QA concatenations such as ``X was written by which person. A was that
+# person.`` while retaining ordinary relative clauses (``A was the person who
+# wrote X``) and titles containing an internal question mark.
+_FACT_UNBOUND_ANSWER_SLOT = re.compile(
+    r"(?:\b(?:by|for|from|to|with|at|in|on|of|as)\s+(?:which|what)\s+"
+    r"(?:person|individual|entity|thing|place|city|country|state|year|date|"
+    r"number|film|movie|song|book|work|organization|company|team|one)\b|"
+    r"\b(?:is|are|was|were|did|does|do|has|have|had|can|could|will|would|"
+    r"should)\s+(?:who|whom|where|when|why|how)\b|"
+    r"\b(?:is|are|was|were)\s+(?:which|what)\s+"
+    r"(?:person|individual|entity|thing|place|city|country|state|year|date|"
+    r"number|film|movie|song|book|work|organization|company|team|one)\b)",
+    re.IGNORECASE,
+)
 # DIRECT_REUSE: TriviaQA ``_FACT_QA_WRAPPER`` with a necessary HotpotQA
 # extension for observed answer/query meta-framing.  The indexed payload must
 # state the underlying fact, not describe its role in a QA pair.
@@ -364,6 +380,8 @@ def validate_hotpotqa_fact_statement(
         raise ValueError("fact_statement must be declarative")
     if _FACT_ANAPHORIC_SUBJECT.match(fact):
         raise ValueError("fact_statement begins with an unbound anaphoric subject")
+    if _FACT_UNBOUND_ANSWER_SLOT.search(fact):
+        raise ValueError("fact_statement contains an unbound interrogative answer slot")
     if not fact.rstrip('"\'’”)]} ').endswith((".", "!")):
         raise ValueError("fact_statement must be a complete declarative sentence")
     # Raw source questions are provenance-only.  A yes/no question can look
