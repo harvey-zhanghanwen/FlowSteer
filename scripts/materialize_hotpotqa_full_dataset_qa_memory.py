@@ -257,6 +257,20 @@ async def materialize(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("resume receipts have duplicate or foreign source IDs")
     for source_id, value in accepted.items():
         materialize_hotpotqa_qa_memories((source_by_id[source_id],), (value,))
+        receipts.setdefault(
+            source_id,
+            {
+                "source_train_task_id": source_id,
+                "status": (
+                    "bootstrap_admitted"
+                    if source_id in bootstrap_by_id
+                    else "resume_admitted"
+                ),
+                "evaluation_scope": FULL_DATASET_EVALUATION_SCOPE,
+                "paraphrase_provenance": value.get("paraphrase_provenance"),
+                "completed_at": _utc_now(),
+            },
+        )
 
     pending = [source for source in sources if source.source_train_task_id not in accepted]
     model = None
@@ -310,6 +324,14 @@ async def materialize(args: argparse.Namespace) -> dict[str, object]:
             if isinstance(result, BaseException):
                 if not args.allow_dataset_pair_fallback:
                     failed_source_ids.append(source_id)
+                    receipts[source_id] = {
+                        "source_train_task_id": source_id,
+                        "status": "rejected_after_bounded_attempts",
+                        "evaluation_scope": FULL_DATASET_EVALUATION_SCOPE,
+                        "generation_error_type": type(result).__name__,
+                        "generation_error": " ".join(str(result).split())[:512],
+                        "completed_at": _utc_now(),
+                    }
                     continue
                 accepted[source_id] = _dataset_pair_fallback(source)
                 receipts[source_id] = {
@@ -333,12 +355,13 @@ async def materialize(args: argparse.Namespace) -> dict[str, object]:
             receipt_path,
             [receipts[item] for item in ordered_ids if item in receipts],
         )
-        if failed_source_ids:
-            raise RuntimeError(
-                f"{len(failed_source_ids)} paraphrases failed; accepted progress "
-                f"was preserved ({len(accepted)}/{len(sources)}); first="
-                f"{failed_source_ids[0]}"
-            )
+
+    if failed_source_ids:
+        raise RuntimeError(
+            f"{len(failed_source_ids)} paraphrases failed; accepted progress "
+            f"was preserved ({len(accepted)}/{len(sources)}); first="
+            f"{failed_source_ids[0]}"
+        )
 
     ordered = [accepted[source.source_train_task_id] for source in sources]
     materialize_hotpotqa_qa_memories(sources, ordered)

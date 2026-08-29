@@ -229,6 +229,129 @@ def test_materializer_admits_bootstrap_and_does_not_regenerate_it(
     assert rows[0]["paraphrase_provenance"] == "existing-local-qwen"
 
 
+def test_materializer_finishes_later_checkpoints_before_reporting_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = tuple(
+        HotpotQATrainQASource(
+            f"hotpotqa:train-{index}",
+            f"hotpotqa:train-{index}",
+            False,
+            f"Who was person {index}?",
+            f"Person {index}",
+        )
+        for index in range(4)
+    )
+    monkeypatch.setattr(
+        materializer,
+        "load_hotpotqa_full_dataset_qa_sources",
+        lambda **_kwargs: HotpotQAFullDatasetQASources(sources, ()),
+    )
+
+    class Registry:
+        def require_model(self, _model_id: str) -> object:
+            return type("Model", (), {"model_id": "qwen3.5-9b-local"})()
+
+        def provider_for(self, _model_id: str) -> object:
+            return object()
+
+    monkeypatch.setattr(materializer, "load_model_registry", lambda _path: Registry())
+    called: list[str] = []
+
+    async def fake_materialize_one(
+        source: HotpotQATrainQASource, **_kwargs: object
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        called.append(source.source_train_task_id)
+        if source.source_train_task_id == "hotpotqa:train-0":
+            raise RuntimeError("bounded semantic verifier rejection")
+        candidate = {
+            "source_train_task_id": source.source_train_task_id,
+            "paraphrase_question": f"Which individual was person {source.base_task_id}?",
+            "paraphrase_answer_statement": (
+                f"The canonical answer is {source.canonical_answer}."
+            ),
+            "paraphrase_provenance": materializer.PARAPHRASE_PROVENANCE,
+            "paraphrase_version": materializer.PARAPHRASE_VERSION,
+            "semantic_preservation_attested": True,
+        }
+        return candidate, {
+            "source_train_task_id": source.source_train_task_id,
+            "status": "accepted",
+        }
+
+    monkeypatch.setattr(materializer, "_materialize_one", fake_materialize_one)
+    output = tmp_path / "paraphrases.jsonl"
+    receipts = tmp_path / "receipts.jsonl"
+    args = Namespace(
+        dataset_catalog=str(tmp_path / "unused.yaml"),
+        train_count=4,
+        validation_count=0,
+        limit=None,
+        output=str(output),
+        receipts=str(receipts),
+        manifest=str(tmp_path / "manifest.json"),
+        bootstrap_materialization=[],
+        materialize_pending_as_dataset_pair_fallback=False,
+        model_catalog=str(tmp_path / "unused-models.yaml"),
+        model_id="qwen3.5-9b-local",
+        concurrency=1,
+        checkpoint_every=1,
+        seed=7,
+        max_attempts=1,
+        allow_dataset_pair_fallback=False,
+    )
+
+    with pytest.raises(RuntimeError, match=r"1 paraphrases failed.*\(3/4\)"):
+        asyncio.run(materializer.materialize(args))
+
+    assert called == [source.source_train_task_id for source in sources]
+    output_rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert [row["source_train_task_id"] for row in output_rows] == [
+        "hotpotqa:train-1",
+        "hotpotqa:train-2",
+        "hotpotqa:train-3",
+    ]
+    receipt_rows = [json.loads(line) for line in receipts.read_text().splitlines()]
+    assert [row["source_train_task_id"] for row in receipt_rows] == [
+        source.source_train_task_id for source in sources
+    ]
+    rejected = receipt_rows[0]
+    assert rejected["status"] == "rejected_after_bounded_attempts"
+    assert rejected["generation_error_type"] == "RuntimeError"
+    assert "semantic verifier rejection" in rejected["generation_error"]
+
+    called.clear()
+
+    async def succeed_failed_only(
+        source: HotpotQATrainQASource, **_kwargs: object
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        called.append(source.source_train_task_id)
+        candidate = {
+            "source_train_task_id": source.source_train_task_id,
+            "paraphrase_question": "Which individual was identified?",
+            "paraphrase_answer_statement": (
+                f"The canonical answer is {source.canonical_answer}."
+            ),
+            "paraphrase_provenance": materializer.PARAPHRASE_PROVENANCE,
+            "paraphrase_version": materializer.PARAPHRASE_VERSION,
+            "semantic_preservation_attested": True,
+        }
+        return candidate, {
+            "source_train_task_id": source.source_train_task_id,
+            "status": "accepted",
+        }
+
+    monkeypatch.setattr(materializer, "_materialize_one", succeed_failed_only)
+    manifest = asyncio.run(materializer.materialize(args))
+    assert called == ["hotpotqa:train-0"]
+    assert manifest["accepted_count"] == 4
+    assert manifest["rejected_count"] == 0
+    resumed_receipts = [
+        json.loads(line) for line in receipts.read_text().splitlines()
+    ]
+    assert all(row["status"] == "accepted" for row in resumed_receipts)
+
+
 def _manifest() -> HotpotQAFullDatasetQAMemoryIndexManifest:
     return HotpotQAFullDatasetQAMemoryIndexManifest(
         schema_version=FULL_DATASET_QA_MEMORY_SCHEMA_VERSION,
