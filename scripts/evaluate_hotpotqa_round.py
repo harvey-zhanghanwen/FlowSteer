@@ -108,8 +108,12 @@ def _git_state(root: Path) -> Mapping[str, Optional[str]]:
 def validate_hotpot_config(config: Mapping[str, Any]) -> None:
     """Reject any accidental expansion beyond the declared held-out round."""
 
-    validate_agent_graph_config(config)
     experiment = _mapping(config.get("experiment"), "experiment")
+    if experiment.get("build_only") is True:
+        raise ConfigurationError(
+            "HotpotQA evaluation runner rejects retrieval-index build-only profiles"
+        )
+    validate_agent_graph_config(config)
     bounded = _mapping(config.get("hotpotqa_evaluation"), "hotpotqa_evaluation")
     director = _mapping(config.get("director"), "director")
     grpo = _mapping(config.get("grpo"), "grpo")
@@ -405,6 +409,7 @@ def _retrieval_evidence_names(
         return (
             "retrieval_profile_selection",
             "retrieval_index_manifest",
+            "retrieval_index_smoke",
             "paraphrase_manifest",
         )
     if corpus_kind == "transductive_qa_memory":
@@ -437,6 +442,93 @@ def _validate_full_dataset_top_k_freeze(
     ):
         raise HotpotRoundError(
             "fact-memory selected, configured, and indexed Top-K differ"
+        )
+
+
+def _validate_full_dataset_fact_memory_smoke(
+    retrieval_config: Mapping[str, Any],
+    index_manifest: Mapping[str, Any],
+    smoke_receipt: Mapping[str, Any],
+) -> None:
+    """Validate only the fact Tool Adapter/receipt smoke boundary.
+
+    Director isolation, worker Tool ownership in a real rollout, and relation
+    routing are trajectory assertions and are deliberately not inferred from
+    this scripted, model-free smoke.
+    """
+
+    smoke_manifest = smoke_receipt.get("index_manifest")
+    if not isinstance(smoke_manifest, Mapping):
+        raise HotpotRoundError("fact-memory smoke has no index manifest")
+    required_true = (
+        "passed",
+        "same_query_top_k_deterministic",
+        "worker_receipt_ownership_valid",
+        "fact_only_search_read_projection_valid",
+        "qa_fields_absent_from_retrieval_payload",
+        "qa_wire_absent_from_retrieval_payload",
+    )
+    if any(smoke_receipt.get(name) is not True for name in required_true):
+        raise HotpotRoundError("fact-memory Tool Adapter/receipt smoke failed")
+    if (
+        smoke_receipt.get("tool_id") != retrieval_config.get("tool_id")
+        or smoke_receipt.get("web_search_used") is not False
+        or smoke_receipt.get("model_api_calls") != 0
+        or smoke_manifest.get("index_id") != index_manifest.get("index_id")
+        or smoke_manifest.get("frozen_top_k")
+        != retrieval_config.get("search_top_k")
+    ):
+        raise HotpotRoundError(
+            "fact-memory smoke receipt differs from the frozen final index/config"
+        )
+
+
+def _read_and_validate_retrieval_evidence(
+    retrieval_config: Mapping[str, Any],
+    paths: Mapping[str, Path],
+) -> dict[str, dict[str, Any]]:
+    """Read required retrieval evidence and fail closed on frozen-profile drift."""
+
+    evidence_names = _retrieval_evidence_names(retrieval_config)
+    missing_path_names = [name for name in evidence_names if name not in paths]
+    if missing_path_names:
+        raise HotpotRoundError(
+            "required retrieval evidence path is not configured: "
+            + ", ".join(missing_path_names)
+        )
+    missing = [str(paths[name]) for name in evidence_names if not paths[name].is_file()]
+    if missing:
+        raise HotpotRoundError(
+            "required retrieval evidence artifact is missing: " + ", ".join(missing)
+        )
+    values = {name: _read_json(paths[name]) for name in evidence_names}
+    if retrieval_config.get("corpus_kind") == "full_dataset_fact_memory":
+        _validate_full_dataset_top_k_freeze(
+            retrieval_config,
+            values["retrieval_index_manifest"],
+            values["retrieval_profile_selection"],
+        )
+        _validate_full_dataset_fact_memory_smoke(
+            retrieval_config,
+            values["retrieval_index_manifest"],
+            values["retrieval_index_smoke"],
+        )
+    return values
+
+
+def _validate_memory_retrieval_execution_boundary(
+    boundary: Mapping[str, Any],
+) -> None:
+    """Require Director/worker/relation assertions from real trajectories."""
+
+    if (
+        boundary.get("director_tool_calls") != 0
+        or not isinstance(boundary.get("retrieval_tool_calls_by_worker"), int)
+        or int(boundary["retrieval_tool_calls_by_worker"]) < 1
+        or boundary.get("retrieval_artifact_routed_via_relation") is not True
+    ):
+        raise HotpotRoundError(
+            "memory Director/worker/relation execution assertions failed"
         )
 
 
@@ -1606,6 +1698,40 @@ async def run_hotpot_round(
         _write_json(paths["manifest"], manifest)
         return manifest
 
+    if (
+        isinstance(retrieval_configuration, Mapping)
+        and retrieval_configuration.get("corpus_kind")
+        == "full_dataset_fact_memory"
+    ):
+        try:
+            evidence = _read_and_validate_retrieval_evidence(
+                retrieval_configuration,
+                paths,
+            )
+            manifest["retrieval_evidence_preflight"] = {
+                "passed": True,
+                "scope": "fact_tool_adapter_and_receipt_only",
+                "artifacts": {
+                    name: str(paths[name]) for name in evidence
+                },
+                "trajectory_assertions_deferred": [
+                    "director_tool_calls=0",
+                    "retrieval_tool_calls_by_worker>0",
+                    "retrieval_artifact_routed_via_relation=true",
+                ],
+            }
+            _write_json(paths["manifest"], manifest)
+        except Exception as exc:
+            manifest.update(
+                status="failed_retrieval_evidence_preflight",
+                error=_safe_error(exc),
+                completed_at=_utc_now(),
+            )
+            _write_json(paths["manifest"], manifest)
+            raise HotpotRoundError(
+                "HotpotQA retrieval evidence preflight failed"
+            ) from exc
+
     try:
         backend = LiveSmokeBackend.from_config(config, root, evaluation_only=True)
         director = _mapping(config["director"], "director")
@@ -1725,6 +1851,22 @@ async def run_hotpot_round(
         _write_json(paths["manifest"], manifest)
         raise HotpotRoundError("no canary task completed the full Stable Zero chain")
 
+    retrieval_boundary: Mapping[str, Any] | None = None
+    if isinstance(retrieval_configuration, Mapping):
+        tool_id = str(retrieval_configuration.get("tool_id", "qa-retrieval"))
+        retrieval_boundary = _retrieval_boundary_statistics(
+            trajectories,
+            tool_id=tool_id,
+        )
+        if retrieval_configuration.get("corpus_kind") in {
+            "train_qa_memory",
+            "transductive_qa_memory",
+            "full_dataset_fact_memory",
+        }:
+            _validate_memory_retrieval_execution_boundary(retrieval_boundary)
+        manifest["retrieval_execution_boundary"] = dict(retrieval_boundary)
+        _write_json(paths["manifest"], manifest)
+
     if canary_only:
         manifest.update(
             status="stable_zero_confirmed",
@@ -1745,38 +1887,28 @@ async def run_hotpot_round(
     }
     retrieval_configuration = config.get("qa_embedding_retrieval")
     if isinstance(retrieval_configuration, Mapping):
-        tool_id = str(retrieval_configuration.get("tool_id", "qa-retrieval"))
         report = {
             **dict(report),
-            "retrieval_execution_boundary": _retrieval_boundary_statistics(
-                trajectories,
-                tool_id=tool_id,
-            ),
+            "retrieval_execution_boundary": dict(retrieval_boundary or {}),
         }
     if config.get("qa_embedding_retrieval") is not None:
         retrieval_config = _mapping(
             config["qa_embedding_retrieval"], "qa_embedding_retrieval"
         )
-        # Reuse the existing retrieval-profile evidence channel for the
-        # SkillFlow/TriviaQA development-only frozen Top-K receipt.
-        evidence_names = _retrieval_evidence_names(retrieval_config)
-        required_retrieval_artifacts = {
-            name: paths[name]
-            for name in evidence_names
-        }
-        missing = [str(path) for path in required_retrieval_artifacts.values() if not path.is_file()]
-        if missing:
-            raise HotpotRoundError(
-                "required retrieval evidence artifact is missing: " + ", ".join(missing)
-            )
+        # Re-read all evidence after collection so the final report cannot
+        # silently accept artifacts changed after the pre-run freeze gate.
+        retrieval_evidence = _read_and_validate_retrieval_evidence(
+            retrieval_config,
+            paths,
+        )
         report = {
             **dict(report),
             "retrieval_evidence": {
                 name: {
-                    "path": str(path),
-                    "value": _read_json(path),
+                    "path": str(paths[name]),
+                    "value": value,
                 }
-                for name, path in required_retrieval_artifacts.items()
+                for name, value in retrieval_evidence.items()
             },
         }
         if retrieval_config.get("corpus_kind") in {
@@ -1786,28 +1918,11 @@ async def run_hotpot_round(
         }:
             index_manifest = _read_json(paths["retrieval_index_manifest"])
             paraphrase_manifest = _read_json(paths["paraphrase_manifest"])
-            if retrieval_config.get("corpus_kind") == "full_dataset_fact_memory":
-                top_k_selection = _read_json(paths["retrieval_profile_selection"])
-                _validate_full_dataset_top_k_freeze(
-                    retrieval_config,
-                    index_manifest,
-                    top_k_selection,
-                )
             boundary = _mapping(
                 report["retrieval_execution_boundary"],
                 "retrieval_execution_boundary",
             )
-            if (
-                boundary.get("director_tool_calls") != 0
-                or not isinstance(
-                    boundary.get("retrieval_tool_calls_by_worker"), int
-                )
-                or int(boundary["retrieval_tool_calls_by_worker"]) < 1
-                or boundary.get("retrieval_artifact_routed_via_relation") is not True
-            ):
-                raise HotpotRoundError(
-                    "memory Director/worker/relation execution assertions failed"
-                )
+            _validate_memory_retrieval_execution_boundary(boundary)
             report = {
                 **dict(report),
                 "retrieval_memory": {

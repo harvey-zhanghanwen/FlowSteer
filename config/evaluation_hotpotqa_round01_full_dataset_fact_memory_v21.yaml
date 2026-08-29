@@ -97,6 +97,7 @@ storage:
   error_demos_path: "reports/hotpotqa_round01_full_dataset_fact_memory_v21/error_demos.jsonl"
   retrieval_profile_selection_path: "data/hotpotqa_full_dataset_fact_memory_v1/top_k_selection.json"
   retrieval_index_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/index_topk3/manifest.json"
+  retrieval_index_smoke_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/fact_memory_index_smoke_receipt.json"
   paraphrase_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/materialization_manifest.json"
   manifest_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/run_manifest.json"
   preflight_receipt_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/preflight_receipt.json"

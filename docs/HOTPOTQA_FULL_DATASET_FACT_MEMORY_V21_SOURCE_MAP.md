@@ -20,7 +20,9 @@ fixed 128-task HotpotQA evaluator panel.
 | Attached/range/abbreviated numeric surface normalization (`a2002`, `1980-1991`, `WWII`) | TriviaQA immutable numeric/date admission boundary | Necessary HotpotQA adaptation over numeric keys; repeated references do not invent a new constraint, semantic constraints remain verifier-gated |
 | Source-aware clausal answer binding | SkillFlow/TriviaQA `_clausal_canonical_relation_statement` | Direct narrow-pattern reuse plus necessary HotpotQA support for punctuated full-sentence canonical answers; all other answers use answer-slot binding |
 | Single-token ordinary answer realization (`American`/`America`, `Danish`/`Denmark`) | TriviaQA independent semantic answer verifier | Necessary HotpotQA adaptation: multi-token identity lineage stays deterministic; single-token equivalence remains verifier-gated |
-| Development-only Top-K selection | SkillFlow/TriviaQA fact-memory Top-K selector (`k={1,2,3,5}`, smallest `k` at maximal Recall) | Thin adaptation |
+| Development-only Top-K selection | SkillFlow/TriviaQA fact-memory Top-K selector (`k={1,3,5}`, smallest `k` at maximal Recall) | Thin adaptation; HotpotQA additionally evaluates `k=2` inside the same bounded candidate rule |
+| Model-free fact Tool smoke | Existing HotpotQA QA-memory smoke plus FlowSteer `AgentRuntime`/Tool receipt fixtures | Thin test-harness adaptation; proves deterministic Search/Read, fact-only projection, and worker-owned receipts only |
+| Pre-run retrieval evidence gate | Existing HotpotQA retrieval evidence paths plus TriviaQA frozen Top-K receipt | Thin runner adaptation; selection/index/config/smoke are read before backend/provider construction and re-read for the final report |
 | Global 97,852-record fact manifest/index wrapper | SkillFlow passage record plus FlowSteer normalized embedding index | Necessary scale adapter |
 
 ## Runtime boundary
@@ -29,12 +31,16 @@ fixed 128-task HotpotQA evaluator panel.
   state, and control-plane feedback only.
 - Only a Canvas worker Agent with `execution_mode=react` and
   `allowed_tools=["hotpotqa.fact_memory"]` can call the Tool.
-- Every worker must execute dynamic `search(query,k)` and `read(memory_id)`;
-  no Web Search or static prefetch path exists.
+- Every evaluation worker must execute dynamic `search(query,k)` and
+  `read(memory_id)`; no Web Search or evaluation-time static prefetch path
+  exists.
 - Retrieved fact artifacts must reach the Output Agent through an explicit
   AgentGraph relation with Tool-receipt lineage.
 - Parametric answering is admitted only after the worker reports the complete
   frozen top-k group as unsupported.
+- The model-free smoke does not stand in for a real AgentGraph trajectory.
+  `director_tool_calls=0`, `retrieval_tool_calls_by_worker>0`, and explicit
+  relation routing are asserted from canary/full trajectory receipts.
 
 ## Data boundary
 
