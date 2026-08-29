@@ -36,6 +36,7 @@ from .aime2026_adapter import (
     AIME2026_EVALUATOR_VERSION,
     score_aime2026_integer,
 )
+from .mbppplus_adapter import MBPPPLUS_EVALUATOR_VERSION
 from .records import TaskRecord
 from .task_dataset import verified_year_to_decade_normalization
 
@@ -56,6 +57,9 @@ UNAVAILABLE_EVALUATOR_VERSION = "agentgraph.evaluator.unavailable.v1"
 JudgeCallback = Callable[[Sequence[Mapping[str, str]], str], Awaitable[Any]]
 RunGraphCallback = Callable[[str], Awaitable[str]]
 SWEHarnessCallback = Callable[[TaskRecord | Mapping[str, Any], str], Awaitable[Any]]
+MBPPPlusHarnessCallback = Callable[
+    [TaskRecord | Mapping[str, Any], str], Awaitable[Any]
+]
 
 
 @dataclass(frozen=True)
@@ -403,6 +407,8 @@ def _dataset_key(record: TaskRecord | Mapping[str, Any]) -> str:
         return "alfworld"
     if "swe" in joined and "bench" in joined:
         return "swe_bench"
+    if "mbpp" in joined:
+        return "mbpp_plus"
     return ""
 
 
@@ -1707,6 +1713,108 @@ async def _evaluate_swebench(
     )
 
 
+async def _evaluate_mbpp_plus(
+    record: TaskRecord | Mapping[str, Any],
+    prediction: str,
+    *,
+    mbppplus_harness: Optional[MBPPPlusHarnessCallback],
+) -> EvaluationOutcome:
+    if mbppplus_harness is None:
+        return _invalid(
+            "mbppplus_harness_unavailable",
+            evaluator_version=MBPPPLUS_EVALUATOR_VERSION,
+            details={"proxy_evaluator_used": False},
+        )
+    try:
+        callback_result = mbppplus_harness(record, prediction)
+        result = (
+            await callback_result
+            if inspect.isawaitable(callback_result)
+            else callback_result
+        )
+    except Exception as exc:
+        return _invalid(
+            "mbppplus_harness_failed",
+            evaluator_version=MBPPPLUS_EVALUATOR_VERSION,
+            details={
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+
+    if not isinstance(result, Mapping):
+        return _invalid(
+            "mbppplus_harness_result_invalid",
+            evaluator_version=MBPPPLUS_EVALUATOR_VERSION,
+        )
+    base_status = result.get("base_status")
+    plus_status = result.get("plus_status")
+    base_passed = result.get("base_passed")
+    plus_passed = result.get("plus_passed")
+    pass_at_1 = result.get("pass_at_1")
+    official_statuses = {"pass", "fail", "timeout"}
+    if (
+        base_status not in official_statuses
+        or plus_status not in official_statuses
+        or type(base_passed) is not bool
+        or type(plus_passed) is not bool
+        or isinstance(pass_at_1, bool)
+        or not isinstance(pass_at_1, (int, float))
+        or not math.isfinite(float(pass_at_1))
+    ):
+        return _invalid(
+            "mbppplus_harness_result_invalid",
+            evaluator_version=MBPPPLUS_EVALUATOR_VERSION,
+        )
+    expected_base_passed = base_status == "pass"
+    expected_plus_passed = plus_status == "pass"
+    expected_pass_at_1 = float(expected_plus_passed)
+    if (
+        base_passed != expected_base_passed
+        or plus_passed != expected_plus_passed
+        or float(pass_at_1) != expected_pass_at_1
+    ):
+        return _invalid(
+            "mbppplus_harness_result_inconsistent",
+            evaluator_version=MBPPPLUS_EVALUATOR_VERSION,
+        )
+
+    raw_diagnostics = result.get("format_diagnostics", {})
+    format_diagnostics: dict[str, Any] = {}
+    if isinstance(raw_diagnostics, Mapping):
+        for key in (
+            "raw_prediction_empty",
+            "sanitized_prediction_empty",
+            "sanitization_changed",
+            "sanitized_character_count",
+            "entry_point",
+        ):
+            if key in raw_diagnostics:
+                format_diagnostics[key] = _detail_value(raw_diagnostics[key])
+    details = {
+        "task_id": str(result.get("task_id", "")),
+        "base_status": base_status,
+        "plus_status": plus_status,
+        "base_passed": base_passed,
+        "plus_passed": plus_passed,
+        "format_diagnostics": format_diagnostics,
+        "evaluator_protocol": str(result.get("evaluator_protocol", "")),
+        "runtime_version": str(result.get("runtime_version", "")),
+        "dataset_version": str(result.get("dataset_version", "")),
+    }
+    return EvaluationOutcome(
+        valid=True,
+        reward=expected_pass_at_1,
+        metrics={
+            "base_pass_at_1": float(base_passed),
+            "pass_at_1": expected_pass_at_1,
+        },
+        reason="evaluated",
+        details=details,
+        evaluator_version=MBPPPLUS_EVALUATOR_VERSION,
+    )
+
+
 async def evaluate_task(
     record: TaskRecord | Mapping[str, Any],
     prediction: str,
@@ -1715,6 +1823,7 @@ async def evaluate_task(
     judge_model: str = "",
     run_graph: Optional[RunGraphCallback] = None,
     swe_harness: Optional[SWEHarnessCallback] = None,
+    mbppplus_harness: Optional[MBPPPlusHarnessCallback] = None,
     max_environment_steps: int = 50,
     ragen_adapter_path: str | Path = DEFAULT_RAGEN_ADAPTER_PATH,
     environment_replay_trace: Sequence[Mapping[str, Any]] = (),
@@ -1724,7 +1833,9 @@ async def evaluate_task(
     ``run_graph`` receives one short environment prompt per step and must return
     exactly one action string.  ``judge`` receives the official HealthBench
     grader message list and the selected judge model name.  SWE-bench remains
-    invalid unless a real harness callback explicitly reports ``resolved``.
+    invalid unless a real harness callback explicitly reports ``resolved``;
+    MBPP+ remains invalid unless the official EvalPlus callback reports its
+    base and plus statuses.
     ``environment_replay_trace`` may contain a prior WebShop/ALFWorld evaluator
     prefix: the environment is reset and each recorded transition is checked
     exactly before ``run_graph`` is called for the first missing step.
@@ -1755,6 +1866,12 @@ async def evaluate_task(
         )
     if dataset == "swe_bench":
         return await _evaluate_swebench(record, str(prediction), swe_harness=swe_harness)
+    if dataset == "mbpp_plus":
+        return await _evaluate_mbpp_plus(
+            record,
+            str(prediction),
+            mbppplus_harness=mbppplus_harness,
+        )
     return _invalid("unsupported_dataset", details={"dataset_key": dataset})
 
 
@@ -1764,6 +1881,8 @@ __all__ = [
     "GRADER_TEMPLATE",
     "AIME2026_EVALUATOR_VERSION",
     "HOTPOTQA_ANSWER_EVALUATOR_VERSION",
+    "MBPPPLUS_EVALUATOR_VERSION",
+    "MBPPPlusHarnessCallback",
     "SWEHarnessCallback",
     "TRIVIAQA_ANSWER_EVALUATOR_VERSION",
     "evaluate_task",

@@ -158,6 +158,13 @@ _BENCHMARKS: Mapping[str, Mapping[str, Any]] = {
         "primary_metric": "resolved",
         "metric_names": ("resolved",),
     },
+    "mbpp_plus": {
+        "label": "MBPP+",
+        "section_names": ("mbppplus_evaluation",),
+        "phase_names": ("mbppplus_evaluation",),
+        "primary_metric": "pass_at_1",
+        "metric_names": ("pass_at_1", "base_pass_at_1"),
+    },
 }
 
 _INTERACTIVE_BENCHMARKS = frozenset({"webshop", "alfworld"})
@@ -288,6 +295,20 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
             and type(per_source.get(dataset_key)) is int
             and int(per_source[dataset_key]) > 0
         )
+    if dataset_key == "mbpp_plus":
+        evaluation = _mapping(config.get("evaluation"), "evaluation")
+        checks["evaluation.evalplus_enabled"] = (
+            evaluation.get("evalplus_enabled") is True
+        )
+        for field_name in (
+            "evalplus_runtime_path",
+            "evalplus_dataset_path",
+            "evalplus_cache_root",
+        ):
+            checks[f"evaluation.{field_name}"] = bool(
+                isinstance(evaluation.get(field_name), str)
+                and str(evaluation[field_name]).strip()
+            )
     if dataset_key == "swe_bench":
         evaluation = _mapping(config.get("evaluation"), "evaluation")
         checks["evaluation.swebench_harness_enabled"] = (
@@ -396,7 +417,7 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         bounded.get("official_2026_only") is True
         or bounded.get("benchmark_slice") == "official_aime_2026"
     )
-    maximum = 30 if official_aime else 128
+    maximum = 30 if official_aime else 100 if dataset_key == "mbpp_plus" else 128
     if (
         isinstance(sample_count, bool)
         or not isinstance(sample_count, int)
@@ -957,6 +978,12 @@ async def _evaluate_prediction(
                 )
             ),
         )
+    if dataset_key == "mbpp_plus":
+        return await evaluate_task(
+            task,
+            prediction,
+            mbppplus_harness=backend.mbppplus_harness,
+        )
     swe_runtime = backend.config.get("swe_coding_runtime")
     if (
         dataset_key == "swe_bench"
@@ -1049,6 +1076,10 @@ def _synthetic_evaluator_preflight_fixture(
             ),
             "preflight",
         )
+    if dataset_key == "mbpp_plus":
+        raise CompletionBenchmarkRoundError(
+            "MBPP+ preflight must use the official evaluator-only preflight"
+        )
     if dataset_key == "swe_bench":
         return (
             TaskRecord(
@@ -1136,6 +1167,36 @@ async def _run_evaluator_preflight(
             "",
             run_graph=invalid_environment_action,
         )
+    elif dataset_key == "mbpp_plus":
+        evaluator = getattr(backend, "mbppplus_evaluator", None)
+        if evaluator is None or not callable(getattr(evaluator, "preflight", None)):
+            raise CompletionBenchmarkRoundError(
+                "official MBPP+ evaluator is not attached"
+            )
+        raw_receipt = await evaluator.preflight()
+        if not isinstance(raw_receipt, Mapping) or raw_receipt.get("ready") is not True:
+            raise CompletionBenchmarkRoundError(
+                "official EvalPlus MBPP+ evaluator preflight failed"
+            )
+        return {
+            "passed": True,
+            "evaluator_version": evaluator_version_for(
+                TaskRecord(
+                    task_id="evaluator-preflight:mbpp_plus:receipt-v1",
+                    question="Evaluator-only preflight receipt.",
+                    ground_truth=None,
+                    split="train",
+                    metadata={"dataset_key": "mbpp_plus"},
+                )
+            ),
+            "base_passed": raw_receipt.get("base_passed"),
+            "plus_passed": raw_receipt.get("plus_passed"),
+            "selection_disjoint": raw_receipt.get("selection_disjoint"),
+            "selected_task_count": raw_receipt.get("selected_task_count"),
+            "evaluator_protocol": raw_receipt.get("evaluator_protocol"),
+            "runtime_version": raw_receipt.get("runtime_version"),
+            "dataset_version": raw_receipt.get("dataset_version"),
+        }
     elif dataset_key == "swe_bench":
         # The official harness performs its own runtime preflight before this
         # callback check.  Use a synthetic unresolved result here so neither a
@@ -1175,6 +1236,13 @@ def _evaluator_runtime_failure_outcome(
             "kind": "repository_patch",
             "source": "CodingExecutionAdapter.materialize_workspace_diff",
             "repository_patch": prediction,
+            "non_empty": bool(prediction.strip()),
+        }
+    elif _dataset_key(task) == "mbpp_plus":
+        details["terminal_artifact"] = {
+            "kind": "python_source",
+            "source": "Output Agent terminal text",
+            "python_source": prediction,
             "non_empty": bool(prediction.strip()),
         }
     return EvaluationOutcome(
@@ -1460,7 +1528,16 @@ async def _direct_one(
         raise CompletionBenchmarkRoundError(
             "Direct generation seed receipt differs from config"
         )
-    evaluation = await _evaluate_prediction(backend, task, response.text)
+    try:
+        evaluation = await _evaluate_prediction(backend, task, response.text)
+    except Exception as exc:
+        if dataset_key != "mbpp_plus":
+            raise
+        evaluation = _evaluator_runtime_failure_outcome(
+            task,
+            response.text,
+            exc,
+        )
     return {
         "schema_version": "flowsteer.completion_benchmark.direct_prediction.v1",
         "dataset_key": dataset_key,
@@ -1523,9 +1600,9 @@ async def _collect_direct(
         task = selected_by_id.get(candidate.get("task_id"))
         evaluation = candidate.get("evaluation")
         existing_answer = candidate.get("final_answer")
-        retry_swebench_evaluator = bool(
+        retry_official_evaluator = bool(
             task is not None
-            and _dataset_key(task) == "swe_bench"
+            and _dataset_key(task) in {"swe_bench", "mbpp_plus"}
             and isinstance(existing_answer, str)
             and (
                 not isinstance(evaluation, Mapping)
@@ -1542,7 +1619,7 @@ async def _collect_direct(
             and (
                 not isinstance(evaluation, Mapping)
                 or evaluation.get("evaluator_version") != evaluator_version_for(task)
-                or retry_swebench_evaluator
+                or retry_official_evaluator
             )
         ):
             updated = dict(candidate)
@@ -1561,8 +1638,12 @@ async def _collect_direct(
             updated["evaluation"] = asdict(rescored_evaluation)
             updated["rescore_receipt"] = {
                 "mode": (
-                    "official_evaluator_only_existing_patch"
-                    if retry_swebench_evaluator
+                    (
+                        "official_evaluator_only_existing_patch"
+                        if task is not None and _dataset_key(task) == "swe_bench"
+                        else "official_evaluator_only_existing_python_source"
+                    )
+                    if retry_official_evaluator
                     else "offline_existing_prediction"
                 ),
                 "source_evaluator_version": (
@@ -2390,16 +2471,17 @@ def _paired_rows(
                 "dataset_key": dataset_key,
                 "task_id": task.task_id,
                 "question": task.question,
-                # SWE-bench gold patches belong to the evaluator checkpoint,
-                # not public paired/ wrong-demo diagnostics.  Static QA keeps
-                # its existing report contract; SWE reports carry only the
-                # public issue and generated patches.
+                # Trusted SWE-bench patches and MBPP+ solutions/tests belong to
+                # the evaluator checkpoint, not public paired diagnostics.
+                # Reports retain only public prompts and generated artifacts.
                 "ground_truth": (
-                    None if dataset_key == "swe_bench" else task.ground_truth
+                    None
+                    if dataset_key in {"swe_bench", "mbpp_plus"}
+                    else task.ground_truth
                 ),
                 "ground_truth_role": (
                     "evaluator_only_redacted"
-                    if dataset_key == "swe_bench"
+                    if dataset_key in {"swe_bench", "mbpp_plus"}
                     else "reported_reference_answer"
                 ),
                 "primary_metric": metric_name,
@@ -2515,6 +2597,25 @@ def _aggregate(
     if dataset_key == "aime_2026":
         result["correct"] = sum(
             float(value.get("accuracy", 0.0)) == 1.0 for value in values
+        )
+    elif dataset_key == "mbpp_plus":
+        result["passed"] = sum(
+            float(value.get("pass_at_1", 0.0)) == 1.0 for value in values
+        )
+        result["base_passed"] = sum(
+            float(value.get("base_pass_at_1", 0.0)) == 1.0 for value in values
+        )
+        complete_official_coverage = len(valid) == total
+        result["official_pass_at_1"] = (
+            result["strict_pass_at_1"] if complete_official_coverage else None
+        )
+        result["official_base_pass_at_1"] = (
+            result["strict_base_pass_at_1"] if complete_official_coverage else None
+        )
+        result["official_pass_at_1_status"] = (
+            "complete_official_evaluator_coverage"
+            if complete_official_coverage
+            else "incomplete_official_evaluator_coverage"
         )
     elif dataset_key == "swe_bench":
         result["resolved"] = sum(
@@ -2832,6 +2933,8 @@ def _report(
                 "swebench_dataset_source"
             )
             if dataset_key == "swe_bench"
+            else bounded.get("population")
+            if dataset_key == "mbpp_plus"
             else bounded.get("benchmark_slice")
         ),
         "sample_count": len(rows),
@@ -2860,6 +2963,8 @@ def _report(
             if dataset_key == "aime_2026"
             else "OpenAI_simple_evals_HealthBench_rubric_raw_score"
             if dataset_key == "healthbench_professional"
+            else "EvalPlus_MBPP_plus_official_pass_at_1_with_base_pass_at_1_auxiliary"
+            if dataset_key == "mbpp_plus"
             else (
                 "SWE_bench_regular_dev_official_Docker_harness_resolved_rate"
                 if _mapping(config["evaluation"], "evaluation").get(
@@ -3260,6 +3365,58 @@ def _attach_swebench_official_harness(
     return receipt
 
 
+def _mbppplus_official_task_id(task: TaskRecord) -> str:
+    """Return the public EvalPlus task ID bound to one aligned record."""
+
+    payload = task.metadata.get("evaluator_payload", {})
+    candidates = [
+        task.metadata.get("source_task_id"),
+        task.metadata.get("benchmark_task_id"),
+        payload.get("task_id") if isinstance(payload, Mapping) else None,
+        task.task_id.rsplit(":", 1)[-1],
+    ]
+    for value in candidates:
+        if not isinstance(value, str):
+            continue
+        prefix, separator, number = value.strip().partition("/")
+        if separator and prefix == "Mbpp" and number.isdigit():
+            return f"Mbpp/{int(number)}"
+    raise CompletionBenchmarkRoundError(
+        f"selected MBPP+ task {task.task_id!r} has no official Mbpp/<number> ID"
+    )
+
+
+def _attach_mbppplus_official_evaluator(
+    backend: LiveSmokeBackend,
+    config: Mapping[str, Any],
+    root: Path,
+    selected: Sequence[TaskRecord],
+) -> Mapping[str, Any]:
+    """Attach the official EvalPlus callback without exposing trusted tests."""
+
+    from src.interactive.mbppplus_adapter import MBPPPlusOfficialEvaluator
+
+    evaluation = _mapping(config["evaluation"], "evaluation")
+    selected_task_ids = tuple(
+        _mbppplus_official_task_id(task) for task in selected
+    )
+    evaluator = MBPPPlusOfficialEvaluator(
+        runtime_path=_resolve(root, str(evaluation["evalplus_runtime_path"])),
+        dataset_path=_resolve(root, str(evaluation["evalplus_dataset_path"])),
+        cache_root=_resolve(root, str(evaluation["evalplus_cache_root"])),
+        selected_task_ids=selected_task_ids,
+    )
+    backend.mbppplus_evaluator = evaluator
+    backend.mbppplus_harness = evaluator.evaluate
+    return {
+        "mode": "official_evalplus_terminal_evaluator",
+        "selected_task_count": len(selected_task_ids),
+        "evaluator_version": evaluator_version_for(selected[0]),
+        "hidden_tests_model_visible": False,
+        "canonical_solution_model_visible": False,
+    }
+
+
 def _completion_stable_zero_check(
     tasks: Sequence[TaskRecord],
     direct: Mapping[str, Mapping[str, Any]],
@@ -3555,6 +3712,7 @@ async def run_completion_benchmark_round(
     try:
         preflight_harness = None
         swebench_harness_receipt = None
+        mbppplus_evaluator_receipt = None
         if dataset_key == "swe_bench":
             swe_runtime = _mapping(
                 config.get("swe_coding_runtime"), "swe_coding_runtime"
@@ -3711,6 +3869,13 @@ async def run_completion_benchmark_round(
         elif dataset_key == "swe_bench":
             assert preflight_harness is not None
             backend.swe_harness = preflight_harness
+        elif dataset_key == "mbpp_plus":
+            mbppplus_evaluator_receipt = _attach_mbppplus_official_evaluator(
+                backend,
+                config,
+                root,
+                active,
+            )
         director = _mapping(config["director"], "director")
         behavior_adapter = director.get("behavior_adapter_name")
         behavior_checkpoint = director.get("behavior_adapter_checkpoint")
@@ -3756,6 +3921,7 @@ async def run_completion_benchmark_round(
             ),
             "healthbench_judge_receipt": judge_receipt,
             "swebench_harness_receipt": swebench_harness_receipt,
+            "mbppplus_evaluator_receipt": mbppplus_evaluator_receipt,
         })
         manifest["runtime_resource"]["sglang_server_runtime"] = (
             sglang_server_runtime

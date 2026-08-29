@@ -1,0 +1,29 @@
+# SkillFlow fixed-100 MBPP+ evaluation population, materialized from the
+# official EvalPlus v0.2.0 release.  Canonical solutions and both base/plus
+# test inputs are kept only in evaluator_private.jsonl.
+
+schema_version: "flowsteer.agentgraph.mbppplus.dataset.v1"
+task_schema_version: "flowsteer.agentgraph.task.v1"
+
+aligned_dir: "data/mbpp_plus/fixed_100_v1"
+aligned_files:
+  train: "data/mbpp_plus/fixed_100_v1/train.jsonl"
+  validation: "data/mbpp_plus/fixed_100_v1/validation.jsonl"
+  test: "data/mbpp_plus/fixed_100_v1/test.jsonl"
+  evaluator_private: "data/mbpp_plus/fixed_100_v1/evaluator_private.jsonl"
+  manifest: "data/mbpp_plus/fixed_100_v1/manifest.json"
+
+sources:
+  official_evalplus:
+    dataset_version: "v0.2.0"
+    path: "data/mbpp_plus/source/MbppPlus-v0.2.0.jsonl"
+    release_url: "https://github.com/evalplus/mbppplus_release/releases/download/v0.2.0/MbppPlus.jsonl.gz"
+
+split_policy:
+  mode: "official_evaluation_only"
+  protocol: "mbpp-plus-fixed-100@1"
+  ordering: "canonical_numeric_task_id_ascending"
+  source_count: 378
+  test_count: 100
+  training_enabled: false
+  metric: "pass@1"

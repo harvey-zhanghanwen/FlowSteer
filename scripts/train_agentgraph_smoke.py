@@ -138,6 +138,7 @@ from src.interactive.task_evaluator import (
     EvaluationOutcome,
     HEALTHBENCH_EVALUATOR_VERSION,
     HOTPOTQA_ANSWER_EVALUATOR_VERSION,
+    MBPPPLUS_EVALUATOR_VERSION,
     RAGEN_EVALUATOR_VERSION,
     SWEHarnessCallback,
     SWEBENCH_EVALUATOR_VERSION,
@@ -466,6 +467,24 @@ def _workflow_problem(
             "Public task metadata: benchmark_id=aime-2026; "
             f"answer_format={answer_format}. Submit exactly one decimal integer "
             "and no explanation."
+        )
+    if source_key == "mbpp_plus":
+        entry_point = task.metadata.get("entry_point")
+        if not isinstance(entry_point, str) or not entry_point.strip():
+            payload = task.metadata.get("evaluator_payload", {})
+            entry_point = (
+                payload.get("entry_point") if isinstance(payload, Mapping) else None
+            )
+        if not isinstance(entry_point, str) or not entry_point.strip():
+            raise ConfigurationError(
+                f"MBPP+ task {task.task_id!r} has no public entry_point"
+            )
+        return (
+            f"{task.question}\n\n"
+            "Terminal artifact: return one complete Python source file that "
+            f"defines the required entry point `{entry_point.strip()}`. The "
+            "terminal artifact is Python source, not a repository patch, a test "
+            "status, or a prose-only answer."
         )
     if source_key not in {"webshop", "alfworld"}:
         return task.question
@@ -1526,6 +1545,8 @@ def evaluator_version_for(task: TaskRecord) -> str:
         return RAGEN_EVALUATOR_VERSION
     if source == "swe_bench":
         return SWEBENCH_EVALUATOR_VERSION
+    if source == "mbpp_plus":
+        return MBPPPLUS_EVALUATOR_VERSION
     raise ValueError(f"unsupported smoke dataset key: {source}")
 
 
@@ -2066,6 +2087,9 @@ class SmokeBackend(Protocol):
 
 
 JudgeCallback = Callable[[Sequence[Mapping[str, str]], str], Awaitable[Any]]
+MBPPPlusHarnessCallback = Callable[
+    [TaskRecord | Mapping[str, Any], str], Awaitable[Any]
+]
 
 
 class LiveSmokeBackend:
@@ -2085,6 +2109,7 @@ class LiveSmokeBackend:
         judge: Optional[JudgeCallback],
         judge_model: str,
         swe_harness: Optional[SWEHarnessCallback] = None,
+        mbppplus_harness: Optional[MBPPPlusHarnessCallback] = None,
         skill_pipeline: Optional[SkillEvidencePipeline] = None,
         skill_epoch: int = 0,
         project_root: Optional[Path] = None,
@@ -2100,6 +2125,7 @@ class LiveSmokeBackend:
         self.judge = judge
         self.judge_model = judge_model
         self.swe_harness = swe_harness
+        self.mbppplus_harness = mbppplus_harness
         self.skill_pipeline = skill_pipeline
         self.skill_epoch = skill_epoch
         self.project_root = (project_root or PROJECT_ROOT).expanduser().resolve()
@@ -3332,6 +3358,7 @@ class LiveSmokeBackend:
             # but must never resume through the legacy stateless callback.
             run_graph=None if environment_settings is not None else run_graph,
             swe_harness=self.swe_harness,
+            mbppplus_harness=self.mbppplus_harness,
             max_environment_steps=int(
                 configured_steps.get(
                     source_key,
