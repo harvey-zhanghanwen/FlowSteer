@@ -96,6 +96,8 @@ def test_fact_record_is_exactly_four_agent_facing_fields() -> None:
         "Q: Who wrote Dune?\nA: Frank Herbert",
         "The answer is Frank Herbert.",
         "Who wrote Dune?",
+        "Who wrote Dune? Frank Herbert.",
+        'Frank Herbert wrote the novel "Dune?".',
     ),
 )
 def test_fact_record_rejects_qa_pair_and_non_declarative_wrappers(
@@ -103,6 +105,33 @@ def test_fact_record_rejects_qa_pair_and_non_declarative_wrappers(
 ) -> None:
     with pytest.raises(ValueError, match="fact_text"):
         TriviaQAFactMemoryRecord.create(fact_text=fact_text)
+
+
+def test_builder_fails_closed_before_embedding_mixed_question_answer_text(
+    tmp_path: Path,
+) -> None:
+    record = _records()[0].to_value()
+    record["fact_text"] = "Who wrote Dune? Frank Herbert."
+    facts_path = tmp_path / "mixed-question-answer.jsonl"
+    facts_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    output_dir = tmp_path / "index"
+    encoder = _RecordingEncoder()
+
+    with pytest.raises(ValueError, match="declarative rather than interrogative"):
+        build_triviaqa_fact_memory_index(
+            facts_path=facts_path,
+            output_dir=output_dir,
+            embedding_model="local-bge",
+            embedding_model_revision="local-revision",
+            frozen_top_k=1,
+            max_tool_calls_per_agent_call=2,
+            max_turns_per_agent_call=3,
+            encoder=encoder,
+            expected_count=1,
+        )
+
+    assert encoder.calls == []
+    assert not output_dir.exists()
 
 
 def test_builder_embeds_only_fact_text_and_manifest_is_fact_only(

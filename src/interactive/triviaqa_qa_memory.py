@@ -1531,7 +1531,12 @@ def _fact_text(value: object) -> str:
         raise ValueError("fact_text cannot contain a Question/Answer field")
     if _FACT_MEMORY_ANSWER_WRAPPER.match(text) is not None:
         raise ValueError("fact_text must be a self-contained declarative fact")
-    if text.endswith("?"):
+    # Fail closed at the Agent-facing/index boundary: without the source-side
+    # metadata available to the materializer, an embedded question mark cannot
+    # be distinguished safely from a question-plus-answer concatenation such
+    # as ``Who wrote Dune? Frank Herbert.``.  Fact rows therefore admit no
+    # question mark at any position, rather than checking only the terminator.
+    if "?" in text:
         raise ValueError("fact_text must be declarative rather than interrogative")
     return text
 

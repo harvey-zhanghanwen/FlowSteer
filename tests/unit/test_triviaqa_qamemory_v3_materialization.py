@@ -46,14 +46,18 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _participation_marker_preserved,
     _restore_authoritative_source_transpositions,
     _repair_fact_terminal_punctuation,
+    _quote_terminal_punctuated_canonical_span,
     _semantic_relation_and_scope_preserved,
     _possessive_name_answer_statement,
     _canonical_answer_is_explicit_compound,
     _called_relation_substitution_preserved,
     _clausal_canonical_relation_statement,
     _capitalized_identity_tokens,
+    _bounded_subject_wh_pair,
+    _leading_copular_object_wh_pair,
     _deterministic_answer_slot_statement,
     _deterministic_question_paraphrase,
+    _deterministic_strict_pair,
     _create_dataset_pair_fallback_record,
     _dataset_pair_fallback_text,
     _is_dataset_pair_fallback_record,
@@ -72,6 +76,7 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     parse_question_repair_response,
     parse_synonym_repair_response,
     parse_verification_response,
+    source_transport_view,
     validate_self_contained_declarative_fact,
 )
 
@@ -87,6 +92,124 @@ def _source() -> TriviaQATrainSource:
         canonical_answer="Zambezi",
         native_split="train",
     )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    (
+        (
+            (
+                '"Which TV series began with the words, ""There is nothing '
+                'wrong with your television set"""'
+            ),
+            (
+                'Which TV series began with the words, "There is nothing '
+                'wrong with your television set"?'
+            ),
+        ),
+        (
+            "What does\xa0the phrase Gentlemen\x85 this is a War Room mean",
+            "What does the phrase Gentlemen… this is a War Room mean?",
+        ),
+        (
+            "In which board game is a 10Ă\x9710 board used",
+            "In which board game is a 10×10 board used?",
+        ),
+        (
+            (
+                "The Italian word for scratched drawings is commonly used in "
+                "English. What is the word/"
+            ),
+            (
+                "The Italian word for scratched drawings is commonly used in "
+                "English. What is the word?"
+            ),
+        ),
+    ),
+)
+def test_source_transport_view_normalizes_only_observed_transport_forms(
+    raw: str,
+    expected: str,
+) -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:transport",
+        base_task_id="triviaqa:transport",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=raw,
+        canonical_answer="Example",
+        native_split="train",
+    )
+
+    normalized = source_transport_view(source)
+
+    assert normalized.original_question == expected
+    assert source.original_question == raw
+    assert source_transport_view(normalized) is normalized
+    assert normalized.canonical_answer == source.canonical_answer
+    assert normalized.source_train_task_id == source.source_train_task_id
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        (
+            "Distributed across Tutuila, Ofu-Olosega, and Ta‘ū, what is the "
+            "only American national park south of the equator?"
+        ),
+        (
+            '"In the criminal justice system, the people are represented by '
+            'two separate yet equally important groups."'
+        ),
+        "“Your name will also go on the list; what is it?”",
+        (
+            "Book Stieg Larsson – The Girl with the Dragon Tattoo and The Girl "
+            "Who Kicked the Hornets’ Nest"
+        ),
+        "Apt 56B, Whitehaven Mansions, Sandhurst Sq, London",
+    ),
+)
+def test_source_transport_view_stays_fail_closed_for_ambiguous_sources(
+    raw: str,
+) -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:transport_negative",
+        base_task_id="triviaqa:transport_negative",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=raw,
+        canonical_answer="Example",
+        native_split="train",
+    )
+
+    assert source_transport_view(source) is source
+
+
+def test_source_transport_view_decodes_no_more_than_csv_wrapper() -> None:
+    raw = (
+        '"Who wrote the operas \'The Queen of Sheba"" and ""Romeo and '
+        'Juliet""?"'
+    )
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:malformed_inner_quote",
+        base_task_id="triviaqa:malformed_inner_quote",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=raw,
+        canonical_answer="Charles Gounod",
+        native_split="train",
+    )
+
+    normalized = source_transport_view(source)
+
+    assert normalized.original_question == (
+        'Who wrote the operas \'The Queen of Sheba" and "Romeo and Juliet"?'
+    )
+    assert normalized.original_question.count('"') == 3
+    assert source.original_question == raw
 
 
 def test_dataset_pair_fallback_is_a_resume_gap_not_a_formal_fact() -> None:
@@ -204,6 +327,32 @@ def test_fact_terminal_punctuation_repair_changes_only_the_delimiter() -> None:
     assert _repair_fact_terminal_punctuation(
         'The character asked, "Save me, Superman?"'
     ) == 'The character asked, "Save me, Superman?"'
+    assert _repair_fact_terminal_punctuation(
+        "The height of Goliath is Six cubits and a span,",
+        protected_span="Six cubits and a span,",
+    ) == "The height of Goliath is Six cubits and a span,."
+
+
+def test_terminal_question_mark_in_canonical_is_quoted_not_removed() -> None:
+    source = _semantic_source(
+        (
+            "British actress Susannah York was nominated for an Oscar for "
+            "her portrayal of Alice LeBlanc in which 1969 film?"
+        ),
+        "They Shoot Horses Don’t They?",
+    )
+    raw = (
+        "British actress Susannah York was nominated for an Oscar for her "
+        "portrayal of Alice LeBlanc in They Shoot Horses Don’t They?"
+    )
+    quoted = _quote_terminal_punctuated_canonical_span(
+        raw,
+        source.canonical_answer,
+    )
+
+    assert quoted.endswith('"They Shoot Horses Don’t They?"')
+    assert exact_canonical_span_preserved(quoted, source.canonical_answer)
+    assert validate_self_contained_declarative_fact(source, quoted) == quoted
 
 
 def test_generation_round_start_preserves_history_and_uses_fresh_rounds() -> None:
@@ -290,6 +439,51 @@ def test_fact_projection_separates_agent_fields_from_qa_provenance() -> None:
     assert provenance[0]["paraphrase_question"] == (
         "Name the waterway on which the Kariba Dam was constructed."
     )
+
+
+def test_resume_admission_uses_view_but_provenance_keeps_raw_source() -> None:
+    raw_question = '"Which river contains the ""Kariba Dam"""'
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:transport_resume",
+        base_task_id="triviaqa:transport_resume",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=raw_question,
+        canonical_answer="Zambezi",
+        native_split="train",
+    )
+    question = 'Name the waterway that contains the "Kariba Dam".'
+    statement = 'The Zambezi river contains the "Kariba Dam".'
+    record = TriviaQAQAMemoryRecord.create(
+        source=source,
+        paraphrase_question=question,
+        paraphrase_answer_statement=statement,
+        paraphrase_version="triviaqa.qa_memory.paraphrase.v12",
+        paraphrase_method=(
+            "semantic-preserving-question-and-answer-paraphrase"
+        ),
+        generator_provider="local-openai-compatible",
+        model_id="supervisor_theta",
+        model_revision="Qwen3.5-9B-local",
+        prompt_template_version="triviaqa.qa_memory.qa_paraphrase.v12",
+        generation_seed=20260827,
+    )
+
+    validate_resume_record_admission((record,), (source,))
+    facts, provenance = build_fact_memory_projection(
+        (record,),
+        (source,),
+        expected_count=1,
+    )
+    prompt_payload = json.loads(build_paraphrase_messages(source)[1]["content"])
+
+    assert prompt_payload["original_question"] == (
+        'Which river contains the "Kariba Dam"?'
+    )
+    assert facts[0]["fact_text"] == statement
+    assert provenance[0]["original_question"] == raw_question
+    assert source.original_question == raw_question
 
 
 def _record(
@@ -959,6 +1153,43 @@ def test_resume_partitions_newly_detected_curly_quote_drift() -> None:
     assert repair_source_ids == ("triviaqa:curly_quote_resume",)
 
 
+def test_resume_partitions_identity_shortcut_exposed_by_transport_view() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:csv_identity_resume",
+        base_task_id="triviaqa:csv_identity_resume",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question='"Which band recorded ""Blue Moon""?"',
+        canonical_answer="Example Band",
+        native_split="train",
+    )
+    contaminated = TriviaQAQAMemoryRecord.create(
+        source=source,
+        paraphrase_question='Which band recorded "Blue Moon"?',
+        paraphrase_answer_statement=(
+            'Example Band recorded "Blue Moon".'
+        ),
+        paraphrase_version="triviaqa.qa_memory.paraphrase.v12",
+        paraphrase_method=(
+            "semantic-preserving-question-and-answer-paraphrase"
+        ),
+        generator_provider="local-openai-compatible",
+        model_id="supervisor_theta",
+        model_revision="Qwen3.5-9B-local",
+        prompt_template_version="triviaqa.qa_memory.qa_paraphrase.v12",
+        generation_seed=20260828,
+    )
+
+    accepted, repair_source_ids = partition_resume_records_for_semantic_repair(
+        (contaminated,),
+        (source,),
+    )
+
+    assert accepted == ()
+    assert repair_source_ids == ("triviaqa:csv_identity_resume",)
+
+
 def test_resume_orders_untouched_tail_before_admission_gaps() -> None:
     sources = tuple(
         TriviaQATrainSource(
@@ -1307,6 +1538,77 @@ def test_v10_lowercase_answer_type_has_no_capitalized_anchor() -> None:
     assert _leading_answer_slot_anchor(source) is None
 
 
+@pytest.mark.parametrize(
+    ("original", "canonical", "accepted"),
+    (
+        (
+            "Which Iain Banks novel has the name of a bird in the title?",
+            "THE CROW ROAD",
+            ("THE CROW ROAD", "Iain Banks THE CROW ROAD"),
+        ),
+        (
+            "Which Great Fire started at the bakery on Pudding Lane?",
+            "London",
+            ("London", "Great Fire of London"),
+        ),
+    ),
+)
+def test_leading_multi_token_proper_modifier_is_not_a_slot_anchor(
+    original: str,
+    canonical: str,
+    accepted: tuple[str, ...],
+) -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:modifier_anchor",
+        base_task_id="triviaqa:modifier_anchor",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=original,
+        canonical_answer=canonical,
+        native_split="train",
+        accepted_answers_for_admission=accepted,
+    )
+
+    assert _leading_answer_slot_anchor(source) is None
+
+
+def test_single_token_alias_grounded_slot_anchor_remains_strict() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:king_anchor",
+        base_task_id="triviaqa:king_anchor",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="Which King created the George Cross medal?",
+        canonical_answer="George VI",
+        native_split="train",
+        accepted_answers_for_admission=("George VI", "King George VI"),
+    )
+
+    assert _leading_answer_slot_anchor(source) == "King"
+    assert not _leading_answer_slot_anchor_preserved(
+        source,
+        "Who created the George Cross medal alongside a King?",
+    )
+
+
+def test_two_token_leading_slot_question_does_not_index_past_tokens() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:short_anchor",
+        base_task_id="triviaqa:short_anchor",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="Which Queen?",
+        canonical_answer="Beatrix",
+        native_split="train",
+        accepted_answers_for_admission=("Beatrix", "Queen Beatrix"),
+    )
+
+    assert _leading_answer_slot_anchor(source) == "Queen"
+
+
 def test_v10_answer_repair_normalizes_only_observed_leading_dot_key() -> None:
     assert parse_answer_repair_response(
         json.dumps(
@@ -1540,6 +1842,22 @@ def test_quote_slot_recovery_restores_multiple_ordered_unicode_slots() -> None:
 
     assert _restore_immutable_quoted_slots(source, candidate) == (
         'Name who released “Blue Moon” and ‘Red Sun’.'
+    )
+
+
+def test_quote_slot_recovery_matches_ascii_and_curly_apostrophe_identity() -> None:
+    source = (
+        "In a 1993 episode of ‘The Simpson’s’ television show, entitled "
+        "‘Rosebud’, which US rock band appeared?"
+    )
+    candidate = (
+        "Identify the US rock band featured in 'The Simpson's' television "
+        "episode entitled 'Rosebud'."
+    )
+
+    assert _restore_immutable_quoted_slots(source, candidate) == (
+        "Identify the US rock band featured in 'The Simpson’s' television "
+        "episode entitled 'Rosebud'."
     )
 
 
@@ -2735,6 +3053,51 @@ def test_deterministic_answer_slot_statement_passes_existing_admission(
 
 
 @pytest.mark.parametrize(
+    ("original", "canonical", "expected"),
+    (
+        (
+            (
+                "British actress Susannah York was nominated for an Oscar for "
+                "her portrayal of Alice LeBlanc in which 1969 film?"
+            ),
+            "They Shoot Horses Don’t They?",
+            (
+                "British actress Susannah York was nominated for an Oscar for "
+                "her portrayal of Alice LeBlanc in \"They Shoot Horses Don’t "
+                "They?\""
+            ),
+        ),
+        (
+            (
+                "The phrase Listen very carefully comes from which UK "
+                "television comedy series?"
+            ),
+            "‘Allo ‘Allo",
+            (
+                "The phrase Listen very carefully comes from ‘Allo ‘Allo."
+            ),
+        ),
+    ),
+)
+def test_deterministic_trailing_preposition_slot_is_literal_and_declarative(
+    original: str,
+    canonical: str,
+    expected: str,
+) -> None:
+    source = _semantic_source(original, canonical)
+
+    candidate = _deterministic_answer_slot_statement(source)
+
+    assert candidate == expected
+    assert _literal_slot_substitution_preserved(
+        original_question=original,
+        canonical_answer=canonical,
+        answer_statement=candidate,
+    )
+    assert validate_self_contained_declarative_fact(source, candidate) == candidate
+
+
+@pytest.mark.parametrize(
     ("original", "canonical"),
     (
         (
@@ -2820,6 +3183,258 @@ def test_answer_repair_uses_verified_deterministic_answer_slot(
     )
 
     assert repaired == "The name of Mickey Mouse's pet dog is Pluto."
+
+
+def test_generation_uses_fully_admitted_deterministic_pair_before_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _semantic_source(
+        "Who became Queen of the Netherlands in 1980?",
+        "Beatrix",
+    )
+    client = object.__new__(LocalQwen35Paraphraser)
+    client.max_retries = 3
+    monkeypatch.setattr(
+        client,
+        "_complete",
+        lambda **_: pytest.fail(
+            "admitted deterministic pair must not call the model"
+        ),
+    )
+
+    question, statement, generation_seed = client.generate(
+        source,
+        seed=29,
+        prefer_deterministic=True,
+    )
+
+    assert (question, statement) == (
+        "Identify the person who became Queen of the Netherlands in 1980.",
+        "Beatrix became Queen of the Netherlands in 1980.",
+    )
+    assert generation_seed == 32
+    assert _deterministic_strict_pair(source) == (question, statement)
+    assert " ".join(source.original_question.split()).casefold() not in (
+        question.casefold()
+    )
+
+
+def test_deterministic_strict_pair_stays_fail_closed_for_do_support() -> None:
+    source = _semantic_source(
+        "Who did Elizabeth Taylor marry?",
+        "Richard Burton",
+    )
+
+    assert _deterministic_question_paraphrase(source) is None
+    assert _deterministic_strict_pair(source) is None
+
+
+@pytest.mark.parametrize(
+    ("original", "canonical", "expected_question", "expected_fact"),
+    (
+        (
+            "Which dictator returned to Haiti in January 2011?",
+            "Jean-Claude Duvalier",
+            "Identify the dictator that returned to Haiti in January 2011.",
+            "Jean-Claude Duvalier returned to Haiti in January 2011.",
+        ),
+        (
+            "Which playwright wrote the plays Tiny Alice and Seascape?",
+            "Edward Albee",
+            "Identify the playwright that wrote the plays Tiny Alice and Seascape.",
+            "Edward Albee wrote the plays Tiny Alice and Seascape.",
+        ),
+        (
+            "What medical procedure is also referred to as a lumbar puncture?",
+            "Spinal Tap",
+            (
+                "Identify the medical procedure that is also referred to as "
+                "a lumbar puncture."
+            ),
+            "Spinal Tap is also referred to as a lumbar puncture.",
+        ),
+        (
+            "Which TV series co-starred Pauline Quirke and Warren Clarke",
+            "Down To Earth",
+            (
+                "Identify the TV series that co-starred Pauline Quirke and "
+                "Warren Clarke."
+            ),
+            "Down To Earth co-starred Pauline Quirke and Warren Clarke.",
+        ),
+    ),
+)
+def test_bounded_subject_wh_pair_reenters_full_admission(
+    original: str,
+    canonical: str,
+    expected_question: str,
+    expected_fact: str,
+) -> None:
+    source = _semantic_source(original, canonical)
+
+    pair = _bounded_subject_wh_pair(source)
+
+    assert pair == (expected_question, expected_fact)
+    assert _deterministic_strict_pair(source) == pair
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": expected_question,
+                "paraphrase_answer_statement": expected_fact,
+            }
+        ),
+        source,
+    ) == pair
+    assert validate_self_contained_declarative_fact(
+        source,
+        expected_fact,
+    ) == expected_fact
+
+
+def test_bounded_subject_wh_pair_preserves_literal_leading_anchor() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:bounded_anchor",
+        base_task_id="triviaqa:bounded_anchor",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=(
+            "Which Louisiana port is regarded as the birthplace of jazz"
+        ),
+        canonical_answer="New Orleans",
+        native_split="train",
+        accepted_answers_for_admission=(
+            "New Orleans",
+            "Louisiana New Orleans",
+        ),
+    )
+
+    pair = _bounded_subject_wh_pair(source)
+
+    assert pair == (
+        "Identify the Louisiana port that is regarded as the birthplace of jazz.",
+        "New Orleans is regarded as the birthplace of jazz.",
+    )
+    assert _literal_slot_substitution_preserved(
+        original_question=source.original_question,
+        canonical_answer=source.canonical_answer,
+        answer_statement=pair[1],
+    )
+    assert _deterministic_strict_pair(source) == pair
+
+
+@pytest.mark.parametrize(
+    "original",
+    (
+        "Who did Elizabeth Taylor marry?",
+        "Which chef prepared the banquet?",
+        "Which artist's album was released in 1980?",
+        "Which singer won; which actor presented the award?",
+        "Which contestant answered what is the opposite of opposite?",
+    ),
+)
+def test_bounded_subject_wh_pair_rejects_unproved_dependencies(
+    original: str,
+) -> None:
+    source = _semantic_source(original, "Example")
+
+    assert _bounded_subject_wh_pair(source) is None
+
+
+@pytest.mark.parametrize(
+    ("original", "canonical", "expected_question", "expected_fact"),
+    (
+        (
+            "What was Radar's surname in MASH?",
+            "O'Reilly",
+            "Identify Radar's surname in MASH.",
+            "Radar's surname in MASH was O'Reilly.",
+        ),
+        (
+            "What is both a revolver and a type of malt liquor?",
+            "Colt .45",
+            "Identify both a revolver and a type of malt liquor.",
+            "both a revolver and a type of malt liquor is Colt .45.",
+        ),
+        (
+            "What was Spike Milligan's Christian name?",
+            "TERENCE",
+            "Identify Spike Milligan's Christian name.",
+            "Spike Milligan's Christian name was TERENCE.",
+        ),
+        (
+            "What is Papageno's occupation in the Mozart opera The Magic Flute'?",
+            "A Birdcatcher",
+            "Identify Papageno's occupation in the Mozart opera The Magic Flute'.",
+            "Papageno's occupation in the Mozart opera The Magic Flute' is A Birdcatcher.",
+        ),
+        (
+            (
+                "What was the full title of the men’s magazine which was "
+                "re-branded to just GQ in 1967?"
+            ),
+            "GENTLEMEN’S QUARTERLY",
+            (
+                "Identify the full title of the men’s magazine which was "
+                "re-branded to just GQ in 1967."
+            ),
+            (
+                "The full title of the men’s magazine which was re-branded "
+                "to just GQ in 1967 was GENTLEMEN’S QUARTERLY."
+            ),
+        ),
+        (
+            "What was Priscilla in Priscilla of the Desert",
+            "A bus",
+            "Identify Priscilla in Priscilla of the Desert.",
+            "Priscilla in Priscilla of the Desert was A bus.",
+        ),
+    ),
+)
+def test_leading_copular_object_wh_pair_reenters_full_admission(
+    original: str,
+    canonical: str,
+    expected_question: str,
+    expected_fact: str,
+) -> None:
+    source = _semantic_source(original, canonical)
+
+    pair = _leading_copular_object_wh_pair(source)
+
+    assert pair == (expected_question, expected_fact)
+    assert _deterministic_strict_pair(source) == pair
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": expected_question,
+                "paraphrase_answer_statement": expected_fact,
+            }
+        ),
+        source,
+    ) == pair
+    assert validate_self_contained_declarative_fact(
+        source,
+        expected_fact,
+    ) == expected_fact
+
+
+@pytest.mark.parametrize(
+    "original",
+    (
+        "Which is the heaviest? An Ice Hockey Puck or a Baseball?",
+        "What did Radar call his dog?",
+        "In what city is the Hexagon theatre?",
+        "Who was the defending champion?",
+        "What is the title, and who wrote it?",
+        "What is?",
+    ),
+)
+def test_leading_copular_object_wh_pair_rejects_other_dependencies(
+    original: str,
+) -> None:
+    source = _semantic_source(original, "Example")
+
+    assert _leading_copular_object_wh_pair(source) is None
 
 
 def test_listed_choice_detection_normalizes_apostrophe_glyphs() -> None:

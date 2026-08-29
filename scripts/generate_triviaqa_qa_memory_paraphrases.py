@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import replace
 from itertools import islice
 import json
 import os
@@ -223,6 +224,91 @@ _COORDINATED_QUESTION_SLOT = re.compile(
     r"(?:what|which|who|whom|whose|where|when|why|how)\b",
     re.IGNORECASE,
 )
+_SOURCE_VIEW_INTERROGATIVE_START = re.compile(
+    r"^(?:what|which|who|whom|whose|where|when|why|how)\b",
+    re.IGNORECASE,
+)
+_SOURCE_VIEW_LOWERCASE_INTERROGATIVE = re.compile(
+    r"\b(?:what|which|who|whom|whose|where|when|why|how)\b"
+)
+_SOURCE_VIEW_SENTENCE_INTERROGATIVE = re.compile(
+    r"[.!?]\s+(?:What|Which|Who|Whom|Whose|Where|When|Why|How)\b"
+)
+_SOURCE_VIEW_DIGIT_MOJIBAKE_MULTIPLY = re.compile(
+    r"(?<=\d)\u0102\u0097(?=\d)"
+)
+_SOURCE_VIEW_TRAILING_CLOSERS = "\"\u201d\u2019')]}"
+
+
+def _decode_csv_transport_wrapper(text: str) -> str:
+    """Decode only an unambiguous outer CSV quote representation.
+
+    A single outer quote pair without doubled inner delimiters can be a
+    semantic quotation and therefore remains untouched. Malformed inner
+    quote pairs are not inferred or repaired: this function only removes the
+    transport wrapper and decodes the explicit doubled delimiters.
+    """
+
+    stripped = text.strip()
+    if (
+        len(stripped) >= 2
+        and stripped.startswith('"')
+        and stripped.endswith('"')
+        and '""' in stripped
+    ):
+        return stripped[1:-1].replace('""', '"')
+    return text
+
+
+def _source_transport_question_view(question: str) -> str:
+    """Return a fail-closed generation/comparison view of one source string.
+
+    The authoritative dataset string remains unchanged in the source record
+    and provenance. Only observed transport representations are normalized;
+    apostrophe glyphs, curly quote delimiters, and ambiguous quote corruption
+    are deliberately outside this boundary.
+    """
+
+    stripped_question = question.strip()
+    ambiguous_outer_quote = (
+        len(stripped_question) >= 2
+        and stripped_question.startswith(('"', "\u201c", "\u2018"))
+        and stripped_question.endswith(('"', "\u201d", "\u2019"))
+        and '""' not in stripped_question
+    )
+    view = _decode_csv_transport_wrapper(question)
+    view = view.replace("\u0085", "\u2026").replace("\u00a0", " ")
+    view = _SOURCE_VIEW_DIGIT_MOJIBAKE_MULTIPLY.sub("\u00d7", view)
+
+    explicit_interrogative = bool(
+        _SOURCE_VIEW_INTERROGATIVE_START.search(view.lstrip())
+        or _SOURCE_VIEW_LOWERCASE_INTERROGATIVE.search(view)
+        or _SOURCE_VIEW_SENTENCE_INTERROGATIVE.search(view)
+    )
+    if explicit_interrogative and "?" not in view and not ambiguous_outer_quote:
+        stripped = view.rstrip()
+        if stripped.endswith("/"):
+            view = stripped[:-1].rstrip() + "?"
+        else:
+            punctuation_surface = stripped.rstrip(
+                _SOURCE_VIEW_TRAILING_CLOSERS
+            )
+            if not punctuation_surface.endswith((".", "!", "?")):
+                view = stripped + "?"
+    return view
+
+
+def source_transport_view(
+    source: TriviaQATrainSource,
+) -> TriviaQATrainSource:
+    """Bind generation and admission to a normalized view without mutation."""
+
+    question = _source_transport_question_view(source.original_question)
+    if question == source.original_question:
+        return source
+    return replace(source, original_question=question)
+
+
 _FUNCTION_WORDS = frozenset(
     {
         "a",
@@ -854,6 +940,13 @@ def _leading_answer_slot_anchor(source: TriviaQATrainSource) -> str | None:
     ):
         return None
     anchor = tokens[1]
+    # ``Which Iain Banks novel ...`` and ``Which Great Fire ...`` begin with
+    # a multi-token proper-name modifier, not an alias-grounded answer-slot
+    # restriction.  Requiring the second source token to end that proper-name
+    # run preserves the original ``Which Gloria co-founded ...`` contract
+    # without pinning an entity modifier to the front of every paraphrase.
+    if len(tokens) > 2 and tokens[2][:1].isupper():
+        return None
     canonical_tokens = {
         token.casefold() for token in _LEXICAL_TOKEN.findall(source.canonical_answer)
     }
@@ -1260,6 +1353,41 @@ def _deterministic_answer_slot_statement(
             ):
                 candidate = literal_candidate
 
+    if candidate is None and len(_QUESTION_SLOT_TOKEN.findall(original)) == 1:
+        # A sentence-final prepositional object is the one embedded-WH shape
+        # for which literal substitution is dependency-unambiguous.  The
+        # non-empty clause before the preposition deliberately excludes
+        # fronted forms such as ``On which street did ...?``.  The existing
+        # token-level proof below must still show that one contiguous WH
+        # constituent, and nothing else, was replaced by the canonical span.
+        trailing_preposition_slot = re.fullmatch(
+            r"(?P<prefix>.+?\s+(?:in|from|by|at|on|for|under|with|to)\s+)"
+            r"(?P<slot>(?:what|which)\s+.+)",
+            body,
+            re.IGNORECASE,
+        )
+        if (
+            trailing_preposition_slot is not None
+            and not internal_question_mark
+            and _COORDINATED_QUESTION_SLOT.search(original) is None
+        ):
+            canonical_object = (
+                f'"{canonical}"'
+                if re.search(r"[?!]", canonical) is not None
+                and '"' not in canonical
+                else canonical
+            )
+            literal_candidate = _declarative_statement(
+                f"{trailing_preposition_slot.group('prefix')}"
+                f"{canonical_object}"
+            )
+            if _literal_slot_substitution_preserved(
+                original_question=original,
+                canonical_answer=canonical,
+                answer_statement=literal_candidate,
+            ):
+                candidate = literal_candidate
+
     if candidate is None:
         completion = re.fullmatch(
             r"(?P<operator>(?i:complete|finish))\s+(?P<object>.+)",
@@ -1338,6 +1466,14 @@ def _deterministic_answer_slot_statement(
 
     if candidate is None:
         return None
+    candidate = _quote_terminal_punctuated_canonical_span(
+        candidate,
+        canonical,
+    )
+    candidate = _repair_fact_terminal_punctuation(
+        candidate,
+        protected_span=canonical,
+    )
     source_quotes = _quoted_spans(source.original_question)
     if source_quotes and not source_quotes.issubset(_quoted_spans(candidate)):
         return None
@@ -1759,13 +1895,7 @@ def _quoted_spans(text: str) -> frozenset[str]:
     # that transport representation before extracting semantic quoted spans;
     # otherwise the outer wrapper is misclassified as a second immutable
     # title that includes the interrogative itself.
-    if (
-        len(normalized) >= 2
-        and normalized.startswith('"')
-        and normalized.endswith('"')
-        and '""' in normalized
-    ):
-        normalized = normalized[1:-1].replace('""', '"')
+    normalized = _decode_csv_transport_wrapper(normalized)
     spans = [
         next(group for group in match.groups() if group is not None).strip()
         for match in _DOUBLE_QUOTED_SPAN.finditer(normalized)
@@ -1792,14 +1922,8 @@ def _ordered_quoted_slots(
 
     located_text = text
     stripped = text.strip()
-    if (
-        decode_csv_transport
-        and len(stripped) >= 2
-        and stripped.startswith('"')
-        and stripped.endswith('"')
-        and '""' in stripped
-    ):
-        located_text = stripped[1:-1].replace('""', '"')
+    if decode_csv_transport:
+        located_text = _decode_csv_transport_wrapper(stripped)
     slots: list[tuple[int, int, str]] = []
     for match in _ORDERED_QUOTED_SLOT.finditer(located_text):
         content_group = next(
@@ -1819,7 +1943,8 @@ def _ordered_quoted_slots(
 
 def _quote_slot_identity_tokens(content: str) -> frozenset[str]:
     tokens = frozenset(
-        token.casefold() for token in _LEXICAL_TOKEN.findall(content)
+        token.casefold().replace("\u2019", "'")
+        for token in _LEXICAL_TOKEN.findall(content)
     )
     content_tokens = tokens - _FUNCTION_WORDS
     return content_tokens or tokens
@@ -1844,10 +1969,14 @@ def _quote_slots_have_unambiguous_ordered_identity(
     )
 
     def score(source_index: int, candidate_index: int) -> tuple[int, int]:
-        source = " ".join(source_contents[source_index].split()).casefold()
+        source = (
+            " ".join(source_contents[source_index].split())
+            .casefold()
+            .replace("\u2019", "'")
+        )
         candidate = " ".join(
             candidate_contents[candidate_index].split()
-        ).casefold()
+        ).casefold().replace("\u2019", "'")
         return (
             int(source == candidate),
             len(source_tokens[source_index] & candidate_tokens[candidate_index]),
@@ -2072,6 +2201,7 @@ def _admitted_generation_seeds(
 def build_paraphrase_messages(source: TriviaQATrainSource) -> list[dict[str, str]]:
     """Build the bounded model request without accepted aliases."""
 
+    source = source_transport_view(source)
     # Only the frozen training projection is model-visible. Held-out validation
     # content and accepted-answer aliases are never included.
     user_payload = {
@@ -2128,6 +2258,7 @@ def build_verification_messages(
 ) -> list[dict[str, str]]:
     """Build a second local-Qwen semantic-equivalence check."""
 
+    source = source_transport_view(source)
     payload = {
         "original_question": source.original_question,
         "paraphrase_question": paraphrase_question,
@@ -2173,6 +2304,7 @@ def build_answer_verification_messages(
 ) -> list[dict[str, str]]:
     """Build the local-Qwen answer-slot and relation-direction check."""
 
+    source = source_transport_view(source)
     payload = {
         "original_question": source.original_question,
         "canonical_training_answer": source.canonical_answer,
@@ -2216,6 +2348,7 @@ def build_answer_repair_messages(
     *,
     rejected_answer_statement: str,
 ) -> list[dict[str, str]]:
+    source = source_transport_view(source)
     payload = {
         "original_question": source.original_question,
         "canonical_training_answer": source.canonical_answer,
@@ -2384,6 +2517,7 @@ def build_synonym_repair_messages(
     *,
     required_source_token: str,
 ) -> list[dict[str, str]]:
+    source = source_transport_view(source)
     payload = {
         "original_question": source.original_question,
         "required_source_token": required_source_token,
@@ -2619,13 +2753,14 @@ def reject_exact_question_identity_shortcut(
 ) -> None:
     """Reject a stored QA record that contains the complete evaluation query."""
 
+    source = source_transport_view(source)
     contaminated_fields = _exact_question_identity_contaminated_fields(
         source,
         paraphrase_question=paraphrase_question,
         paraphrase_answer_statement=paraphrase_answer_statement,
     )
     if contaminated_fields:
-        raise ValueError(
+        raise FactProjectionAdmissionError(
             "semantic paraphrase retained the complete original question substring"
         )
 
@@ -2661,6 +2796,7 @@ def validate_self_contained_declarative_fact(
     question fragments even when an answer span happens to be present.
     """
 
+    source = source_transport_view(source)
     if not isinstance(fact_text, str) or not fact_text.strip():
         raise FactProjectionAdmissionError("fact_text must be non-empty text")
     fact = " ".join(fact_text.split())
@@ -2729,8 +2865,52 @@ def validate_self_contained_declarative_fact(
     return fact
 
 
-def _repair_fact_terminal_punctuation(fact_text: str) -> str:
-    """Repair only a missing or comma-like terminal sentence delimiter."""
+def _quote_terminal_punctuated_canonical_span(
+    fact_text: str,
+    canonical_answer: str,
+) -> str:
+    """Quote one terminal-punctuated canonical value without changing it.
+
+    TriviaQA contains titles whose canonical span itself includes ``?`` or
+    ``!``.  Quoting that exact, unique span distinguishes title punctuation
+    from an interrogative fact.  Ambiguous repeated spans and already-quoted
+    values remain unchanged and continue through the fail-closed fact gate.
+    """
+
+    fact = " ".join(fact_text.split()).strip()
+    canonical = " ".join(canonical_answer.split()).strip()
+    if not fact or not canonical or re.search(r"[?!]", canonical) is None:
+        return fact
+    if '"' in canonical:
+        return fact
+    matches = tuple(
+        re.finditer(rf"(?<!\w){re.escape(canonical)}(?!\w)", fact)
+    )
+    if len(matches) != 1:
+        return fact
+    match = matches[0]
+    if (
+        match.start() > 0
+        and match.end() < len(fact)
+        and fact[match.start() - 1] in {'"', "\u201c"}
+        and fact[match.end()] in {'"', "\u201d"}
+    ):
+        return fact
+    return fact[: match.start()] + '"' + canonical + '"' + fact[match.end() :]
+
+
+def _repair_fact_terminal_punctuation(
+    fact_text: str,
+    *,
+    protected_span: str | None = None,
+) -> str:
+    """Repair only a missing or comma-like terminal sentence delimiter.
+
+    A terminal comma, semicolon, or colon that belongs to the authoritative
+    canonical span is retained character-for-character; sentence punctuation
+    is appended after it.  Unprotected delimiter repair keeps the historical
+    normalization behavior.
+    """
 
     fact = " ".join(fact_text.split()).strip()
     if not fact:
@@ -2741,6 +2921,17 @@ def _repair_fact_terminal_punctuation(fact_text: str) -> str:
     closers = match.group("closers")
     if body.endswith((".", "!", "?")):
         return fact
+    normalized_protected = (
+        " ".join(protected_span.split()).strip()
+        if isinstance(protected_span, str)
+        else ""
+    )
+    if (
+        normalized_protected
+        and normalized_protected.endswith((",", ";", ":"))
+        and body.endswith(normalized_protected)
+    ):
+        return f"{body}{closers}."
     if body.endswith((",", ";", ":")):
         body = body[:-1].rstrip()
     return f"{body}{closers}."
@@ -2844,13 +3035,16 @@ def parse_paraphrase_response(
 ) -> tuple[str, str]:
     """Accept only the declared question-and-statement JSON response."""
 
+    source = source_transport_view(source)
     value = _decode_paraphrase_object(text)
     question = value["paraphrase_question"]
     if not isinstance(question, str) or not question.strip():
         raise ValueError("paraphrase_question must be non-empty text")
     question = " ".join(question.split())
     if question.casefold() == " ".join(source.original_question.split()).casefold():
-        raise ValueError("model returned the original question unchanged")
+        raise FactProjectionAdmissionError(
+            "model returned the original question unchanged"
+        )
     if not _has_lexical_or_phrase_replacement(
         source.original_question,
         question,
@@ -3132,7 +3326,7 @@ def partition_resume_records_for_semantic_repair(
                 source,
                 record.paraphrase_answer_statement,
             )
-            parse_paraphrase_response(
+            question, statement = parse_paraphrase_response(
                 json.dumps(
                     {
                         "paraphrase_question": record.paraphrase_question,
@@ -3143,6 +3337,11 @@ def partition_resume_records_for_semantic_repair(
                     ensure_ascii=False,
                 ),
                 source,
+            )
+            reject_exact_question_identity_shortcut(
+                source,
+                paraphrase_question=question,
+                paraphrase_answer_statement=statement,
             )
         except (SemanticPreservationError, FactProjectionAdmissionError):
             repair_source_ids.append(record.source_train_task_id)
@@ -3321,7 +3520,6 @@ _DETERMINISTIC_SUBJECT_RELATIVE_VERB = re.compile(
     r"said|sang|stars?|starred|supplies?|translates?|won|wrote)",
     re.IGNORECASE,
 )
-
 
 def _finish_deterministic_question_candidate(
     source: TriviaQATrainSource,
@@ -3602,6 +3800,171 @@ def _deterministic_question_paraphrase(
     return _finish_deterministic_question_candidate(source, candidate)
 
 
+_BOUNDED_SUBJECT_WH_HEADS = frozenset(
+    {
+        "dictator",
+        "footballer",
+        "law",
+        "playwright",
+        "port",
+        "procedure",
+        "revolutionary",
+        "series",
+    }
+)
+_BOUNDED_SUBJECT_WH_PREDICATE = re.compile(
+    r"(?:is|was|are|were|returned|returns|says?|runs?|wrote|writes|"
+    r"co[- ]?starred)\b",
+    re.IGNORECASE,
+)
+
+
+def _bounded_subject_wh_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind one leading typed subject-WH to its copied finite predicate."""
+
+    original = " ".join(source.original_question.split())
+    body = original[:-1].rstrip() if original.endswith(("?", ".")) else original
+    if (
+        not body
+        or "?" in body
+        or _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?i:what|which)\s+(?P<head>.+?)\s+"
+        rf"(?P<predicate>{_BOUNDED_SUBJECT_WH_PREDICATE.pattern}.+)",
+        body,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    head = match.group("head")
+    head_tokens = tuple(_LEXICAL_TOKEN.findall(head))
+    if (
+        not head_tokens
+        or len(head_tokens) > 12
+        or any(token.endswith(("'s", "’s")) for token in head_tokens)
+        or not (
+            _simple_subject_wh_head(head)
+            or head_tokens[-1].casefold() in _BOUNDED_SUBJECT_WH_HEADS
+        )
+    ):
+        return None
+    predicate = match.group("predicate")
+    question = _finish_deterministic_question_candidate(
+        source,
+        _declarative_statement(f"Identify the {head} that {predicate}"),
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"{source.canonical_answer} {predicate}"
+    )
+
+
+def _leading_copular_object_wh_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind one leading object-WH to its complete copied complement."""
+
+    original = " ".join(source.original_question.split())
+    body = original[:-1].rstrip() if original.endswith(("?", ".")) else original
+    if (
+        not body
+        or "?" in body
+        or _answer_slot_count(original) != 1
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?i:what|which)\s+(?P<copula>is|was|are|were)\s+"
+        r"(?P<complement>.+)",
+        body,
+    )
+    if match is None:
+        return None
+    complement = match.group("complement")
+    question = _finish_deterministic_question_candidate(
+        source,
+        _declarative_statement(f"Identify {complement}"),
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"{complement} {match.group('copula')} {source.canonical_answer}"
+    )
+
+
+def _deterministic_strict_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Return only an existing deterministic pair that passes every gate.
+
+    This is not an original-question fallback.  It composes the bounded
+    question and answer transformations already used by the repair path, then
+    re-enters the complete parser and exact-query rejection boundary.  If no
+    independently admissible pair exists, generation remains failed.
+    """
+
+    candidates: list[tuple[str, str]] = []
+    bounded_subject_wh = _bounded_subject_wh_pair(source)
+    if bounded_subject_wh is not None:
+        candidates.append(bounded_subject_wh)
+    quoted_attribution = _quoted_attribution_qa(source)
+    if quoted_attribution is not None:
+        candidates.append(quoted_attribution)
+
+    question = _deterministic_question_paraphrase(source)
+    if question is not None:
+        statements: list[str] = []
+        possessive = _possessive_name_answer_statement(source)
+        for statement in (
+            _clausal_canonical_relation_statement(source),
+            possessive[1] if possessive is not None else None,
+            _literal_subject_wh_answer_statement(source),
+            _deterministic_answer_slot_statement(source),
+        ):
+            if statement is not None and statement not in statements:
+                statements.append(statement)
+        candidates.extend((question, statement) for statement in statements)
+
+    leading_copular_object_wh = _leading_copular_object_wh_pair(source)
+    if leading_copular_object_wh is not None:
+        candidates.append(leading_copular_object_wh)
+
+    for question, statement in candidates:
+        statement = _quote_terminal_punctuated_canonical_span(
+            statement,
+            source.canonical_answer,
+        )
+        statement = _repair_fact_terminal_punctuation(
+            statement,
+            protected_span=source.canonical_answer,
+        )
+        try:
+            question, statement = parse_paraphrase_response(
+                json.dumps(
+                    {
+                        "paraphrase_question": question,
+                        "paraphrase_answer_statement": statement,
+                    },
+                    ensure_ascii=False,
+                ),
+                source,
+            )
+            reject_exact_question_identity_shortcut(
+                source,
+                paraphrase_question=question,
+                paraphrase_answer_statement=statement,
+            )
+        except ValueError:
+            continue
+        return question, statement
+    return None
+
+
 class LocalQwen35Paraphraser:
     """Small dependency-free client matching the existing local gateway."""
 
@@ -3735,8 +4098,13 @@ class LocalQwen35Paraphraser:
                 pass
             return None
 
+        quoted_statement = _quote_terminal_punctuated_canonical_span(
+            rejected_statement,
+            source.canonical_answer,
+        )
         punctuated_statement = _repair_fact_terminal_punctuation(
-            rejected_statement
+            quoted_statement,
+            protected_span=source.canonical_answer,
         )
         if punctuated_statement != " ".join(rejected_statement.split()).strip():
             try:
@@ -4010,7 +4378,14 @@ class LocalQwen35Paraphraser:
         source: TriviaQATrainSource,
         *,
         seed: int,
+        prefer_deterministic: bool = False,
     ) -> tuple[str, str, int]:
+        source = source_transport_view(source)
+        if prefer_deterministic:
+            deterministic_pair = _deterministic_strict_pair(source)
+            if deterministic_pair is not None:
+                question, statement = deterministic_pair
+                return question, statement, seed + self.max_retries
         messages = build_paraphrase_messages(source)
         last_error: BaseException | None = None
         for attempt in range(self.max_retries + 1):
@@ -4172,6 +4547,9 @@ class LocalQwen35Paraphraser:
                         isinstance(parse_error, SemanticPreservationError)
                         and "answer-slot family" in str(parse_error)
                     )
+                    leading_anchor_error = str(parse_error).startswith(
+                        "paraphrase_question moved the leading answer-slot anchor"
+                    )
                     if (
                         not schema_error
                         and not answer_error
@@ -4179,6 +4557,7 @@ class LocalQwen35Paraphraser:
                         and not quoted_question_error
                         and not source_transposition_error
                         and not answer_slot_family_error
+                        and not leading_anchor_error
                     ):
                         raise
                     if schema_error:
@@ -4216,7 +4595,7 @@ class LocalQwen35Paraphraser:
                             raise
                         question = " ".join(raw_question.split())
                         statement = " ".join(raw_statement.split())
-                        if answer_slot_family_error:
+                        if answer_slot_family_error or leading_anchor_error:
                             question = self._repair_paraphrase_question(
                                 source,
                                 rejected_question=source.original_question,
@@ -4740,6 +5119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             + source.selection_index
                             + generation_round * GENERATION_ROUND_SEED_STRIDE
                         ),
+                        prefer_deterministic=True,
                     )
                     break
                 except RuntimeError as exc:

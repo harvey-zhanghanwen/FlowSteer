@@ -48,7 +48,28 @@ DEFAULT_REPORT_DIR = (
 DEFAULT_INDEX_MANIFEST = (
     PROJECT_ROOT / "data/triviaqa_fact_memory_full_native_v1/index/manifest.json"
 )
+DEFAULT_MATERIALIZATION_MANIFEST = (
+    PROJECT_ROOT
+    / "data/triviaqa_fact_memory_full_native_v1/materialization_manifest.json"
+)
+DEFAULT_TOP_K_SELECTION_RECEIPT = (
+    PROJECT_ROOT
+    / "data/triviaqa_fact_memory_full_native_v1/top_k_selection_receipt.json"
+)
 FACT_MEMORY_TOOL_ID = "triviaqa.qa_memory"
+TOP_K_SELECTION_SCHEMA_VERSION = (
+    "flowsteer.triviaqa.fact_memory.top_k_selection.v1"
+)
+MATERIALIZATION_SCHEMA_VERSION = (
+    "flowsteer.triviaqa.fact_memory.materialization.v1"
+)
+EXPECTED_FACT_MEMORY_COUNT = 76_523
+ZERO_FALLBACK_COUNT_FIELDS = (
+    "dataset_pair_fallback_count",
+    "bounded_failure_fallback_count",
+    "pending_gap_fallback_count",
+    "legacy_fallback_regeneration_count",
+)
 FACT_RECORD_FIELDS = frozenset(
     {"schema_version", "memory_id", "tool_id", "fact_text"}
 )
@@ -89,6 +110,12 @@ WEB_TOOL_MARKERS = ("web", "browser", "http", "serp", "google", "bing")
 def _resolve(value: str | Path) -> Path:
     path = Path(value)
     return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _exact_int(value: object, expected: int) -> bool:
+    """Require a real integer, excluding bool's integer subclass behavior."""
+
+    return type(value) is int and value == expected
 
 
 def _all_tool_receipts(
@@ -767,6 +794,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     paired_path = _resolve(args.paired_results)
     manifest_path = _resolve(args.run_manifest)
     index_manifest_path = _resolve(args.index_manifest)
+    materialization_manifest_path = _resolve(args.materialization_manifest)
+    top_k_selection_receipt_path = _resolve(args.top_k_selection_receipt)
     selected_rows, selected_diag = qa.base._read_jsonl_snapshot(selected_path)
     trajectory_rows, trajectory_diag = qa.base._read_jsonl_snapshot(trajectory_path)
     paired_rows, paired_diag = qa.base._read_jsonl_snapshot(paired_path)
@@ -777,10 +806,103 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     paired, paired_dedup = qa._deduplicate_rows(paired_rows)
     manifest, manifest_error = qa.base._read_json(manifest_path)
     index_manifest, index_manifest_error = qa.base._read_json(index_manifest_path)
+    materialization_manifest, materialization_manifest_error = qa.base._read_json(
+        materialization_manifest_path
+    )
+    top_k_selection_receipt, top_k_selection_receipt_error = qa.base._read_json(
+        top_k_selection_receipt_path
+    )
     selected_ids = list(selected)
     direct = qa._condition_metrics(selected_ids, paired, "direct")
     agentgraph = qa._condition_metrics(selected_ids, paired, "agentgraph")
     protocol, per_task = _aggregate_protocol(selected_ids, trajectories)
+    selected_top_k = top_k_selection_receipt.get("selected_top_k")
+    final_index_frozen_top_k = index_manifest.get("frozen_top_k")
+    expected_fact_memory_count = args.expected_fact_memory_count
+    materialization_count_checks = {
+        "record_count": _exact_int(
+            materialization_manifest.get("record_count"),
+            expected_fact_memory_count,
+        ),
+        "unique_source_count": _exact_int(
+            materialization_manifest.get("unique_source_count"),
+            expected_fact_memory_count,
+        ),
+        "strict_semantic_paraphrase_count": _exact_int(
+            materialization_manifest.get("strict_semantic_paraphrase_count"),
+            expected_fact_memory_count,
+        ),
+        "lexical_or_phrase_replacement_count": _exact_int(
+            materialization_manifest.get("lexical_or_phrase_replacement_count"),
+            expected_fact_memory_count,
+        ),
+        "fact_text_count": _exact_int(
+            materialization_manifest.get("fact_text_count"),
+            expected_fact_memory_count,
+        ),
+    }
+    materialization_fallback_checks = {
+        field: _exact_int(materialization_manifest.get(field), 0)
+        for field in ZERO_FALLBACK_COUNT_FIELDS
+    }
+    exact_original_question_substring_count_eq_0 = _exact_int(
+        materialization_manifest.get(
+            "exact_original_question_substring_count"
+        ),
+        0,
+    )
+    materialization_manifest_valid = bool(
+        materialization_manifest_error is None
+        and materialization_manifest.get("schema_version")
+        == MATERIALIZATION_SCHEMA_VERSION
+        and all(materialization_count_checks.values())
+        and all(materialization_fallback_checks.values())
+        and exact_original_question_substring_count_eq_0
+    )
+    final_index_memory_count_valid = bool(
+        index_manifest_error is None
+        and _exact_int(
+            index_manifest.get("memory_count"), expected_fact_memory_count
+        )
+    )
+    top_k_selection_receipt_valid = bool(
+        top_k_selection_receipt_error is None
+        and top_k_selection_receipt.get("schema_version")
+        == TOP_K_SELECTION_SCHEMA_VERSION
+        and type(selected_top_k) is int
+        and selected_top_k > 0
+    )
+    selected_top_k_matches_final_index = bool(
+        top_k_selection_receipt_valid
+        and index_manifest_error is None
+        and type(final_index_frozen_top_k) is int
+        and final_index_frozen_top_k > 0
+        and selected_top_k == final_index_frozen_top_k
+    )
+    protocol.update(
+        {
+            "expected_fact_memory_count": expected_fact_memory_count,
+            "materialization_manifest_valid": materialization_manifest_valid,
+            "materialization_count_checks": materialization_count_checks,
+            "materialization_fallback_checks": materialization_fallback_checks,
+            "exact_original_question_substring_count_eq_0": (
+                exact_original_question_substring_count_eq_0
+            ),
+            "final_index_memory_count_valid": final_index_memory_count_valid,
+            "top_k_selection_receipt_valid": top_k_selection_receipt_valid,
+            "selected_top_k": selected_top_k,
+            "final_index_frozen_top_k": final_index_frozen_top_k,
+            "selected_top_k_matches_final_index": (
+                selected_top_k_matches_final_index
+            ),
+        }
+    )
+    protocol["protocol_valid"] = bool(
+        protocol.get("protocol_valid") is True
+        and materialization_manifest_valid
+        and final_index_memory_count_valid
+        and selected_top_k_matches_final_index
+    )
     demos, taxonomy = _wrong_demos(
         selected,
         trajectories,
@@ -797,6 +919,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         and index_manifest.get("embedding_input_field") == "fact_text"
         and index_manifest.get("provenance_loaded_by_index") is False
         and index_manifest.get("tool_id") == FACT_MEMORY_TOOL_ID
+        and final_index_memory_count_valid
     )
     snapshot_complete = bool(
         len(selected_ids) == args.expected_count
@@ -861,6 +984,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "formal_metrics_available": formal_complete,
             "manifest_read_error": manifest_error,
             "index_manifest_read_error": index_manifest_error,
+            "materialization_manifest_read_error": (
+                materialization_manifest_error
+            ),
+            "top_k_selection_receipt_read_error": (
+                top_k_selection_receipt_error
+            ),
         },
         "metrics": {
             "metric_protocol": "triviaqa.official.answer.v1",
@@ -907,6 +1036,39 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 "tool_budget",
             )
         },
+        "fact_memory_materialization": {
+            "schema_version": materialization_manifest.get("schema_version"),
+            "expected_fact_memory_count": expected_fact_memory_count,
+            "manifest_valid": materialization_manifest_valid,
+            "count_checks": materialization_count_checks,
+            "fallback_checks": materialization_fallback_checks,
+            "exact_original_question_substring_count": (
+                materialization_manifest.get(
+                    "exact_original_question_substring_count"
+                )
+            ),
+            **{
+                key: materialization_manifest.get(key)
+                for key in (
+                    "record_count",
+                    "unique_source_count",
+                    "strict_semantic_paraphrase_count",
+                    "lexical_or_phrase_replacement_count",
+                    "fact_text_count",
+                    *ZERO_FALLBACK_COUNT_FIELDS,
+                )
+            },
+        },
+        "top_k_selection": {
+            "schema_version": top_k_selection_receipt.get("schema_version"),
+            "selection_split": top_k_selection_receipt.get("selection_split"),
+            "selection_rule": top_k_selection_receipt.get("selection_rule"),
+            "selected_top_k": selected_top_k,
+            "final_index_frozen_top_k": final_index_frozen_top_k,
+            "selected_top_k_matches_final_index": (
+                selected_top_k_matches_final_index
+            ),
+        },
         "protocol_assertions": protocol,
         "per_task_protocol": per_task,
         "failure_taxonomy": taxonomy,
@@ -929,6 +1091,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "paired_deduplication": paired_dedup,
             "run_manifest": qa.base._display_path(manifest_path),
             "index_manifest": qa.base._display_path(index_manifest_path),
+            "materialization_manifest": qa.base._display_path(
+                materialization_manifest_path
+            ),
+            "top_k_selection_receipt": qa.base._display_path(
+                top_k_selection_receipt_path
+            ),
         },
     }
 
@@ -944,6 +1112,11 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
     formal = qa.base._mapping(metrics.get("formal"))
     graph = qa.base._mapping(formal.get("agentgraph"))
     protocol = qa.base._mapping(report.get("protocol_assertions"))
+    materialization = qa.base._mapping(
+        report.get("fact_memory_materialization")
+    )
+    fact_memory_index = qa.base._mapping(report.get("fact_memory_index"))
+    top_k_selection = qa.base._mapping(report.get("top_k_selection"))
     terminal = qa.base._mapping(report.get("terminal"))
     demos = qa.base._list(report.get("wrong_demos"))
     lines = [
@@ -955,6 +1128,12 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         f"- AgentGraph F1: `{_percentage(graph.get('strict_token_f1'))}`",
         f"- Terminal failures: `{terminal.get('strict_failure_count')}`",
         f"- Protocol valid: `{protocol.get('protocol_valid')}`",
+        f"- Materialization manifest valid: `{materialization.get('manifest_valid')}`",
+        f"- Materialized facts: `{materialization.get('record_count')}` / `{materialization.get('expected_fact_memory_count')}`",
+        f"- Final index memories: `{fact_memory_index.get('memory_count')}`",
+        f"- Selected Top-K: `{top_k_selection.get('selected_top_k')}`",
+        f"- Final index frozen Top-K: `{top_k_selection.get('final_index_frozen_top_k')}`",
+        f"- Top-K receipt/index match: `{top_k_selection.get('selected_top_k_matches_final_index')}`",
         f"- Director Tool calls: `{protocol.get('director_tool_calls')}`",
         f"- Worker search/read: `{protocol.get('worker_search_count')}` / `{protocol.get('worker_read_count')}`",
         f"- First data-plane Action is search: `{protocol.get('first_data_plane_action_is_search')}`",
@@ -995,6 +1174,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--index-manifest", default=str(DEFAULT_INDEX_MANIFEST))
     parser.add_argument(
+        "--materialization-manifest",
+        default=str(DEFAULT_MATERIALIZATION_MANIFEST),
+    )
+    parser.add_argument(
+        "--top-k-selection-receipt",
+        default=str(DEFAULT_TOP_K_SELECTION_RECEIPT),
+    )
+    parser.add_argument(
         "--output-json",
         default=str(DEFAULT_REPORT_DIR / "formal_result_analysis.json"),
     )
@@ -1003,10 +1190,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=str(DEFAULT_REPORT_DIR / "formal_result_analysis.md"),
     )
     parser.add_argument("--expected-count", type=int, default=128)
+    parser.add_argument(
+        "--expected-fact-memory-count",
+        type=int,
+        default=EXPECTED_FACT_MEMORY_COUNT,
+    )
     parser.add_argument("--demo-count", type=int, default=3)
     args = parser.parse_args(argv)
     if args.expected_count < 1:
         parser.error("--expected-count must be positive")
+    if args.expected_fact_memory_count < 1:
+        parser.error("--expected-fact-memory-count must be positive")
     if args.demo_count < 0:
         parser.error("--demo-count must be non-negative")
     return args

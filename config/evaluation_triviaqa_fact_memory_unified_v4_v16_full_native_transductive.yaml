@@ -69,6 +69,10 @@ qa_tool_runtime:
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"
   root: "artifacts/triviaqa_fact_memory_unified_v4_v16_full_native_transductive/evidence"
+  expected_fact_memory_count: 76523
+  materialization_manifest_path: "data/triviaqa_fact_memory_full_native_v1/materialization_manifest.json"
+  top_k_selection_receipt_path: "data/triviaqa_fact_memory_full_native_v1/top_k_selection_receipt.json"
+  final_index_manifest_path: "data/triviaqa_fact_memory_full_native_v1/index/manifest.json"
   selected_tasks_path: "artifacts/triviaqa_fact_memory_unified_v4_v16_full_native_transductive/selected_tasks.jsonl"
   direct_predictions_path: "artifacts/triviaqa_fact_memory_unified_v4_v16_full_native_transductive/direct_question_only_predictions.jsonl"
   trajectories_path: "artifacts/triviaqa_fact_memory_unified_v4_v16_full_native_transductive/agentgraph_trajectories.jsonl"
