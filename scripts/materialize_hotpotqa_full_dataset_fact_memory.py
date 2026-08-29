@@ -31,19 +31,23 @@ from scripts.materialize_hotpotqa_qa_memory import (  # noqa: E402
 from src.interactive.config_loader import load_model_registry  # noqa: E402
 from src.interactive.hotpotqa_full_dataset_fact_memory_index import (  # noqa: E402
     FULL_DATASET_EVALUATION_SCOPE,
+    canonical_answer_is_declarative_clause,
     load_hotpotqa_full_dataset_qa_sources,
     materialize_hotpotqa_declarative_facts,
+    validate_hotpotqa_fact_statement,
+    validate_hotpotqa_question_rewrite,
 )
 from src.interactive.hotpotqa_qa_memory_index import (  # noqa: E402
     HotpotQATrainQASource,
 )
 
 
-PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.generate_verify.v1"
-PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v1"
+PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v2"
+PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v2"
 PARAPHRASE_PROVENANCE = (
-    "local-qwen3.5-9b-semantic-rewrite-and-fact-verification-v1"
+    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v2"
 )
+GENERATION_ROUND_SEED_STRIDE = 100_000_000
 
 FACT_GENERATION_SCHEMA = _json_schema(
     {
@@ -51,12 +55,22 @@ FACT_GENERATION_SCHEMA = _json_schema(
         "fact_statement": {"type": "string", "minLength": 1},
     }
 )
-FACT_VERIFICATION_SCHEMA = _json_schema(
+QUESTION_REPAIR_SCHEMA = _json_schema(
+    {"paraphrase_question": {"type": "string", "minLength": 1}}
+)
+FACT_REPAIR_SCHEMA = _json_schema(
+    {"fact_statement": {"type": "string", "minLength": 1}}
+)
+QUESTION_VERIFICATION_SCHEMA = _json_schema(
     {
         "semantic_preserved": {"type": "boolean"},
         "question_changed": {"type": "boolean"},
         "constraints_preserved": {"type": "boolean"},
         "answer_slot_preserved": {"type": "boolean"},
+    }
+)
+FACT_VERIFICATION_SCHEMA = _json_schema(
+    {
         "fact_declarative": {"type": "boolean"},
         "fact_self_contained": {"type": "boolean"},
         "fact_supported_by_qa": {"type": "boolean"},
@@ -64,39 +78,52 @@ FACT_VERIFICATION_SCHEMA = _json_schema(
         "no_qa_wire_format": {"type": "boolean"},
     }
 )
-_REQUIRED_VERIFICATION_FIELDS = tuple(FACT_VERIFICATION_SCHEMA["required"])
+_REQUIRED_QUESTION_VERIFICATION_FIELDS = tuple(
+    QUESTION_VERIFICATION_SCHEMA["required"]
+)
+_REQUIRED_FACT_VERIFICATION_FIELDS = tuple(
+    FACT_VERIFICATION_SCHEMA["required"]
+)
+
+
+class FactMaterializationRejected(RuntimeError):
+    """Bounded strict-generation rejection with complete attempt receipts."""
+
+    def __init__(
+        self,
+        source_id: str,
+        attempt_receipts: Sequence[Mapping[str, object]],
+    ) -> None:
+        self.source_id = source_id
+        self.attempt_receipts = tuple(dict(item) for item in attempt_receipts)
+        last = self.attempt_receipts[-1] if self.attempt_receipts else {}
+        detail = str(last.get("error", "strict field verification exhausted"))
+        super().__init__(
+            f"full-dataset fact materialization failed for {source_id}: {detail}"
+        )
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _normalized_text(value: str) -> str:
-    return " ".join(value.casefold().split())
+def _generated_text(generated: Mapping[str, object], field: str) -> str:
+    value = generated.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be non-empty text")
+    return " ".join(value.split())
 
 
 def _candidate(
     source: HotpotQATrainQASource,
     generated: Mapping[str, object],
 ) -> dict[str, object]:
-    question = generated.get("paraphrase_question")
-    if not isinstance(question, str) or not question.strip():
-        raise ValueError("paraphrase_question must be non-empty text")
-    if _normalized_text(question) == _normalized_text(source.question):
-        raise ValueError("paraphrase_question must change the source wording")
-    fact = generated.get("fact_statement")
-    if not isinstance(fact, str) or not fact.strip():
-        raise ValueError("fact_statement must be non-empty text")
-    normalized_fact = fact.strip()
-    lowered = normalized_fact.casefold()
-    if lowered.startswith("question:") or lowered.startswith("answer:"):
-        raise ValueError("fact_statement cannot use Question/Answer labels")
-    if "\nquestion:" in lowered or "\nanswer:" in lowered:
-        raise ValueError("fact_statement cannot contain a Q-A wire format")
-    if _normalized_text(normalized_fact) == _normalized_text(
-        source.canonical_answer
-    ):
-        raise ValueError("fact_statement must be self-contained, not a bare answer")
+    question = validate_hotpotqa_question_rewrite(
+        source, generated.get("paraphrase_question")
+    )
+    normalized_fact = validate_hotpotqa_fact_statement(
+        source, generated.get("fact_statement")
+    )
     return {
         "source_train_task_id": source.source_train_task_id,
         "paraphrase_question": question.strip(),
@@ -115,94 +142,353 @@ async def _materialize_one(
     provider: object,
     seed: int,
     max_attempts: int,
+    generation_rounds: int = 2,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    errors: list[str] = []
-    for attempt in range(max_attempts):
-        generation_seed = seed + index * max_attempts * 2 + attempt * 2
-        try:
-            generated, generation_receipt = await _generate_json(
-                model=model,
-                provider=provider,
-                schema=FACT_GENERATION_SCHEMA,
-                contract=(
-                    "Semantically reword one HotpotQA question while preserving "
-                    "its scope, entities, relations, constraints, multi-hop path, "
-                    "and answer slot. Also express the supplied dataset answer as "
-                    "one self-contained declarative fact that states the complete "
-                    "question-answer relation without Question/Answer labels. "
-                    "Preserve names, proper nouns, numbers, and dates exactly when "
-                    "they cannot be safely paraphrased. Do not add aliases or facts. "
-                    "Return only the requested JSON fields."
-                ),
-                problem=(
-                    f"Source question:\n{source.question}\n\n"
-                    f"Dataset answer:\n{source.canonical_answer}"
-                ),
-                request_id=(
-                    f"hotpotqa-full-dataset-fact:{index:06d}:"
-                    f"generate:{attempt:02d}"
-                ),
-                seed=generation_seed,
-                temperature=0.2,
+    if generation_rounds < 1:
+        raise ValueError("generation_rounds must be positive")
+    binding_mode = (
+        "declarative_clause_paraphrase"
+        if canonical_answer_is_declarative_clause(source.canonical_answer)
+        else "answer_slot_binding"
+    )
+    question: str | None = None
+    fact: str | None = None
+    question_admitted = False
+    fact_admitted = False
+    question_rejection = "not yet generated"
+    fact_rejection = "not yet generated"
+    attempt_receipts: list[dict[str, object]] = []
+
+    for generation_round in range(generation_rounds):
+        for attempt in range(max_attempts):
+            request_seed = (
+                seed
+                + index * max_attempts * 8
+                + generation_round * GENERATION_ROUND_SEED_STRIDE
+                + attempt * 8
             )
-            candidate = _candidate(source, generated)
-            verified, verification_receipt = await _generate_json(
-                model=model,
-                provider=provider,
-                schema=FACT_VERIFICATION_SCHEMA,
-                contract=(
-                    "Verify the proposed semantic rewrite and declarative fact "
-                    "against only the supplied source question and dataset answer. "
-                    "The rewrite must genuinely change surface wording without "
-                    "changing semantics, scope, constraints, relations, multi-hop "
-                    "path, or answer slot. The fact must be declarative, "
-                    "self-contained, supported by the pair, and free of Q-A labels. "
-                    "Canonical spans that cannot be safely paraphrased must remain. "
-                    "Evaluate every boolean independently and return only JSON."
-                ),
-                problem=(
-                    f"Source question:\n{source.question}\n\n"
-                    f"Dataset answer:\n{source.canonical_answer}\n\n"
-                    f"Paraphrased question:\n{candidate['paraphrase_question']}\n\n"
-                    f"Declarative fact:\n{candidate['fact_statement']}"
-                ),
-                request_id=(
-                    f"hotpotqa-full-dataset-fact:{index:06d}:"
-                    f"verify:{attempt:02d}"
-                ),
-                seed=generation_seed + 1,
-                temperature=0.0,
-            )
-            if any(
-                verified.get(name) is not True
-                for name in _REQUIRED_VERIFICATION_FIELDS
-            ):
-                failed = [
-                    name
-                    for name in _REQUIRED_VERIFICATION_FIELDS
-                    if verified.get(name) is not True
-                ]
-                raise ValueError(
-                    "semantic/fact verifier rejected: " + ",".join(failed)
-                )
-            materialize_hotpotqa_declarative_facts((source,), (candidate,))
-            return candidate, {
-                "source_train_task_id": source.source_train_task_id,
-                "status": "accepted",
-                "evaluation_scope": FULL_DATASET_EVALUATION_SCOPE,
+            trace: dict[str, object] = {
+                "generation_round": generation_round + 1,
                 "attempt": attempt + 1,
-                "generation_seed": generation_seed,
-                "verification_seed": generation_seed + 1,
-                "generation_response": dict(generation_receipt),
-                "verification_response": dict(verification_receipt),
-                "verification": verified,
-                "completed_at": _utc_now(),
+                "fact_binding_mode": binding_mode,
+                "question": {"preserved_from_prior_attempt": question_admitted},
+                "fact": {"preserved_from_prior_attempt": fact_admitted},
             }
-        except Exception as exc:
-            errors.append(f"{type(exc).__name__}: {' '.join(str(exc).split())}")
-    raise RuntimeError(
-        f"full-dataset fact materialization failed for "
-        f"{source.source_train_task_id}: {errors[-1]}"
+            question_trace = trace["question"]
+            fact_trace = trace["fact"]
+            assert isinstance(question_trace, dict)
+            assert isinstance(fact_trace, dict)
+
+            if question is None and fact is None:
+                try:
+                    generated, generation_receipt = await _generate_json(
+                        model=model,
+                        provider=provider,
+                        schema=FACT_GENERATION_SCHEMA,
+                        contract=(
+                            "Semantically reword the HotpotQA question while "
+                            "preserving every entity, relation, scope, constraint, "
+                            "multi-hop path, answer slot, name, number, date, and "
+                            "quoted span. Replace real wording, not only word order. "
+                            + (
+                                "The dataset answer is already a declarative clause; "
+                                "write a semantically equivalent self-contained "
+                                "declarative fact from that clause alone. Do not "
+                                "invent a relation between a possibly mismatched "
+                                "question and answer. "
+                                if binding_mode == "declarative_clause_paraphrase"
+                                else
+                                "Bind the dataset answer semantics to the original "
+                                "question's answer slot in a self-contained "
+                                "declarative fact. Preserve proper names, numbers, "
+                                "dates, and quoted titles; ordinary phrases may use "
+                                "equivalent wording. Express yes/no as the matching "
+                                "affirmative/negative proposition. Preserve relation "
+                                "direction and scope. "
+                            )
+                            + "Do not add entities, aliases, facts, or Q-A labels. "
+                            "Return only the requested JSON fields."
+                        ),
+                        problem=(
+                            f"Source question:\n{source.question}\n\n"
+                            f"Dataset answer:\n{source.canonical_answer}"
+                        ),
+                        request_id=(
+                            f"hotpotqa-full-dataset-fact:{index:06d}:"
+                            f"round:{generation_round:02d}:generate:{attempt:02d}"
+                        ),
+                        seed=request_seed,
+                        temperature=0.1,
+                    )
+                    question = _generated_text(
+                        generated, "paraphrase_question"
+                    )
+                    fact = _generated_text(generated, "fact_statement")
+                    trace["joint_generation_response"] = dict(
+                        generation_receipt
+                    )
+                except Exception as exc:
+                    trace["error"] = (
+                        f"{type(exc).__name__}: {' '.join(str(exc).split())}"
+                    )
+                    attempt_receipts.append(trace)
+                    continue
+            else:
+                if not question_admitted:
+                    try:
+                        repaired, response = await _generate_json(
+                            model=model,
+                            provider=provider,
+                            schema=QUESTION_REPAIR_SCHEMA,
+                            contract=(
+                                "Repair only the HotpotQA question paraphrase. "
+                                "Preserve every entity, relation, scope, constraint, "
+                                "multi-hop path, answer slot, name, number, date, "
+                                "and quoted span. Replace at least one non-entity "
+                                "word or phrase; changing only word order is invalid. "
+                                "Do not reveal the answer. Return only JSON."
+                            ),
+                            problem=(
+                                f"Source question:\n{source.question}\n\n"
+                                f"Rejected paraphrase:\n{question or ''}\n\n"
+                                f"Prior admission result:\n{question_rejection}"
+                            ),
+                            request_id=(
+                                f"hotpotqa-full-dataset-fact:{index:06d}:"
+                                f"round:{generation_round:02d}:"
+                                f"repair-question:{attempt:02d}"
+                            ),
+                            seed=request_seed,
+                            temperature=0.0,
+                        )
+                        question = _generated_text(
+                            repaired, "paraphrase_question"
+                        )
+                        question_trace["generation_response"] = dict(response)
+                    except Exception as exc:
+                        question_trace["generation_error"] = (
+                            f"{type(exc).__name__}: {' '.join(str(exc).split())}"
+                        )
+                        question_rejection = str(
+                            question_trace["generation_error"]
+                        )
+                if not fact_admitted:
+                    try:
+                        repaired, response = await _generate_json(
+                            model=model,
+                            provider=provider,
+                            schema=FACT_REPAIR_SCHEMA,
+                            contract=(
+                                "Repair only one self-contained declarative fact. "
+                                + (
+                                    "The dataset answer is a complete declarative "
+                                    "clause. Semantically paraphrase only that clause; "
+                                    "preserve all names, numbers, dates, quoted spans, "
+                                    "relations, and scope. Do not bind it to or infer "
+                                    "anything from the question. "
+                                    if binding_mode
+                                    == "declarative_clause_paraphrase"
+                                    else
+                                    "Bind the dataset answer semantics to the "
+                                    "question's original answer slot. Preserve proper "
+                                    "names, numbers, dates, and quoted titles; ordinary "
+                                    "phrases may use equivalent wording. Express yes/no "
+                                    "as the matching affirmative/negative proposition. "
+                                    "Copy the authoritative relation and scope; do not "
+                                    "reverse arguments or add a fact. "
+                                )
+                                + "Do not add entities, aliases, or Q-A labels. "
+                                "Return only JSON."
+                            ),
+                            problem=(
+                                (
+                                    f"Dataset answer clause:\n"
+                                    f"{source.canonical_answer}\n\n"
+                                    if binding_mode
+                                    == "declarative_clause_paraphrase"
+                                    else
+                                    f"Source question:\n{source.question}\n\n"
+                                    f"Dataset answer:\n{source.canonical_answer}\n\n"
+                                )
+                                + f"Rejected fact:\n{fact or ''}\n\n"
+                                + f"Prior admission result:\n{fact_rejection}"
+                            ),
+                            request_id=(
+                                f"hotpotqa-full-dataset-fact:{index:06d}:"
+                                f"round:{generation_round:02d}:"
+                                f"repair-fact:{attempt:02d}"
+                            ),
+                            seed=request_seed + 1,
+                            temperature=0.0,
+                        )
+                        fact = _generated_text(repaired, "fact_statement")
+                        fact_trace["generation_response"] = dict(response)
+                    except Exception as exc:
+                        fact_trace["generation_error"] = (
+                            f"{type(exc).__name__}: {' '.join(str(exc).split())}"
+                        )
+                        fact_rejection = str(fact_trace["generation_error"])
+
+            if not question_admitted and question is not None:
+                try:
+                    question = validate_hotpotqa_question_rewrite(
+                        source, question
+                    )
+                    question_trace["deterministic_admission"] = True
+                    verified, response = await _generate_json(
+                        model=model,
+                        provider=provider,
+                        schema=QUESTION_VERIFICATION_SCHEMA,
+                        contract=(
+                            "Verify only semantic equivalence of the question "
+                            "paraphrase. Preserve entity identity, relation, scope, "
+                            "constraints, multi-hop path, answer slot, and answer "
+                            "cardinality. Surface wording must genuinely change. "
+                            "Do not solve the question. Evaluate each boolean "
+                            "independently and return only JSON."
+                        ),
+                        problem=(
+                            f"Source question:\n{source.question}\n\n"
+                            f"Paraphrased question:\n{question}"
+                        ),
+                        request_id=(
+                            f"hotpotqa-full-dataset-fact:{index:06d}:"
+                            f"round:{generation_round:02d}:"
+                            f"verify-question:{attempt:02d}"
+                        ),
+                        seed=request_seed + 2,
+                        temperature=0.0,
+                    )
+                    failed = [
+                        name
+                        for name in _REQUIRED_QUESTION_VERIFICATION_FIELDS
+                        if verified.get(name) is not True
+                    ]
+                    question_trace["verification"] = dict(verified)
+                    question_trace["verification_response"] = dict(response)
+                    question_trace["failed_fields"] = failed
+                    question_admitted = not failed
+                    question_rejection = (
+                        "accepted"
+                        if question_admitted
+                        else "semantic verifier rejected: " + ",".join(failed)
+                    )
+                except Exception as exc:
+                    question_admitted = False
+                    question_trace["deterministic_or_verification_error"] = (
+                        f"{type(exc).__name__}: {' '.join(str(exc).split())}"
+                    )
+                    question_rejection = str(
+                        question_trace["deterministic_or_verification_error"]
+                    )
+
+            if not fact_admitted and fact is not None:
+                try:
+                    fact = validate_hotpotqa_fact_statement(source, fact)
+                    fact_trace["deterministic_admission"] = True
+                    verified, response = await _generate_json(
+                        model=model,
+                        provider=provider,
+                        schema=FACT_VERIFICATION_SCHEMA,
+                        contract=(
+                            "Verify only the proposed declarative fact. It must "
+                            "be self-contained, declarative, free of Q-A labels, "
+                            + (
+                                "and semantically equivalent to the supplied "
+                                "dataset answer clause alone. Do not require or "
+                                "invent a relation to the question. "
+                                if binding_mode
+                                == "declarative_clause_paraphrase"
+                                else
+                                "and supported by binding the dataset answer semantics "
+                                "to the source question's answer slot without changing "
+                                "relation direction, polarity, or scope. Proper names, "
+                                "numbers, dates, and quoted titles must be preserved; "
+                                "ordinary phrases may use equivalent wording. "
+                            )
+                            + "Reject added entities, aliases, facts, numbers, or "
+                            "dates. Evaluate every boolean independently and "
+                            "return only JSON."
+                        ),
+                        problem=(
+                            (
+                                f"Dataset answer clause:\n"
+                                f"{source.canonical_answer}\n\n"
+                                if binding_mode
+                                == "declarative_clause_paraphrase"
+                                else
+                                f"Source question:\n{source.question}\n\n"
+                                f"Dataset answer:\n{source.canonical_answer}\n\n"
+                            )
+                            + f"Declarative fact:\n{fact}"
+                        ),
+                        request_id=(
+                            f"hotpotqa-full-dataset-fact:{index:06d}:"
+                            f"round:{generation_round:02d}:"
+                            f"verify-fact:{attempt:02d}"
+                        ),
+                        seed=request_seed + 3,
+                        temperature=0.0,
+                    )
+                    failed = [
+                        name
+                        for name in _REQUIRED_FACT_VERIFICATION_FIELDS
+                        if verified.get(name) is not True
+                    ]
+                    fact_trace["verification"] = dict(verified)
+                    fact_trace["verification_response"] = dict(response)
+                    fact_trace["failed_fields"] = failed
+                    fact_admitted = not failed
+                    fact_rejection = (
+                        "accepted"
+                        if fact_admitted
+                        else "fact verifier rejected: " + ",".join(failed)
+                    )
+                except Exception as exc:
+                    fact_admitted = False
+                    fact_trace["deterministic_or_verification_error"] = (
+                        f"{type(exc).__name__}: {' '.join(str(exc).split())}"
+                    )
+                    fact_rejection = str(
+                        fact_trace["deterministic_or_verification_error"]
+                    )
+
+            trace["candidate"] = {
+                "paraphrase_question": question,
+                "fact_statement": fact,
+            }
+            trace["error"] = (
+                "question="
+                + ("accepted" if question_admitted else "rejected")
+                + ",fact="
+                + ("accepted" if fact_admitted else "rejected")
+            )
+            attempt_receipts.append(trace)
+            if question_admitted and fact_admitted:
+                candidate = _candidate(
+                    source,
+                    {
+                        "paraphrase_question": question,
+                        "fact_statement": fact,
+                    },
+                )
+                materialize_hotpotqa_declarative_facts(
+                    (source,), (candidate,)
+                )
+                return candidate, {
+                    "source_train_task_id": source.source_train_task_id,
+                    "status": "accepted",
+                    "evaluation_scope": FULL_DATASET_EVALUATION_SCOPE,
+                    "generation_round": generation_round + 1,
+                    "attempt": attempt + 1,
+                    "generation_seed": request_seed,
+                    "fact_binding_mode": binding_mode,
+                    "attempt_receipts": attempt_receipts,
+                    "completed_at": _utc_now(),
+                }
+
+    raise FactMaterializationRejected(
+        source.source_train_task_id, attempt_receipts
     )
 
 
@@ -240,19 +526,49 @@ async def materialize(args: argparse.Namespace) -> dict[str, object]:
     }
     if len(receipts) != len(receipt_rows):
         raise ValueError("resume receipts have duplicate or foreign source IDs")
-    for source_id, value in accepted.items():
-        materialize_hotpotqa_declarative_facts(
-            (source_by_id[source_id],), (value,)
-        )
-        receipts.setdefault(
-            source_id,
+    resume_rejected: list[str] = []
+    for source_id, value in list(accepted.items()):
+        try:
+            materialize_hotpotqa_declarative_facts(
+                (source_by_id[source_id],), (value,)
+            )
+        except (TypeError, ValueError) as exc:
+            accepted.pop(source_id)
+            previous_status = receipts.get(source_id, {}).get("status")
+            receipts[source_id] = {
+                "source_train_task_id": source_id,
+                "status": "resume_rejected_by_current_admission",
+                "evaluation_scope": FULL_DATASET_EVALUATION_SCOPE,
+                "previous_status": previous_status,
+                "admission_error_type": type(exc).__name__,
+                "admission_error": " ".join(str(exc).split())[:512],
+                "completed_at": _utc_now(),
+            }
+            resume_rejected.append(source_id)
+            continue
+        previous = dict(receipts.get(source_id, {}))
+        previous.update(
             {
                 "source_train_task_id": source_id,
-                "status": "resume_admitted",
+                "status": "resume_revalidated",
                 "evaluation_scope": FULL_DATASET_EVALUATION_SCOPE,
-                "paraphrase_provenance": value.get("paraphrase_provenance"),
+                "current_deterministic_admission": True,
                 "completed_at": _utc_now(),
-            },
+            }
+        )
+        receipts[source_id] = previous
+
+    if resume_rejected:
+        # Remove stale attestations before any model request.  The successful
+        # checkpoint remains source-order stable and the rejected IDs become
+        # ordinary pending rows on this same resume invocation.
+        _write_jsonl(
+            output_path,
+            [accepted[item] for item in ordered_ids if item in accepted],
+        )
+        _write_jsonl(
+            receipt_path,
+            [receipts[item] for item in ordered_ids if item in receipts],
         )
 
     pending = [
@@ -281,6 +597,7 @@ async def materialize(args: argparse.Namespace) -> dict[str, object]:
                 provider=provider,
                 seed=args.seed,
                 max_attempts=args.max_attempts,
+                generation_rounds=getattr(args, "generation_rounds", 2),
             )
 
     failed_source_ids: list[str] = []
@@ -295,7 +612,7 @@ async def materialize(args: argparse.Namespace) -> dict[str, object]:
             source_id = source.source_train_task_id
             if isinstance(result, BaseException):
                 failed_source_ids.append(source_id)
-                receipts[source_id] = {
+                rejection_receipt: dict[str, object] = {
                     "source_train_task_id": source_id,
                     "status": "rejected_after_bounded_attempts",
                     "evaluation_scope": FULL_DATASET_EVALUATION_SCOPE,
@@ -303,6 +620,11 @@ async def materialize(args: argparse.Namespace) -> dict[str, object]:
                     "generation_error": " ".join(str(result).split())[:512],
                     "completed_at": _utc_now(),
                 }
+                if isinstance(result, FactMaterializationRejected):
+                    rejection_receipt["attempt_receipts"] = list(
+                        result.attempt_receipts
+                    )
+                receipts[source_id] = rejection_receipt
                 continue
             candidate, receipt = result
             accepted[source_id] = candidate
@@ -339,6 +661,12 @@ async def materialize(args: argparse.Namespace) -> dict[str, object]:
         "prompt_version": PROMPT_VERSION,
         "paraphrase_version": PARAPHRASE_VERSION,
         "paraphrase_provenance": PARAPHRASE_PROVENANCE,
+        "paraphrase_versions": sorted(
+            {str(value["paraphrase_version"]) for value in ordered}
+        ),
+        "paraphrase_provenances": sorted(
+            {str(value["paraphrase_provenance"]) for value in ordered}
+        ),
         "source_dataset": "HotpotQA",
         "source_configuration": "distractor",
         "source_splits": ["train", "validation"],
@@ -367,6 +695,7 @@ async def materialize(args: argparse.Namespace) -> dict[str, object]:
         "generator_model_id": args.model_id,
         "seed": args.seed,
         "max_attempts": args.max_attempts,
+        "generation_rounds": getattr(args, "generation_rounds", 2),
         "generation_concurrency": args.concurrency,
         "checkpoint_every": checkpoint_size,
         "accepted_count": len(ordered),
@@ -430,6 +759,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--concurrency", type=_positive_integer, default=64)
     parser.add_argument("--checkpoint-every", type=_positive_integer, default=1_024)
     parser.add_argument("--max-attempts", type=_positive_integer, default=4)
+    parser.add_argument(
+        "--generation-rounds", type=_positive_integer, default=2
+    )
     parser.add_argument("--limit", type=_positive_integer)
     return parser
 

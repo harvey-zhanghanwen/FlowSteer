@@ -11,8 +11,10 @@ embedded and exposed to worker Agents.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from collections import Counter
 import json
 from pathlib import Path
+import re
 from threading import Lock
 from types import MappingProxyType
 from typing import Mapping, Sequence
@@ -49,6 +51,214 @@ _MATERIALIZATION_FIELDS = frozenset(
     }
 )
 _FACT_FIELDS = frozenset({"memory_id", "fact_text"})
+
+# Thin adaptation of TriviaQA's lexical/immutable-field admission boundary.
+# These checks stay outside the Agent-facing index and use Q-A only as source
+# provenance while deciding whether a generated fact may be projected.
+_LEXICAL_TOKEN = re.compile(r"[^\W_]+(?:['’-][^\W_]+)*", re.UNICODE)
+_NUMBER_OR_DATE_TOKEN = re.compile(
+    r"\b(?:\d(?:[\d,./-]*\d)?|[IVXLCDM]{2,})\b"
+)
+_QUOTED_SPAN = re.compile(r'"([^\"]+)"|“([^”]+)”|(?<!\w)[\'‘]([^\'’]+)[\'’](?!\w)')
+_FINITE_CLAUSE_VERB = re.compile(
+    r"\b(?:is|are|was|were|has|have|had|does|do|did|can|could|may|"
+    r"might|must|shall|should|will|would)\b",
+    re.IGNORECASE,
+)
+_FUNCTION_WORDS = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "been", "being",
+        "both", "by", "did", "do", "does", "for", "from", "had", "has",
+        "have", "he", "her", "hers", "him", "his", "how", "i", "in",
+        "is", "it", "its", "me", "my", "of", "on", "or", "our", "she",
+        "that", "the", "their", "them", "they", "this", "those", "to",
+        "was", "we", "were", "what", "when", "where", "which", "who",
+        "whom", "whose", "why", "with", "you", "your",
+    }
+)
+_SENTENCE_INITIAL_NON_ENTITY = frozenset(
+    {
+        "after", "although", "among", "are", "before", "between",
+        "because", "did", "does", "do", "during", "either", "following",
+        "has", "have", "how", "identify", "is", "name", "neither",
+        "since", "state", "was", "were", "what", "when", "where",
+        "which", "while", "who", "whom", "whose", "why",
+    }
+)
+
+
+def _lexical_tokens(text: str) -> tuple[str, ...]:
+    return tuple(match.group(0) for match in _LEXICAL_TOKEN.finditer(text))
+
+
+def _content_tokens(text: str) -> Counter[str]:
+    return Counter(
+        token.casefold()
+        for token in _lexical_tokens(text)
+        if token.casefold() not in _FUNCTION_WORDS
+    )
+
+
+def _identity_tokens(text: str) -> frozenset[str]:
+    tokens = _lexical_tokens(text)
+    identities: set[str] = set()
+    for index, token in enumerate(tokens):
+        folded = token.casefold()
+        if folded in _FUNCTION_WORDS:
+            continue
+        if index == 0 and folded in _SENTENCE_INITIAL_NON_ENTITY:
+            continue
+        if token[:1].isupper() or token.isupper():
+            if folded.endswith(("'s", "’s")):
+                folded = folded[:-2]
+            identities.add(folded)
+    return frozenset(identities)
+
+
+def _quoted_spans(text: str) -> frozenset[str]:
+    return frozenset(
+        next(group for group in match.groups() if group is not None).strip()
+        for match in _QUOTED_SPAN.finditer(text)
+    )
+
+
+def _contains_ordered_tokens(text: str, required: Sequence[str]) -> bool:
+    """Return whether normalized tokens occur in order, allowing insertions."""
+
+    if not required:
+        return True
+    observed = iter(token.casefold() for token in _lexical_tokens(text))
+    for required_token in required:
+        folded = required_token.casefold()
+        if not any(token == folded for token in observed):
+            return False
+    return True
+
+
+def canonical_answer_is_declarative_clause(answer: str) -> bool:
+    """Classify an answer proposition without inspecting a task identity."""
+
+    normalized = " ".join(_required_text(answer, "canonical_answer").split())
+    return len(_lexical_tokens(normalized)) >= 4 and bool(
+        _FINITE_CLAUSE_VERB.search(normalized)
+    )
+
+
+def validate_hotpotqa_question_rewrite(
+    source: HotpotQATrainQASource,
+    paraphrase_question: object,
+) -> str:
+    """Apply TriviaQA-style immutable-field and lexical-change admission."""
+
+    question = _required_text(paraphrase_question, "paraphrase_question")
+    if _normalized_text(question) == _normalized_text(source.question):
+        raise ValueError("paraphrase_question is identical to the source question")
+    if _content_tokens(question) == _content_tokens(source.question):
+        raise ValueError(
+            "paraphrase_question changed only syntax or word order"
+        )
+    # Entity equivalence is checked by the dedicated semantic verifier.  A
+    # capitalization-only heuristic is not an entity recognizer and wrongly
+    # rejects valid rewrites such as ``American`` -> ``U.S.``.  Deterministic
+    # admission remains strict for numbers/dates and answer leakage.
+    if Counter(_NUMBER_OR_DATE_TOKEN.findall(source.question)) != Counter(
+        _NUMBER_OR_DATE_TOKEN.findall(question)
+    ):
+        raise ValueError(
+            "paraphrase_question changed an immutable number or date"
+        )
+    canonical = " ".join(source.canonical_answer.split())
+    if (
+        canonical.casefold() not in source.question.casefold()
+        and canonical.casefold() in question.casefold()
+    ):
+        raise ValueError("paraphrase_question introduced the canonical answer")
+    return question
+
+
+def validate_hotpotqa_fact_statement(
+    source: HotpotQATrainQASource,
+    fact_statement: object,
+) -> str:
+    """Admit one fact-only payload with no Q-A wire or unsupported entities."""
+
+    fact = " ".join(_required_text(fact_statement, "fact_statement").split())
+    lowered = fact.casefold()
+    if re.search(r"\b(?:question|answer|prompt|response)\s*:", lowered):
+        raise ValueError("fact_statement contains a Question/Answer wire")
+    unquoted = _QUOTED_SPAN.sub(" quoted material ", fact)
+    if "?" in unquoted or re.match(
+        r"^(?:who|what|which|where|when|why|how|name|identify)\b",
+        fact,
+        re.IGNORECASE,
+    ):
+        raise ValueError("fact_statement must be declarative")
+    if not fact.rstrip('"\'’”)]} ').endswith((".", "!")):
+        raise ValueError("fact_statement must be a complete declarative sentence")
+
+    allowed_identities = _identity_tokens(
+        f"{source.question} {source.canonical_answer}"
+    )
+    novel_identities = _identity_tokens(fact) - allowed_identities
+    if novel_identities:
+        raise ValueError(
+            "fact_statement introduced an unsupported immutable entity token: "
+            + ", ".join(sorted(novel_identities))
+        )
+    allowed_numbers = Counter(
+        _NUMBER_OR_DATE_TOKEN.findall(
+            f"{source.question} {source.canonical_answer}"
+        )
+    )
+    observed_numbers = Counter(_NUMBER_OR_DATE_TOKEN.findall(fact))
+    if any(observed_numbers[token] > allowed_numbers[token] for token in observed_numbers):
+        raise ValueError("fact_statement introduced a number or date")
+    canonical = " ".join(source.canonical_answer.split())
+    if canonical_answer_is_declarative_clause(canonical):
+        if _normalized_text(fact) == _normalized_text(canonical):
+            raise ValueError(
+                "clausal canonical answer must receive a semantic rewrite"
+            )
+        required_answer_identities = _identity_tokens(canonical)
+        if not required_answer_identities.issubset(_identity_tokens(fact)):
+            raise ValueError(
+                "fact_statement removed an immutable entity from the answer clause"
+            )
+        if Counter(_NUMBER_OR_DATE_TOKEN.findall(canonical)) != Counter(
+            _NUMBER_OR_DATE_TOKEN.findall(fact)
+        ):
+            raise ValueError(
+                "fact_statement changed a number or date in the answer clause"
+            )
+    else:
+        # Preserve immutable answer material while allowing an ordinary phrase
+        # or a binary label to be realized as an equivalent declarative fact.
+        # This follows TriviaQA's fact-memory admission: a literal full-span
+        # requirement would reject valid transformations such as ``yes`` -> an
+        # affirmative proposition and ``16-year-old`` -> ``16 years old``.
+        required_answer_identities = _identity_tokens(canonical)
+        required_answer_numbers = Counter(
+            _NUMBER_OR_DATE_TOKEN.findall(canonical)
+        )
+        requires_literal_sequence = bool(
+            required_answer_identities
+            or _quoted_spans(canonical)
+        )
+        if requires_literal_sequence and not _contains_ordered_tokens(
+            fact, _lexical_tokens(canonical)
+        ):
+            raise ValueError(
+                "fact_statement removed immutable answer tokens"
+            )
+        observed_fact_numbers = Counter(_NUMBER_OR_DATE_TOKEN.findall(fact))
+        if any(
+            observed_fact_numbers[token] < count
+            for token, count in required_answer_numbers.items()
+        ):
+            raise ValueError(
+                "fact_statement removed a number or date from the answer"
+            )
+    return fact
 
 
 def _required_text(value: object, name: str) -> str:
@@ -211,12 +421,12 @@ def materialize_hotpotqa_declarative_facts(
             raise ValueError("fact materialization source order or identity differs")
         if value["semantic_preservation_attested"] is not True:
             raise ValueError("fact materialization lacks semantic verification")
-        paraphrase = _required_text(
-            value["paraphrase_question"], "paraphrase_question"
+        validate_hotpotqa_question_rewrite(
+            source, value["paraphrase_question"]
         )
-        if _normalized_text(paraphrase) == _normalized_text(source.question):
-            raise ValueError("paraphrase_question is identical to the source question")
-        fact_text = _required_text(value["fact_statement"], "fact_statement")
+        fact_text = validate_hotpotqa_fact_statement(
+            source, value["fact_statement"]
+        )
         _required_text(value["paraphrase_provenance"], "paraphrase_provenance")
         _required_text(value["paraphrase_version"], "paraphrase_version")
         facts.append(
@@ -577,4 +787,7 @@ __all__ = [
     "build_hotpotqa_full_dataset_fact_memory_index",
     "load_hotpotqa_full_dataset_qa_sources",
     "materialize_hotpotqa_declarative_facts",
+    "canonical_answer_is_declarative_clause",
+    "validate_hotpotqa_fact_statement",
+    "validate_hotpotqa_question_rewrite",
 ]

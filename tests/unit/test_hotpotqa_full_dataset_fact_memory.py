@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from argparse import Namespace
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -176,6 +177,84 @@ def test_materialization_rejects_verbatim_question_and_qa_wire() -> None:
         materialize_hotpotqa_declarative_facts((source,), (qa_wire,))
 
 
+@pytest.mark.parametrize(
+    ("question", "answer", "paraphrase", "fact"),
+    (
+        (
+            "Are Jane and First for Women both women's magazines?",
+            "yes",
+            "Do Jane and First for Women both qualify as women's magazines?",
+            "Jane and First for Women are both women's magazines.",
+        ),
+        (
+            "How old is the female main protagonist of Catching Fire?",
+            "16-year-old",
+            "What is the age of the female lead in Catching Fire?",
+            "The female main protagonist of Catching Fire is 16 years old.",
+        ),
+    ),
+)
+def test_materialization_allows_semantically_equivalent_answer_realization(
+    question: str,
+    answer: str,
+    paraphrase: str,
+    fact: str,
+) -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:equivalent-answer",
+        base_task_id="hotpotqa:equivalent-answer",
+        cycled=False,
+        question=question,
+        canonical_answer=answer,
+    )
+    value = _materialization(source, fact=fact)
+    value["paraphrase_question"] = paraphrase
+    admitted = materialize_hotpotqa_declarative_facts((source,), (value,))
+    assert admitted[0].fact_text == fact
+
+
+def test_materialization_allows_quote_style_and_entity_description_rewrite() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:semantic-surface-rewrite",
+        base_task_id="hotpotqa:semantic-surface-rewrite",
+        cycled=False,
+        question='What American band recorded "The Track"?',
+        canonical_answer="The Example Band",
+    )
+    value = _materialization(
+        source,
+        fact="The Example Band recorded 'The Track'.",
+    )
+    value["paraphrase_question"] = (
+        "Which U.S. musical group made the recording called 'The Track'?"
+    )
+    admitted = materialize_hotpotqa_declarative_facts((source,), (value,))
+    assert admitted[0].fact_text == "The Example Band recorded 'The Track'."
+
+
+def test_materialization_rejects_added_entity_and_truncated_proper_name() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:immutable-answer",
+        base_task_id="hotpotqa:immutable-answer",
+        cycled=False,
+        question="Who directed the Paris Opera Ballet?",
+        canonical_answer="Rudolf Khametovich Nureyev",
+    )
+    added_entity = _materialization(
+        source,
+        fact="Michelle Pfeiffer directed the Paris Opera Ballet.",
+    )
+    with pytest.raises(ValueError, match="unsupported immutable entity"):
+        materialize_hotpotqa_declarative_facts((source,), (added_entity,))
+
+    truncated_name = _materialization(
+        source,
+        fact="Rudolf Nureyev directed the Paris Opera Ballet.",
+    )
+    with pytest.raises(ValueError, match="immutable answer tokens"):
+        materialize_hotpotqa_declarative_facts((source,), (truncated_name,))
+
+
 def test_materializer_has_no_fallback_option() -> None:
     parser = materializer._parser()
     option_strings = {
@@ -256,10 +335,19 @@ def test_materializer_continues_then_resume_retries_only_rejected(
     monkeypatch.setattr(materializer, "_materialize_one", succeed)
     manifest = asyncio.run(materializer.materialize(args))
     assert called == [sources[0].source_train_task_id]
+    assert manifest["source_record_count"] == 4
+    assert manifest["question_rewrite_count"] == 4
+    assert manifest["fact_count"] == 4
     assert manifest["accepted_count"] == 4
     assert manifest["semantic_rewrite_coverage"] == 1.0
     assert manifest["fallback_count"] == 0
     assert manifest["rejected_count"] == 0
+    admitted = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(admitted) == 4
+    assert all(
+        "fallback" not in str(row["paraphrase_provenance"]).casefold()
+        for row in admitted
+    )
 
 
 def _manifest() -> HotpotQAFullDatasetFactMemoryIndexManifest:
@@ -301,6 +389,25 @@ def _manifest() -> HotpotQAFullDatasetFactMemoryIndexManifest:
         facts_path="facts.jsonl",
         embeddings_path="embeddings.npy",
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("question_rewrite_count", 1, "question must be rewritten"),
+        ("fact_count", 1, "one declarative fact"),
+        ("semantic_rewrite_coverage", 0.5, "exactly 100%"),
+        ("contains_raw_questions", True, "raw Q-A"),
+        ("contains_raw_answers", True, "raw Q-A"),
+    ),
+)
+def test_index_manifest_fails_closed_on_incomplete_or_raw_qa_corpus(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        replace(_manifest(), **{field: value})
 
 
 def test_index_search_and_read_expose_only_fact_wire() -> None:
