@@ -97,7 +97,7 @@ def test_fact_record_is_exactly_four_agent_facing_fields() -> None:
         "The answer is Frank Herbert.",
         "Who wrote Dune?",
         "Who wrote Dune? Frank Herbert.",
-        'Frank Herbert wrote the novel "Dune?".',
+        'Frank Herbert wrote the novel "Dune?.',
     ),
 )
 def test_fact_record_rejects_qa_pair_and_non_declarative_wrappers(
@@ -105,6 +105,15 @@ def test_fact_record_rejects_qa_pair_and_non_declarative_wrappers(
 ) -> None:
     with pytest.raises(ValueError, match="fact_text"):
         TriviaQAFactMemoryRecord.create(fact_text=fact_text)
+
+
+def test_fact_record_accepts_question_mark_inside_balanced_quoted_title() -> None:
+    fact = 'Frank Herbert wrote the novel "Dune?".'
+
+    record = TriviaQAFactMemoryRecord.create(fact_text=fact)
+
+    assert record.fact_text == fact
+    assert record.embedding_text() == fact
 
 
 def test_builder_fails_closed_before_embedding_mixed_question_answer_text(

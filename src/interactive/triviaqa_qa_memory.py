@@ -1516,6 +1516,12 @@ _FACT_MEMORY_QA_LABEL = re.compile(
 _FACT_MEMORY_ANSWER_WRAPPER = re.compile(
     r"(?i)\A\s*(?:the\s+)?(?:answer|response)\s+(?:is|was)\b"
 )
+_FACT_MEMORY_QUOTED_SPAN = re.compile(
+    r'"([^"]+)"|“([^”]+)”|'
+    r"(?<!\w)'((?:[^']|(?<=\w)'(?=\w))+)'(?!\w)"
+    + r"|(?<!\w)‘((?:[^‘’]|(?<=\w)’(?=\w)|"
+    r"‘(?:[^‘’]|(?<=\w)’(?=\w))+’)+)’(?!\w)"
+)
 
 
 def _fact_text(value: object) -> str:
@@ -1531,12 +1537,14 @@ def _fact_text(value: object) -> str:
         raise ValueError("fact_text cannot contain a Question/Answer field")
     if _FACT_MEMORY_ANSWER_WRAPPER.match(text) is not None:
         raise ValueError("fact_text must be a self-contained declarative fact")
-    # Fail closed at the Agent-facing/index boundary: without the source-side
-    # metadata available to the materializer, an embedded question mark cannot
-    # be distinguished safely from a question-plus-answer concatenation such
-    # as ``Who wrote Dune? Frank Herbert.``.  Fact rows therefore admit no
-    # question mark at any position, rather than checking only the terminator.
-    if "?" in text:
+    # A question mark inside one balanced immutable quotation can belong to a
+    # title or cited sentence. Any question mark outside such a span remains
+    # an interrogative or question-plus-answer concatenation and fails closed.
+    unquoted_surface = _FACT_MEMORY_QUOTED_SPAN.sub(
+        " quoted material ",
+        text,
+    )
+    if "?" in unquoted_surface:
         raise ValueError("fact_text must be declarative rather than interrogative")
     return text
 
