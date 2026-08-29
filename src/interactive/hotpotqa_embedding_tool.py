@@ -30,6 +30,10 @@ from .hotpotqa_transductive_qa_memory_index import (
     TRANSDUCTIVE_EVALUATION_REGIME,
     TRANSDUCTIVE_QA_MEMORY_CORPUS_VERSION,
 )
+from .hotpotqa_full_dataset_qa_memory_index import (
+    FULL_DATASET_EVALUATION_SCOPE,
+    FULL_DATASET_QA_MEMORY_CORPUS_VERSION,
+)
 from .react_execution import ToolReactExecutionAdapter
 from .tool_runtime import (
     ToolCapability,
@@ -47,6 +51,7 @@ HOTPOTQA_DATASET_SCOPE = ("hotpotqa",)
 _PASSAGE_INDEX_KIND = "public_passage"
 _QA_MEMORY_INDEX_KIND = "train_qa_memory"
 _TRANSDUCTIVE_QA_MEMORY_INDEX_KIND = "transductive_qa_memory"
+_FULL_DATASET_QA_MEMORY_INDEX_KIND = "full_dataset_qa_memory"
 _QA_MEMORY_RETRIEVAL_SUFFICIENCY = frozenset({"supported", "unsupported"})
 
 
@@ -54,6 +59,7 @@ def _is_qa_memory_index_kind(index_kind: str) -> bool:
     return index_kind in {
         _QA_MEMORY_INDEX_KIND,
         _TRANSDUCTIVE_QA_MEMORY_INDEX_KIND,
+        _FULL_DATASET_QA_MEMORY_INDEX_KIND,
     }
 
 
@@ -215,6 +221,7 @@ def _index_identity(
         "source_record_count": ("source_record_count",),
         "source_train_count": ("source_train_count",),
         "source_evaluation_count": ("source_evaluation_count",),
+        "source_validation_count": ("source_validation_count",),
         "source_splits": ("source_splits",),
         "unique_source_count": ("unique_source_count",),
         "cycled_record_count": ("cycled_record_count",),
@@ -225,6 +232,7 @@ def _index_identity(
         "evaluation_overlap_count": ("evaluation_overlap_count",),
         "contains_evaluation_answers": ("contains_evaluation_answers",),
         "evaluation_regime": ("evaluation_regime",),
+        "evaluation_scope": ("evaluation_scope",),
         "official_heldout_eligible": ("official_heldout_eligible",),
         "paraphrase_versions": ("paraphrase_versions",),
         "paraphrase_provenances": ("paraphrase_provenances",),
@@ -299,6 +307,30 @@ def _index_kind(index: _EmbeddingIndex) -> str:
         if search_parameters != ("query", "k") or read_parameters != ("memory_id",):
             raise TypeError("QA-memory manifest and global search/read signatures differ")
         return _TRANSDUCTIVE_QA_MEMORY_INDEX_KIND
+    if corpus_version == FULL_DATASET_QA_MEMORY_CORPUS_VERSION:
+        source_splits = _optional_manifest_field(manifest, "source_splits")
+        if tuple(source_splits) != ("train", "validation"):
+            raise ValueError("full-dataset QA-memory source splits differ")
+        if _optional_manifest_field(manifest, "contains_evaluation_answers") is not True:
+            raise ValueError("full-dataset QA-memory must declare evaluation answers")
+        if (
+            _optional_manifest_field(manifest, "evaluation_scope")
+            != FULL_DATASET_EVALUATION_SCOPE
+        ):
+            raise ValueError("full-dataset QA-memory evaluation scope differs")
+        if _optional_manifest_field(manifest, "official_heldout_eligible") is not False:
+            raise ValueError("full-dataset QA-memory cannot be held-out eligible")
+        evaluation_overlap_count = _optional_manifest_field(
+            manifest, "evaluation_overlap_count"
+        )
+        if (
+            not isinstance(evaluation_overlap_count, int)
+            or evaluation_overlap_count < 1
+        ):
+            raise ValueError("full-dataset QA-memory evaluation overlap differs")
+        if search_parameters != ("query", "k") or read_parameters != ("memory_id",):
+            raise TypeError("QA-memory manifest and global search/read signatures differ")
+        return _FULL_DATASET_QA_MEMORY_INDEX_KIND
     if search_parameters != ("task_id", "query", "k") or read_parameters not in {
         ("task_id", "doc_id"),
         ("task_id", "passage_id"),

@@ -185,15 +185,19 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
             "public_context",
             "train_qa_memory",
             "transductive_qa_memory",
+            "full_dataset_qa_memory",
         }:
             raise ConfigurationError(
                 "qa_embedding_retrieval.corpus_kind must be public_context "
-                "or train_qa_memory or transductive_qa_memory"
+                "or train_qa_memory or transductive_qa_memory "
+                "or full_dataset_qa_memory"
             )
-        if corpus_kind in {"train_qa_memory", "transductive_qa_memory"}:
+        if corpus_kind in {
+            "train_qa_memory",
+            "transductive_qa_memory",
+            "full_dataset_qa_memory",
+        }:
             qa_memory_checks = {
-                "train_sample_count": retrieval.get("train_sample_count") == 512,
-                "validation_sample_count": retrieval.get("validation_sample_count") == 128,
                 "tool_id": retrieval.get("tool_id") == "hotpotqa.qa_memory",
                 "required_evidence_tool_id": (
                     _mapping(config["agent_graph"], "agent_graph").get(
@@ -222,12 +226,28 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
                 ),
             }
             if corpus_kind == "train_qa_memory":
-                qa_memory_checks["index_scope"] = (
-                    retrieval.get("index_scope") == "global_train_only"
-                )
-            else:
                 qa_memory_checks.update(
                     {
+                        "train_sample_count": (
+                            retrieval.get("train_sample_count") == 512
+                        ),
+                        "validation_sample_count": (
+                            retrieval.get("validation_sample_count") == 128
+                        ),
+                        "index_scope": (
+                            retrieval.get("index_scope") == "global_train_only"
+                        ),
+                    }
+                )
+            elif corpus_kind == "transductive_qa_memory":
+                qa_memory_checks.update(
+                    {
+                        "train_sample_count": (
+                            retrieval.get("train_sample_count") == 512
+                        ),
+                        "validation_sample_count": (
+                            retrieval.get("validation_sample_count") == 128
+                        ),
                         "index_scope": (
                             retrieval.get("index_scope")
                             == "global_train_plus_frozen_validation"
@@ -244,6 +264,37 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
                         "evaluation_regime": (
                             retrieval.get("evaluation_regime")
                             == "transductive_retrieval"
+                        ),
+                        "official_heldout_eligible": (
+                            retrieval.get("official_heldout_eligible") is False
+                        ),
+                    }
+                )
+            else:
+                qa_memory_checks.update(
+                    {
+                        "index_scope": (
+                            retrieval.get("index_scope")
+                            == "global_native_train_plus_native_validation"
+                        ),
+                        "source_record_count": (
+                            retrieval.get("source_record_count") == 97852
+                        ),
+                        "source_train_count": (
+                            retrieval.get("source_train_count") == 90447
+                        ),
+                        "source_validation_count": (
+                            retrieval.get("source_validation_count") == 7405
+                        ),
+                        "evaluation_overlap_count": (
+                            retrieval.get("evaluation_overlap_count") == 128
+                        ),
+                        "contains_evaluation_answers": (
+                            retrieval.get("contains_evaluation_answers") is True
+                        ),
+                        "evaluation_scope": (
+                            retrieval.get("evaluation_scope")
+                            == "in_database_transductive"
                         ),
                         "official_heldout_eligible": (
                             retrieval.get("official_heldout_eligible") is False
@@ -1210,6 +1261,8 @@ def _input_context(config: Mapping[str, Any]) -> str:
         return f"{scope_prefix}_dynamic_train_qa_memory_search_read"
     if retrieval.get("corpus_kind") == "transductive_qa_memory":
         return f"{scope_prefix}_dynamic_transductive_qa_memory_search_read"
+    if retrieval.get("corpus_kind") == "full_dataset_qa_memory":
+        return f"{scope_prefix}_dynamic_full_dataset_qa_memory_search_read"
     return f"{scope_prefix}_dynamic_embedding_search_read"
 
 
@@ -1292,13 +1345,26 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
             f"answer evaluator: **{100 * baseline['strict_exact_match']:.2f} EM**, "
             f"**{100 * baseline['strict_token_f1']:.2f} F1**.\n"
         )
-    if report.get("input_context") == "question_only_dynamic_train_qa_memory_search_read":
+    input_context = str(report.get("input_context", ""))
+    if input_context.endswith("_dynamic_train_qa_memory_search_read"):
         input_description = (
             "The Director receives the original question and control-plane Canvas "
             "receipts only. Tool-capable worker Agents dynamically search/read the "
             "global train-only QA-memory and route evidence through graph relations."
         )
-    elif report.get("input_context") == "question_only_dynamic_embedding_search_read":
+    elif input_context.endswith("_dynamic_transductive_qa_memory_search_read"):
+        input_description = (
+            "The Director receives the public task and control-plane receipts only. "
+            "Tool-capable worker Agents dynamically search/read the transductive "
+            "QA-memory and route evidence through explicit graph relations."
+        )
+    elif input_context.endswith("_dynamic_full_dataset_qa_memory_search_read"):
+        input_description = (
+            "The Director receives the public task and control-plane receipts only. "
+            "Tool-capable worker Agents dynamically search/read the full-dataset "
+            "QA-memory and route evidence through explicit graph relations."
+        )
+    elif input_context.endswith("_dynamic_embedding_search_read"):
         input_description = (
             "The Director and Agent Runtime receive only the original question; "
             "public passages are obtained dynamically through the task-scoped "
@@ -1308,15 +1374,20 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         input_description = "The model input uses all ten supplied passages."
     report_title = (
         "HotpotQA Architecture Validation — Dynamic Embedding Retrieval"
-        if report.get("input_context") in {
-            "question_only_dynamic_embedding_search_read",
-            "question_only_dynamic_train_qa_memory_search_read",
-        }
+        if "_dynamic_" in input_context
         else "HotpotQA Architecture Validation — Round 01"
+    )
+    evaluation_scope = str(
+        report.get("evaluation_regime", "heldout_evaluation")
+    )
+    sample_scope = (
+        "Fixed evaluation samples"
+        if report.get("official_heldout_eligible") is False
+        else "Fixed project-held-out samples"
     )
     return f"""# {report_title}
 
-Fixed project-held-out samples: **{report['sample_count']}**. {input_description} No training, backward pass, optimizer step, policy update, MACE, Bayesian, or Skill loop ran.
+{sample_scope}: **{report['sample_count']}**. Evaluation scope: **{evaluation_scope}**. {input_description} No training, backward pass, optimizer step, policy update, MACE, Bayesian, or Skill loop ran.
 
 | Condition | Completed | Valid | Strict EM | Strict F1 |
 |---|---:|---:|---:|---:|
@@ -1618,9 +1689,13 @@ async def run_hotpot_round(
         if retrieval_config.get("corpus_kind") in {
             "train_qa_memory",
             "transductive_qa_memory",
+            "full_dataset_qa_memory",
         }:
             evidence_names.append("paraphrase_manifest")
-        if retrieval_config.get("corpus_kind") == "transductive_qa_memory":
+        if retrieval_config.get("corpus_kind") in {
+            "transductive_qa_memory",
+            "full_dataset_qa_memory",
+        }:
             evidence_names = [
                 "retrieval_index_manifest",
                 "paraphrase_manifest",
@@ -1647,6 +1722,7 @@ async def run_hotpot_round(
         if retrieval_config.get("corpus_kind") in {
             "train_qa_memory",
             "transductive_qa_memory",
+            "full_dataset_qa_memory",
         }:
             index_manifest = _read_json(paths["retrieval_index_manifest"])
             paraphrase_manifest = _read_json(paths["paraphrase_manifest"])
@@ -1674,6 +1750,9 @@ async def run_hotpot_round(
                     "source_evaluation_count": index_manifest.get(
                         "source_evaluation_count"
                     ),
+                    "source_validation_count": index_manifest.get(
+                        "source_validation_count"
+                    ),
                     "unique_source_count": index_manifest.get("unique_source_count"),
                     "cycled_record_count": index_manifest.get("cycled_record_count"),
                     "paraphrase_count": index_manifest.get("paraphrase_count"),
@@ -1697,6 +1776,7 @@ async def run_hotpot_round(
                         "contains_evaluation_answers"
                     ),
                     "evaluation_regime": index_manifest.get("evaluation_regime"),
+                    "evaluation_scope": index_manifest.get("evaluation_scope"),
                     "official_heldout_eligible": index_manifest.get(
                         "official_heldout_eligible"
                     ),

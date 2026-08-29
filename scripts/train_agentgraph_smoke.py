@@ -37,6 +37,10 @@ from src.interactive.hotpotqa_qa_memory_index import HotpotQAQAMemoryIndex
 from src.interactive.hotpotqa_transductive_qa_memory_index import (
     HotpotQATransductiveQAMemoryIndex,
 )
+from src.interactive.hotpotqa_full_dataset_qa_memory_index import (
+    FULL_DATASET_EVALUATION_SCOPE,
+    HotpotQAFullDatasetQAMemoryIndex,
+)
 from src.interactive.hotpotqa_embedding_tool import (
     HotpotQAEmbeddingReactExecutionAdapter,
     build_hotpotqa_embedding_tool_registry,
@@ -464,6 +468,7 @@ class LiveSmokeBackend:
             HotpotQAEmbeddingIndex
             | HotpotQAQAMemoryIndex
             | HotpotQATransductiveQAMemoryIndex
+            | HotpotQAFullDatasetQAMemoryIndex
         ] = None,
     ) -> None:
         self.config = config
@@ -549,6 +554,7 @@ class LiveSmokeBackend:
             HotpotQAEmbeddingIndex
             | HotpotQAQAMemoryIndex
             | HotpotQATransductiveQAMemoryIndex
+            | HotpotQAFullDatasetQAMemoryIndex
         ] = None
         raw_embedding_retrieval = config.get("qa_embedding_retrieval")
         if raw_embedding_retrieval is not None:
@@ -571,6 +577,12 @@ class LiveSmokeBackend:
                     embedding_model_path=str(retrieval["embedding_model"]),
                     embedding_device=str(retrieval["embedding_device"]),
                 )
+            elif corpus_kind == "full_dataset_qa_memory":
+                hotpotqa_embedding_index = HotpotQAFullDatasetQAMemoryIndex.open(
+                    index_dir,
+                    embedding_model_path=str(retrieval["embedding_model"]),
+                    embedding_device=str(retrieval["embedding_device"]),
+                )
             elif corpus_kind == "public_context":
                 hotpotqa_embedding_index = HotpotQAEmbeddingIndex.open(
                     index_dir,
@@ -580,7 +592,8 @@ class LiveSmokeBackend:
             else:
                 raise ConfigurationError(
                     "qa_embedding_retrieval.corpus_kind must be public_context "
-                    "or train_qa_memory or transductive_qa_memory"
+                    "or train_qa_memory or transductive_qa_memory "
+                    "or full_dataset_qa_memory"
                 )
             manifest = hotpotqa_embedding_index.manifest
             if (
@@ -618,6 +631,22 @@ class LiveSmokeBackend:
             ):
                 raise ConfigurationError(
                     "HotpotQA transductive QA-memory manifest differs from config"
+                )
+            if corpus_kind == "full_dataset_qa_memory" and (
+                manifest.source_record_count
+                != int(retrieval["source_record_count"])
+                or manifest.source_train_count
+                != int(retrieval["source_train_count"])
+                or manifest.source_validation_count
+                != int(retrieval["source_validation_count"])
+                or manifest.evaluation_overlap_count
+                != int(retrieval["evaluation_overlap_count"])
+                or manifest.contains_evaluation_answers is not True
+                or manifest.evaluation_scope != FULL_DATASET_EVALUATION_SCOPE
+                or manifest.official_heldout_eligible is not False
+            ):
+                raise ConfigurationError(
+                    "HotpotQA full-dataset QA-memory manifest differs from config"
                 )
         evidence_store = EvidenceStore(_resolve(root, str(storage["root"])))
 
