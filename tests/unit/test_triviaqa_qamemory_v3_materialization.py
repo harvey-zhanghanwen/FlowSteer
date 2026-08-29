@@ -54,7 +54,9 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _clausal_canonical_relation_statement,
     _capitalized_identity_tokens,
     _bounded_subject_wh_pair,
+    _fronted_context_subject_wh_pair,
     _leading_copular_object_wh_pair,
+    _network_identifier_contrast_pair,
     _deterministic_answer_slot_statement,
     _deterministic_question_paraphrase,
     _deterministic_strict_pair,
@@ -3435,6 +3437,190 @@ def test_leading_copular_object_wh_pair_rejects_other_dependencies(
     source = _semantic_source(original, "Example")
 
     assert _leading_copular_object_wh_pair(source) is None
+
+
+@pytest.mark.parametrize(
+    ("original", "canonical", "expected_question", "expected_fact"),
+    (
+        (
+            (
+                "'.uk' is the network identifier for the United Kingdom. "
+                "Which country uses the identifier '.jp'?"
+            ),
+            "JAPAN",
+            (
+                "The network identifier for the United Kingdom is '.uk'. "
+                "Identify the country that uses the identifier '.jp'."
+            ),
+            (
+                "The network identifier for the United Kingdom is '.uk', "
+                "and JAPAN uses the identifier '.jp'."
+            ),
+        ),
+        (
+            (
+                ".uk (dot uk) is the network identifier for the United Kingdom, "
+                "which country uses the identifier .br (dot br)?"
+            ),
+            "BRAZIL",
+            (
+                "The network identifier for the United Kingdom is .uk (dot uk). "
+                "Identify the country that uses the identifier .br (dot br)."
+            ),
+            (
+                "The network identifier for the United Kingdom is .uk (dot uk), "
+                "and BRAZIL uses the identifier .br (dot br)."
+            ),
+        ),
+        (
+            (
+                ".uk is the network identifier for the United Kingdom, "
+                "which country uses the identifier .ke?"
+            ),
+            "KENYA",
+            (
+                "The network identifier for the United Kingdom is .uk. "
+                "Identify the country that uses the identifier .ke."
+            ),
+            (
+                "The network identifier for the United Kingdom is .uk, "
+                "and KENYA uses the identifier .ke."
+            ),
+        ),
+    ),
+)
+def test_network_identifier_contrast_pair_reenters_full_admission(
+    original: str,
+    canonical: str,
+    expected_question: str,
+    expected_fact: str,
+) -> None:
+    source = _semantic_source(original, canonical)
+
+    pair = _network_identifier_contrast_pair(source)
+
+    assert pair == (expected_question, expected_fact)
+    assert _deterministic_strict_pair(source) == pair
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": expected_question,
+                "paraphrase_answer_statement": expected_fact,
+            }
+        ),
+        source,
+    ) == pair
+
+
+@pytest.mark.parametrize(
+    "original",
+    (
+        (
+            "'.fr' is the network identifier for France. "
+            "Which country uses the identifier '.jp'?"
+        ),
+        (
+            "'.uk' is the network identifier for the United Kingdom. "
+            "What country is represented by the identifier '.jp'?"
+        ),
+        (
+            "'.uk' is the network identifier for the United Kingdom. "
+            "Which country uses the identifier '.jp', and who administers it?"
+        ),
+        (
+            ".uk (dot uk) is the network identifier for the United Kingdom, "
+            "which country uses the identifier .br (dot bz)?"
+        ),
+    ),
+)
+def test_network_identifier_contrast_pair_rejects_other_relations(
+    original: str,
+) -> None:
+    source = _semantic_source(original, "Example")
+
+    assert _network_identifier_contrast_pair(source) is None
+
+
+@pytest.mark.parametrize(
+    ("original", "canonical", "expected_question", "expected_fact"),
+    (
+        (
+            "In 1961, who became the first non- American golfer to win The Masters?",
+            "Gary Player",
+            (
+                "In 1961, identify the person who became the first non- American "
+                "golfer to win The Masters."
+            ),
+            (
+                "In 1961, Gary Player became the first non- American golfer to "
+                "win The Masters."
+            ),
+        ),
+        (
+            "In the Old Testament, who was the mother of Solomon?",
+            "Bathsheba",
+            (
+                "In the Old Testament, identify the person who was the mother "
+                "of Solomon."
+            ),
+            "In the Old Testament, Bathsheba was the mother of Solomon.",
+        ),
+        (
+            "In Shakespeare's 'Twelfth Night' who is the uncle of Olivia?",
+            "SIR TOBY BELCH",
+            (
+                "In Shakespeare's 'Twelfth Night', identify the person who is "
+                "the uncle of Olivia."
+            ),
+            (
+                "In Shakespeare's 'Twelfth Night', SIR TOBY BELCH is the uncle "
+                "of Olivia."
+            ),
+        ),
+    ),
+)
+def test_fronted_context_subject_wh_pair_reenters_full_admission(
+    original: str,
+    canonical: str,
+    expected_question: str,
+    expected_fact: str,
+) -> None:
+    source = _semantic_source(original, canonical)
+
+    pair = _fronted_context_subject_wh_pair(source)
+
+    assert pair == (expected_question, expected_fact)
+    assert _deterministic_strict_pair(source) == pair
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": expected_question,
+                "paraphrase_answer_statement": expected_fact,
+            }
+        ),
+        source,
+    ) == pair
+
+
+@pytest.mark.parametrize(
+    ("original", "canonical"),
+    (
+        (
+            "In the 1960s, who had a hit record with Bob Dylan?",
+            "Peter, Paul and Mary",
+        ),
+        ("In sport who are the Black Caps?", "NEW ZEALAND CRICKET TEAM"),
+        ("In 1961, who became the champion?", "Example"),
+        ("During 1961, who became the champion?", "Example"),
+    ),
+)
+def test_fronted_context_subject_wh_pair_rejects_unproved_subjects(
+    original: str,
+    canonical: str,
+) -> None:
+    source = _semantic_source(original, canonical)
+
+    assert _fronted_context_subject_wh_pair(source) is None
 
 
 def test_listed_choice_detection_normalizes_apostrophe_glyphs() -> None:

@@ -3897,6 +3897,103 @@ def _leading_copular_object_wh_pair(
     )
 
 
+def _network_identifier_contrast_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind the target country in the complete UK identifier contrast."""
+
+    original = " ".join(source.original_question.split())
+    if _answer_slot_count(original) != 1:
+        return None
+    match = re.fullmatch(
+        r"(?P<reference>'\.uk'|\.uk(?: \(dot uk\))?)\s+"
+        r"is the network identifier for the United Kingdom[.,]\s+"
+        r"which country uses the identifier\s+"
+        r"(?P<target>'\.(?P<quoted_label>[a-z]{2})'|"
+        r"\.(?P<bare_label>[a-z]{2})"
+        r"(?: \(dot (?P<dot_label>[a-z]{2})\))?)\?",
+        original,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    dot_label = match.group("dot_label")
+    bare_label = match.group("bare_label")
+    if (
+        dot_label is not None
+        and bare_label is not None
+        and dot_label.casefold() != bare_label.casefold()
+    ):
+        return None
+    reference = match.group("reference")
+    target = match.group("target")
+    question = _finish_deterministic_question_candidate(
+        source,
+        _declarative_statement(
+            "The network identifier for the United Kingdom is "
+            f"{reference}. Identify the country that uses the identifier "
+            f"{target}"
+        ),
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        "The network identifier for the United Kingdom is "
+        f"{reference}, and {source.canonical_answer} uses the identifier "
+        f"{target}"
+    )
+
+
+_FRONTED_CONTEXT_PERSON_PREDICATE = re.compile(
+    r"(?:became\s+the\s+first\b.*\bgolfer\b|"
+    r"(?:is|was)\s+the\s+(?:mother|uncle)\b)",
+    re.IGNORECASE,
+)
+
+
+def _fronted_context_subject_wh_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind one singular subject-WH while retaining its fronted context."""
+
+    original = " ".join(source.original_question.split())
+    body = original[:-1].rstrip() if original.endswith(("?", ".")) else original
+    if (
+        not body
+        or "?" in body
+        or _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+        or _canonical_answer_is_explicit_compound(source.canonical_answer)
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?P<context>In .+?)(?:,\s+|\s+)who\s+(?P<predicate>.+)",
+        body,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    context = match.group("context")
+    predicate = match.group("predicate")
+    if (
+        _QUESTION_SLOT_TOKEN.search(context) is not None
+        or re.match(r"(?:are|were)\b", predicate, re.IGNORECASE) is not None
+        or _FRONTED_CONTEXT_PERSON_PREDICATE.match(predicate) is None
+    ):
+        return None
+    question = _finish_deterministic_question_candidate(
+        source,
+        _declarative_statement(
+            f"{context}, identify the person who {predicate}"
+        ),
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"{context}, {source.canonical_answer} {predicate}"
+    )
+
+
 def _deterministic_strict_pair(
     source: TriviaQATrainSource,
 ) -> tuple[str, str] | None:
@@ -3933,6 +4030,12 @@ def _deterministic_strict_pair(
     leading_copular_object_wh = _leading_copular_object_wh_pair(source)
     if leading_copular_object_wh is not None:
         candidates.append(leading_copular_object_wh)
+    network_identifier_contrast = _network_identifier_contrast_pair(source)
+    if network_identifier_contrast is not None:
+        candidates.append(network_identifier_contrast)
+    fronted_context_subject_wh = _fronted_context_subject_wh_pair(source)
+    if fronted_context_subject_wh is not None:
+        candidates.append(fronted_context_subject_wh)
 
     for question, statement in candidates:
         statement = _quote_terminal_punctuated_canonical_span(
