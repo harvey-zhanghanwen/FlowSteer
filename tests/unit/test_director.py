@@ -49,6 +49,8 @@ from src.interactive.director import (
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     SCALAR_DIRECTOR_PROMPT_VERSION,
     SCALAR_DIRECTOR_SYSTEM_PROMPT,
+    STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2,
+    STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
@@ -1381,6 +1383,51 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("current_graph", historical)
         self.assertEqual({"revision": 2}, current["current_graph"])
 
+    def test_stepwise_v2_compacts_old_environment_state_only(self) -> None:
+        model_registry = registry()
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2,
+        )
+        old_state = {
+            "current_graph": {"revision": 1},
+            "canvas_feedback": "environment action completed",
+            "environment_state": {
+                "original_task_instruction": "buy the requested item",
+                "current_observation": "large historical page",
+            },
+        }
+        current_state = {
+            "current_graph": {"revision": 2},
+            "environment_state": {
+                "original_task_instruction": "buy the requested item",
+                "current_observation": "latest page",
+            },
+        }
+        messages = [
+            {"role": "system", "content": STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2},
+            {"role": "user", "content": "task and catalog"},
+            {"role": "assistant", "content": '{"action":"continue"}'},
+            {
+                "role": "user",
+                "content": orchestrator._observation_message(old_state),
+            },
+            {"role": "assistant", "content": '{"action":"continue"}'},
+            {
+                "role": "user",
+                "content": orchestrator._observation_message(current_state),
+            },
+        ]
+
+        replay = orchestrator._compact_historical_messages(messages)
+
+        historical = observation_payload(replay[3])
+        current = observation_payload(replay[-1])
+        self.assertEqual("environment action completed", historical["canvas_feedback"])
+        self.assertNotIn("environment_state", historical)
+        self.assertEqual(current_state, current)
+
     async def test_catalog_order_is_decoupled_from_rollout_sampling_seed(self) -> None:
         model_registry = registry()
         env = AgentWorkflowEnv(
@@ -1873,6 +1920,43 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {"action", "agent_id", "contract"},
             set(contract_branch["properties"]),
+        )
+
+    def test_live_scalar_add_agent_schema_uses_exact_stateful_domain(self) -> None:
+        domains = {
+            "add_agent": {
+                "existing_agent_ids": [],
+                "model_ids": ["qwen"],
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                ],
+                "free_text_fields": ["agent_id", "contract"],
+                "optional_agent_fields": [],
+                "registered_execution_profiles": [],
+            }
+        }
+
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_agent",
+                domains,
+            )
+        )
+
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            ["action", "agent_id", "model_id", "contract"],
+            schema["required"],
+        )
+        self.assertEqual(
+            {"action", "agent_id", "model_id", "contract"},
+            set(schema["properties"]),
+        )
+        self.assertEqual(
+            {"enum": ["qwen"]},
+            schema["properties"]["model_id"],
         )
 
     def test_model_admissible_v3_binds_live_parameter_domains(self) -> None:

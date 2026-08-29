@@ -16,6 +16,7 @@ from src.interactive.agent_runtime import (
 )
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.environment_execution import (
+    _public_transition_summary,
     build_environment_execution_resources,
     EnvironmentExecutionError,
     evaluator_locked_ragen_session_factory,
@@ -109,6 +110,35 @@ def resources(
 
 
 class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
+    def test_repeated_search_transition_is_public_no_progress(self) -> None:
+        receipt = {
+            "state_advanced": True,
+            "action": "search[blue steel table]",
+            "observation": "Search page",
+            "next_observation": "Search results for blue steel table",
+            "observation_status": "success",
+            "terminal": False,
+        }
+
+        summary = _public_transition_summary(
+            task_family="webshop",
+            observation="Search results for blue steel table",
+            receipts=(receipt, dict(receipt)),
+        )
+
+        latest = summary["latest_transition"]
+        no_progress = summary["no_progress"]
+        assert isinstance(latest, dict)
+        assert isinstance(no_progress, dict)
+        self.assertTrue(latest["observation_changed"])
+        self.assertTrue(latest["result_is_current_state"])
+        self.assertTrue(no_progress["detected"])
+        self.assertEqual(
+            ["repeated_state_action"],
+            no_progress["reasons"],
+        )
+        self.assertEqual(2, no_progress["repeated_state_action_count"])
+
     async def test_agent_runtime_admits_and_executes_registered_environment_tool(
         self,
     ) -> None:
@@ -627,7 +657,8 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.metadata["environment_terminal"])
         self.assertIn("search[<your query>]", gateway.requests[0].problem)
         self.assertIn("Do not return JSON", gateway.requests[0].problem)
-        self.assertNotIn("Agent contract:", gateway.requests[0].problem)
+        self.assertIn("Current Agent contract:", gateway.requests[0].problem)
+        self.assertIn("select an admissible environment action", gateway.requests[0].problem)
         self.assertEqual(
             "environment_action", gateway.requests[0].agent.artifact_type
         )
@@ -917,6 +948,153 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("finish", canvas.model_admissible_action_types())
         finished = await canvas.step('{"action":"finish"}')
         self.assertTrue(finished.done)
+
+    async def test_webshop_no_progress_returns_goal_and_repairs_preserved_actor(
+        self,
+    ) -> None:
+        class RepeatingWebShopSession(FakeSession):
+            environment_id = "fake:webshop:repeat"
+            task_family = "webshop"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = {
+                    "has_search_bar": False,
+                    "clickables": ["6.6ft", "Buy Now"],
+                }
+
+            def reset(self) -> str:
+                self.reset_count += 1
+                return "Product page with size options 6.6ft and Buy Now"
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                if action == "click[6.6ft]":
+                    return (
+                        "Product page with size options 6.6ft and Buy Now",
+                        0.0,
+                        False,
+                        {"graded_score": 0.0},
+                    )
+                return (
+                    "Thank you for shopping with us!",
+                    1.0,
+                    True,
+                    {"graded_score": 1.0},
+                )
+
+        repeated_option = json.dumps(
+            {
+                "resource_id": "webshop",
+                "kind": "tool",
+                "name": "click",
+                "arguments": {"target": "6.6ft"},
+                "skill_id": None,
+            }
+        )
+        buy_now = json.dumps(
+            {
+                "resource_id": "webshop",
+                "kind": "tool",
+                "name": "click",
+                "arguments": {"target": "Buy Now"},
+                "skill_id": None,
+            }
+        )
+        session = RepeatingWebShopSession()
+        gateway = SequenceGateway([repeated_option, repeated_option, buy_now])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+            structured_actions=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        instruction = "buy the exact requested size"
+        workflow_problem = (
+            instruction + "\n\nExecution interface: use the environment tool."
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem=workflow_problem,
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "continue",
+                "finish",
+            ),
+        )
+        await canvas.step(
+            json.dumps(
+                {
+                    "action": "add_agent",
+                    "agent_id": "actor",
+                    "model_id": "m",
+                    "contract": "Select an exact constraint match.",
+                    "execution_mode": "react",
+                    "allowed_tools": [environment.tool_id],
+                }
+            )
+        )
+        await canvas.step('{"action":"set_output","agent_id":"actor"}')
+        await canvas.step('{"action":"continue"}')
+
+        stalled_state = canvas.public_environment_state()
+        self.assertIsNotNone(stalled_state)
+        assert stalled_state is not None
+        self.assertEqual(instruction, stalled_state["original_task_instruction"])
+        self.assertEqual(workflow_problem, stalled_state["task_instruction"])
+        self.assertNotIn("admissible_actions", stalled_state)
+        self.assertEqual(2, stalled_state["admissible_action_count"])
+        progress = stalled_state["public_progress"]
+        assert isinstance(progress, dict)
+        self.assertTrue(progress["no_progress"]["detected"])
+        self.assertEqual(
+            ["repeated_state_action"], progress["no_progress"]["reasons"]
+        )
+        episode_id = stalled_state["environment_episode_id"]
+        self.assertEqual(("modify_agent",), canvas.model_admissible_action_types())
+        modify_domain = canvas.model_admissible_action_targets()["modify_agent"]
+        self.assertEqual(["actor"], modify_domain["agent_ids"])
+        self.assertEqual(["contract"], modify_domain["mutable_fields"])
+
+        repaired = await canvas.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "actor",
+                    "contract": "Do not repeat an unchanged option; use current evidence and remaining budget.",
+                }
+            )
+        )
+        self.assertTrue(repaired.accepted)
+        self.assertEqual(episode_id, canvas.public_environment_state()["environment_episode_id"])
+        self.assertEqual(
+            ["click[6.6ft]", "click[6.6ft]", "click[Buy Now]"],
+            session.actions,
+        )
+        self.assertIn("Current Agent contract:", gateway.requests[-1].problem)
+        self.assertIn("Do not repeat an unchanged option", gateway.requests[-1].problem)
+        self.assertIn("Apply one ReAct control cycle", gateway.requests[-1].problem)
+        self.assertNotIn("Execution interface:", gateway.requests[-1].problem)
+        self.assertNotIn("graded_score", str(canvas.public_environment_state()))
 
     async def test_ragen_session_calls_deployed_adapter_signature(self) -> None:
         class FakeRAGEN:

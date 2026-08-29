@@ -802,7 +802,8 @@ class AgentWorkflowEnv:
             "current_observation",
             "current_observation_clipped",
             "current_observation_original_chars",
-            "admissible_actions",
+            "admissible_action_count",
+            "public_progress",
             "turns_used",
             "remaining_action_budget",
             "environment_terminal",
@@ -813,14 +814,46 @@ class AgentWorkflowEnv:
             for key in allowed_fields
             if key in raw_state
         }
+        original_task_instruction = self._problem.partition(
+            "\n\nExecution interface:"
+        )[0].strip()
         result.update(
             {
                 "task_instruction": self._problem,
+                "original_task_instruction": original_task_instruction,
                 "environment_actor_id": actor_id,
                 "execution_semantics": "one_action_one_observation",
             }
         )
+        if str(raw_state.get("task_family", "")).casefold() != "webshop":
+            admissible_actions = raw_state.get("admissible_actions")
+            if isinstance(admissible_actions, (list, tuple)):
+                result["admissible_actions"] = list(admissible_actions)
         return result
+
+    def _stateful_no_progress_receipt(self) -> Optional[dict[str, object]]:
+        """Return a conservative public no-progress diagnosis, if measured."""
+
+        state = self.public_environment_state()
+        if state is None:
+            return None
+        progress = state.get("public_progress")
+        if not isinstance(progress, Mapping):
+            return None
+        no_progress = progress.get("no_progress")
+        if not isinstance(no_progress, Mapping) or no_progress.get("detected") is not True:
+            return None
+        actor_id = state.get("environment_actor_id")
+        if not isinstance(actor_id, str) or not self._graph.has_node(actor_id):
+            return None
+        return {
+            "environment_actor_id": actor_id,
+            "reasons": list(no_progress.get("reasons", ())),
+            "repeated_state_action_count": no_progress.get(
+                "repeated_state_action_count", 0
+            ),
+            "action_cycle": no_progress.get("action_cycle") is True,
+        }
 
     def _continue_issue(self) -> Optional[str]:
         """Return why the next stateful environment transition is unavailable."""
@@ -987,6 +1020,43 @@ class AgentWorkflowEnv:
         node_count = len(self._graph.nodes)
         node_ids = tuple(node.id for node in self._graph.nodes)
         can_add = self.max_agents is None or node_count < self.max_agents
+        stateful_no_progress = self._stateful_no_progress_receipt()
+        if stateful_no_progress is not None:
+            # FlowSteer's execution feedback owns the next edit boundary.  A
+            # repeated public state-action pair is a measured execution fault,
+            # not a reason to delete the Agent or abandon the environment
+            # episode.  First expose an in-place contract repair.  If that same
+            # public fault persists, expose ordinary ADD/relation augmentation;
+            # CONTINUE, DELETE and FINISH remain masked until progress resumes.
+            actor_id = stateful_no_progress["environment_actor_id"]
+            repeated_count = stateful_no_progress.get(
+                "repeated_state_action_count", 0
+            )
+            augmentation_admitted = (
+                type(repeated_count) is int and repeated_count >= 3
+            )
+            admitted_no_progress: list[str] = []
+            for action_type in self.allowed_action_types:
+                if (
+                    action_type == AgentActionType.MODIFY_AGENT.value
+                    and actor_id in self._model_admissible_modify_agent_ids()
+                ):
+                    admitted_no_progress.append(action_type)
+                elif (
+                    augmentation_admitted
+                    and action_type == AgentActionType.ADD_AGENT.value
+                    and AgentActionType.ADD_SUBGRAPH.value
+                    not in self._allowed_action_type_set
+                    and can_add
+                ):
+                    admitted_no_progress.append(action_type)
+                elif (
+                    augmentation_admitted
+                    and action_type == AgentActionType.SET_RELATION.value
+                    and self._model_admissible_relation_candidates()
+                ):
+                    admitted_no_progress.append(action_type)
+            return tuple(admitted_no_progress)
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
         evidence_recovery_reasoner_ids = tuple(
             agent_id
@@ -3402,13 +3472,17 @@ class AgentWorkflowEnv:
                     "contract",
                 ],
                 "free_text_fields": ["agent_id", "contract"],
-                "optional_agent_fields": [
-                    "role_family",
-                    "allowed_tools",
-                    "execution_mode",
-                    "artifact_type",
-                    "completion_condition",
-                ],
+                "optional_agent_fields": (
+                    []
+                    if self.required_tool_id is not None
+                    else [
+                        "role_family",
+                        "allowed_tools",
+                        "execution_mode",
+                        "artifact_type",
+                        "completion_condition",
+                    ]
+                ),
                 "registered_execution_profiles": [
                     {
                         "execution_mode": execution_mode,
@@ -3661,6 +3735,18 @@ class AgentWorkflowEnv:
             }
         if AgentActionType.MODIFY_AGENT.value in admitted:
             modifiable_node_ids = list(self._model_admissible_modify_agent_ids())
+            stateful_no_progress = self._stateful_no_progress_receipt()
+            no_progress_actor_id = (
+                stateful_no_progress.get("environment_actor_id")
+                if stateful_no_progress is not None
+                else None
+            )
+            if isinstance(no_progress_actor_id, str):
+                modifiable_node_ids = [
+                    agent_id
+                    for agent_id in modifiable_node_ids
+                    if agent_id == no_progress_actor_id
+                ]
             capability_repairs = (
                 self._required_tool_capability_repair_domains()
                 if self.required_tool_issue() is not None
@@ -3674,19 +3760,24 @@ class AgentWorkflowEnv:
                         for field in capability_repairs[agent_id]
                     )
                 )
+            elif isinstance(no_progress_actor_id, str):
+                base_mutable_fields = ["contract"]
             else:
-                base_mutable_fields = [
-                    "model_id",
-                    "contract",
-                    "artifact_type",
-                    "completion_condition",
-                ]
-                if not self._uses_semantic_lineage_protocol():
-                    base_mutable_fields[2:2] = [
-                        "role_family",
-                        "allowed_tools",
-                        "execution_mode",
+                if self.required_tool_id is not None:
+                    base_mutable_fields = ["model_id", "contract"]
+                else:
+                    base_mutable_fields = [
+                        "model_id",
+                        "contract",
+                        "artifact_type",
+                        "completion_condition",
                     ]
+                    if not self._uses_semantic_lineage_protocol():
+                        base_mutable_fields[2:2] = [
+                            "role_family",
+                            "allowed_tools",
+                            "execution_mode",
+                        ]
             measured_failed_ids = self._failed_agent_ids.intersection(node_ids)
             provider_failure_agent_ids = {
                 agent_id
@@ -3748,6 +3839,8 @@ class AgentWorkflowEnv:
                         if agent_id in capability_repairs
                         else ["model_id"]
                         if agent_id in provider_failure_agent_ids
+                        else ["contract"]
+                        if agent_id == no_progress_actor_id
                         else list(
                             per_agent_recovery_field_values[agent_id]
                         )

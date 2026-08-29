@@ -140,6 +140,15 @@ class _EnvironmentRolloutState:
     terminal: bool = False
 
 
+_EXECUTION_INTERFACE_SEPARATOR = "\n\nExecution interface:"
+
+
+def _original_task_instruction(problem: str) -> str:
+    """Return the benchmark instruction before the runtime interface suffix."""
+
+    return str(problem).partition(_EXECUTION_INTERFACE_SEPARATOR)[0].strip()
+
+
 _WEBSHOP_SCORE_MARKER = re.compile(
     r"Your\s+score\s*\(\s*min\s+0\.0\s*,\s*max\s+1\.0\s*\)",
     re.IGNORECASE,
@@ -889,6 +898,112 @@ def _webshop_task_constraints(task: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(constraints))
 
 
+def _public_transition_summary(
+    *,
+    task_family: str,
+    observation: str,
+    receipts: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Project public Action--Observation progress for Agent and Director.
+
+    The projection is a thin visible-state adaptation of SkillFlow's bounded
+    environment history.  It consumes no reward, evaluator ``info`` or hidden
+    target and never ranks candidates or recommends the next action.
+    """
+
+    completed = [
+        item
+        for item in receipts
+        if item.get("state_advanced") is True
+        and isinstance(item.get("action"), str)
+    ]
+    recent_actions = [str(item["action"]) for item in completed[-8:]]
+    latest = receipts[-1] if receipts else None
+    observation_changed: Optional[bool] = None
+    latest_transition: dict[str, object] = {
+        "action": None,
+        "observation_status": "reset",
+        "state_advanced": None,
+        "observation_changed": None,
+        "terminal": False,
+        "result_observation_field": "current_observation",
+        "result_is_current_state": None,
+    }
+    if isinstance(latest, Mapping):
+        previous_observation = latest.get("observation")
+        next_observation = latest.get("next_observation")
+        if isinstance(previous_observation, str) and isinstance(
+            next_observation, str
+        ):
+            observation_changed = previous_observation != next_observation
+        latest_transition.update(
+            {
+                "action": latest.get("action"),
+                "observation_status": latest.get("observation_status"),
+                "state_advanced": latest.get("state_advanced"),
+                "observation_changed": observation_changed,
+                "terminal": latest.get("terminal") is True,
+                "result_is_current_state": next_observation == observation,
+            }
+        )
+
+    repeated_state_action_count = 0
+    if isinstance(latest, Mapping) and isinstance(latest.get("action"), str):
+        latest_action = latest["action"]
+        latest_pre_observation = latest.get("observation")
+        latest_next_observation = latest.get("next_observation")
+        for item in completed:
+            if (
+                item.get("action") == latest_action
+                and item.get("observation") == latest_pre_observation
+                and item.get("next_observation") == latest_next_observation
+            ):
+                repeated_state_action_count += 1
+    action_cycle = bool(
+        len(recent_actions) >= 4
+        and recent_actions[-4] == recent_actions[-2]
+        and recent_actions[-3] == recent_actions[-1]
+    )
+    no_progress_reasons: list[str] = []
+    if repeated_state_action_count >= 2:
+        no_progress_reasons.append("repeated_state_action")
+    if action_cycle:
+        no_progress_reasons.append("action_cycle")
+
+    summary: dict[str, object] = {
+        "latest_transition": latest_transition,
+        "recent_actions": recent_actions,
+        "no_progress": {
+            "detected": bool(no_progress_reasons),
+            "reasons": no_progress_reasons,
+            "repeated_state_action_count": repeated_state_action_count,
+            "action_cycle": action_cycle,
+        },
+    }
+    if task_family.casefold() == "webshop":
+        searches: list[str] = []
+        opened_asins: list[str] = []
+        click_targets: list[str] = []
+        for action in recent_actions:
+            search = re.fullmatch(r"search\[(.*)\]", action, flags=re.IGNORECASE)
+            click = re.fullmatch(r"click\[(.*)\]", action, flags=re.IGNORECASE)
+            if search and search.group(1).strip():
+                searches.append(search.group(1).strip())
+            if click and click.group(1).strip():
+                target = click.group(1).strip()
+                click_targets.append(target)
+                if re.fullmatch(r"b[0-9a-z]{9}", target, flags=re.IGNORECASE):
+                    opened_asins.append(target.lower())
+        summary.update(
+            {
+                "recent_search_queries": searches[-3:],
+                "opened_asins": opened_asins[-8:],
+                "recent_click_targets": click_targets[-8:],
+            }
+        )
+    return summary
+
+
 def _public_state_feedback(
     request: AgentRequest,
     *,
@@ -915,8 +1030,24 @@ def _public_state_feedback(
         if item.get("state_advanced") is True
         and isinstance(item.get("action"), str)
     ]
+    task_instruction = _original_task_instruction(request.problem)
+    progress = _public_transition_summary(
+        task_family=task_family,
+        observation=observation,
+        receipts=receipts,
+    )
+    lines.append(f"Original task goal: {task_instruction}")
+    latest_transition = progress["latest_transition"]
+    if isinstance(latest_transition, Mapping) and latest_transition.get("action"):
+        lines.append(
+            "Latest Action--Observation result: "
+            f"action={latest_transition.get('action')!r}; "
+            f"status={latest_transition.get('observation_status')}; "
+            f"observation_changed={latest_transition.get('observation_changed')}; "
+            "the resulting public state is the current observation below."
+        )
     if task_family.lower() == "alfworld":
-        facts = _alfworld_task_facts(request.problem)
+        facts = _alfworld_task_facts(task_instruction)
         visible = [
             f"target_class={facts['target_class']}",
             f"destination_class={facts['destination_class']}",
@@ -925,7 +1056,7 @@ def _public_state_feedback(
         ]
         lines.append("Task facts: " + "; ".join(visible) + ".")
         target = facts.get("target_class")
-        task_lower = request.problem.lower()
+        task_lower = task_instruction.lower()
         if target and re.search(r"\bit\b", task_lower):
             lines.append(f"Task coreference: `it` refers to `{target}`.")
         if target and re.search(r"\bthem\b", task_lower):
@@ -974,7 +1105,7 @@ def _public_state_feedback(
                     + "."
                 )
     elif task_family.lower() == "webshop":
-        constraints = _webshop_task_constraints(request.problem)
+        constraints = _webshop_task_constraints(task_instruction)
         if constraints:
             lines.append(
                 "Task constraints retained from the instruction: "
@@ -1000,27 +1131,13 @@ def _public_state_feedback(
     recent_actions = completed_actions[-6:]
     if recent_actions:
         lines.append("Recent executed actions: " + " | ".join(recent_actions) + ".")
-    if len(recent_actions) >= 4 and (
-        recent_actions[-4] == recent_actions[-2]
-        and recent_actions[-3] == recent_actions[-1]
-    ):
+    no_progress = progress.get("no_progress")
+    if isinstance(no_progress, Mapping) and no_progress.get("detected") is True:
         lines.append(
-            "No-progress signal: the last four public actions form an A-B-A-B "
-            "oscillation; reassess the task constraints and current observation."
-        )
-    repeated_pairs = 0
-    for item in receipts:
-        if (
-            item.get("state_advanced") is True
-            and item.get("observation") == observation
-            and isinstance(item.get("action"), str)
-        ):
-            repeated_pairs += 1
-    if repeated_pairs:
-        lines.append(
-            "No-progress signal: this exact public observation has already been "
-            "used as an action-decision state; avoid repeating an action that did not "
-            "advance the task."
+            "No-progress signal: reasons="
+            + ",".join(str(value) for value in no_progress.get("reasons", ()))
+            + "; preserve the current episode and do not repeat an action that "
+            "already returned the same public state."
         )
     if receipts and receipts[-1].get("observation_status") == "parse_error":
         lines.append(
@@ -1083,11 +1200,17 @@ def _action_prompt(
             else "Return exactly one native action copied from the admissible action list."
         )
     return (
-        f"Task:\n{request.problem}\n\n"
+        "Original task instruction:\n"
+        f"{_original_task_instruction(request.problem)}\n\n"
+        f"Current Agent contract:\n{request.agent.contract}\n\n"
         f"Previous environment turns:\n{_history_text(receipts)}\n\n"
         f"{public_state}\n\n"
         f"Current observation (turn {turn}):\n{visible_observation}\n\n"
         f"Admissible actions:\n{actions}\n\n"
+        "Apply one ReAct control cycle: condition the next Action on the "
+        "original task, current Agent contract and preceding Observation. "
+        "Emit only the Action; the Runtime returns its Observation to the "
+        "Director before another Canvas decision.\n\n"
         f"{format_instruction}"
         + (
             ""
@@ -1228,6 +1351,11 @@ class EnvironmentExecutionAdapter:
                 episode.session.available_actions,
             )
         last = state.receipts[-1] if state.receipts else None
+        public_progress = _public_transition_summary(
+            task_family=episode.session.task_family,
+            observation=episode.observation,
+            receipts=state.receipts,
+        )
         return {
             "environment_episode_id": state.episode_id,
             "environment_id": episode.session.environment_id,
@@ -1246,6 +1374,8 @@ class EnvironmentExecutionAdapter:
             "current_observation_clipped": observation_clipped,
             "current_observation_original_chars": len(episode.observation),
             "admissible_actions": list(admissible_actions),
+            "admissible_action_count": len(admissible_actions),
+            "public_progress": public_progress,
             "turns_used": state.turns_used,
             "remaining_action_budget": max(self._max_turns - state.turns_used, 0),
             "environment_terminal": state.terminal,

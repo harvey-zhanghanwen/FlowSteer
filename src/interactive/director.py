@@ -66,10 +66,19 @@ Use only action types, targets and parameters in the current admissible_action_t
 
 Each accepted Canvas edit is executed once. continue leaves the AgentGraph unchanged and executes exactly one Action--Observation transition in the current stateful environment. Inspect the returned original task, action, public state and observation before choosing the next action. ReAct is an execution mode, not an Agent role. Use finish only when finish_admissibility is admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
 
+STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types, targets and parameters in the current admissible_action_types and action_target_domains, model_id values in model_catalog, and exact tool_id values in tool_catalog. add_agent adds one Agent with a free-text contract. A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange.
+
+Each accepted Canvas edit is executed once. continue leaves the AgentGraph unchanged and executes exactly one Action--Observation transition in the current stateful environment. After every transition, inspect the original task, latest action result, current public episode state and remaining budget before choosing the next Canvas action. Preserve the current Agent and episode when public no-progress feedback requests repair or augmentation. ReAct is an execution mode, not an Agent role. Use finish only when finish_admissibility is admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
+
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
 STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION = (
     "agentgraph.director.minimal-neutral-scalar-stepwise.v1"
+)
+STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2 = (
+    "agentgraph.director.minimal-neutral-scalar-stepwise.v2"
 )
 LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1 = (
     "agentgraph.director.minimal-neutral-scalar.v1"
@@ -622,6 +631,7 @@ def scalar_director_prompt_version(value: object) -> bool:
     return value in {
         SCALAR_DIRECTOR_PROMPT_VERSION,
         STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION,
+        STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2,
     }
 
 
@@ -636,6 +646,9 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION: (
             STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT
+        ),
+        STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2: (
+            STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2
         ),
         LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
@@ -703,6 +716,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
         STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT,
+        STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
@@ -2397,7 +2411,46 @@ def director_live_action_parameter_json_schema_text(
     if not isinstance(domain, Mapping):
         raise ValueError(f"missing live target domain for {action}")
 
-    if action == "add_subgraph":
+    if action == "add_agent":
+        required_fields = _live_string_domain(
+            domain.get("required_agent_fields"),
+            label="add_agent.required_agent_fields",
+        )
+        if required_fields != ("agent_id", "model_id", "contract"):
+            raise ValueError("add_agent live domain has incompatible required fields")
+        raw_optional_fields = domain.get("optional_agent_fields", ())
+        if not isinstance(raw_optional_fields, (list, tuple)):
+            raise ValueError("add_agent optional fields must be a sequence")
+        optional_fields = tuple(raw_optional_fields)
+        if (
+            any(
+                not isinstance(field, str)
+                or field not in _AGENT_SPEC_JSON_SCHEMA["properties"]
+                or field in required_fields
+                for field in optional_fields
+            )
+            or len(optional_fields) != len(set(optional_fields))
+        ):
+            raise ValueError("add_agent live domain has invalid optional fields")
+        model_ids = _live_string_domain(
+            domain.get("model_ids"),
+            label="add_agent.model_ids",
+        )
+        agent_properties = _AGENT_SPEC_JSON_SCHEMA["properties"]
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action", *required_fields],
+            "properties": {
+                "action": {"const": "add_agent"},
+                **{
+                    field: json.loads(json.dumps(agent_properties[field]))
+                    for field in (*required_fields, *optional_fields)
+                },
+            },
+        }
+        schema["properties"]["model_id"] = {"enum": list(model_ids)}
+    elif action == "add_subgraph":
         if add_agents is None:
             raise ValueError(
                 "add_subgraph v3 parameter phase requires sampled Agent declarations"
@@ -3636,6 +3689,7 @@ class AgentGraphOrchestrator:
         if self.prompt_version not in {
             LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
             QA_DIRECTOR_PROMPT_VERSION,
+            STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2,
         }:
             return copied
         return self._compact_qa_historical_messages(copied)
@@ -3839,7 +3893,9 @@ __all__ = [
     "SCALAR_DIRECTOR_PROMPT_VERSION",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT",
     "STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION",
+    "STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2",
     "STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT",
+    "STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2",
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15",
