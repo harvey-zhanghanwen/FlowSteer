@@ -4431,6 +4431,691 @@ def _fronted_domain_passive_pair(
     )
 
 
+def _term_do_give_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind the exact plural do-support ``give to`` name relation."""
+
+    original = " ".join(source.original_question.split())
+    if (
+        _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+        or _COORDINATED_QUESTION_SLOT.search(original) is not None
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?i:what)\s+(?P<label>term|name)\s+(?i:do)\s+"
+        r"(?P<actor>[^?]{1,120}?)\s+(?i:give to)\s+"
+        r"(?P<object>[^?]{1,320})\?",
+        original,
+    )
+    if match is None:
+        return None
+    label = match.group("label")
+    actor = match.group("actor")
+    object_ = match.group("object")
+    question = _finish_deterministic_question_candidate(
+        source,
+        f"What {label} do {actor} assign to {object_}?",
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"The {label} {actor} give to {object_} is {source.canonical_answer}"
+    )
+
+
+def _say_was_object_wh_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind object-WH under the bounded ``did ... say was`` relation."""
+
+    original = " ".join(source.original_question.split())
+    if (
+        _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+        or _COORDINATED_QUESTION_SLOT.search(original) is not None
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?i:what did)\s+(?P<speaker>[^,;:?!]{1,120}?)\s+"
+        r"(?i:say was)\s+"
+        r"(?P<complement>the\s+(?:most|least)\s+[^?]{1,240})\?",
+        original,
+    )
+    if match is None:
+        return None
+    speaker = match.group("speaker")
+    complement = match.group("complement")
+    question = _finish_deterministic_question_candidate(
+        source,
+        f"What did {speaker} describe as {complement}?",
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"{speaker} said {source.canonical_answer} was {complement}"
+    )
+
+
+_BARE_TERMINAL_ACTION_CLAUSE_TOKEN = re.compile(
+    r"\b(?:am|are|was|were|be|been|being|is|have|has|had|can|could|"
+    r"will|would|shall|should|may|might|must|to|which|who|whom|whose|"
+    r"that|when|where|if|never)\b",
+    re.IGNORECASE,
+)
+
+
+def _bare_terminal_action_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind ``do/does what`` only after one short bare subject NP."""
+
+    original = " ".join(source.original_question.split())
+    if (
+        _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+        or _COORDINATED_QUESTION_SLOT.search(original) is not None
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?P<subject>[A-Z][A-Za-z'’ -]{1,80})\s+"
+        r"(?P<aux>(?i:do|does))\s+(?i:what)\?",
+        original,
+    )
+    if match is None:
+        return None
+    subject = match.group("subject")
+    if (
+        len(_LEXICAL_TOKEN.findall(subject)) > 8
+        or _BARE_TERMINAL_ACTION_CLAUSE_TOKEN.search(subject) is not None
+    ):
+        return None
+    performs = (
+        "perform"
+        if match.group("aux").casefold() == "do"
+        else "performs"
+    )
+    question = _finish_deterministic_question_candidate(
+        source,
+        f"{subject} {performs} which action?",
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"The action {subject} {performs} is {source.canonical_answer}"
+    )
+
+
+def _if_you_are_eating_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind the repeated non-initial ``eating`` object relation."""
+
+    original = " ".join(source.original_question.split())
+    if (
+        _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+        or _COORDINATED_QUESTION_SLOT.search(original) is not None
+    ):
+        return None
+    match = re.fullmatch(
+        r"(?i:if you are eating)\s+(?P<food>[^?]{1,240}),\s+"
+        r"(?i:what are you eating)\?",
+        original,
+    )
+    if match is None:
+        return None
+    food = match.group("food")
+    question = _finish_deterministic_question_candidate(
+        source,
+        f"If you are consuming {food}, what are you consuming?",
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"If you are eating {food}, you are eating {source.canonical_answer}"
+    )
+
+
+_QUOTED_TITLE_CANONICAL = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9 .,&-]{0,80}"
+)
+_QUOTED_WH_SLOT = re.compile(r"‘(?i:what)’")
+
+
+def _quoted_title_slot_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Fill one balanced inner ``‘what’`` under two title carriers."""
+
+    original = " ".join(source.original_question.split())
+    canonical = " ".join(source.canonical_answer.split())
+    if (
+        _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+        or _COORDINATED_QUESTION_SLOT.search(original) is not None
+        or _QUOTED_TITLE_CANONICAL.fullmatch(canonical) is None
+        or len(_QUOTED_WH_SLOT.findall(original)) != 1
+    ):
+        return None
+    known_as = re.fullmatch(
+        r"(?P<subject>[^?]{1,160})\s+(?i:was known as)\s+"
+        r"(?P<title>the\s+‘[^?‘’]{1,100}‘(?i:what)’"
+        r"[^?‘’]{1,100}’)\?",
+        original,
+    )
+    wrote_opera = re.fullmatch(
+        r"(?P<subject>[^?]{1,160})\s+(?i:wrote the opera)\s+"
+        r"(?P<title>‘[^?‘’]{1,100}‘(?i:what)’"
+        r"[^?‘’]{1,100}’)\?",
+        original,
+    )
+    if known_as is not None:
+        subject = known_as.group("subject")
+        title = known_as.group("title")
+        question = _finish_deterministic_question_candidate(
+            source,
+            f"{subject} was referred to as {title}?",
+        )
+        statement = (
+            f"{subject} was known as "
+            f"{_QUOTED_WH_SLOT.sub(canonical, title)}"
+        )
+    elif wrote_opera is not None:
+        subject = wrote_opera.group("subject")
+        title = wrote_opera.group("title")
+        question = _finish_deterministic_question_candidate(
+            source,
+            f"{subject} composed the opera {title}?",
+        )
+        statement = (
+            f"{subject} wrote the opera "
+            f"{_QUOTED_WH_SLOT.sub(canonical, title)}"
+        )
+    else:
+        return None
+    if question is None:
+        return None
+    return question, _declarative_statement(statement)
+
+
+def _bounded_imperative_nominal_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    original = " ".join(source.original_question.split())
+    body = original[:-1].rstrip() if original.endswith(("?", ".")) else original
+    if (
+        not body
+        or "?" in body
+        or _answer_slot_count(original) != 1
+        or _COORDINATED_QUESTION_SLOT.search(original) is not None
+    ):
+        return None
+    name = re.fullmatch(r"(?i:name)\s+(?P<target>.+)", body)
+    if name is not None:
+        target = name.group("target")
+        if re.match(r"(?i:(?:any|either|one of)\b)", target):
+            return None
+        question = _declarative_statement(f"Identify {target}")
+        statement = _declarative_statement(
+            f"{target} is {source.canonical_answer}"
+        )
+    else:
+        give_name = re.fullmatch(
+            r"(?i:give)\s+the\s+name\s+of\s+(?P<target>.+)", body
+        )
+        if give_name is None:
+            return None
+        target = give_name.group("target")
+        question = _declarative_statement(f"Identify the name of {target}")
+        statement = _declarative_statement(
+            f"The name of {target} is {source.canonical_answer}"
+        )
+    question = _finish_deterministic_question_candidate(source, question)
+    return (question, statement) if question is not None else None
+
+
+def _postal_address_fact_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    original = " ".join(source.original_question.split())
+    if (
+        "?" in original
+        or _quoted_spans(original)
+        or _QUESTION_SLOT_TOKEN.search(original) is not None
+    ):
+        return None
+    body = original[:-1].rstrip() if original.endswith(".") else original
+    parts = tuple(part.strip() for part in body.split(","))
+    if (
+        len(parts) not in {3, 4}
+        or any(not part for part in parts)
+        or re.fullmatch(
+            r"(?:(?:Apt|Apartment)\s+)?"
+            r"\d+[A-Za-z]?(?:\s+[^,]+)?",
+            parts[0],
+            re.IGNORECASE,
+        )
+        is None
+    ):
+        return None
+    locality = ", ".join(reversed(parts))
+    question = _finish_deterministic_question_candidate(
+        source,
+        _declarative_statement(
+            f"Identify the entity associated with {locality}"
+        ),
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"{source.canonical_answer} is the entity associated with {locality}"
+    )
+
+
+def _bounded_listed_choice_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    original = " ".join(source.original_question.split())
+    canonical = " ".join(source.canonical_answer.split())
+    if (
+        not _is_explicit_listed_choice_question(
+            original_question=original,
+            canonical_answer=canonical,
+        )
+        or re.search(r"\w\Z", canonical) is None
+    ):
+        return None
+    question: str | None = None
+    fact: str | None = None
+
+    weight = re.fullmatch(
+        r"Which is the heaviest\?\s+"
+        r"(?P<left>[^?]+?)\s+or\s+(?P<right>[^?]+)\?",
+        original,
+    )
+    if weight is not None:
+        left, right = weight.group("left"), weight.group("right")
+        question = f"Which item has the maximum weight? {left} or {right}?"
+        fact = (
+            f"Among {left} and {right}, the item with the maximum weight "
+            f"is {canonical}"
+        )
+
+    if question is None:
+        count = re.fullmatch(
+            r"How many (?P<head>[^?]+?) had there been "
+            r"(?P<scope>[^?]+)\?\s+"
+            r"(?P<choices>[^?]+\bor\b[^?]+)\?",
+            original,
+            re.IGNORECASE,
+        )
+        if count is not None and _atomic_count_canonical(canonical):
+            head = count.group("head")
+            scope = count.group("scope")
+            choices = count.group("choices")
+            question = (
+                f"State the number of {head} there had been "
+                f"{scope}? {choices}."
+            )
+            fact = (
+                f"The number of {head} there had been {scope} was {canonical}"
+            )
+
+    if (
+        question is None
+        and original.casefold()
+        == "which side of a coin is obverse, heads or tails?"
+    ):
+        question = "Which face of a coin is the obverse, heads or tails?"
+        fact = f"The obverse face of a coin is {canonical}"
+
+    if question is None and original == (
+        "Towards which direction (North, East, South or West) is a "
+        "rainbow normally seen in the afternoon?"
+    ):
+        question = (
+            "Towards which direction (North, East, South or West) is a "
+            "rainbow typically seen in the afternoon?"
+        )
+        fact = (
+            "A rainbow is normally seen in the afternoon towards "
+            f"{canonical}"
+        )
+
+    if question is None and original == (
+        "In the world of the theatre, does ‘stage left’ describe the "
+        "audience’s left? Or the actor’s left?"
+    ):
+        question = (
+            "In the world of the theatre, does ‘stage left’ refer to the "
+            "audience’s left or the actor’s left?"
+        )
+        fact = (
+            "In the world of the theatre, ‘stage left’ describes "
+            f"{canonical}"
+        )
+
+    if question is None:
+        typed_subject = re.fullmatch(
+            r"Which (?P<head>[a-z][a-z -]{0,40}) "
+            r"(?P<predicate>bats?\s+[^?]{1,180})\?\s+"
+            r"(?P<choices>[^?]{1,160}\bor\b[^?]{1,160})\?",
+            original,
+        )
+        if typed_subject is not None:
+            head = typed_subject.group("head")
+            predicate = typed_subject.group("predicate")
+            choices = typed_subject.group("choices")
+            question = (
+                f"Identify the {head} that {predicate} from the listed "
+                f"options: {choices}."
+            )
+            fact = f"The {head} that {predicate} is {canonical}"
+
+    if question is None or fact is None:
+        return None
+    question = _finish_deterministic_question_candidate(source, question)
+    if question is None:
+        return None
+    return question, (
+        fact.rstrip(" .;:")
+        + f"; the selected listed option is {canonical}."
+    )
+
+
+def _copular_who_or_what_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    original = " ".join(source.original_question.split())
+    match = re.fullmatch(
+        r"(?:(?P<context>Militarily),\s+)?"
+        r"(?i:who)\s+or\s+what\s+"
+        r"(?P<copula>is|are)\s+(?P<referent>[^?]{1,240})\?",
+        original,
+    )
+    if match is None or _answer_slot_count(original) != 2:
+        return None
+    context = match.group("context")
+    copula = match.group("copula").casefold()
+    referent = match.group("referent")
+    prefix = f"{context}, " if context else ""
+    if copula == "are":
+        if re.fullmatch(
+            r"The [^,?]+,\s+The [^,?]+\s+and\s+The [^?]+",
+            referent,
+        ) is None:
+            return None
+        question = f"Who or what do the names {referent} denote?"
+        statement = (
+            f"The names {referent} denote {source.canonical_answer}."
+        )
+    else:
+        interrogative = "who" if context else "Who"
+        question = (
+            f"{prefix}{interrogative} or what does {referent} denote?"
+        )
+        statement = (
+            f"{prefix}{referent} denotes {source.canonical_answer}."
+        )
+    question = _finish_deterministic_question_candidate(source, question)
+    if question is None:
+        return None
+    return question, statement
+
+
+def _bounded_internal_question_mark_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    original = " ".join(source.original_question.split())
+    question: str | None = None
+    statement: str | None = None
+
+    message = re.fullmatch(
+        r"In which TV sitcom is one of the characters said to have proposed "
+        r"to another on Valentine's Day by putting the message "
+        r"(?P<message>[^?]{1,120}\?) in their local paper\?",
+        original,
+    )
+    if message is not None:
+        quoted = f'"{message.group("message")}"'
+        question = (
+            "In which TV sitcom is one of the characters said to have "
+            "proposed to another on Valentine's Day by placing the message "
+            f"{quoted} in their local paper?"
+        )
+        statement = (
+            "The TV sitcom in which one of the characters is said to have "
+            "proposed to another on Valentine's Day by putting the message "
+            f"{quoted} in their local paper is {source.canonical_answer}."
+        )
+
+    if question is None:
+        scientific_form = re.fullmatch(
+            r"Which scientific law can be expressed in the form "
+            r"(?P<form>[^?]{1,120})\?\s+"
+            r"\(\*QR:\s+(?P<reading>[^)]+)\)",
+            original,
+        )
+        if scientific_form is not None:
+            form = scientific_form.group("form")
+            reading = scientific_form.group("reading")
+            question = (
+                "Which scientific law is represented by the form "
+                f"{form} (*QR: {reading})?"
+            )
+            statement = (
+                "The scientific law expressed in the form "
+                f"{form} (*QR: {reading}) is {source.canonical_answer}."
+            )
+
+    if question is None:
+        singer_title = re.fullmatch(
+            r"Which singer's Eurovision Song Contest entry was "
+            r"(?P<title>Knock Knock \(Who's There\?\))\?",
+            original,
+        )
+        if singer_title is not None:
+            title = singer_title.group("title")
+            question = (
+                "Identify the singer whose Eurovision Song Contest entry "
+                f'was "{title}".'
+            )
+            statement = (
+                f"{source.canonical_answer}'s Eurovision Song Contest entry "
+                f'was "{title}".'
+            )
+
+    if question is None:
+        hinted_definition = re.fullmatch(
+            r"Named for (?P<context>the fictional town in the radio series "
+            r"A Prairie Home Companion), what is "
+            r"(?P<subject>the Lake Wobegon effect)\?\s+"
+            r"(?P<hint>\(Hint:.+\))",
+            original,
+        )
+        if hinted_definition is not None:
+            context = hinted_definition.group("context")
+            subject = hinted_definition.group("subject")
+            hint = hinted_definition.group("hint")
+            question = f"Identify {subject}, named for {context}. {hint}"
+            statement = _declarative_statement(
+                f"{subject} is the {source.canonical_answer}"
+            )
+
+    if question is None:
+        painting_title = re.fullmatch(
+            r"The painting "
+            r"(?P<title>And When Did You Last See Your Father\?) by "
+            r"(?P<artist>[^?]{1,160}) is set in the middle of which century\?",
+            original,
+        )
+        if painting_title is not None:
+            title = painting_title.group("title")
+            artist = painting_title.group("artist")
+            question = (
+                "In the center of which century is the painting "
+                f'"{title}" by {artist} set?'
+            )
+            statement = (
+                f'The painting "{title}" by {artist} is set in the middle '
+                f"of the {source.canonical_answer} century."
+            )
+
+    if question is None:
+        strapline = re.fullmatch(
+            r"What product was advertised with the strapline "
+            r"(?P<strapline>Don't Say Brown Say \?\?\?)",
+            original,
+        )
+        if strapline is not None:
+            text = strapline.group("strapline")
+            question = f'What product was promoted with the strapline "{text}"?'
+            statement = (
+                f'The product advertised with the strapline "{text}" is '
+                f"{source.canonical_answer}."
+            )
+
+    if question is None or statement is None:
+        return None
+    question = _finish_deterministic_question_candidate(source, question)
+    if question is None:
+        return None
+    return question, statement
+
+
+def _typed_subject_trailing_context_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    original = " ".join(source.original_question.split())
+    match = re.fullmatch(
+        r"Which (?P<title>King) (?P<modifier>of [^?]{1,120}?) "
+        r"was born on (?P<date>[^?]{1,80})\?\s+"
+        r"He died (?P<duration>[^.]{1,80}) later\.",
+        original,
+    )
+    if (
+        match is None
+        or _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+    ):
+        return None
+    title = match.group("title")
+    modifier = match.group("modifier")
+    date = match.group("date")
+    duration = match.group("duration")
+    question = _finish_deterministic_question_candidate(
+        source,
+        (
+            f"Identify the {title} {modifier} who was born on {date}. "
+            f"He died {duration} later."
+        ),
+    )
+    if question is None:
+        return None
+    return question, (
+        f"{source.canonical_answer} {modifier} was born on {date}. "
+        f"He died {duration} later."
+    )
+
+
+def _bounded_possessive_relation_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind two corpus-bounded possessive identity relations."""
+
+    original = " ".join(source.original_question.split())
+    body = (
+        original[:-1].rstrip()
+        if original.endswith(("?", "."))
+        else original
+    )
+    if (
+        _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+        or _COORDINATED_QUESTION_SLOT.search(original) is not None
+    ):
+        return None
+
+    comedian = re.fullmatch(
+        r"Which (?P<descriptor>English comedian)['’]s "
+        r"real name is (?P<name>.+)",
+        body,
+        re.IGNORECASE,
+    )
+    early_roles = re.fullmatch(
+        r"Whose (?P<relation>early film roles included .+)",
+        body,
+        re.IGNORECASE,
+    )
+    if comedian is not None:
+        descriptor = comedian.group("descriptor")
+        name = comedian.group("name")
+        question = _declarative_statement(
+            f"Identify the {descriptor} whose actual name is {name}"
+        )
+        statement = _declarative_statement(
+            f"{source.canonical_answer} is the {descriptor} "
+            f"whose real name is {name}"
+        )
+    elif early_roles is not None:
+        relation = early_roles.group("relation")
+        question = _declarative_statement(
+            "Identify the person whose "
+            f"{relation.replace('film roles', 'film appearances', 1)}"
+        )
+        statement = _declarative_statement(
+            f"{source.canonical_answer}'s {relation}"
+        )
+    else:
+        return None
+
+    question = _finish_deterministic_question_candidate(source, question)
+    return (question, statement) if question is not None else None
+
+
+def _bounded_typed_subject_relation_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind one admitted typed-subject predicate without widening the head."""
+
+    original = " ".join(source.original_question.split())
+    body = (
+        original[:-1].rstrip()
+        if original.endswith(("?", "."))
+        else original
+    )
+    if (
+        _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+        or _COORDINATED_QUESTION_SLOT.search(original) is not None
+    ):
+        return None
+
+    condiment = re.fullmatch(
+        r"Which (?P<head>condiment) "
+        r"(?P<predicate>was known as .+)",
+        body,
+        re.IGNORECASE,
+    )
+    if condiment is None:
+        return None
+
+    question = _finish_deterministic_question_candidate(
+        source,
+        _declarative_statement(
+            f"Identify the {condiment.group('head')} that "
+            f"{condiment.group('predicate')}"
+        ),
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"{source.canonical_answer} {condiment.group('predicate')}"
+    )
+
+
 def _deterministic_strict_pair(
     source: TriviaQATrainSource,
 ) -> tuple[str, str] | None:
@@ -4457,6 +5142,19 @@ def _deterministic_strict_pair(
         _simple_np_terminal_copular_pair(source),
         _object_wh_represent_pair(source),
         _fronted_domain_passive_pair(source),
+        _term_do_give_pair(source),
+        _say_was_object_wh_pair(source),
+        _bare_terminal_action_pair(source),
+        _if_you_are_eating_pair(source),
+        _quoted_title_slot_pair(source),
+        _bounded_imperative_nominal_pair(source),
+        _postal_address_fact_pair(source),
+        _bounded_listed_choice_pair(source),
+        _copular_who_or_what_pair(source),
+        _bounded_internal_question_mark_pair(source),
+        _typed_subject_trailing_context_pair(source),
+        _bounded_possessive_relation_pair(source),
+        _bounded_typed_subject_relation_pair(source),
     ):
         if analogue_pair is not None:
             candidates.append(analogue_pair)

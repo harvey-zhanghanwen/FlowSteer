@@ -67,6 +67,19 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _simple_np_terminal_copular_pair,
     _object_wh_represent_pair,
     _fronted_domain_passive_pair,
+    _term_do_give_pair,
+    _say_was_object_wh_pair,
+    _bare_terminal_action_pair,
+    _if_you_are_eating_pair,
+    _quoted_title_slot_pair,
+    _bounded_imperative_nominal_pair,
+    _postal_address_fact_pair,
+    _bounded_listed_choice_pair,
+    _copular_who_or_what_pair,
+    _bounded_internal_question_mark_pair,
+    _typed_subject_trailing_context_pair,
+    _bounded_possessive_relation_pair,
+    _bounded_typed_subject_relation_pair,
     _fronted_context_subject_wh_pair,
     _leading_copular_object_wh_pair,
     _network_identifier_contrast_pair,
@@ -4091,6 +4104,289 @@ def test_bounded_residual_relation_pairs_reject_nearby_shapes(
     original: str,
 ) -> None:
     assert helper(_semantic_source(original, "Example")) is None
+
+
+@pytest.mark.parametrize(
+    (
+        "helper",
+        "original",
+        "canonical",
+        "expected_question",
+        "expected_fact",
+    ),
+    (
+        (
+            _term_do_give_pair,
+            (
+                "What term do stamp collectors give to the printers colour "
+                "markings in the margin of a block of stamps?"
+            ),
+            "TRAFFIC LIGHTS",
+            (
+                "What term do stamp collectors assign to the printers colour "
+                "markings in the margin of a block of stamps?"
+            ),
+            (
+                "The term stamp collectors give to the printers colour "
+                "markings in the margin of a block of stamps is "
+                "TRAFFIC LIGHTS."
+            ),
+        ),
+        (
+            _say_was_object_wh_pair,
+            (
+                "What did Dirty Harry say was the most powerful handgun in "
+                "the world?"
+            ),
+            ".44 Magnum",
+            (
+                "What did Dirty Harry describe as the most powerful handgun "
+                "in the world?"
+            ),
+            (
+                "Dirty Harry said .44 Magnum was the most powerful handgun "
+                "in the world."
+            ),
+        ),
+        (
+            _bare_terminal_action_pair,
+            "Birds of a feather do what?",
+            "Flock Together",
+            "Birds of a feather perform which action?",
+            (
+                "The action Birds of a feather perform is Flock Together."
+            ),
+        ),
+        (
+            _if_you_are_eating_pair,
+            "If you are eating nori, what are you eating?",
+            "Seaweed",
+            "If you are consuming nori, what are you consuming?",
+            "If you are eating nori, you are eating Seaweed.",
+        ),
+        (
+            _quoted_title_slot_pair,
+            (
+                "Convict George Joseph Smith was known as the ‘Brides in the "
+                "‘what’ murderer’?"
+            ),
+            "Bath",
+            (
+                "Convict George Joseph Smith was referred to as the ‘Brides "
+                "in the ‘what’ murderer’?"
+            ),
+            (
+                "Convict George Joseph Smith was known as the ‘Brides in the "
+                "Bath murderer’."
+            ),
+        ),
+        (
+            _quoted_title_slot_pair,
+            (
+                "Gioachino Rossini wrote the opera ‘The ‘what’ of Seville’?"
+            ),
+            "Barber",
+            (
+                "Gioachino Rossini composed the opera ‘The ‘what’ of "
+                "Seville’?"
+            ),
+            (
+                "Gioachino Rossini wrote the opera ‘The Barber of Seville’."
+            ),
+        ),
+    ),
+)
+def test_bounded_object_wh_families_reenter_full_admission(
+    helper,
+    original: str,
+    canonical: str,
+    expected_question: str,
+    expected_fact: str,
+) -> None:
+    source = _semantic_source(original, canonical)
+
+    pair = helper(source)
+
+    assert pair == (expected_question, expected_fact)
+    assert _deterministic_strict_pair(source) == pair
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": expected_question,
+                "paraphrase_answer_statement": expected_fact,
+            },
+            ensure_ascii=False,
+        ),
+        source,
+    ) == pair
+    assert (
+        validate_self_contained_declarative_fact(source, expected_fact)
+        == expected_fact
+    )
+
+
+@pytest.mark.parametrize(
+    ("helper", "original"),
+    (
+        (
+            _term_do_give_pair,
+            "What term does a collector give to a printer marking?",
+        ),
+        (
+            _say_was_object_wh_pair,
+            "What did Stevie Wonder just call to say in 1984?",
+        ),
+        (
+            _bare_terminal_action_pair,
+            (
+                "The medical condition anhidrosis is the inability to do "
+                "what?"
+            ),
+        ),
+        (
+            _if_you_are_eating_pair,
+            "If you ate nori, what did you eat?",
+        ),
+        (
+            _quoted_title_slot_pair,
+            (
+                "Cheap literature was known as ‘what’ books, based on the "
+                "word for travelling traders?"
+            ),
+        ),
+        (
+            _quoted_title_slot_pair,
+            "Boxer Primo Carnera was known as the ‘Ambling ‘what’?",
+        ),
+    ),
+)
+def test_bounded_object_wh_families_reject_nearby_shapes(
+    helper,
+    original: str,
+) -> None:
+    assert helper(_semantic_source(original, "Example")) is None
+
+
+@pytest.mark.parametrize(
+    ("helper", "original", "canonical", "expected"),
+    (
+        (
+            _bounded_imperative_nominal_pair,
+            "Name Google's search engine for academic publishing?",
+            "Scholar",
+            (
+                "Identify Google's search engine for academic publishing.",
+                "Google's search engine for academic publishing is Scholar.",
+            ),
+        ),
+        (
+            _postal_address_fact_pair,
+            "Apt 56B, Whitehaven Mansions, Sandhurst Sq, London",
+            "Hercule Poirot",
+            (
+                "Identify the entity associated with London, Sandhurst Sq, "
+                "Whitehaven Mansions, Apt 56B.",
+                "Hercule Poirot is the entity associated with London, "
+                "Sandhurst Sq, Whitehaven Mansions, Apt 56B.",
+            ),
+        ),
+        (
+            _bounded_listed_choice_pair,
+            (
+                "Which team bats first in a baseball game? The home team, "
+                "or the visitors?"
+            ),
+            "The visitors",
+            (
+                "Identify the team that bats first in a baseball game from "
+                "the listed options: The home team, or the visitors.",
+                "The team that bats first in a baseball game is The "
+                "visitors; the selected listed option is The visitors.",
+            ),
+        ),
+        (
+            _copular_who_or_what_pair,
+            "Who or what are The Warrior, The Plank and The Downward Dog?",
+            "Yoga poses",
+            (
+                "Who or what do the names The Warrior, The Plank and The "
+                "Downward Dog denote?",
+                "The names The Warrior, The Plank and The Downward Dog "
+                "denote Yoga poses.",
+            ),
+        ),
+        (
+            _bounded_internal_question_mark_pair,
+            (
+                "What product was advertised with the strapline Don't Say "
+                "Brown Say ???"
+            ),
+            "Hovis",
+            (
+                "What product was promoted with the strapline \"Don't Say "
+                "Brown Say ???\"?",
+                "The product advertised with the strapline \"Don't Say "
+                "Brown Say ???\" is Hovis.",
+            ),
+        ),
+        (
+            _typed_subject_trailing_context_pair,
+            (
+                "Which King of Scotland was born on March 17th 1473? He "
+                "died 40 years later."
+            ),
+            "JAMES IV",
+            (
+                "Identify the King of Scotland who was born on March 17th "
+                "1473. He died 40 years later.",
+                "JAMES IV of Scotland was born on March 17th 1473. He died "
+                "40 years later.",
+            ),
+        ),
+        (
+            _bounded_possessive_relation_pair,
+            "Which English comedian’s real name is Royston Vasey?",
+            "Roy ‘Chubby’ Brown",
+            (
+                "Identify the English comedian whose actual name is "
+                "Royston Vasey.",
+                "Roy ‘Chubby’ Brown is the English comedian whose real name "
+                "is Royston Vasey.",
+            ),
+        ),
+        (
+            _bounded_typed_subject_relation_pair,
+            "Which condiment was known as ’’Wilson’s gravy\"?",
+            "HP sauce",
+            (
+                "Identify the condiment that was known as ’’Wilson’s "
+                "gravy\".",
+                "HP sauce was known as ’’Wilson’s gravy\".",
+            ),
+        ),
+    ),
+)
+def test_bounded_choice_fragment_families_reenter_full_admission(
+    helper,
+    original: str,
+    canonical: str,
+    expected: tuple[str, str],
+) -> None:
+    source = _semantic_source(original, canonical)
+
+    assert helper(source) == expected
+    assert _deterministic_strict_pair(source) == expected
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": expected[0],
+                "paraphrase_answer_statement": expected[1],
+            },
+            ensure_ascii=False,
+        ),
+        source,
+    ) == expected
+    assert validate_self_contained_declarative_fact(source, expected[1]) == expected[1]
 
 
 def test_listed_choice_detection_normalizes_apostrophe_glyphs() -> None:
