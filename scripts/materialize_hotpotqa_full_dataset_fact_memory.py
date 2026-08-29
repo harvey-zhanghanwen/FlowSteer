@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -584,6 +585,17 @@ async def materialize(args: argparse.Namespace) -> dict[str, object]:
         provider = registry.provider_for(args.model_id)
         if model.model_id != "qwen3.5-9b-local":
             raise ValueError("full-dataset generator must be local Qwen3.5-9B")
+        # DIRECT_REUSE: TriviaQA's SkillFlow-derived materializer sizes its
+        # HTTP worker pool from the requested generation concurrency.  The
+        # shared Gateway uses ``asyncio.to_thread``; without this assignment,
+        # Python silently caps real request concurrency at its small default
+        # executor size even when the materializer semaphore is larger.
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(
+                max_workers=args.concurrency,
+                thread_name_prefix="hotpotqa-fact-materializer",
+            )
+        )
 
     semaphore = asyncio.Semaphore(args.concurrency)
 
@@ -697,6 +709,7 @@ async def materialize(args: argparse.Namespace) -> dict[str, object]:
         "max_attempts": args.max_attempts,
         "generation_rounds": getattr(args, "generation_rounds", 2),
         "generation_concurrency": args.concurrency,
+        "http_executor_workers": args.concurrency,
         "checkpoint_every": checkpoint_size,
         "accepted_count": len(ordered),
         "rejected_count": 0,

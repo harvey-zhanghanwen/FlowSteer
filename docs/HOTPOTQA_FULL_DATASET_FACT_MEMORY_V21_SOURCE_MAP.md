@@ -15,6 +15,7 @@ fixed 128-task HotpotQA evaluator panel.
 | Native train+validation source projection | Existing `_hotpot_records` converter | Necessary scale adapter |
 | Q-A → semantic rewrite + self-contained declarative fact | User-required fact-corpus compatibility boundary, using the existing local-Qwen structured generation/verification gateway | Necessary adaptation |
 | Separate question/fact verification, field-level repair, and generation-round retry | SkillFlow/TriviaQA `generate_triviaqa_qa_memory_paraphrases.py::{_repair_paraphrase_question,_repair_answer_statement}` and its independent semantic/answer verification | Thin adaptation |
+| Materialization HTTP worker pool sized by configured concurrency | SkillFlow/TriviaQA `ThreadPoolExecutor(max_workers=args.concurrency)` materialization loop | Direct reuse |
 | Immutable entity/number/date admission and resume revalidation | SkillFlow/TriviaQA deterministic materialization admission and rejected-source retry partition | Thin adaptation |
 | Development-only Top-K selection | SkillFlow/TriviaQA fact-memory Top-K selector (`k={1,2,3,5}`, smallest `k` at maximal Recall) | Thin adaptation |
 | Global 97,852-record fact manifest/index wrapper | SkillFlow passage record plus FlowSteer normalized embedding index | Necessary scale adapter |
