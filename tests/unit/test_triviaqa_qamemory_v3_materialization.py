@@ -201,6 +201,10 @@ def _source() -> TriviaQATrainSource:
                 "county. Which is the second largest?"
             ),
         ),
+        (
+            "Who wrote the poem ‘Ode to  a Grecian Urn’?",
+            "Who wrote the poem ‘Ode to a Grecian Urn’?",
+        ),
     ),
 )
 def test_source_transport_view_normalizes_only_observed_transport_forms(

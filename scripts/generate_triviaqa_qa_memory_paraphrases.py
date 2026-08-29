@@ -308,6 +308,11 @@ def _source_transport_question_view(question: str) -> str:
         count=1,
     )
     view = _SOURCE_VIEW_FUSED_EGO_FIRST.sub("ego first", view, count=1)
+    # Dataset transport contains a small number of repeated ASCII spaces,
+    # including inside immutable quoted spans. Model responses are normalized
+    # to single spaces before quote-scope admission, so compare against the
+    # same transport-only view while retaining the raw source in provenance.
+    view = " ".join(view.split())
 
     explicit_interrogative = bool(
         _SOURCE_VIEW_INTERROGATIVE_START.search(view.lstrip())
