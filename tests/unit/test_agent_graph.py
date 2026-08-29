@@ -1922,7 +1922,11 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(rejected.accepted)
         self.assertFalse(env.finished)
-        self.assertIn("exactly one ReAct environment actor", rejected.feedback)
+        self.assertIn("execution_mode='react'", rejected.feedback)
+        self.assertIn(
+            "allowed_tools=['alfworld.environment']",
+            rejected.feedback,
+        )
         self.assertIn("alfworld.environment", rejected.feedback)
 
     async def test_canvas_rejects_actions_outside_configured_search_space(self) -> None:

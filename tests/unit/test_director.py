@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import unittest
 
+from jsonschema import Draft202012Validator
+
 from src.interactive.agent_graph import AgentGraph, AgentNode
 from src.interactive.agent_runtime import (
     AgentResponse,
@@ -2303,7 +2305,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             request["action_target_domain_version"],
         )
         self.assertEqual(
-            "agentgraph.live-action-target-domains.v10",
+            "agentgraph.live-action-target-domains.v11",
             DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
         )
         initial_retriever_domain = env.model_admissible_action_targets()[
@@ -2410,6 +2412,83 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                     }
                 ),
                 domains,
+            )
+
+    def test_webshop_add_agent_schema_requires_one_registered_profile_pair(
+        self,
+    ) -> None:
+        domains = {
+            "add_agent": {
+                "existing_agent_ids": [],
+                "model_ids": ["qwen"],
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+                "free_text_fields": ["agent_id", "contract"],
+                "optional_agent_fields": [],
+                "registered_execution_profiles": [
+                    {"execution_mode": "reasoning", "allowed_tools": []},
+                    {
+                        "execution_mode": "react",
+                        "allowed_tools": ["webshop.environment"],
+                    },
+                ],
+                "execution_profiles": [
+                    {
+                        "execution_mode": "react",
+                        "allowed_tools": ["webshop.environment"],
+                    }
+                ],
+            }
+        }
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_agent",
+                domains,
+            )
+        )
+        validator = Draft202012Validator(schema)
+        complete = {
+            "action": "add_agent",
+            "agent_id": "node_1",
+            "model_id": "qwen",
+            "contract": "Use the public environment.",
+            "execution_mode": "react",
+            "allowed_tools": ["webshop.environment"],
+        }
+        self.assertTrue(validator.is_valid(complete))
+        self.assertFalse(
+            validator.is_valid(
+                {
+                    key: value
+                    for key, value in complete.items()
+                    if key != "allowed_tools"
+                }
+            )
+        )
+        self.assertFalse(
+            validator.is_valid(
+                {
+                    **complete,
+                    "execution_mode": "reasoning",
+                }
+            )
+        )
+        malformed_domains = json.loads(json.dumps(domains))
+        malformed_domains["add_agent"]["execution_profiles"] = [
+            {
+                "execution_mode": "react",
+                "allowed_tools": ["other.environment"],
+            }
+        ]
+        with self.assertRaisesRegex(ValueError, "exact registered"):
+            director_live_action_target_domains_json(
+                ("add_agent",),
+                malformed_domains,
             )
 
     def test_hotpotqa_v3_binds_semantic_relation_directions_and_format_output(

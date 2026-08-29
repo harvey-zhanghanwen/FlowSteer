@@ -2508,8 +2508,13 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError(
                 "v3 MODIFY field/Agent receipt is incomplete"
             )
+        expected_action_fields = (
+            {"action", "agent_id", "execution_mode", "allowed_tools"}
+            if selected_field == "execution_profile"
+            else {"action", "agent_id", selected_field}
+        )
         if action_value is not None and (
-            set(action_value) != {"action", "agent_id", selected_field}
+            set(action_value) != expected_action_fields
             or action_value.get("agent_id") != selected_agent_id
         ):
             raise ReceiptValidationError(
@@ -2539,15 +2544,26 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError("v3 MODIFY selected an inadmissible Agent")
         if len(admitted_agent_ids) > 1:
             expected_phases.add("modify_agent_selection")
-        value_schema = parameter_schema["properties"][selected_field]
-        if (
-            action_value is not None
-            and "enum" in value_schema
-            and action_value[selected_field] not in value_schema["enum"]
-        ):
-            raise ReceiptValidationError(
-                "v3 MODIFY value is outside its discrete live domain"
-            )
+        if selected_field == "execution_profile":
+            if action_value is not None and (
+                action_value.get("execution_mode")
+                != parameter_schema["properties"]["execution_mode"].get("const")
+                or action_value.get("allowed_tools")
+                != parameter_schema["properties"]["allowed_tools"].get("const")
+            ):
+                raise ReceiptValidationError(
+                    "v3 MODIFY execution profile differs from its exact live pair"
+                )
+        else:
+            value_schema = parameter_schema["properties"][selected_field]
+            if (
+                action_value is not None
+                and "enum" in value_schema
+                and action_value[selected_field] not in value_schema["enum"]
+            ):
+                raise ReceiptValidationError(
+                    "v3 MODIFY value is outside its discrete live domain"
+                )
         expected_parameter_branch = f"modify_agent:{selected_field}"
         if metadata.get("selected_add_agent_ids") is not None:
             raise ReceiptValidationError("v3 MODIFY receipt carries ADD declarations")
@@ -2643,9 +2659,11 @@ def _validate_v3_hierarchical_action_receipt(
         expected_parameter_branch = f"set_relation:{selected_index}"
     else:
         try:
-            director_live_action_parameter_json_schema_text(
+            parameter_schema = json.loads(
+                director_live_action_parameter_json_schema_text(
                 selected_action,
                 domains,
+                )
             )
         except ValueError as exc:
             raise ReceiptValidationError(
@@ -2660,6 +2678,19 @@ def _validate_v3_hierarchical_action_receipt(
                 raise ReceiptValidationError(
                     "v3 final Agent target is outside its live domain"
                 )
+        if action_value is not None and selected_action == "add_agent":
+            for profile_field in ("execution_mode", "allowed_tools"):
+                expected_value = parameter_schema["properties"].get(
+                    profile_field,
+                    {},
+                ).get("const")
+                if (
+                    expected_value is not None
+                    and action_value.get(profile_field) != expected_value
+                ):
+                    raise ReceiptValidationError(
+                        "v3 ADD execution profile differs from its exact live pair"
+                    )
 
     if metadata.get("parameter_schema_branch") != expected_parameter_branch:
         raise ReceiptValidationError(

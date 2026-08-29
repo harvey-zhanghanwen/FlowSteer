@@ -856,6 +856,182 @@ def _alfworld_action_object(action: object) -> str:
     return ""
 
 
+_WEBSHOP_NAV_CLICKABLES = frozenset(
+    {
+        "back to search",
+        "< prev",
+        "prev",
+        "next >",
+        "description",
+        "features",
+        "reviews",
+        "buy now",
+    }
+)
+_WEBSHOP_OPTION_LABELS = frozenset(
+    {
+        "color",
+        "size",
+        "scent",
+        "flavor name",
+        "flavor",
+        "flavour",
+        "style",
+        "pattern",
+        "quantity",
+        "pack",
+        "count",
+        "dimension",
+        "dimensions",
+        "material",
+        "fit",
+        "fit type",
+        "item shape",
+        "shape",
+    }
+)
+
+
+def _webshop_norm(text: object) -> str:
+    """Reuse SkillFlow's normalization for visible WebShop option values."""
+
+    return re.sub(
+        r"\s+",
+        " ",
+        re.sub(r"[^a-z0-9.%]+", " ", str(text).lower()),
+    ).strip()
+
+
+def _webshop_tokens(observation: object) -> list[str]:
+    """Split the two public WebShop observation formats used by SkillFlow."""
+
+    text = str(observation or "")
+    parts = (
+        re.split(r"\s*\[SEP\]\s*", text)
+        if "[SEP]" in text
+        else re.split(r"\s*\|\s*", text)
+    )
+    return [token.strip() for token in parts if token and token.strip()]
+
+
+def _webshop_parse_product_options(
+    observation: object,
+) -> tuple[dict[str, list[str]], str]:
+    """Thin-adapt SkillFlow's product-page option parser."""
+
+    tokens = _webshop_tokens(observation)
+    lowered = [token.lower() for token in tokens]
+    if "buy now" not in lowered or "< prev" not in lowered:
+        return {}, ""
+    try:
+        start = lowered.index("< prev") + 1
+    except ValueError:
+        start = 0
+    title_index: Optional[int] = None
+    for index, token in enumerate(lowered):
+        if token.startswith("price:"):
+            title_index = max(index - 1, start)
+            break
+    if title_index is None:
+        return {}, ""
+
+    groups: dict[str, list[str]] = {}
+    current_group: Optional[str] = None
+    for token in tokens[start:title_index]:
+        key = token.strip().lower()
+        if key in _WEBSHOP_OPTION_LABELS:
+            current_group = key
+            groups.setdefault(current_group, [])
+        elif current_group and token.strip():
+            groups[current_group].append(token.strip())
+
+    for group, values in tuple(groups.items()):
+        seen: set[str] = set()
+        unique: list[str] = []
+        for value in values:
+            normalized = _webshop_norm(value)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                unique.append(value)
+        groups[group] = unique
+    title = tokens[title_index] if 0 <= title_index < len(tokens) else ""
+    return groups, title
+
+
+def _webshop_clicked_option_assignments(
+    receipts: Sequence[Mapping[str, object]],
+    groups: Mapping[str, Sequence[str]],
+) -> dict[str, str]:
+    """Return the latest visible option assignment for each product group.
+
+    SkillFlow bounds option history to the current product.  The original
+    WebShop environment assigns ``session[\"options\"][group] = value``;
+    therefore a later click replaces the earlier value in that group rather
+    than accumulating mutually exclusive selections.
+    """
+
+    value_groups: dict[str, list[tuple[str, str]]] = {}
+    for group, values in groups.items():
+        for value in values:
+            normalized = _webshop_norm(value)
+            if normalized:
+                value_groups.setdefault(normalized, []).append((group, value))
+
+    selected: dict[str, str] = {}
+    for receipt in reversed(receipts):
+        if receipt.get("state_advanced") is not True:
+            continue
+        raw_action = receipt.get("action")
+        if not isinstance(raw_action, str):
+            continue
+        action = raw_action.strip()
+        lowered = action.lower()
+        if lowered.startswith("search[") or lowered == "click[back to search]":
+            break
+        match = re.fullmatch(r"click\[(.*)\]", action, flags=re.IGNORECASE)
+        if match is None:
+            continue
+        value = match.group(1).strip()
+        value_lower = value.lower()
+        if re.fullmatch(r"b[0-9a-z]{9}", value_lower):
+            break
+        if value_lower in _WEBSHOP_NAV_CLICKABLES:
+            continue
+        candidates = value_groups.get(_webshop_norm(value), ())
+        # When the same display value belongs to multiple option groups, the
+        # flattened observation does not expose the HTML option name.  Retain
+        # the native action instead of guessing an entity--attribute binding.
+        if len(candidates) != 1:
+            continue
+        group, canonical_value = candidates[0]
+        selected.setdefault(group, canonical_value)
+    return {group: selected[group] for group in groups if group in selected}
+
+
+def _webshop_model_visible_actions(
+    *,
+    observation: object,
+    receipts: Sequence[Mapping[str, object]],
+    native_actions: Sequence[str],
+) -> tuple[tuple[str, ...], dict[str, list[str]], dict[str, str]]:
+    """Remove only the already-selected same-product option assignment.
+
+    The returned action list is a model-input projection.  Native legal actions
+    remain unchanged in environment and evaluator receipts.
+    """
+
+    groups, _ = _webshop_parse_product_options(observation)
+    selected = _webshop_clicked_option_assignments(receipts, groups)
+    selected_values = {_webshop_norm(value) for value in selected.values()}
+    visible: list[str] = []
+    for action in native_actions:
+        match = re.fullmatch(r"click\[(.*)\]", action, flags=re.IGNORECASE)
+        if match is not None and _webshop_norm(match.group(1)) in selected_values:
+            continue
+        visible.append(action)
+    return tuple(visible), groups, selected
+
+
 def _webshop_task_constraints(task: str) -> tuple[str, ...]:
     """Project SkillFlow's visible WebShop price/attribute fields only."""
 
@@ -983,10 +1159,24 @@ def _public_transition_summary(
         and recent_transitions[-4] == recent_transitions[-2]
         and recent_transitions[-3] == recent_transitions[-1]
     )
+    latest_is_successful_webshop_search = bool(
+        task_family.casefold() == "webshop"
+        and isinstance(latest, Mapping)
+        and latest.get("state_advanced") is True
+        and isinstance(latest.get("action"), str)
+        and re.fullmatch(
+            r"search\[(.*)\]",
+            str(latest["action"]),
+            flags=re.IGNORECASE,
+        )
+    )
     no_progress_reasons: list[str] = []
-    if repeated_state_action_count >= 2:
+    # WebShop permits the same query to be submitted again after navigation.
+    # It is a legal state transition and cannot, by itself, trigger Canvas
+    # recovery or suppress another environment action.
+    if repeated_state_action_count >= 2 and not latest_is_successful_webshop_search:
         no_progress_reasons.append("repeated_state_action")
-    if action_cycle:
+    if action_cycle and not latest_is_successful_webshop_search:
         no_progress_reasons.append("action_cycle")
 
     # SkillFlow conditions every next Action on public observed history.  Keep
@@ -1033,11 +1223,51 @@ def _public_transition_summary(
                 click_targets.append(target)
                 if re.fullmatch(r"b[0-9a-z]{9}", target, flags=re.IGNORECASE):
                     opened_asins.append(target.lower())
+        latest_search_outcome: Optional[dict[str, str]] = None
+        if isinstance(latest, Mapping) and isinstance(latest.get("action"), str):
+            search = re.fullmatch(
+                r"search\[(.*)\]",
+                str(latest["action"]),
+                flags=re.IGNORECASE,
+            )
+            if search and search.group(1).strip():
+                outcome = "unknown"
+                next_observation = latest.get("next_observation")
+                if isinstance(next_observation, str):
+                    total = re.search(
+                        r"\bTotal\s+results\s*:\s*([0-9]+)\b",
+                        next_observation,
+                        flags=re.IGNORECASE,
+                    )
+                    if total is not None:
+                        outcome = (
+                            "zero_results"
+                            if int(total.group(1)) == 0
+                            else "results_observed"
+                        )
+                latest_search_outcome = {
+                    "query": search.group(1).strip(),
+                    "outcome": outcome,
+                }
+        groups, title = _webshop_parse_product_options(observation)
+        selected_options = _webshop_clicked_option_assignments(receipts, groups)
         summary.update(
             {
                 "recent_search_queries": searches[-3:],
                 "opened_asins": opened_asins[-8:],
                 "recent_click_targets": click_targets[-8:],
+                "latest_search_outcome": latest_search_outcome,
+                "current_product": (
+                    {
+                        "title": title,
+                        "visible_option_groups": {
+                            group: list(values) for group, values in groups.items()
+                        },
+                        "selected_options": selected_options,
+                    }
+                    if groups
+                    else None
+                ),
             }
         )
     return summary
@@ -1166,6 +1396,39 @@ def _public_state_feedback(
             lines.append("Recent search queries: " + " | ".join(searches[-3:]) + ".")
         if opened:
             lines.append("Opened candidate ASINs: " + ", ".join(opened[-8:]) + ".")
+        latest_search_outcome = progress.get("latest_search_outcome")
+        if isinstance(latest_search_outcome, Mapping):
+            lines.append(
+                "Latest public search outcome: "
+                f"query={latest_search_outcome.get('query')!r}; "
+                f"outcome={latest_search_outcome.get('outcome')}."
+            )
+        current_product = progress.get("current_product")
+        if isinstance(current_product, Mapping):
+            title = current_product.get("title")
+            if isinstance(title, str) and title:
+                lines.append(f"Current product title: {title}.")
+            option_groups = current_product.get("visible_option_groups")
+            if isinstance(option_groups, Mapping) and option_groups:
+                lines.append(
+                    "Visible product option groups: "
+                    + "; ".join(
+                        f"{group}={', '.join(str(value) for value in values)}"
+                        for group, values in option_groups.items()
+                        if isinstance(values, (list, tuple))
+                    )
+                    + "."
+                )
+            selected_options = current_product.get("selected_options")
+            if isinstance(selected_options, Mapping) and selected_options:
+                lines.append(
+                    "Current product option assignments: "
+                    + "; ".join(
+                        f"{group}={value}"
+                        for group, value in selected_options.items()
+                    )
+                    + "."
+                )
 
     recent_actions = completed_actions[-6:]
     if recent_actions:
@@ -1394,11 +1657,18 @@ class EnvironmentExecutionAdapter:
             episode.observation,
             self._max_observation_chars,
         )
-        admissible_actions = ()
+        native_admissible_actions: tuple[str, ...] = ()
         if not state.terminal:
-            admissible_actions, _ = _admissible_actions(
+            native_admissible_actions, _ = _admissible_actions(
                 episode.session.task_family,
                 episode.session.available_actions,
+            )
+        model_visible_actions = native_admissible_actions
+        if episode.session.task_family.casefold() == "webshop":
+            model_visible_actions, _, _ = _webshop_model_visible_actions(
+                observation=episode.observation,
+                receipts=state.receipts,
+                native_actions=native_admissible_actions,
             )
         last = state.receipts[-1] if state.receipts else None
         public_progress = _public_transition_summary(
@@ -1423,8 +1693,13 @@ class EnvironmentExecutionAdapter:
             "current_observation": visible_observation,
             "current_observation_clipped": observation_clipped,
             "current_observation_original_chars": len(episode.observation),
-            "admissible_actions": list(admissible_actions),
-            "admissible_action_count": len(admissible_actions),
+            # Native actions remain lossless for the environment/evaluator.
+            # The model-visible projection may suppress only the currently
+            # selected option value on a WebShop product page.
+            "admissible_actions": list(native_admissible_actions),
+            "admissible_action_count": len(native_admissible_actions),
+            "model_visible_admissible_actions": list(model_visible_actions),
+            "model_visible_admissible_action_count": len(model_visible_actions),
             "public_progress": public_progress,
             "turns_used": state.turns_used,
             "remaining_action_budget": max(self._max_turns - state.turns_used, 0),
@@ -1502,19 +1777,30 @@ class EnvironmentExecutionAdapter:
         turn = state.turns_used + 1
         if turn > self._max_turns or state.terminal:
             return
-        admissible_actions, has_search_bar = _admissible_actions(
+        native_admissible_actions, has_search_bar = _admissible_actions(
             session.task_family,
             session.available_actions,
         )
-        if not admissible_actions:
+        if not native_admissible_actions:
             raise EnvironmentExecutionError(
                 "environment exposed no admissible actions before terminal"
+            )
+        model_visible_actions = native_admissible_actions
+        if session.task_family.casefold() == "webshop":
+            model_visible_actions, _, _ = _webshop_model_visible_actions(
+                observation=episode.observation,
+                receipts=state.receipts,
+                native_actions=native_admissible_actions,
+            )
+        if not model_visible_actions:
+            raise EnvironmentExecutionError(
+                "environment exposed no model-visible actions before terminal"
             )
         prompt = _action_prompt(
             request,
             task_family=session.task_family,
             observation=episode.observation,
-            admissible_actions=admissible_actions,
+            admissible_actions=model_visible_actions,
             receipts=state.receipts,
             turn=turn,
             max_observation_chars=self._max_observation_chars,
@@ -1524,7 +1810,7 @@ class EnvironmentExecutionAdapter:
             request,
             task_family=session.task_family,
             observation=episode.observation,
-            admissible_actions=admissible_actions,
+            admissible_actions=model_visible_actions,
             receipts=state.receipts,
         )
         _, observation_clipped = _prompt_observation(
@@ -1538,7 +1824,7 @@ class EnvironmentExecutionAdapter:
         if self._structured_actions:
             model_metadata["response_json_schema"] = json.dumps(
                 _webshop_structured_action_schema(
-                    admissible_actions,
+                    model_visible_actions,
                     has_search_bar=has_search_bar,
                 ),
                 ensure_ascii=False,
@@ -1570,7 +1856,11 @@ class EnvironmentExecutionAdapter:
             model=replace(request.model, metadata=model_metadata),
         )
         generated = await self._gateway.generate(model_request)
-        response = generated if isinstance(generated, AgentResponse) else AgentResponse(generated)
+        response = (
+            generated
+            if isinstance(generated, AgentResponse)
+            else AgentResponse(generated)
+        )
         raw_action = response.text
         state.model_calls.append(
             {
@@ -1589,14 +1879,14 @@ class EnvironmentExecutionAdapter:
         if self._structured_actions:
             action, observation_status = _parse_webshop_structured_action(
                 raw_action,
-                admissible_actions=admissible_actions,
+                admissible_actions=model_visible_actions,
                 webshop_has_search_bar=has_search_bar,
             )
         else:
             action = _parse_action(
                 raw_action,
                 task_family=session.task_family,
-                admissible_actions=admissible_actions,
+                admissible_actions=model_visible_actions,
                 webshop_has_search_bar=has_search_bar,
             )
             observation_status = "success" if action is not None else "parse_error"
@@ -1612,11 +1902,12 @@ class EnvironmentExecutionAdapter:
                     "environment_revision_before": episode.revision,
                     "environment_revision_after": episode.revision,
                     "observation": episode.observation,
-                    "admissible_actions": list(admissible_actions),
+                    "admissible_actions": list(native_admissible_actions),
+                    "model_visible_admissible_actions": list(model_visible_actions),
                     "raw_model_output": raw_action,
                     "action": None,
                     "next_observation": episode.observation,
-                    "next_admissible_actions": list(admissible_actions),
+                    "next_admissible_actions": list(native_admissible_actions),
                     "terminal": False,
                     "state_advanced": False,
                     "observation_status": observation_status,
@@ -1627,7 +1918,7 @@ class EnvironmentExecutionAdapter:
                 {
                     "step": turn - 1,
                     "observation": episode.raw_observation,
-                    "legal_actions": list(admissible_actions),
+                    "legal_actions": list(native_admissible_actions),
                     "action": "<INVALID>",
                     # The native evaluator replays its established
                     # ``<action>...</action>`` wire.  Keep an invalid native
@@ -1671,11 +1962,12 @@ class EnvironmentExecutionAdapter:
                     "environment_revision_before": previous_revision,
                     "environment_revision_after": episode.revision,
                     "observation": previous_observation,
-                    "admissible_actions": list(admissible_actions),
+                    "admissible_actions": list(native_admissible_actions),
+                    "model_visible_admissible_actions": list(model_visible_actions),
                     "raw_model_output": raw_action,
                     "action": action,
                     "next_observation": episode.observation,
-                    "next_admissible_actions": list(admissible_actions),
+                    "next_admissible_actions": list(native_admissible_actions),
                     "terminal": state.terminal,
                     "state_advanced": False,
                     "observation_status": "tool_error",
@@ -1715,7 +2007,8 @@ class EnvironmentExecutionAdapter:
                 "environment_revision_before": previous_revision,
                 "environment_revision_after": episode.revision,
                 "observation": previous_observation,
-                "admissible_actions": list(admissible_actions),
+                "admissible_actions": list(native_admissible_actions),
+                "model_visible_admissible_actions": list(model_visible_actions),
                 "raw_model_output": raw_action,
                 "action": action,
                 "next_observation": transition.public_observation,
@@ -1730,7 +2023,7 @@ class EnvironmentExecutionAdapter:
             {
                 "step": turn - 1,
                 "observation": previous_raw_observation,
-                "legal_actions": list(admissible_actions),
+                "legal_actions": list(native_admissible_actions),
                 "action": action,
                 # Preserve the native evaluator protocol while retaining the
                 # exact sampled SkillFlow StructuredAction as an independent

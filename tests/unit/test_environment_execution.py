@@ -17,6 +17,7 @@ from src.interactive.agent_runtime import (
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.environment_execution import (
     _public_transition_summary,
+    _webshop_model_visible_actions,
     build_environment_execution_resources,
     EnvironmentExecutionError,
     evaluator_locked_ragen_session_factory,
@@ -110,19 +111,19 @@ def resources(
 
 
 class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
-    def test_repeated_search_transition_is_public_no_progress(self) -> None:
+    def test_legal_repeated_search_is_public_outcome_not_no_progress(self) -> None:
         receipt = {
             "state_advanced": True,
             "action": "search[blue steel table]",
             "observation": "Search page",
-            "next_observation": "Search results for blue steel table",
+            "next_observation": "WebShop [SEP] Page 1 (Total results: 50)",
             "observation_status": "success",
             "terminal": False,
         }
 
         summary = _public_transition_summary(
             task_family="webshop",
-            observation="Search results for blue steel table",
+            observation="WebShop [SEP] Page 1 (Total results: 50)",
             receipts=(receipt, dict(receipt)),
         )
 
@@ -132,12 +133,89 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         assert isinstance(no_progress, dict)
         self.assertTrue(latest["observation_changed"])
         self.assertTrue(latest["result_is_current_state"])
-        self.assertTrue(no_progress["detected"])
-        self.assertEqual(
-            ["repeated_state_action"],
-            no_progress["reasons"],
-        )
+        self.assertFalse(no_progress["detected"])
+        self.assertEqual([], no_progress["reasons"])
         self.assertEqual(2, no_progress["repeated_state_action_count"])
+        self.assertEqual(
+            {
+                "query": "blue steel table",
+                "outcome": "results_observed",
+            },
+            summary["latest_search_outcome"],
+        )
+
+    def test_zero_result_search_is_public_outcome_only(self) -> None:
+        receipt = {
+            "state_advanced": True,
+            "action": "search[exact uncommon query]",
+            "observation": "Search page",
+            "next_observation": "WebShop [SEP] Page 1 (Total results: 0)",
+            "observation_status": "success",
+            "terminal": False,
+        }
+
+        summary = _public_transition_summary(
+            task_family="webshop",
+            observation="WebShop [SEP] Page 1 (Total results: 0)",
+            receipts=(receipt,),
+        )
+
+        self.assertEqual(
+            {"query": "exact uncommon query", "outcome": "zero_results"},
+            summary["latest_search_outcome"],
+        )
+        self.assertFalse(summary["no_progress"]["detected"])
+
+    def test_webshop_visible_actions_remove_only_current_option_assignments(
+        self,
+    ) -> None:
+        observation = (
+            "WebShop [SEP] < Prev [SEP] Color [SEP] Red [SEP] Blue [SEP] "
+            "Size [SEP] Small [SEP] Large [SEP] Demo Product [SEP] "
+            "Price: $10 [SEP] Buy Now"
+        )
+        receipts = (
+            {
+                "state_advanced": True,
+                "action": "click[B000ITEM01]",
+            },
+            {"state_advanced": True, "action": "click[Red]"},
+            {"state_advanced": True, "action": "click[Blue]"},
+            {"state_advanced": True, "action": "click[Small]"},
+        )
+        native_actions = (
+            "search[<your query>]",
+            "click[Red]",
+            "click[Blue]",
+            "click[Small]",
+            "click[Large]",
+            "click[Buy Now]",
+            "click[Back to Search]",
+            "click[B000ITEM02]",
+        )
+
+        visible, groups, selected = _webshop_model_visible_actions(
+            observation=observation,
+            receipts=receipts,
+            native_actions=native_actions,
+        )
+
+        self.assertEqual(
+            {"color": ["Red", "Blue"], "size": ["Small", "Large"]},
+            groups,
+        )
+        self.assertEqual({"color": "Blue", "size": "Small"}, selected)
+        self.assertNotIn("click[Blue]", visible)
+        self.assertNotIn("click[Small]", visible)
+        for retained in (
+            "search[<your query>]",
+            "click[Red]",
+            "click[Large]",
+            "click[Buy Now]",
+            "click[Back to Search]",
+            "click[B000ITEM02]",
+        ):
+            self.assertIn(retained, visible)
 
     def test_revisited_public_state_exposes_prior_actions_without_false_loop(
         self,
@@ -709,8 +787,12 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_required_environment_capability_uses_atomic_live_repair_domain(
         self,
     ) -> None:
-        session = FakeSession()
-        gateway = SequenceGateway([])
+        class WebShopSession(FakeSession):
+            environment_id = "fake:webshop:atomic-profile"
+            task_family = "webshop"
+
+        session = WebShopSession()
+        gateway = SequenceGateway(["finish"])
         environment = resources(session=session, gateway=gateway, max_turns=1)
         model_registry = ModelRegistry(
             [ProviderSpec("fake", kind="test")],
@@ -721,7 +803,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             gateway,
             execution_adapters={"react": environment.execution_adapter},
             tool_registry=environment.tool_registry,
-            dataset_id="alfworld",
+            dataset_id="webshop",
         )
         allowed_actions = (
             "add_agent",
@@ -742,71 +824,116 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(("add_agent",), empty.model_admissible_action_types())
         self.assertEqual(
-            ["agent_id", "model_id", "contract"],
+            [
+                "agent_id",
+                "model_id",
+                "contract",
+                "execution_mode",
+                "allowed_tools",
+            ],
             empty.model_admissible_action_targets()["add_agent"][
                 "required_agent_fields"
             ],
         )
+        self.assertEqual(
+            [
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": [environment.tool_id],
+                }
+            ],
+            empty.model_admissible_action_targets()["add_agent"][
+                "execution_profiles"
+            ],
+        )
+        half_add = await empty.step(
+            '{"action":"add_agent","agent_id":"actor","model_id":"m",'
+            '"contract":"Use the public environment."}'
+        )
+        self.assertFalse(half_add.accepted)
+        self.assertIn("atomically declare", half_add.feedback)
+        self.assertEqual(0, len(gateway.requests))
+        added = await empty.step(
+            '{"action":"add_agent","agent_id":"actor","model_id":"m",'
+            '"contract":"Use the public environment.",'
+            f'"execution_mode":"react","allowed_tools":["{environment.tool_id}"]'
+            "}"
+        )
+        self.assertTrue(added.accepted)
+        self.assertEqual("react", empty.graph.get_node("actor").execution_mode.value)
+        self.assertEqual(
+            (environment.tool_id,),
+            empty.graph.get_node("actor").allowed_tools,
+        )
+        self.assertEqual(["finish"], session.actions)
 
+        repair_session = WebShopSession()
+        repair_gateway = SequenceGateway(["finish"])
+        repair_environment = resources(
+            session=repair_session,
+            gateway=repair_gateway,
+            max_turns=1,
+        )
+        repair_runtime = AgentRuntime(
+            model_registry,
+            repair_gateway,
+            execution_adapters={
+                "react": repair_environment.execution_adapter
+            },
+            tool_registry=repair_environment.tool_registry,
+            dataset_id="webshop",
+        )
         reasoning_graph = AgentGraph(
             [AgentNode("arbitrary", "m", "Use the available interface.")]
         )
         reasoning = AgentWorkflowEnv(
             model_registry,
-            runtime=runtime,
+            runtime=repair_runtime,
             problem="complete the task",
             graph=reasoning_graph,
             execute_on_edit=True,
-            required_tool_id=environment.tool_id,
+            required_tool_id=repair_environment.tool_id,
             allowed_actions=allowed_actions,
         )
         self.assertEqual(
             ("modify_agent",), reasoning.model_admissible_action_types()
         )
         repair = reasoning.model_admissible_action_targets()["modify_agent"]
-        self.assertEqual(["execution_mode"], repair["mutable_fields"])
+        self.assertEqual(["execution_profile"], repair["mutable_fields"])
         self.assertEqual(
-            {"execution_mode": ["react"]},
+            {
+                "execution_profile": [
+                    {
+                        "execution_mode": "react",
+                        "allowed_tools": [repair_environment.tool_id],
+                    }
+                ]
+            },
             repair["per_agent_candidates"][0]["discrete_value_domains"],
         )
-
-        react_graph = AgentGraph(
-            [
-                AgentNode(
-                    "arbitrary",
-                    "m",
-                    "Use the available interface.",
-                    execution_mode="react",
-                )
-            ]
+        half_modify = await reasoning.step(
+            '{"action":"modify_agent","agent_id":"arbitrary",'
+            '"execution_mode":"react"}'
         )
-        react = AgentWorkflowEnv(
-            model_registry,
-            runtime=runtime,
-            problem="complete the task",
-            graph=react_graph,
-            execute_on_edit=True,
-            required_tool_id=environment.tool_id,
-            allowed_actions=allowed_actions,
+        self.assertFalse(half_modify.accepted)
+        self.assertIn("atomically commit", half_modify.feedback)
+        self.assertEqual(0, len(repair_gateway.requests))
+        repaired = await reasoning.step(
+            '{"action":"modify_agent","agent_id":"arbitrary",'
+            f'"execution_mode":"react","allowed_tools":["{repair_environment.tool_id}"]'
+            "}"
         )
-        repair = react.model_admissible_action_targets()["modify_agent"]
-        self.assertEqual(["allowed_tools"], repair["mutable_fields"])
+        self.assertTrue(repaired.accepted)
         self.assertEqual(
-            {"allowed_tools": [[environment.tool_id]]},
-            repair["per_agent_candidates"][0]["discrete_value_domains"],
+            "react",
+            reasoning.graph.get_node("arbitrary").execution_mode.value,
         )
-
-        actor_graph = AgentGraph([make_request().agent])
-        actor = AgentWorkflowEnv(
-            model_registry,
-            runtime=runtime,
-            problem="complete the task",
-            graph=actor_graph,
-            execute_on_edit=True,
-            required_tool_id=environment.tool_id,
-            allowed_actions=allowed_actions,
+        self.assertEqual(
+            (repair_environment.tool_id,),
+            reasoning.graph.get_node("arbitrary").allowed_tools,
         )
-        restored = actor.model_admissible_action_types()
+        self.assertEqual(["finish"], repair_session.actions)
+        restored = reasoning.model_admissible_action_types()
         self.assertIn("add_agent", restored)
         self.assertIn("set_output", restored)
         self.assertNotEqual(("modify_agent",), restored)
@@ -938,6 +1065,119 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         for request_value in gateway.requests:
             self.assertIn("complete the webshop task", request_value.problem)
             self.assertNotIn("graded_score", request_value.problem)
+
+    async def test_webshop_selected_option_is_removed_only_from_next_model_domain(
+        self,
+    ) -> None:
+        product_observation = (
+            "WebShop [SEP] < Prev [SEP] Color [SEP] Red [SEP] Blue [SEP] "
+            "Size [SEP] Small [SEP] Large [SEP] Demo Product [SEP] "
+            "Price: $10 [SEP] Buy Now"
+        )
+
+        class ProductSession(FakeSession):
+            environment_id = "fake:webshop:product-options"
+            task_family = "webshop"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = {
+                    "has_search_bar": True,
+                    "clickables": [
+                        "Red",
+                        "Blue",
+                        "Small",
+                        "Large",
+                        "Buy Now",
+                        "Back to Search",
+                        "B000ITEM02",
+                    ],
+                }
+
+            def reset(self) -> str:
+                self.reset_count += 1
+                return product_observation
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                if action == "click[Buy Now]":
+                    return (
+                        "Thank you for shopping with us!",
+                        1.0,
+                        True,
+                        {"graded_score": 1.0},
+                    )
+                return product_observation, 0.0, False, {"graded_score": 0.0}
+
+        def structured_click(target: str) -> str:
+            return json.dumps(
+                {
+                    "resource_id": "webshop",
+                    "kind": "tool",
+                    "name": "click",
+                    "arguments": {"target": target},
+                    "skill_id": None,
+                }
+            )
+
+        session = ProductSession()
+        gateway = SequenceGateway(
+            [structured_click("Blue"), structured_click("Buy Now")]
+        )
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=3,
+            stepwise_director=True,
+            structured_actions=True,
+        )
+        request = make_request("webshop")
+
+        first = await environment.execution_adapter.execute(request)
+        second = await environment.execution_adapter.execute(request)
+
+        first_state = first.metadata["environment_current_state"]
+        self.assertEqual(
+            {"color": "Blue"},
+            first_state["public_progress"]["current_product"]["selected_options"],
+        )
+        self.assertNotIn(
+            "click[Blue]", first_state["model_visible_admissible_actions"]
+        )
+        schema = json.loads(gateway.requests[1].model.metadata["response_json_schema"])
+        branches = schema.get("oneOf", [schema])
+        click_branch = next(
+            branch
+            for branch in branches
+            if branch["properties"]["name"].get("const") == "click"
+        )
+        click_targets = click_branch["properties"]["arguments"]["properties"][
+            "target"
+        ]["enum"]
+        self.assertNotIn("Blue", click_targets)
+        for retained in (
+            "Red",
+            "Small",
+            "Large",
+            "Buy Now",
+            "Back to Search",
+            "B000ITEM02",
+        ):
+            self.assertIn(retained, click_targets)
+        self.assertIn(
+            "Current product option assignments: color=Blue.",
+            gateway.requests[1].problem,
+        )
+        second_receipt = second.metadata["environment_receipts"][1]
+        self.assertIn("click[Blue]", second_receipt["admissible_actions"])
+        self.assertNotIn(
+            "click[Blue]", second_receipt["model_visible_admissible_actions"]
+        )
+        self.assertIn(
+            "click[Blue]",
+            second.metadata["evaluator_environment_trace"][1]["legal_actions"],
+        )
+        self.assertEqual(["click[Blue]", "click[Buy Now]"], session.actions)
 
     async def test_webshop_structured_action_fills_only_fixed_wire_constants(
         self,

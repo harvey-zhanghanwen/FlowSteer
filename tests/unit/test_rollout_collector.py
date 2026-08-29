@@ -1449,6 +1449,105 @@ def test_native_sglang_v3_binds_modify_agent_and_discrete_value():
     }
 
 
+def test_native_sglang_v3_records_atomic_webshop_execution_profile_pair():
+    actions = ("modify_agent",)
+    domains = {
+        "modify_agent": {
+            "mutable_fields": ["execution_profile"],
+            "per_agent_candidates": [
+                {
+                    "agent_id": "actor",
+                    "mutable_fields": ["execution_profile"],
+                    "current_values": {
+                        "execution_profile": {
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        }
+                    },
+                    "discrete_value_domains": {
+                        "execution_profile": [
+                            {
+                                "execution_mode": "react",
+                                "allowed_tools": ["webshop.environment"],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+    }
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    final_action = {
+        "action": "modify_agent",
+        "agent_id": "actor",
+        "execution_mode": "react",
+        "allowed_tools": ["webshop.environment"],
+    }
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"modify_agent","field":"execution_profile"}',
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(
+            actions
+        ),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+
+    response = asyncio.run(client.propose("repair Canvas", **schema_request))
+
+    parameter_schema = json.loads(
+        client.payloads[1]["sampling_params"]["json_schema"]
+    )
+    assert parameter_schema["required"] == [
+        "action",
+        "agent_id",
+        "execution_mode",
+        "allowed_tools",
+    ]
+    assert parameter_schema["properties"]["execution_mode"] == {
+        "const": "react"
+    }
+    assert parameter_schema["properties"]["allowed_tools"] == {
+        "const": ["webshop.environment"]
+    }
+    assert response.metadata["selected_modify_field"] == "execution_profile"
+    assert response.metadata["selected_modify_agent_id"] == "actor"
+    assert response.metadata["parameter_schema_branch"] == (
+        "modify_agent:execution_profile"
+    )
+    assert response.metadata["request_count"] == 2
+    parsed = AgentActionParser().parse(response.text)
+    assert _validate_v3_hierarchical_action_receipt(
+        parsed,
+        response.metadata,
+        schema_request,
+    ) == {"modify_field_selection"}
+    half_profile = AgentActionParser().parse(
+        '{"action":"modify_agent","agent_id":"actor",'
+        '"execution_mode":"react"}'
+    )
+    with pytest.raises(ReceiptValidationError, match="parsed atomic patch"):
+        _validate_v3_hierarchical_action_receipt(
+            half_profile,
+            response.metadata,
+            schema_request,
+        )
+
+
 def test_native_sglang_v3_regenerates_one_truncated_parameter_with_exact_receipts():
     actions = ("modify_agent",)
     domains = {

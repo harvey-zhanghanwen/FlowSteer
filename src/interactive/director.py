@@ -798,6 +798,11 @@ _MUTABLE_AGENT_PROPERTIES = {
     "artifact_type": _NON_EMPTY_STRING_SCHEMA,
     "completion_condition": _NON_EMPTY_STRING_SCHEMA,
 }
+_EXECUTION_PROFILE_FIELD = "execution_profile"
+_LIVE_MUTABLE_AGENT_FIELDS = (
+    *tuple(_MUTABLE_AGENT_PROPERTIES),
+    _EXECUTION_PROFILE_FIELD,
+)
 DIRECTOR_ACTION_JSON_SCHEMA = {
     "type": "object",
     "oneOf": [
@@ -914,7 +919,7 @@ DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3 = (
     "agentgraph.model-admissible-action-mask.v3"
 )
 DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION = (
-    "agentgraph.live-action-target-domains.v10"
+    "agentgraph.live-action-target-domains.v11"
 )
 DIRECTOR_ACTION_JSON_SCHEMA_TEXT = json.dumps(
     DIRECTOR_ACTION_JSON_SCHEMA,
@@ -1156,7 +1161,7 @@ def director_modify_agent_field_selector_json_schema_text(
     admitted_fields = DIRECTOR_MODIFY_AGENT_FIELDS if fields is None else tuple(fields)
     if (
         not admitted_fields
-        or any(field not in DIRECTOR_MODIFY_AGENT_FIELDS for field in admitted_fields)
+        or any(field not in _LIVE_MUTABLE_AGENT_FIELDS for field in admitted_fields)
         or len(admitted_fields) != len(set(admitted_fields))
     ):
         raise ValueError("modify_agent field domain is empty or invalid")
@@ -2299,6 +2304,11 @@ def _live_discrete_values(
             or len(value) != len(set(value))
         ):
             raise ValueError("modify_agent allowed_tools domain is invalid")
+        if field_name == _EXECUTION_PROFILE_FIELD:
+            _live_execution_profiles(
+                [value],
+                label="modify_agent.execution_profile",
+            )
         try:
             identity = json.dumps(
                 value,
@@ -2328,7 +2338,7 @@ def _live_modify_agent_candidates(
         domain.get("mutable_fields"),
         label="modify_agent.mutable_fields",
     )
-    if field_name not in global_fields or field_name not in DIRECTOR_MODIFY_AGENT_FIELDS:
+    if field_name not in global_fields or field_name not in _LIVE_MUTABLE_AGENT_FIELDS:
         raise ValueError("modify_agent field is outside the live domain")
     candidates = domain.get("per_agent_candidates")
     if not isinstance(candidates, (list, tuple)):
@@ -2345,7 +2355,7 @@ def _live_modify_agent_candidates(
             or not agent_id
             or agent_id in seen_ids
             or not isinstance(fields, (list, tuple))
-            or any(field not in DIRECTOR_MODIFY_AGENT_FIELDS for field in fields)
+            or any(field not in _LIVE_MUTABLE_AGENT_FIELDS for field in fields)
             or len(fields) != len(set(fields))
         ):
             raise ValueError("modify_agent candidate is malformed")
@@ -2416,7 +2426,13 @@ def director_live_action_parameter_json_schema_text(
             domain.get("required_agent_fields"),
             label="add_agent.required_agent_fields",
         )
-        if required_fields != ("agent_id", "model_id", "contract"):
+        base_required_fields = ("agent_id", "model_id", "contract")
+        profile_required_fields = (
+            *base_required_fields,
+            "execution_mode",
+            "allowed_tools",
+        )
+        if required_fields not in {base_required_fields, profile_required_fields}:
             raise ValueError("add_agent live domain has incompatible required fields")
         raw_optional_fields = domain.get("optional_agent_fields", ())
         if not isinstance(raw_optional_fields, (list, tuple)):
@@ -2450,6 +2466,30 @@ def director_live_action_parameter_json_schema_text(
             },
         }
         schema["properties"]["model_id"] = {"enum": list(model_ids)}
+        if required_fields == profile_required_fields:
+            profiles = _live_execution_profiles(
+                domain.get("execution_profiles"),
+                label="add_agent.execution_profiles",
+            )
+            registered_profiles = _live_execution_profiles(
+                domain.get("registered_execution_profiles"),
+                label="add_agent.registered_execution_profiles",
+            )
+            if len(profiles) != 1 or profiles[0] not in registered_profiles:
+                raise ValueError(
+                    "add_agent requires one exact registered execution profile"
+                )
+            execution_mode, allowed_tools = profiles[0]
+            schema["properties"]["execution_mode"] = {
+                "const": execution_mode
+            }
+            schema["properties"]["allowed_tools"] = {
+                "const": list(allowed_tools)
+            }
+        elif domain.get("execution_profiles") is not None:
+            raise ValueError(
+                "add_agent execution profiles require both profile fields"
+            )
     elif action == "add_subgraph":
         if add_agents is None:
             raise ValueError(
@@ -2559,7 +2599,7 @@ def director_live_action_parameter_json_schema_text(
                 "anyOf": [{"enum": endpoint_ids}, {"type": "null"}]
             }
     elif action == "modify_agent":
-        if modify_field not in DIRECTOR_MODIFY_AGENT_FIELDS:
+        if modify_field not in _LIVE_MUTABLE_AGENT_FIELDS:
             raise ValueError("modify_agent v3 parameter phase requires a live field")
         candidates = _live_modify_agent_candidates(
             action_target_domains,
@@ -2570,16 +2610,47 @@ def director_live_action_parameter_json_schema_text(
             raise ValueError(
                 "modify_agent v3 parameter phase requires a live Agent target"
             )
-        schema = json.loads(
-            director_modify_agent_field_sampling_json_schema_text(modify_field)
-        )
-        schema["properties"]["agent_id"] = {"const": modify_agent_id}
         discrete_values = _live_discrete_values(
             by_id[modify_agent_id],
             modify_field,
         )
-        if discrete_values is not None:
-            schema["properties"][modify_field] = {"enum": list(discrete_values)}
+        if modify_field == _EXECUTION_PROFILE_FIELD:
+            if discrete_values is None or len(discrete_values) != 1:
+                raise ValueError(
+                    "modify_agent execution_profile requires one exact pair"
+                )
+            profiles = _live_execution_profiles(
+                discrete_values,
+                label="modify_agent.execution_profile",
+            )
+            execution_mode, allowed_tools = profiles[0]
+            schema = {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "action",
+                    "agent_id",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+                "properties": {
+                    "action": {"const": "modify_agent"},
+                    "agent_id": {"const": modify_agent_id},
+                    "execution_mode": {"const": execution_mode},
+                    "allowed_tools": {"const": list(allowed_tools)},
+                },
+            }
+        else:
+            schema = json.loads(
+                director_modify_agent_field_sampling_json_schema_text(
+                    modify_field
+                )
+            )
+            schema["properties"]["agent_id"] = {"const": modify_agent_id}
+            if discrete_values is not None:
+                schema["properties"][modify_field] = {
+                    "enum": list(discrete_values)
+                }
     elif action in {"delete_agent", "set_output"}:
         agent_ids = _live_string_domain(
             domain.get("agent_ids"),
@@ -2712,7 +2783,7 @@ def director_validate_live_action_target_domains(
                 domain.get("mutable_fields"),
                 label="modify_agent.mutable_fields",
             )
-            if any(field not in DIRECTOR_MODIFY_AGENT_FIELDS for field in fields):
+            if any(field not in _LIVE_MUTABLE_AGENT_FIELDS for field in fields):
                 raise ValueError("modify_agent mutable field domain is invalid")
             candidates = domain.get("per_agent_candidates")
             if not isinstance(candidates, (list, tuple)):

@@ -896,26 +896,76 @@ class AgentWorkflowEnv:
     def _required_tool_capability_repair_domains(
         self,
     ) -> dict[str, dict[str, object]]:
-        """Project atomic repairs for the unique stateful Tool owner.
+        """Project atomic execution-profile repairs for the stateful owner.
 
         SkillFlow binds one bounded environment episode to one Agent.  This
-        projection exposes only the execution capability needed to establish
-        that owner; it does not select an Agent role, model, contract, Output,
-        relation, or topology.  Once exactly one owner exists the ordinary
-        free AgentGraph search space is restored.
+        projection exposes the correlated ``execution_mode``/``allowed_tools``
+        profile needed to establish that owner.  Both fields are committed in
+        one FlowSteer Canvas edit so execute-on-edit never runs a half-configured
+        stateful Agent.  It does not select an Agent role, model, contract,
+        Output, relation, or topology.  Once exactly one owner exists the
+        ordinary free AgentGraph search space is restored.
         """
 
         if self.required_tool_id is None:
+            return {}
+        if not self._uses_atomic_stateful_execution_profile():
+            owners = self._required_tool_actor_ids()
+            if len(owners) == 1:
+                return {}
+            if len(owners) > 1:
+                return {
+                    agent_id: {"allowed_tools": []}
+                    for agent_id in owners
+                }
+            nodes = tuple(self._graph.nodes)
+            if not nodes:
+                return {}
+            exact_tool_nodes = tuple(
+                node
+                for node in nodes
+                if node.allowed_tools == (self.required_tool_id,)
+            )
+            if exact_tool_nodes:
+                return {
+                    node.id: {"execution_mode": "react"}
+                    for node in exact_tool_nodes
+                }
+            react_nodes = tuple(
+                node
+                for node in nodes
+                if node.execution_mode.value == "react"
+            )
+            if react_nodes:
+                return {
+                    node.id: {"allowed_tools": [self.required_tool_id]}
+                    for node in react_nodes
+                }
+            return {
+                node.id: {"execution_mode": "react"}
+                for node in nodes
+            }
+        required_profile = {
+            "execution_mode": "react",
+            "allowed_tools": [self.required_tool_id],
+        }
+        if (
+            "react",
+            (self.required_tool_id,),
+        ) not in self.runtime.registered_execution_profiles():
             return {}
         owners = self._required_tool_actor_ids()
         if len(owners) == 1:
             return {}
         if len(owners) > 1:
-            # Clearing the Tool declaration is a valid, non-destructive first
-            # step for any duplicate owner.  The Director remains free to
-            # choose which Agent retains the stateful capability.
+            # Moving one duplicate owner to the registered reasoning/no-Tool
+            # profile is a valid, non-destructive first step.  The Director
+            # remains free to choose which Agent retains the stateful profile.
             return {
-                agent_id: {"allowed_tools": []}
+                agent_id: {
+                    "execution_mode": "reasoning",
+                    "allowed_tools": [],
+                }
                 for agent_id in owners
             }
 
@@ -929,7 +979,7 @@ class AgentWorkflowEnv:
         )
         if exact_tool_nodes:
             return {
-                node.id: {"execution_mode": "react"}
+                node.id: dict(required_profile)
                 for node in exact_tool_nodes
             }
         react_nodes = tuple(
@@ -937,13 +987,78 @@ class AgentWorkflowEnv:
         )
         if react_nodes:
             return {
-                node.id: {"allowed_tools": [self.required_tool_id]}
+                node.id: dict(required_profile)
                 for node in react_nodes
             }
         return {
-            node.id: {"execution_mode": "react"}
+            node.id: dict(required_profile)
             for node in nodes
         }
+
+    def _uses_atomic_stateful_execution_profile(self) -> bool:
+        """Return whether this task uses the WebShop atomic Tool profile."""
+
+        return (
+            self.required_tool_id is not None
+            and isinstance(self.runtime.dataset_id, str)
+            and self.runtime.dataset_id.casefold() == "webshop"
+        )
+
+    def _required_tool_profile_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Reject a half-configured stateful execution profile before edit."""
+
+        if (
+            not self._uses_atomic_stateful_execution_profile()
+            or self.required_tool_issue() is None
+        ):
+            return None
+        expected_fields = {
+            "execution_mode": "react",
+            "allowed_tools": (self.required_tool_id,),
+        }
+        if not self._graph.nodes:
+            if action.action_type is not AgentActionType.ADD_AGENT:
+                return "the first stateful environment edit must add its Agent"
+            if (
+                action.execution_mode != expected_fields["execution_mode"]
+                or action.allowed_tools != expected_fields["allowed_tools"]
+            ):
+                return (
+                    "the stateful environment Agent must atomically declare "
+                    "execution_mode='react' and the exact required Tool"
+                )
+            return None
+
+        repairs = self._required_tool_capability_repair_domains()
+        if not repairs:
+            return "the required stateful execution profile is not registered"
+        if (
+            action.action_type is not AgentActionType.MODIFY_AGENT
+            or action.agent_id not in repairs
+        ):
+            return "stateful capability repair requires one atomic MODIFY"
+        expected = repairs[action.agent_id]
+        if (
+            action.execution_mode != expected["execution_mode"]
+            or action.allowed_tools != tuple(expected["allowed_tools"])
+        ):
+            return (
+                "stateful capability repair must atomically commit the exact "
+                "registered execution_mode/allowed_tools profile"
+            )
+        unrelated_values = (
+            action.model_id,
+            action.contract,
+            action.role_family,
+            action.artifact_type,
+            action.completion_condition,
+        )
+        if any(value is not None for value in unrelated_values):
+            return "stateful capability repair may modify only its execution profile"
+        return None
 
     def model_admissible_action_types(self) -> Tuple[str, ...]:
         """Project state-conditioned Canvas actions for the Flow-Director.
@@ -975,6 +1090,19 @@ class AgentWorkflowEnv:
             # Output edits.  Agent identity, model and free-text contract stay
             # policy-selected, and the full search space returns immediately
             # after the capability boundary is satisfied.
+            required_profile_registered = (
+                not self._uses_atomic_stateful_execution_profile()
+                or (
+                    self.required_tool_id is not None
+                    and (
+                        "react",
+                        (self.required_tool_id,),
+                    )
+                    in self.runtime.registered_execution_profiles()
+                )
+            )
+            if not required_profile_registered:
+                return ()
             if not self._graph.nodes:
                 if (
                     AgentActionType.ADD_AGENT.value
@@ -3475,6 +3603,23 @@ class AgentWorkflowEnv:
         )
         targets: dict[str, object] = {}
         if AgentActionType.ADD_AGENT.value in admitted:
+            atomic_execution_profiles = (
+                [
+                    {
+                        "execution_mode": "react",
+                        "allowed_tools": [self.required_tool_id],
+                    }
+                ]
+                if (
+                    self._uses_atomic_stateful_execution_profile()
+                    and not self._graph.nodes
+                    and (
+                        "react",
+                        (self.required_tool_id,),
+                    ) in self.runtime.registered_execution_profiles()
+                )
+                else []
+            )
             targets[AgentActionType.ADD_AGENT.value] = {
                 "existing_agent_ids": node_ids,
                 "model_ids": list(self._available_model_ids()),
@@ -3482,6 +3627,11 @@ class AgentWorkflowEnv:
                     "agent_id",
                     "model_id",
                     "contract",
+                    *(
+                        ["execution_mode", "allowed_tools"]
+                        if atomic_execution_profiles
+                        else []
+                    ),
                 ],
                 "free_text_fields": ["agent_id", "contract"],
                 "optional_agent_fields": (
@@ -3504,6 +3654,11 @@ class AgentWorkflowEnv:
                         self.runtime.registered_execution_profiles()
                     )
                 ],
+                **(
+                    {"execution_profiles": atomic_execution_profiles}
+                    if atomic_execution_profiles
+                    else {}
+                ),
             }
         if AgentActionType.ADD_SUBGRAPH.value in admitted:
             remaining = (
@@ -3765,11 +3920,15 @@ class AgentWorkflowEnv:
                 else {}
             )
             if capability_repairs:
-                base_mutable_fields = list(
-                    dict.fromkeys(
-                        field
-                        for agent_id in modifiable_node_ids
-                        for field in capability_repairs[agent_id]
+                base_mutable_fields = (
+                    ["execution_profile"]
+                    if self._uses_atomic_stateful_execution_profile()
+                    else list(
+                        dict.fromkeys(
+                            field
+                            for agent_id in modifiable_node_ids
+                            for field in capability_repairs[agent_id]
+                        )
                     )
                 )
             elif isinstance(no_progress_actor_id, str):
@@ -3847,7 +4006,11 @@ class AgentWorkflowEnv:
                 agent_id: [
                     field
                     for field in (
-                        list(capability_repairs[agent_id])
+                        (
+                            ["execution_profile"]
+                            if self._uses_atomic_stateful_execution_profile()
+                            else list(capability_repairs[agent_id])
+                        )
                         if agent_id in capability_repairs
                         else ["model_id"]
                         if agent_id in provider_failure_agent_ids
@@ -3887,10 +4050,16 @@ class AgentWorkflowEnv:
                 node = self._graph.get_node(agent_id)
                 current_values: dict[str, object] = {}
                 for field in fields:
-                    value = getattr(node, field)
-                    current_values[field] = (
-                        list(value) if isinstance(value, tuple) else value
-                    )
+                    if field == "execution_profile":
+                        current_values[field] = {
+                            "execution_mode": node.execution_mode.value,
+                            "allowed_tools": list(node.allowed_tools),
+                        }
+                    else:
+                        value = getattr(node, field)
+                        current_values[field] = (
+                            list(value) if isinstance(value, tuple) else value
+                        )
                 per_agent_current_values[agent_id] = current_values
             per_agent_discrete_domains: dict[
                 str, dict[str, list[object]]
@@ -3912,8 +4081,13 @@ class AgentWorkflowEnv:
                                 recovery_field_values[field]
                             ]
                 if agent_id in capability_repairs:
-                    for field, value in capability_repairs[agent_id].items():
-                        discrete_domains[field] = [value]
+                    if self._uses_atomic_stateful_execution_profile():
+                        discrete_domains["execution_profile"] = [
+                            dict(capability_repairs[agent_id])
+                        ]
+                    else:
+                        for field, value in capability_repairs[agent_id].items():
+                            discrete_domains[field] = [value]
                 per_agent_discrete_domains[agent_id] = discrete_domains
             mutable_fields = [
                 field
@@ -4150,6 +4324,14 @@ class AgentWorkflowEnv:
                 action,
                 "action rejected: action type is outside the configured Canvas "
                 f"action set {list(self.allowed_action_types)!r}",
+            )
+        required_tool_profile_issue = (
+            self._required_tool_profile_admission_issue(action)
+        )
+        if required_tool_profile_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + required_tool_profile_issue,
             )
         # Provider/model availability is a Runtime boundary shared by generic
         # FlowSteer Canvas tasks and semantic QA tasks.  Apply its exact live
