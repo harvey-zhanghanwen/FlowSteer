@@ -51,10 +51,10 @@ from src.interactive.hotpotqa_qa_memory_index import (  # noqa: E402
 )
 
 
-PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v4"
-PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v4"
+PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v5"
+PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v5"
 PARAPHRASE_PROVENANCE = (
-    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v4"
+    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v5"
 )
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
 
@@ -65,7 +65,11 @@ FACT_GENERATION_SCHEMA = _json_schema(
     }
 )
 QUESTION_REPAIR_SCHEMA = _json_schema(
-    {"paraphrase_question": {"type": "string", "minLength": 1}}
+    {
+        "paraphrase_question": {"type": "string", "minLength": 1},
+        "replaced_source_token": {"type": "string", "minLength": 1},
+        "replacement_phrase": {"type": "string", "minLength": 1},
+    }
 )
 FACT_REPAIR_SCHEMA = _json_schema(
     {"fact_statement": {"type": "string", "minLength": 1}}
@@ -96,6 +100,22 @@ _REQUIRED_QUESTION_VERIFICATION_FIELDS = tuple(
 )
 _REQUIRED_FACT_VERIFICATION_FIELDS = tuple(
     FACT_VERIFICATION_SCHEMA["required"]
+)
+_RELATION_REBUILD_REJECTION_MARKERS = (
+    "fact_supported_by_qa",
+    "answer_slot_bound",
+    "relation_direction_preserved",
+    "no_new_fact_or_relation",
+    "fact_declarative",
+    "fact_self_contained",
+    "no_qa_wire_format",
+    "canonical_span_preserved_when_required",
+    "contains the complete source question lexical surface",
+    "is identical to the canonical answer",
+    "contains a question/answer wire",
+    "must be declarative",
+    "must be a complete declarative sentence",
+    "begins with an unbound anaphoric subject",
 )
 
 
@@ -216,6 +236,86 @@ def _problem_payload(value: Mapping[str, object]) -> str:
     )
 
 
+def _lexical_replacement_source_tokens(
+    source: HotpotQATrainQASource,
+) -> tuple[str, ...]:
+    """Thin adaptation of TriviaQA's required-source-token repair boundary."""
+
+    content_tokens = set(_content_tokens(source.question))
+    immutable_identities = {
+        token.casefold().removesuffix("'s").removesuffix("’s")
+        for token in _immutable_identity_surfaces(source.question)
+    }
+    quoted_tokens = {
+        token.casefold()
+        for span in _quoted_spans(source.question)
+        for token in _lexical_tokens(span)
+    }
+    candidates: list[str] = []
+    for token in _lexical_tokens(source.question):
+        normalized = token.casefold()
+        identity_base = normalized.removesuffix("'s").removesuffix("’s")
+        if (
+            normalized in content_tokens
+            and identity_base not in immutable_identities
+            and normalized not in quoted_tokens
+            and not any(character.isdigit() for character in normalized)
+        ):
+            candidates.append(token)
+    if not candidates:
+        relation_auxiliaries = {
+            "are",
+            "did",
+            "do",
+            "does",
+            "had",
+            "has",
+            "have",
+            "is",
+            "was",
+            "were",
+        }
+        candidates.extend(
+            token
+            for token in _lexical_tokens(source.question)
+            if token.casefold() in relation_auxiliaries
+        )
+    return tuple(dict.fromkeys(candidates))
+
+
+def _parse_question_repair(
+    generated: Mapping[str, object],
+    *,
+    eligible_source_tokens: Sequence[str],
+    required_source_token: str,
+) -> str:
+    """Validate the structured lexical-replacement receipt before admission."""
+
+    question = _generated_text(generated, "paraphrase_question")
+    replaced = _generated_text(generated, "replaced_source_token")
+    replacement = _generated_text(generated, "replacement_phrase")
+    eligible = {token.casefold() for token in eligible_source_tokens}
+    if replaced.casefold() not in eligible:
+        raise ValueError("question repair replaced_source_token is ineligible")
+    if replaced.casefold() != required_source_token.casefold():
+        raise ValueError("question repair replaced the wrong source token")
+    if replacement.casefold() not in question.casefold():
+        raise ValueError("question repair replacement_phrase is absent")
+    if replaced.casefold() == replacement.casefold():
+        raise ValueError("question repair did not change lexical wording")
+    return question
+
+
+def _fact_repair_strategy(prior_rejection: str) -> str:
+    normalized = prior_rejection.casefold()
+    if any(
+        marker in normalized
+        for marker in _RELATION_REBUILD_REJECTION_MARKERS
+    ):
+        return "authoritative_answer_slot_reconstruction"
+    return "preserve_and_repair_immutable_fields"
+
+
 def _candidate(
     source: HotpotQATrainQASource,
     generated: Mapping[str, object],
@@ -267,6 +367,7 @@ async def _materialize_one(
     fact_admitted = False
     question_rejection = "not yet generated"
     fact_rejection = "not yet generated"
+    question_repair_count = 0
     attempt_receipts: list[dict[str, object]] = []
 
     for generation_round in range(generation_rounds):
@@ -361,6 +462,17 @@ async def _materialize_one(
             else:
                 if not question_admitted:
                     try:
+                        eligible_source_tokens = (
+                            _lexical_replacement_source_tokens(source)
+                        )
+                        if not eligible_source_tokens:
+                            raise ValueError(
+                                "question repair has no eligible lexical source token"
+                            )
+                        required_source_token = eligible_source_tokens[
+                            question_repair_count % len(eligible_source_tokens)
+                        ]
+                        question_repair_count += 1
                         repaired, response = await _generate_json(
                             model=model,
                             provider=provider,
@@ -374,13 +486,23 @@ async def _materialize_one(
                                 "Treat the immutable fields as exact dataset strings; "
                                 "never correct, replace, delete, or complete them from "
                                 "world knowledge. Do not use any forbidden canonical "
-                                "token or reveal the answer. Return only JSON."
+                                "token or reveal the answer. Replace the supplied "
+                                "required_source_token_to_replace, or a phrase that "
+                                "contains it, with a genuine equivalent expression. "
+                                "Report that exact source token and the replacement "
+                                "phrase in the structured response. Return only JSON."
                             ),
                             problem=_problem_payload(
                                 {
                                     **question_source_payload,
                                     "rejected_question": question or "",
                                     "prior_admission_result": question_rejection,
+                                    "lexical_replacement_source_tokens": list(
+                                        eligible_source_tokens
+                                    ),
+                                    "required_source_token_to_replace": (
+                                        required_source_token
+                                    ),
                                 }
                             ),
                             request_id=(
@@ -391,10 +513,15 @@ async def _materialize_one(
                             seed=request_seed,
                             temperature=0.0,
                         )
-                        question = _generated_text(
-                            repaired, "paraphrase_question"
+                        question = _parse_question_repair(
+                            repaired,
+                            eligible_source_tokens=eligible_source_tokens,
+                            required_source_token=required_source_token,
                         )
                         question_trace["generation_response"] = dict(response)
+                        question_trace["required_source_token_to_replace"] = (
+                            required_source_token
+                        )
                     except Exception as exc:
                         question_trace["generation_error"] = (
                             f"{type(exc).__name__}: {' '.join(str(exc).split())}"
@@ -404,6 +531,13 @@ async def _materialize_one(
                         )
                 if not fact_admitted:
                     try:
+                        fact_repair_strategy = _fact_repair_strategy(
+                            fact_rejection
+                        )
+                        reconstruct_from_source = (
+                            fact_repair_strategy
+                            == "authoritative_answer_slot_reconstruction"
+                        )
                         repaired, response = await _generate_json(
                             model=model,
                             provider=provider,
@@ -440,12 +574,32 @@ async def _materialize_one(
                                 "relation once; do not loop over, duplicate, or append a "
                                 "second rendering of the same relation. Do not add "
                                 "entities, aliases, or Q-A labels. "
+                                + (
+                                    "Construct a new minimal fact only from the "
+                                    "authoritative original_question and "
+                                    "canonical_training_answer. Do not imitate or "
+                                    "continue the rejected fact. Replace the complete "
+                                    "interrogative answer slot with the canonical "
+                                    "answer semantics and convert the remaining source "
+                                    "relation into declarative order. "
+                                    if reconstruct_from_source
+                                    else
+                                    "Preserve correct material from the rejected fact "
+                                    "while repairing only its reported immutable-field "
+                                    "admission failure. "
+                                )
+                                +
                                 "Return only JSON."
                             ),
                             problem=_problem_payload(
                                 {
                                     **fact_source_payload,
-                                    "rejected_fact": fact or "",
+                                    **(
+                                        {}
+                                        if reconstruct_from_source
+                                        else {"rejected_fact": fact or ""}
+                                    ),
+                                    "fact_repair_strategy": fact_repair_strategy,
                                     "prior_admission_result": fact_rejection,
                                 }
                             ),
@@ -459,6 +613,7 @@ async def _materialize_one(
                         )
                         fact = _generated_text(repaired, "fact_statement")
                         fact_trace["generation_response"] = dict(response)
+                        fact_trace["repair_strategy"] = fact_repair_strategy
                     except Exception as exc:
                         fact_trace["generation_error"] = (
                             f"{type(exc).__name__}: {' '.join(str(exc).split())}"

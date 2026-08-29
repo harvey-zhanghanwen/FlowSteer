@@ -246,6 +246,8 @@ def test_targeted_repair_uses_triviaqa_immutable_and_answer_slot_payloads(
         if "repair-question" in request_id:
             return {
                 "paraphrase_question": "In 2012, which person wrote Atlas?",
+                "replaced_source_token": "authored",
+                "replacement_phrase": "wrote",
             }, {"request_id": request_id}
         if "repair-fact" in request_id:
             return {
@@ -293,6 +295,10 @@ def test_targeted_repair_uses_triviaqa_immutable_and_answer_slot_payloads(
         "ada",
         "lovelace",
     ]
+    assert question_payload["lexical_replacement_source_tokens"] == [
+        "authored"
+    ]
+    assert question_payload["required_source_token_to_replace"] == "authored"
     assert "canonical_training_answer" not in question_payload
 
     fact_repair = next(
@@ -305,6 +311,10 @@ def test_targeted_repair_uses_triviaqa_immutable_and_answer_slot_payloads(
         "Lovelace",
     ]
     assert fact_payload["allowed_fact_number_or_date_tokens"] == ["2012"]
+    assert fact_payload["fact_repair_strategy"] == (
+        "authoritative_answer_slot_reconstruction"
+    )
+    assert "rejected_fact" not in fact_payload
     assert "relation_direction_preserved" in fact_payload[
         "prior_admission_result"
     ]
@@ -324,6 +334,24 @@ def test_targeted_repair_uses_triviaqa_immutable_and_answer_slot_payloads(
     assert receipt["attempt_receipts"][0]["fact"]["failed_fields"] == [
         "relation_direction_preserved"
     ]
+    assert receipt["attempt_receipts"][1]["question"][
+        "required_source_token_to_replace"
+    ] == "authored"
+    assert receipt["attempt_receipts"][1]["fact"]["repair_strategy"] == (
+        "authoritative_answer_slot_reconstruction"
+    )
+
+
+def test_fact_repair_strategy_reconstructs_semantics_but_preserves_immutable_fix() -> None:
+    assert materializer._fact_repair_strategy(
+        "fact verifier rejected: fact_supported_by_qa,answer_slot_bound"
+    ) == "authoritative_answer_slot_reconstruction"
+    assert materializer._fact_repair_strategy(
+        "ValueError: fact_statement is identical to the canonical answer"
+    ) == "authoritative_answer_slot_reconstruction"
+    assert materializer._fact_repair_strategy(
+        "ValueError: fact_statement introduced a number or date"
+    ) == "preserve_and_repair_immutable_fields"
 
 
 def test_rejected_materialization_receipt_persists_candidate_and_failed_fields(
