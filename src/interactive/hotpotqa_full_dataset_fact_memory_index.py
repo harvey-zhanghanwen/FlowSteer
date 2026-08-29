@@ -103,6 +103,15 @@ _FACT_QA_WRAPPER = re.compile(
     r"(?:have|has|associated\s+with)\s+(?:the\s+)?answer)\b)",
     re.IGNORECASE,
 )
+# DIRECT_REUSE: ``prepare_agentgraph_datasets`` annotates this official
+# source anomaly by question/answer shape, never by task identity.  A binary
+# ``Are/Were A and B both P?`` record with a non-binary official answer is an
+# authoritative answer clause/prefix, not a yes/no answer-slot label.
+_HOTPOTQA_BINARY_BOTH_QUESTION = re.compile(
+    r"^(?:are|were)\s+.+\s+and\s+.+\s+both\s+.+?\?\s*$",
+    re.IGNORECASE,
+)
+_HOTPOTQA_BINARY_ANSWERS = frozenset({"yes", "no"})
 _FUNCTION_WORDS = frozenset(
     {
         "a", "an", "and", "are", "as", "at", "be", "been", "being",
@@ -260,6 +269,16 @@ def canonical_answer_is_declarative_clause(
 
     normalized = " ".join(_required_text(answer, "canonical_answer").split())
     answer_tokens = _lexical_tokens(normalized)
+    if question is not None:
+        normalized_question = " ".join(
+            _required_text(question, "question").split()
+        )
+        if (
+            _HOTPOTQA_BINARY_BOTH_QUESTION.fullmatch(normalized_question)
+            is not None
+            and normalized.casefold() not in _HOTPOTQA_BINARY_ANSWERS
+        ):
+            return True
     # NECESSARY_HOTPOT_ADAPTATION: unlike TriviaQA, some HotpotQA canonical
     # answers are complete punctuated sentences.  Terminal-period + finite
     # predicate is a fail-closed sentence signal that does not classify

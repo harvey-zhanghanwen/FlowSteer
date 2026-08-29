@@ -52,10 +52,10 @@ from src.interactive.hotpotqa_qa_memory_index import (  # noqa: E402
 )
 
 
-PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v6"
-PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v6"
+PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v7"
+PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v7"
 PARAPHRASE_PROVENANCE = (
-    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v6"
+    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v7"
 )
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
 
@@ -102,11 +102,25 @@ FACT_VERIFICATION_SCHEMA = _json_schema(
         "no_new_fact_or_relation": {"type": "boolean"},
     }
 )
+CLAUSE_FACT_VERIFICATION_SCHEMA = _json_schema(
+    {
+        "semantically_equivalent_to_answer_clause": {"type": "boolean"},
+        "fact_declarative": {"type": "boolean"},
+        "fact_self_contained": {"type": "boolean"},
+        "canonical_identities_preserved": {"type": "boolean"},
+        "canonical_numbers_preserved": {"type": "boolean"},
+        "no_qa_wire_format": {"type": "boolean"},
+        "no_new_fact": {"type": "boolean"},
+    }
+)
 _REQUIRED_QUESTION_VERIFICATION_FIELDS = tuple(
     QUESTION_VERIFICATION_SCHEMA["required"]
 )
 _REQUIRED_FACT_VERIFICATION_FIELDS = tuple(
     FACT_VERIFICATION_SCHEMA["required"]
+)
+_REQUIRED_CLAUSE_FACT_VERIFICATION_FIELDS = tuple(
+    CLAUSE_FACT_VERIFICATION_SCHEMA["required"]
 )
 _RELATION_REBUILD_REJECTION_MARKERS = (
     "fact_supported_by_qa",
@@ -129,6 +143,17 @@ _ANSWER_RECONSTRUCTION_PATTERNS = (
     "relative_clause_binding",
     "fronted_canonical_span",
     "clausal_statement_paraphrase",
+)
+_QUESTION_DIRECT_SYNONYM_REJECTION_MARKERS = (
+    "changed an immutable number or date",
+    "introduced the canonical answer",
+)
+_CLAUSE_SYNONYM_REJECTION_MARKERS = (
+    "is identical to the canonical answer",
+    "changed a number or date in the answer clause",
+    "removed a number or date from the answer",
+    "introduced a number or date",
+    "must be a complete declarative sentence",
 )
 
 
@@ -296,6 +321,53 @@ def _lexical_replacement_source_tokens(
     return tuple(dict.fromkeys(candidates))
 
 
+def _clause_replacement_source_tokens(
+    source: HotpotQATrainQASource,
+) -> tuple[str, ...]:
+    """Select one non-identity, non-number clause token for synonym repair."""
+
+    canonical = source.canonical_answer
+    content_tokens = set(_content_tokens(canonical))
+    immutable_identities = {
+        token.casefold().removesuffix("'s").removesuffix("’s")
+        for token in _immutable_identity_surfaces(canonical)
+    }
+    candidates: list[str] = []
+    for token in _lexical_tokens(canonical):
+        normalized = token.casefold()
+        identity_base = normalized.removesuffix("'s").removesuffix("’s")
+        if (
+            normalized in content_tokens
+            and identity_base not in immutable_identities
+            and not any(character.isdigit() for character in normalized)
+        ):
+            candidates.append(token)
+    return tuple(dict.fromkeys(candidates))
+
+
+def _question_requires_direct_synonym(prior_rejection: str) -> bool:
+    normalized = prior_rejection.casefold()
+    return any(
+        marker in normalized
+        for marker in _QUESTION_DIRECT_SYNONYM_REJECTION_MARKERS
+    )
+
+
+def _clause_requires_synonym_repair(prior_rejection: str) -> bool:
+    normalized = prior_rejection.casefold()
+    return any(
+        marker in normalized
+        for marker in _CLAUSE_SYNONYM_REJECTION_MARKERS
+    )
+
+
+def _complete_declarative_punctuation(text: str) -> str:
+    normalized = " ".join(text.split()).rstrip()
+    if not normalized.rstrip('"\'’”)]} ').endswith((".", "!")):
+        normalized += "."
+    return normalized
+
+
 def _parse_question_repair(
     generated: Mapping[str, object],
     *,
@@ -461,6 +533,7 @@ async def _materialize_one(
     fact_rejection = "not yet generated"
     question_repair_count = 0
     fact_reconstruction_count = 0
+    clause_repair_count = 0
     fact_candidate_count = 0
     fact_candidate_keys: set[str] = set()
     force_fact_reconstruction = False
@@ -578,7 +651,17 @@ async def _materialize_one(
                             question_repair_count % len(eligible_source_tokens)
                         ]
                         question_repair_count += 1
+                        direct_synonym_repair = (
+                            _question_requires_direct_synonym(
+                                question_rejection
+                            )
+                        )
                         try:
+                            if direct_synonym_repair:
+                                raise ValueError(
+                                    "whole-question repair skipped for deterministic "
+                                    "immutable-field rejection"
+                                )
                             repaired, response = await _generate_json(
                                 model=model,
                                 provider=provider,
@@ -626,6 +709,9 @@ async def _materialize_one(
                             )
                             question_trace["repair_mode"] = "structured_rewrite"
                         except Exception as structured_exc:
+                            question_trace["structured_repair_skipped"] = (
+                                direct_synonym_repair
+                            )
                             question_trace["structured_repair_error"] = (
                                 f"{type(structured_exc).__name__}: "
                                 f"{' '.join(str(structured_exc).split())}"
@@ -681,10 +767,20 @@ async def _materialize_one(
                         )
                 if not fact_admitted:
                     try:
+                        clause_synonym_repair = (
+                            binding_mode == "declarative_clause_paraphrase"
+                            and _clause_requires_synonym_repair(
+                                fact_rejection
+                            )
+                        )
                         fact_repair_strategy = (
-                            "authoritative_answer_slot_reconstruction"
-                            if force_fact_reconstruction
-                            else _fact_repair_strategy(fact_rejection)
+                            "clause_synonym_only"
+                            if clause_synonym_repair
+                            else (
+                                "authoritative_answer_slot_reconstruction"
+                                if force_fact_reconstruction
+                                else _fact_repair_strategy(fact_rejection)
+                            )
                         )
                         reconstruct_from_source = (
                             fact_repair_strategy
@@ -700,87 +796,134 @@ async def _materialize_one(
                                 % len(reconstruction_patterns)
                             ]
                             fact_reconstruction_count += 1
-                        repaired, response = await _generate_json(
-                            model=model,
-                            provider=provider,
-                            schema=FACT_REPAIR_SCHEMA,
-                            contract=(
-                                "Repair only one self-contained declarative fact. "
-                                + (
-                                    "The dataset answer is a complete declarative "
-                                    "clause. Semantically paraphrase that clause; if it "
-                                    "begins with an unbound pronoun, replace only that "
-                                    "pronoun with the explicit subject already named in "
-                                    "the source question. Use the question for no other "
-                                    "inference; "
-                                    "preserve all names, numbers, dates, quoted spans, "
-                                    "relations, and scope. "
-                                    if binding_mode
-                                    == "declarative_clause_paraphrase"
-                                    else
-                                    "Bind the dataset answer semantics to the "
-                                    "question's original answer slot. Preserve proper "
-                                    "names, numbers, dates, and quoted titles; ordinary "
-                                    "phrases may use equivalent wording. Express yes/no "
-                                    "as the matching affirmative/negative proposition. "
-                                    "Copy the authoritative relation and scope; do not "
-                                    "reverse arguments or add a fact. "
+                        if clause_synonym_repair:
+                            clause_source_tokens = (
+                                _clause_replacement_source_tokens(source)
+                            )
+                            if not clause_source_tokens:
+                                raise ValueError(
+                                    "clause repair has no eligible synonym token"
                                 )
-                                + "Every pronoun or demonstrative must have an explicit "
-                                "antecedent inside the same fact. State the fact itself; "
-                                "do not describe an answer, question, query, or inquiry. "
-                                "Copy supplied immutable answer fields exactly. Bind "
-                                "the canonical answer only to the original answer slot; "
-                                "retain the source predicate, argument direction, "
-                                "polarity, scope, and constraints. Express one supported "
-                                "relation once; do not loop over, duplicate, or append a "
-                                "second rendering of the same relation. Do not add "
-                                "entities, aliases, or Q-A labels. "
-                                + (
-                                    "Construct a new minimal fact only from the "
-                                    "authoritative original_question and "
-                                    "canonical_training_answer. Do not imitate or "
-                                    "continue the rejected fact. Replace the complete "
-                                    "interrogative answer slot with the canonical "
-                                    "answer semantics and convert the remaining source "
-                                    "relation into declarative order. "
-                                    + _answer_reconstruction_instruction(
-                                        reconstruction_pattern
+                            required_clause_token = clause_source_tokens[
+                                clause_repair_count % len(clause_source_tokens)
+                            ]
+                            clause_repair_count += 1
+                            synonym, response = await _generate_json(
+                                model=model,
+                                provider=provider,
+                                schema=SYNONYM_REPAIR_SCHEMA,
+                                contract=(
+                                    "Produce only one context-appropriate synonym or "
+                                    "equivalent phrase for required_source_token in the "
+                                    "authoritative canonical answer clause. Preserve "
+                                    "part of speech and semantics. Do not rewrite the "
+                                    "clause, alter an entity or number/date, add a fact, "
+                                    "or return the same token. Return only JSON."
+                                ),
+                                problem=_problem_payload(
+                                    {
+                                        **fact_source_payload,
+                                        "required_source_token": (
+                                            required_clause_token
+                                        ),
+                                        "eligible_clause_source_tokens": list(
+                                            clause_source_tokens
+                                        ),
+                                        "prior_admission_result": fact_rejection,
+                                    }
+                                ),
+                                request_id=(
+                                    f"hotpotqa-full-dataset-fact:{index:06d}:"
+                                    f"round:{generation_round:02d}:"
+                                    f"repair-fact-clause-synonym:{attempt:02d}"
+                                ),
+                                seed=request_seed + 1,
+                                temperature=0.0,
+                            )
+                            replacement = _parse_synonym_repair(
+                                synonym,
+                                required_source_token=required_clause_token,
+                            )
+                            fact = _replace_source_token_once(
+                                source.canonical_answer,
+                                source_token=required_clause_token,
+                                replacement_phrase=replacement,
+                            )
+                            fact = _complete_declarative_punctuation(fact)
+                            fact_repair_temperature = 0.0
+                            fact_trace["required_clause_source_token"] = (
+                                required_clause_token
+                            )
+                        else:
+                            fact_repair_temperature = (
+                                0.0
+                                if binding_mode
+                                == "declarative_clause_paraphrase"
+                                else 0.1
+                            )
+                            repaired, response = await _generate_json(
+                                model=model,
+                                provider=provider,
+                                schema=FACT_REPAIR_SCHEMA,
+                                contract=(
+                                    "Repair only one self-contained declarative fact. "
+                                    + (
+                                        "The dataset answer is a complete declarative "
+                                        "clause. Semantically paraphrase that clause; "
+                                        "resolve only a leading pronoun to the explicit "
+                                        "source subject and add no other relation. "
+                                        if binding_mode
+                                        == "declarative_clause_paraphrase"
+                                        else
+                                        "Bind the dataset answer semantics to the "
+                                        "question's original answer slot. Preserve "
+                                        "proper names, numbers, dates, quoted titles, "
+                                        "relation direction, polarity, and scope. "
                                     )
-                                    + " "
-                                    if reconstruct_from_source
-                                    else
-                                    "Preserve correct material from the rejected fact "
-                                    "while repairing only its reported immutable-field "
-                                    "admission failure. "
-                                )
-                                +
-                                "Return only JSON."
-                            ),
-                            problem=_problem_payload(
-                                {
-                                    **fact_source_payload,
-                                    **(
-                                        {}
+                                    + "Every pronoun or demonstrative must have an "
+                                    "explicit antecedent. State one supported fact, "
+                                    "not a Q-A label or repeated relation. "
+                                    + (
+                                        "Construct it only from original_question and "
+                                        "canonical_training_answer. Do not imitate the "
+                                        "rejected fact. "
+                                        + _answer_reconstruction_instruction(
+                                            reconstruction_pattern
+                                        )
+                                        + " "
                                         if reconstruct_from_source
-                                        else {"rejected_fact": fact or ""}
-                                    ),
-                                    "fact_repair_strategy": fact_repair_strategy,
-                                    "answer_reconstruction_pattern": (
-                                        reconstruction_pattern
-                                    ),
-                                    "prior_admission_result": fact_rejection,
-                                }
-                            ),
-                            request_id=(
-                                f"hotpotqa-full-dataset-fact:{index:06d}:"
-                                f"round:{generation_round:02d}:"
-                                f"repair-fact:{attempt:02d}"
-                            ),
-                            seed=request_seed + 1,
-                            temperature=0.0,
-                        )
-                        fact = _generated_text(repaired, "fact_statement")
+                                        else
+                                        "Preserve correct material while repairing only "
+                                        "the reported immutable-field failure. "
+                                    )
+                                    + "Return only JSON."
+                                ),
+                                problem=_problem_payload(
+                                    {
+                                        **fact_source_payload,
+                                        **(
+                                            {}
+                                            if reconstruct_from_source
+                                            else {"rejected_fact": fact or ""}
+                                        ),
+                                        "fact_repair_strategy": (
+                                            fact_repair_strategy
+                                        ),
+                                        "answer_reconstruction_pattern": (
+                                            reconstruction_pattern
+                                        ),
+                                        "prior_admission_result": fact_rejection,
+                                    }
+                                ),
+                                request_id=(
+                                    f"hotpotqa-full-dataset-fact:{index:06d}:"
+                                    f"round:{generation_round:02d}:"
+                                    f"repair-fact:{attempt:02d}"
+                                ),
+                                seed=request_seed + 1,
+                                temperature=fact_repair_temperature,
+                            )
+                            fact = _generated_text(repaired, "fact_statement")
                         fact_candidate_key = fact.casefold()
                         fact_candidate_repeated = (
                             fact_candidate_key in fact_candidate_keys
@@ -794,6 +937,9 @@ async def _materialize_one(
                         fact_trace["candidate_number"] = fact_candidate_count
                         fact_trace["generation_response"] = dict(response)
                         fact_trace["repair_strategy"] = fact_repair_strategy
+                        fact_trace["repair_temperature"] = (
+                            fact_repair_temperature
+                        )
                         fact_trace["answer_reconstruction_pattern"] = (
                             reconstruction_pattern
                         )
@@ -869,39 +1015,48 @@ async def _materialize_one(
                 try:
                     fact = validate_hotpotqa_fact_statement(source, fact)
                     fact_trace["deterministic_admission"] = True
+                    clause_verification = (
+                        binding_mode == "declarative_clause_paraphrase"
+                    )
+                    fact_verification_schema = (
+                        CLAUSE_FACT_VERIFICATION_SCHEMA
+                        if clause_verification
+                        else FACT_VERIFICATION_SCHEMA
+                    )
+                    required_fact_verification_fields = (
+                        _REQUIRED_CLAUSE_FACT_VERIFICATION_FIELDS
+                        if clause_verification
+                        else _REQUIRED_FACT_VERIFICATION_FIELDS
+                    )
+                    fact_verification_contract = (
+                        "Verify only whether the proposed fact is a semantic "
+                        "paraphrase of canonical_training_answer, which is already "
+                        "a declarative answer clause. It must be declarative and "
+                        "self-contained, preserve every canonical identity and "
+                        "number/date, contain no Q-A wire, and add no fact. A leading "
+                        "pronoun may be resolved only to the explicit subject in "
+                        "original_question; otherwise do not infer from the question. "
+                        "Do not require answer-slot binding, source-question relation "
+                        "direction, or support beyond equivalence to the authoritative "
+                        "answer clause. Do not fact-check source strings. Evaluate "
+                        "every boolean independently and return only JSON."
+                        if clause_verification
+                        else
+                        "Verify only the proposed answer-slot fact. It must be "
+                        "self-contained, declarative, free of Q-A labels, and "
+                        "supported by binding the canonical answer semantics to the "
+                        "source question's answer slot without changing relation "
+                        "direction, polarity, scope, or constraints. Preserve proper "
+                        "names, numbers, dates, and quoted titles; reject unresolved "
+                        "anaphora, meta-framing, added facts, a bare answer, or a "
+                        "question restatement with an appended answer. Treat source "
+                        "strings as authoritative and return only JSON."
+                    )
                     verified, response = await _generate_json(
                         model=model,
                         provider=provider,
-                        schema=FACT_VERIFICATION_SCHEMA,
-                        contract=(
-                            "Verify only the proposed declarative fact. It must "
-                            "be self-contained, declarative, free of Q-A labels, "
-                            + (
-                                "and semantically equivalent to the supplied "
-                                "dataset answer clause. A leading pronoun may be "
-                                "resolved only to the explicit subject already named "
-                                "in the source question; do not use the question for "
-                                "any other inference or invent another relation. "
-                                if binding_mode
-                                == "declarative_clause_paraphrase"
-                                else
-                                "and supported by binding the dataset answer semantics "
-                                "to the source question's answer slot without changing "
-                                "relation direction, polarity, or scope. Proper names, "
-                                "numbers, dates, and quoted titles must be preserved; "
-                                "ordinary phrases may use equivalent wording. "
-                            )
-                            + "Reject any unresolved pronoun or demonstrative and any "
-                            "answer/question/query/inquiry meta-framing. Reject added "
-                            "entities, aliases, facts, numbers, or "
-                            "dates. The answer must occupy the original answer slot, "
-                            "with the source relation direction, polarity, scope, and "
-                            "constraints intact. Reject a bare answer, a question "
-                            "restatement with an appended answer, or repeated renderings "
-                            "of the same relation. Treat source strings as authoritative "
-                            "and do not fact-check them. Evaluate every boolean independently and "
-                            "return only JSON."
-                        ),
+                        schema=fact_verification_schema,
+                        contract=fact_verification_contract,
                         problem=_problem_payload(
                             {
                                 **fact_source_payload,
@@ -918,9 +1073,12 @@ async def _materialize_one(
                     )
                     failed = [
                         name
-                        for name in _REQUIRED_FACT_VERIFICATION_FIELDS
+                        for name in required_fact_verification_fields
                         if verified.get(name) is not True
                     ]
+                    fact_trace["verification_mode"] = (
+                        "answer_clause" if clause_verification else "answer_slot"
+                    )
                     fact_trace["verification"] = dict(verified)
                     fact_trace["verification_response"] = dict(response)
                     fact_trace["failed_fields"] = failed

@@ -47,6 +47,15 @@ def _fact_verification(**overrides: bool) -> dict[str, bool]:
     return value
 
 
+def _clause_fact_verification(**overrides: bool) -> dict[str, bool]:
+    value = {
+        name: True
+        for name in materializer._REQUIRED_CLAUSE_FACT_VERIFICATION_FIELDS
+    }
+    value.update(overrides)
+    return value
+
+
 def _sidecar(
     source: HotpotQATrainQASource,
     *,
@@ -192,7 +201,12 @@ def test_clausal_answer_and_short_span_use_distinct_binding_modes(
         if "verify-question" in request_id:
             return _question_verification(), {"request_id": request_id}
         if "verify-fact" in request_id:
-            return _fact_verification(), {"request_id": request_id}
+            verification = (
+                _clause_fact_verification()
+                if expected_mode == "declarative_clause_paraphrase"
+                else _fact_verification()
+            )
+            return verification, {"request_id": request_id}
         raise AssertionError(f"unexpected request: {request_id}")
 
     monkeypatch.setattr(materializer, "_generate_json", fake_generate_json)
@@ -219,6 +233,12 @@ def test_clausal_answer_and_short_span_use_distinct_binding_modes(
     assert fact_problem["declarative_fact"] == fact
     if expected_mode == "declarative_clause_paraphrase":
         assert fact_problem["original_question"] == source.question
+        assert set(fact_verification["schema"]["required"]) == set(
+            materializer._REQUIRED_CLAUSE_FACT_VERIFICATION_FIELDS
+        )
+        assert "answer_slot_bound" not in fact_verification["schema"][
+            "required"
+        ]
     else:
         assert source.canonical_answer in fact
 
@@ -240,7 +260,7 @@ def test_targeted_repair_uses_triviaqa_immutable_and_answer_slot_payloads(
         request_id = str(kwargs["request_id"])
         if ":generate:" in request_id:
             return {
-                "paraphrase_question": "In 2013, which person wrote Atlas?",
+                "paraphrase_question": "Who in 2012 authored Atlas?",
                 "fact_statement": "Ada Lovelace authored Atlas.",
             }, {"request_id": request_id}
         if "repair-question" in request_id:
@@ -340,6 +360,8 @@ def test_targeted_repair_uses_triviaqa_immutable_and_answer_slot_payloads(
     assert receipt["attempt_receipts"][1]["fact"]["repair_strategy"] == (
         "authoritative_answer_slot_reconstruction"
     )
+    assert receipt["attempt_receipts"][1]["fact"]["repair_temperature"] == 0.1
+    assert fact_repair["temperature"] == 0.1
 
 
 def test_fact_repair_strategy_reconstructs_semantics_but_preserves_immutable_fix() -> None:
@@ -412,6 +434,7 @@ def test_question_synonym_only_repair_rewrites_authoritative_source(
     assert "rejected_question" not in synonym_payload
     second_attempt = receipt["attempt_receipts"][1]["question"]
     assert second_attempt["repair_mode"] == "synonym_only"
+    assert second_attempt["structured_repair_skipped"] is True
     assert "structured_repair_error" in second_attempt
     assert second_attempt["failed_fields"] == []
 
@@ -471,6 +494,7 @@ def test_repeated_fact_forces_rotating_source_reconstruction(
     repair_payloads = [
         json.loads(str(call["problem"])) for call in repair_calls
     ]
+    assert all(call["temperature"] == 0.1 for call in repair_calls)
     assert [
         payload["answer_reconstruction_pattern"]
         for payload in repair_payloads
@@ -490,6 +514,69 @@ def test_repeated_fact_forces_rotating_source_reconstruction(
         True,
         False,
     ]
+
+
+def test_clause_identical_tail_uses_synonym_repair_and_clause_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(
+        6,
+        question="What occurred to Atlas in 2012?",
+        answer="Atlas was released in 2012.",
+    )
+    calls: list[Mapping[str, object]] = []
+
+    async def fake_generate_json(**kwargs: object):
+        calls.append(dict(kwargs))
+        request_id = str(kwargs["request_id"])
+        if ":generate:" in request_id:
+            return {
+                "paraphrase_question": "What happened to Atlas during 2012?",
+                "fact_statement": "Atlas was released in 2012.",
+            }, {"request_id": request_id}
+        if "repair-fact-clause-synonym" in request_id:
+            return {
+                "source_token": "released",
+                "replacement_phrase": "issued",
+            }, {"request_id": request_id}
+        if "verify-question" in request_id:
+            return _question_verification(), {"request_id": request_id}
+        if "verify-fact" in request_id:
+            return _clause_fact_verification(), {"request_id": request_id}
+        raise AssertionError(f"unexpected request: {request_id}")
+
+    monkeypatch.setattr(materializer, "_generate_json", fake_generate_json)
+    candidate, receipt = asyncio.run(
+        materializer._materialize_one(
+            source,
+            index=0,
+            model=object(),
+            provider=object(),
+            seed=41,
+            max_attempts=2,
+            generation_rounds=1,
+        )
+    )
+
+    assert candidate["fact_statement"] == "Atlas was issued in 2012."
+    clause_repair = next(
+        call
+        for call in calls
+        if "repair-fact-clause-synonym" in str(call["request_id"])
+    )
+    clause_payload = json.loads(str(clause_repair["problem"]))
+    assert clause_payload["required_source_token"] == "released"
+    assert clause_repair["temperature"] == 0.0
+    verifier_call = next(
+        call for call in calls if "verify-fact" in str(call["request_id"])
+    )
+    assert set(verifier_call["schema"]["required"]) == set(
+        materializer._REQUIRED_CLAUSE_FACT_VERIFICATION_FIELDS
+    )
+    second_fact = receipt["attempt_receipts"][1]["fact"]
+    assert second_fact["repair_strategy"] == "clause_synonym_only"
+    assert second_fact["verification_mode"] == "answer_clause"
+    assert second_fact["repair_temperature"] == 0.0
 
 
 def test_rejected_materialization_receipt_persists_candidate_and_failed_fields(

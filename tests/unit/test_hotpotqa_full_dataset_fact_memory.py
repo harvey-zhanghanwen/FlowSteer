@@ -503,6 +503,22 @@ def test_complete_sentence_answer_and_repeated_numeric_reference() -> None:
     assert materialize_hotpotqa_declarative_facts((world_war,), (value,))
 
 
+def test_binary_both_nonbinary_official_answer_uses_clause_binding() -> None:
+    question = "Were Alpha and Beta both founded in California?"
+    assert fact_index.canonical_answer_is_declarative_clause(
+        "Alpha was founded in California, while Beta was founded in Nevada.",
+        question=question,
+    )
+    assert not fact_index.canonical_answer_is_declarative_clause(
+        "yes",
+        question=question,
+    )
+    assert not fact_index.canonical_answer_is_declarative_clause(
+        "California",
+        question="Where were Alpha and Beta founded?",
+    )
+
+
 def test_materializer_has_no_fallback_option() -> None:
     parser = materializer._parser()
     option_strings = {
