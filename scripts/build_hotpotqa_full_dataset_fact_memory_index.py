@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the all-native HotpotQA Q-A memory embedding index."""
+"""Build the all-native HotpotQA declarative-fact embedding index."""
 
 from __future__ import annotations
 
@@ -15,12 +15,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.interactive.config_loader import load_yaml  # noqa: E402
-from src.interactive.hotpotqa_full_dataset_qa_memory_index import (  # noqa: E402
+from src.interactive.hotpotqa_full_dataset_fact_memory_index import (  # noqa: E402
     FULL_DATASET_EVALUATION_SCOPE,
-    build_hotpotqa_full_dataset_qa_memory_index,
-)
-from src.interactive.hotpotqa_qa_memory_index import (  # noqa: E402
-    load_paraphrase_materialization,
+    build_hotpotqa_full_dataset_fact_memory_index,
 )
 
 
@@ -54,24 +51,46 @@ def _task_ids(path: Path) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _fact_sidecar(path: Path) -> tuple[Mapping[str, object], ...]:
+    values: list[Mapping[str, object]] = []
+    with path.expanduser().resolve().open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{path}:{line_number}: invalid JSON") from exc
+            if not isinstance(value, Mapping):
+                raise ValueError(f"{path}:{line_number}: expected an object")
+            values.append(value)
+    return tuple(values)
+
+
 def build_from_config(config_path: Path) -> Mapping[str, object]:
     config_path = config_path.expanduser().resolve()
     root = config_path.parent.parent
     config = load_yaml(config_path)
     retrieval = _mapping(config.get("qa_embedding_retrieval"), "qa_embedding_retrieval")
-    if retrieval.get("corpus_kind") != "full_dataset_qa_memory":
-        raise ValueError("config does not select full_dataset_qa_memory")
-    if retrieval.get("contains_evaluation_answers") is not True:
-        raise ValueError("full-dataset config must declare evaluation answers")
+    if retrieval.get("corpus_kind") != "full_dataset_fact_memory":
+        raise ValueError("config does not select full_dataset_fact_memory")
+    if retrieval.get("contains_evaluation_source_facts") is not True:
+        raise ValueError("full-dataset config must declare evaluation source facts")
+    if retrieval.get("contains_raw_questions") is not False:
+        raise ValueError("fact index must exclude raw questions")
+    if retrieval.get("contains_raw_answers") is not False:
+        raise ValueError("fact index must exclude raw answers")
+    if retrieval.get("indexed_text_field") != "fact_text":
+        raise ValueError("fact index must vectorize only fact_text")
     if retrieval.get("evaluation_scope") != FULL_DATASET_EVALUATION_SCOPE:
         raise ValueError("full-dataset evaluation scope differs")
     if retrieval.get("official_heldout_eligible") is not False:
         raise ValueError("full-dataset retrieval cannot be held-out eligible")
 
-    paraphrases = load_paraphrase_materialization(
+    paraphrases = _fact_sidecar(
         _resolve(root, retrieval["paraphrase_materialization_path"])
     )
-    manifest = build_hotpotqa_full_dataset_qa_memory_index(
+    manifest = build_hotpotqa_full_dataset_fact_memory_index(
         index_dir=_resolve(root, retrieval["index_dir"]),
         dataset_catalog_path=_resolve(root, retrieval["dataset_catalog"]),
         frozen_evaluation_task_ids=_task_ids(
@@ -96,7 +115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         value = build_from_config(Path(args.config))
     except Exception as exc:
         print(
-            f"HotpotQA full-dataset QA-memory index build failed: {exc}",
+            f"HotpotQA full-dataset fact-memory index build failed: {exc}",
             file=sys.stderr,
         )
         return 1

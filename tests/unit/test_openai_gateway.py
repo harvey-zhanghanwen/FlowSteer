@@ -105,6 +105,47 @@ class MessageTests(unittest.TestCase):
         self.assertIn("answer directly from the public task", system)
         self.assertIn("never copy the unrelated record", system)
 
+    def test_output_treats_fact_memory_as_evidence_without_qa_wire(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "agent",
+            AgentNode("agent", "model", "answer", execution_mode="reasoning"),
+        )
+        object.__setattr__(item, "is_output_agent", True)
+        object.__setattr__(
+            item,
+            "upstream",
+            (
+                UpstreamMessage(
+                    "worker",
+                    "agent",
+                    "retrieval_sufficiency=supported",
+                    tool_receipts=(
+                        {
+                            "tool_id": "hotpotqa.fact_memory",
+                            "request": {"action": "read"},
+                            "result": {
+                                "fact": {
+                                    "memory_id": "m1",
+                                    "fact_text": "Ada authored the work.",
+                                }
+                            },
+                            "error_type": None,
+                        },
+                    ),
+                ),
+            ),
+        )
+
+        system = build_agent_messages(item)[0]["content"]
+
+        self.assertIn("retrieved evidence", system)
+        self.assertIn("entity binding", system)
+        self.assertIn("answer slot", system)
+        self.assertNotIn("paired QA records", system)
+        self.assertNotIn("canonical answer", system)
+
 
 class GatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_and_response_mapping(self) -> None:

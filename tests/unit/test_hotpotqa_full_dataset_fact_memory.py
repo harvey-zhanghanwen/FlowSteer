@@ -1,0 +1,384 @@
+from __future__ import annotations
+
+import asyncio
+from argparse import Namespace
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from scripts import materialize_hotpotqa_full_dataset_fact_memory as materializer
+from src.interactive import hotpotqa_full_dataset_fact_memory_index as fact_index
+from src.interactive.hotpotqa_full_dataset_fact_memory_index import (
+    FULL_DATASET_EVALUATION_SCOPE,
+    FULL_DATASET_FACT_DOCUMENT_FORMAT,
+    FULL_DATASET_FACT_DOCUMENT_TEMPLATE,
+    FULL_DATASET_FACT_INDEXED_TEXT_FIELD,
+    FULL_DATASET_FACT_MEMORY_CORPUS_VERSION,
+    FULL_DATASET_FACT_MEMORY_SCHEMA_VERSION,
+    HotpotQADeclarativeFact,
+    HotpotQAFullDatasetFactMemoryIndex,
+    HotpotQAFullDatasetFactMemoryIndexManifest,
+    HotpotQAFullDatasetQASources,
+    build_hotpotqa_full_dataset_fact_memory_index,
+    load_hotpotqa_full_dataset_qa_sources,
+    materialize_hotpotqa_declarative_facts,
+)
+from src.interactive.hotpotqa_qa_memory_index import HotpotQATrainQASource
+
+
+def _source(index: int, *, answer: str | None = None) -> HotpotQATrainQASource:
+    return HotpotQATrainQASource(
+        source_train_task_id=f"hotpotqa:source-{index}",
+        base_task_id=f"hotpotqa:source-{index}",
+        cycled=False,
+        question=f"Who was person {index}?",
+        canonical_answer=answer or f"Person {index}",
+    )
+
+
+def _materialization(
+    source: HotpotQATrainQASource,
+    *,
+    fact: str | None = None,
+) -> dict[str, object]:
+    return {
+        "source_train_task_id": source.source_train_task_id,
+        "paraphrase_question": f"Which individual was designated {source.base_task_id}?",
+        "fact_statement": fact or f"The designated individual was {source.canonical_answer}.",
+        "paraphrase_provenance": materializer.PARAPHRASE_PROVENANCE,
+        "paraphrase_version": materializer.PARAPHRASE_VERSION,
+        "semantic_preservation_attested": True,
+    }
+
+
+def _record(
+    task_id: str,
+    *,
+    split: str,
+    question: str,
+    answer: str,
+) -> dict[str, object]:
+    return {
+        "task_id": task_id,
+        "split": split,
+        "question": (
+            "Based on the following passages, answer the question.\n\n"
+            "[[private context that must not survive]]\n\n"
+            f"Question: {question}"
+        ),
+        "ground_truth": answer,
+        "metadata": {"evaluator_payload": {"supporting_facts": "private"}},
+    }
+
+
+def _catalog(path: Path) -> None:
+    path.write_text(
+        """
+sources:
+  hotpotqa:
+    path: /unused
+    files:
+      train: train-*.parquet
+      validation: validation-*.parquet
+    candidate_sequence: [train, validation]
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+
+def test_loader_keeps_raw_qa_only_in_index_external_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = tmp_path / "datasets.yaml"
+    _catalog(catalog)
+    records = (
+        _record(
+            "hotpotqa:train-1",
+            split="train",
+            question="Who wrote it?",
+            answer="Ada",
+        ),
+        _record(
+            "hotpotqa:validation-1",
+            split="validation",
+            question="Where was it built?",
+            answer="Rome",
+        ),
+    )
+    monkeypatch.setattr(fact_index, "_hotpot_records", lambda _config: iter(records))
+
+    sources = load_hotpotqa_full_dataset_qa_sources(
+        dataset_catalog_path=catalog,
+        expected_train_count=1,
+        expected_validation_count=1,
+    )
+
+    assert sources.train[0].question == "Who wrote it?"
+    assert sources.validation[0].canonical_answer == "Rome"
+    assert "private context" not in repr(sources.combined).casefold()
+    assert "supporting" not in repr(sources.combined).casefold()
+
+
+def test_loader_rejects_native_split_overlap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = tmp_path / "datasets.yaml"
+    _catalog(catalog)
+    records = (
+        _record("hotpotqa:same", split="train", question="Who?", answer="Ada"),
+        _record(
+            "hotpotqa:same", split="validation", question="Where?", answer="Rome"
+        ),
+    )
+    monkeypatch.setattr(fact_index, "_hotpot_records", lambda _config: iter(records))
+    with pytest.raises(ValueError, match="overlap"):
+        load_hotpotqa_full_dataset_qa_sources(
+            dataset_catalog_path=catalog,
+            expected_train_count=1,
+            expected_validation_count=1,
+        )
+
+
+def test_materialization_projects_only_declarative_fact() -> None:
+    source = _source(0, answer="Ada Lovelace")
+    fact = materialize_hotpotqa_declarative_facts(
+        (source,),
+        (_materialization(source, fact="Ada Lovelace authored the work."),),
+    )[0]
+
+    assert fact.to_value() == {
+        "memory_id": "hotpotqa-fact-000000",
+        "fact_text": "Ada Lovelace authored the work.",
+    }
+    serialized = json.dumps(fact.to_value())
+    for forbidden in (
+        "question",
+        "answer",
+        "canonical",
+        "ground_truth",
+        "paraphrase",
+        "source_train_task_id",
+    ):
+        assert forbidden not in serialized.casefold()
+
+
+def test_materialization_rejects_verbatim_question_and_qa_wire() -> None:
+    source = _source(0)
+    verbatim = _materialization(source)
+    verbatim["paraphrase_question"] = source.question
+    with pytest.raises(ValueError, match="identical"):
+        materialize_hotpotqa_declarative_facts((source,), (verbatim,))
+
+    qa_wire = _materialization(source, fact="Question: Who?\nAnswer: Person 0")
+    with pytest.raises(ValueError, match="Question/Answer"):
+        materialize_hotpotqa_declarative_facts((source,), (qa_wire,))
+
+
+def test_materializer_has_no_fallback_option() -> None:
+    parser = materializer._parser()
+    option_strings = {
+        option
+        for action in parser._actions
+        for option in action.option_strings
+    }
+    assert "--allow-dataset-pair-fallback" not in option_strings
+    assert "--materialize-pending-as-dataset-pair-fallback" not in option_strings
+    assert "--bootstrap-materialization" not in option_strings
+
+
+def test_materializer_continues_then_resume_retries_only_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = tuple(_source(index) for index in range(4))
+    monkeypatch.setattr(
+        materializer,
+        "load_hotpotqa_full_dataset_qa_sources",
+        lambda **_kwargs: HotpotQAFullDatasetQASources(sources, ()),
+    )
+
+    class Registry:
+        def require_model(self, _model_id: str) -> object:
+            return type("Model", (), {"model_id": "qwen3.5-9b-local"})()
+
+        def provider_for(self, _model_id: str) -> object:
+            return object()
+
+    monkeypatch.setattr(materializer, "load_model_registry", lambda _path: Registry())
+    called: list[str] = []
+
+    async def fail_first(
+        source: HotpotQATrainQASource, **_kwargs: object
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        called.append(source.source_train_task_id)
+        if source.source_train_task_id == sources[0].source_train_task_id:
+            raise RuntimeError("bounded verifier rejection")
+        return _materialization(source), {
+            "source_train_task_id": source.source_train_task_id,
+            "status": "accepted",
+        }
+
+    monkeypatch.setattr(materializer, "_materialize_one", fail_first)
+    output = tmp_path / "sidecar.jsonl"
+    receipts = tmp_path / "receipts.jsonl"
+    args = Namespace(
+        dataset_catalog=str(tmp_path / "unused.yaml"),
+        train_count=4,
+        validation_count=1,
+        limit=None,
+        output=str(output),
+        receipts=str(receipts),
+        manifest=str(tmp_path / "manifest.json"),
+        model_catalog=str(tmp_path / "unused-models.yaml"),
+        model_id="qwen3.5-9b-local",
+        concurrency=1,
+        checkpoint_every=1,
+        seed=7,
+        max_attempts=1,
+    )
+    with pytest.raises(RuntimeError, match=r"1 fact materializations failed.*\(3/4\)"):
+        asyncio.run(materializer.materialize(args))
+    assert called == [source.source_train_task_id for source in sources]
+    assert not Path(args.manifest).exists()
+
+    called.clear()
+
+    async def succeed(
+        source: HotpotQATrainQASource, **_kwargs: object
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        called.append(source.source_train_task_id)
+        return _materialization(source), {
+            "source_train_task_id": source.source_train_task_id,
+            "status": "accepted",
+        }
+
+    monkeypatch.setattr(materializer, "_materialize_one", succeed)
+    manifest = asyncio.run(materializer.materialize(args))
+    assert called == [sources[0].source_train_task_id]
+    assert manifest["accepted_count"] == 4
+    assert manifest["semantic_rewrite_coverage"] == 1.0
+    assert manifest["fallback_count"] == 0
+    assert manifest["rejected_count"] == 0
+
+
+def _manifest() -> HotpotQAFullDatasetFactMemoryIndexManifest:
+    return HotpotQAFullDatasetFactMemoryIndexManifest(
+        schema_version=FULL_DATASET_FACT_MEMORY_SCHEMA_VERSION,
+        index_id="hotpotqa-fact-test",
+        corpus_version=FULL_DATASET_FACT_MEMORY_CORPUS_VERSION,
+        source="HotpotQA facts",
+        source_splits=("train", "validation"),
+        embedding_model="local-bge",
+        embedding_model_path="/models/bge",
+        embedding_dimension=2,
+        normalized=True,
+        similarity="cosine",
+        frozen_top_k=1,
+        source_record_count=2,
+        source_train_count=1,
+        source_validation_count=1,
+        unique_source_count=2,
+        cycled_record_count=0,
+        question_rewrite_count=2,
+        fact_count=2,
+        semantic_rewrite_coverage=1.0,
+        frozen_evaluation_count=1,
+        evaluation_overlap_count=1,
+        contains_evaluation_source_facts=True,
+        contains_raw_questions=False,
+        contains_raw_answers=False,
+        evaluation_scope=FULL_DATASET_EVALUATION_SCOPE,
+        official_heldout_eligible=False,
+        paraphrase_versions=("test-v1",),
+        paraphrase_provenances=("unit-test",),
+        document_template=FULL_DATASET_FACT_DOCUMENT_TEMPLATE,
+        document_format=FULL_DATASET_FACT_DOCUMENT_FORMAT,
+        indexed_text_field=FULL_DATASET_FACT_INDEXED_TEXT_FIELD,
+        source_dataset_catalog_path="/datasets/catalog.yaml",
+        source_train_path="/datasets/train.parquet",
+        source_validation_path="/datasets/validation.parquet",
+        facts_path="facts.jsonl",
+        embeddings_path="embeddings.npy",
+    )
+
+
+def test_index_search_and_read_expose_only_fact_wire() -> None:
+    class Model:
+        def encode(self, texts: list[str], **_kwargs: object) -> np.ndarray:
+            assert texts
+            return np.asarray([[1.0, 0.0] for _item in texts], dtype=np.float32)
+
+    facts = (
+        HotpotQADeclarativeFact("hotpotqa-fact-000000", "Ada authored the work."),
+        HotpotQADeclarativeFact("hotpotqa-fact-000001", "Rome is in Italy."),
+    )
+    index = HotpotQAFullDatasetFactMemoryIndex(
+        manifest=_manifest(),
+        facts=facts,
+        embeddings=np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+        model=Model(),
+    )
+    hit = asyncio.run(index.search("Who authored the work?", 1))[0]
+    assert set(hit.__dataclass_fields__) == {
+        "memory_id",
+        "fact_snippet",
+        "similarity",
+        "rank",
+    }
+    assert index.read(hit.memory_id).to_value() == {
+        "memory_id": "hotpotqa-fact-000000",
+        "fact_text": "Ada authored the work.",
+    }
+
+
+def test_builder_vectorizes_only_fact_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    train = _source(0, answer="Ada")
+    validation = _source(1, answer="Rome")
+    sources = HotpotQAFullDatasetQASources((train,), (validation,))
+    monkeypatch.setattr(
+        fact_index,
+        "load_hotpotqa_full_dataset_qa_sources",
+        lambda **_kwargs: sources,
+    )
+    monkeypatch.setattr(
+        fact_index,
+        "_native_source_paths",
+        lambda _path: ("/raw/train.parquet", "/raw/validation.parquet"),
+    )
+    monkeypatch.setattr(fact_index, "_load_sentence_transformer", lambda *_args: object())
+    captured: list[str] = []
+
+    def capture_encode(_model: object, texts: list[str], **_kwargs: object) -> np.ndarray:
+        captured.extend(texts)
+        return np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+
+    monkeypatch.setattr(fact_index, "_encode", capture_encode)
+    paraphrases = (
+        _materialization(train, fact="Ada authored the work."),
+        _materialization(validation, fact="Rome is the relevant location."),
+    )
+    manifest = build_hotpotqa_full_dataset_fact_memory_index(
+        index_dir=tmp_path / "index",
+        dataset_catalog_path=tmp_path / "catalog.yaml",
+        frozen_evaluation_task_ids=(validation.source_train_task_id,),
+        paraphrases=paraphrases,
+        embedding_model_path="/models/bge",
+        embedding_model_id="local-bge",
+        embedding_device="cpu",
+        frozen_top_k=1,
+        expected_train_count=1,
+        expected_validation_count=1,
+    )
+    assert captured == ["Ada authored the work.", "Rome is the relevant location."]
+    fact_rows = [
+        json.loads(line)
+        for line in (tmp_path / "index" / "facts.jsonl").read_text().splitlines()
+    ]
+    assert all(set(row) == {"memory_id", "fact_text"} for row in fact_rows)
+    assert manifest.contains_raw_questions is False
+    assert manifest.contains_raw_answers is False
+    assert manifest.indexed_text_field == "fact_text"
+    assert manifest.semantic_rewrite_coverage == 1.0

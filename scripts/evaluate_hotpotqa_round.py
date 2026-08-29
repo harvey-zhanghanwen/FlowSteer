@@ -185,25 +185,30 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
             "public_context",
             "train_qa_memory",
             "transductive_qa_memory",
-            "full_dataset_qa_memory",
+            "full_dataset_fact_memory",
         }:
             raise ConfigurationError(
                 "qa_embedding_retrieval.corpus_kind must be public_context "
                 "or train_qa_memory or transductive_qa_memory "
-                "or full_dataset_qa_memory"
+                "or full_dataset_fact_memory"
             )
         if corpus_kind in {
             "train_qa_memory",
             "transductive_qa_memory",
-            "full_dataset_qa_memory",
+            "full_dataset_fact_memory",
         }:
+            expected_tool_id = (
+                "hotpotqa.fact_memory"
+                if corpus_kind == "full_dataset_fact_memory"
+                else "hotpotqa.qa_memory"
+            )
             qa_memory_checks = {
-                "tool_id": retrieval.get("tool_id") == "hotpotqa.qa_memory",
+                "tool_id": retrieval.get("tool_id") == expected_tool_id,
                 "required_evidence_tool_id": (
                     _mapping(config["agent_graph"], "agent_graph").get(
                         "required_evidence_tool_id"
                     )
-                    == "hotpotqa.qa_memory"
+                    == expected_tool_id
                 ),
                 "director_feedback_mode": (
                     _mapping(config["agent_graph"], "agent_graph").get(
@@ -289,8 +294,21 @@ def validate_hotpot_config(config: Mapping[str, Any]) -> None:
                         "evaluation_overlap_count": (
                             retrieval.get("evaluation_overlap_count") == 128
                         ),
-                        "contains_evaluation_answers": (
-                            retrieval.get("contains_evaluation_answers") is True
+                        "contains_evaluation_source_facts": (
+                            retrieval.get("contains_evaluation_source_facts") is True
+                        ),
+                        "contains_raw_questions": (
+                            retrieval.get("contains_raw_questions") is False
+                        ),
+                        "contains_raw_answers": (
+                            retrieval.get("contains_raw_answers") is False
+                        ),
+                        "document_format": (
+                            retrieval.get("document_format")
+                            == "declarative_fact_only"
+                        ),
+                        "indexed_text_field": (
+                            retrieval.get("indexed_text_field") == "fact_text"
                         ),
                         "evaluation_scope": (
                             retrieval.get("evaluation_scope")
@@ -1261,8 +1279,8 @@ def _input_context(config: Mapping[str, Any]) -> str:
         return f"{scope_prefix}_dynamic_train_qa_memory_search_read"
     if retrieval.get("corpus_kind") == "transductive_qa_memory":
         return f"{scope_prefix}_dynamic_transductive_qa_memory_search_read"
-    if retrieval.get("corpus_kind") == "full_dataset_qa_memory":
-        return f"{scope_prefix}_dynamic_full_dataset_qa_memory_search_read"
+    if retrieval.get("corpus_kind") == "full_dataset_fact_memory":
+        return f"{scope_prefix}_dynamic_full_dataset_fact_memory_search_read"
     return f"{scope_prefix}_dynamic_embedding_search_read"
 
 
@@ -1332,7 +1350,11 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         if isinstance(report.get("retrieval_execution_boundary"), Mapping)
         else {}
     )
-    qa_memory = report.get("qa_memory") if isinstance(report.get("qa_memory"), Mapping) else {}
+    retrieval_memory = (
+        report.get("retrieval_memory")
+        if isinstance(report.get("retrieval_memory"), Mapping)
+        else {}
+    )
     baseline = (
         report.get("round01_agentgraph_official_rescore")
         if isinstance(report.get("round01_agentgraph_official_rescore"), Mapping)
@@ -1358,11 +1380,12 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
             "Tool-capable worker Agents dynamically search/read the transductive "
             "QA-memory and route evidence through explicit graph relations."
         )
-    elif input_context.endswith("_dynamic_full_dataset_qa_memory_search_read"):
+    elif input_context.endswith("_dynamic_full_dataset_fact_memory_search_read"):
         input_description = (
             "The Director receives the public task and control-plane receipts only. "
             "Tool-capable worker Agents dynamically search/read the full-dataset "
-            "QA-memory and route evidence through explicit graph relations."
+            "declarative-fact memory and route evidence through explicit graph "
+            "relations."
         )
     elif input_context.endswith("_dynamic_embedding_search_read"):
         input_description = (
@@ -1407,7 +1430,7 @@ Terminal failures: **{report.get('terminal_failures', 0)}**.
 - Director Tool calls: **{boundary.get('director_tool_calls', 0)}**
 - Worker retrieval Tool calls: **{boundary.get('retrieval_tool_calls_by_worker', 0)}**
 - Retrieval artifact routed via AgentGraph relation: **{boundary.get('retrieval_artifact_routed_via_relation', False)}**
-- QA-memory records / unique sources / cycled: **{qa_memory.get('source_record_count', qa_memory.get('train_record_count', 'N/A'))} / {qa_memory.get('unique_source_count', 'N/A')} / {qa_memory.get('cycled_record_count', 'N/A')}**
+- Retrieval records / unique sources / cycled: **{retrieval_memory.get('source_record_count', retrieval_memory.get('train_record_count', 'N/A'))} / {retrieval_memory.get('unique_source_count', 'N/A')} / {retrieval_memory.get('cycled_record_count', 'N/A')}**
 
 ## Failure types
 
@@ -1519,6 +1542,15 @@ async def run_hotpot_round(
         )
         manifest["contains_evaluation_answers"] = retrieval_configuration.get(
             "contains_evaluation_answers", False
+        )
+        manifest["contains_evaluation_source_facts"] = (
+            retrieval_configuration.get("contains_evaluation_source_facts", False)
+        )
+        manifest["contains_raw_questions"] = retrieval_configuration.get(
+            "contains_raw_questions", False
+        )
+        manifest["contains_raw_answers"] = retrieval_configuration.get(
+            "contains_raw_answers", False
         )
         manifest["official_heldout_eligible"] = retrieval_configuration.get(
             "official_heldout_eligible", True
@@ -1689,12 +1721,12 @@ async def run_hotpot_round(
         if retrieval_config.get("corpus_kind") in {
             "train_qa_memory",
             "transductive_qa_memory",
-            "full_dataset_qa_memory",
+            "full_dataset_fact_memory",
         }:
             evidence_names.append("paraphrase_manifest")
         if retrieval_config.get("corpus_kind") in {
             "transductive_qa_memory",
-            "full_dataset_qa_memory",
+            "full_dataset_fact_memory",
         }:
             evidence_names = [
                 "retrieval_index_manifest",
@@ -1722,7 +1754,7 @@ async def run_hotpot_round(
         if retrieval_config.get("corpus_kind") in {
             "train_qa_memory",
             "transductive_qa_memory",
-            "full_dataset_qa_memory",
+            "full_dataset_fact_memory",
         }:
             index_manifest = _read_json(paths["retrieval_index_manifest"])
             paraphrase_manifest = _read_json(paths["paraphrase_manifest"])
@@ -1739,11 +1771,11 @@ async def run_hotpot_round(
                 or boundary.get("retrieval_artifact_routed_via_relation") is not True
             ):
                 raise HotpotRoundError(
-                    "QA-memory Director/worker/relation execution assertions failed"
+                    "memory Director/worker/relation execution assertions failed"
                 )
             report = {
                 **dict(report),
-                "qa_memory": {
+                "retrieval_memory": {
                     "train_record_count": index_manifest.get("train_record_count"),
                     "source_record_count": index_manifest.get("source_record_count"),
                     "source_train_count": index_manifest.get("source_train_count"),
@@ -1756,6 +1788,13 @@ async def run_hotpot_round(
                     "unique_source_count": index_manifest.get("unique_source_count"),
                     "cycled_record_count": index_manifest.get("cycled_record_count"),
                     "paraphrase_count": index_manifest.get("paraphrase_count"),
+                    "question_rewrite_count": index_manifest.get(
+                        "question_rewrite_count"
+                    ),
+                    "fact_count": index_manifest.get("fact_count"),
+                    "semantic_rewrite_coverage": index_manifest.get(
+                        "semantic_rewrite_coverage"
+                    ),
                     "paraphrase_versions": index_manifest.get("paraphrase_versions"),
                     "paraphrase_provenances": index_manifest.get(
                         "paraphrase_provenances"
@@ -1774,6 +1813,19 @@ async def run_hotpot_round(
                     ),
                     "contains_evaluation_answers": index_manifest.get(
                         "contains_evaluation_answers"
+                    ),
+                    "contains_evaluation_source_facts": index_manifest.get(
+                        "contains_evaluation_source_facts"
+                    ),
+                    "contains_raw_questions": index_manifest.get(
+                        "contains_raw_questions"
+                    ),
+                    "contains_raw_answers": index_manifest.get(
+                        "contains_raw_answers"
+                    ),
+                    "document_format": index_manifest.get("document_format"),
+                    "indexed_text_field": index_manifest.get(
+                        "indexed_text_field"
                     ),
                     "evaluation_regime": index_manifest.get("evaluation_regime"),
                     "evaluation_scope": index_manifest.get("evaluation_scope"),

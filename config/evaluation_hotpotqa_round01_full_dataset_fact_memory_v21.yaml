@@ -1,17 +1,17 @@
 # HotpotQA Round-01 highest-profile architecture with the explicitly
-# in-database full native train+validation paired QA-memory. Only worker Agents
-# can search/read it; the Director remains on the control plane with no Tool.
+# in-database full native train+validation declarative-fact memory. Only worker
+# Agents can search/read it; the Director remains on the control plane.
 schema_version: "flowsteer.agentgraph.config.v1"
 experiment:
-  name: "hotpotqa_round01_full_dataset_qa_memory_v20"
+  name: "hotpotqa_round01_full_dataset_fact_memory_v21"
   phase: "hotpotqa_evaluation"
   training_enabled: false
   seed: 20260815
-  condition_id: "hotpotqa_round01_full_dataset_qa_memory_v20"
-  sampling_schedule_purpose: "hotpotqa_round01_full_dataset_qa_memory_v20_inference_only"
+  condition_id: "hotpotqa_round01_full_dataset_fact_memory_v21"
+  sampling_schedule_purpose: "hotpotqa_round01_full_dataset_fact_memory_v21_inference_only"
   prompt_version: "agentgraph.director.minimal.v2"
-  tool_version: "skillflow.hotpotqa.full-dataset-qa-memory.search-read-first+flowsteer-worker-relations-v20"
-  output_dir: "artifacts/hotpotqa_round01_full_dataset_qa_memory_v20"
+  tool_version: "skillflow.document-passage+flowsteer.embedding-worker-relations.fact-v21"
+  output_dir: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21"
 
 data:
   catalog_path: "config/datasets_agentgraph.yaml"
@@ -34,21 +34,25 @@ hotpotqa_evaluation:
   direct_protocol: "round01_saved_outputs_official_rescore_v1"
   direct_source_path: "artifacts/hotpotqa_round_01/direct_predictions.jsonl"
   agentgraph_baseline_source_path: "artifacts/hotpotqa_round_01/agentgraph_trajectories.jsonl"
-  agentgraph_protocol: "round01_canvas_dynamic_full_dataset_qa_memory_worker_v20"
+  agentgraph_protocol: "round01_canvas_dynamic_full_dataset_fact_memory_worker_v21"
   protocol_equivalent_to_direct: false
 
 qa_embedding_retrieval:
   enabled: true
-  condition_id: "hotpotqa_round01_full_dataset_qa_memory_v20"
+  condition_id: "hotpotqa_round01_full_dataset_fact_memory_v21"
   mode: "model_driven_search_read"
-  corpus_kind: "full_dataset_qa_memory"
+  corpus_kind: "full_dataset_fact_memory"
   index_scope: "global_native_train_plus_native_validation"
   evaluation_regime: "in_database_transductive"
   evaluation_scope: "in_database_transductive"
-  contains_evaluation_answers: true
+  contains_evaluation_source_facts: true
+  contains_raw_questions: false
+  contains_raw_answers: false
+  document_format: "declarative_fact_only"
+  indexed_text_field: "fact_text"
   official_heldout_eligible: false
   fallback_policy: "parametric_only_when_retrieval_unsupported"
-  tool_id: "hotpotqa.qa_memory"
+  tool_id: "hotpotqa.fact_memory"
   dataset_scope: ["hotpotqa"]
   task_scope: "public_task"
   retrieval_query_scope: "question_only"
@@ -63,9 +67,9 @@ qa_embedding_retrieval:
   evaluation_overlap_count: 128
   development_tasks: "artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/train.jsonl"
   development_sample_count: 64
-  paraphrase_materialization_path: "data/hotpotqa_qa_memory_full_dataset_transductive_v1/qa_memory.jsonl"
-  paraphrase_manifest_path: "data/hotpotqa_qa_memory_full_dataset_transductive_v1/materialization_manifest.json"
-  index_dir: "data/hotpotqa_qa_memory_full_dataset_transductive_v1/index"
+  paraphrase_materialization_path: "data/hotpotqa_full_dataset_fact_memory_v1/fact_provenance_sidecar.jsonl"
+  paraphrase_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/materialization_manifest.json"
+  index_dir: "data/hotpotqa_full_dataset_fact_memory_v1/index_topk3"
   embedding_model: "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5"
   embedding_model_id: "BAAI/bge-base-en-v1.5"
   embedding_device: "cpu"
@@ -82,21 +86,21 @@ qa_embedding_retrieval:
   web_search_enabled: false
 
 storage:
-  schema_version: "flowsteer.hotpotqa.full_dataset_qa_memory_retrieval.v1"
-  root: "artifacts/hotpotqa_round01_full_dataset_qa_memory_v20/evidence"
-  selected_tasks_path: "artifacts/hotpotqa_round01_full_dataset_qa_memory_v20/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/hotpotqa_round01_full_dataset_qa_memory_v20/direct_rescored_predictions.jsonl"
-  trajectories_path: "artifacts/hotpotqa_round01_full_dataset_qa_memory_v20/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/hotpotqa_round01_full_dataset_qa_memory_v20/collection_failures.jsonl"
-  paired_results_path: "artifacts/hotpotqa_round01_full_dataset_qa_memory_v20/paired_results.jsonl"
-  wrong_demos_path: "artifacts/hotpotqa_round01_full_dataset_qa_memory_v20/wrong_demos.jsonl"
-  error_demos_path: "reports/hotpotqa_round01_full_dataset_qa_memory_v20/error_demos.jsonl"
-  retrieval_index_manifest_path: "data/hotpotqa_qa_memory_full_dataset_transductive_v1/index/manifest.json"
-  paraphrase_manifest_path: "data/hotpotqa_qa_memory_full_dataset_transductive_v1/materialization_manifest.json"
-  manifest_path: "artifacts/hotpotqa_round01_full_dataset_qa_memory_v20/run_manifest.json"
-  preflight_receipt_path: "artifacts/hotpotqa_round01_full_dataset_qa_memory_v20/preflight_receipt.json"
-  report_json_path: "reports/hotpotqa_round01_full_dataset_qa_memory_v20/report.json"
-  report_markdown_path: "reports/hotpotqa_round01_full_dataset_qa_memory_v20/report.md"
+  schema_version: "flowsteer.hotpotqa.full_dataset_fact_memory_retrieval.v1"
+  root: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/evidence"
+  selected_tasks_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/direct_rescored_predictions.jsonl"
+  trajectories_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/collection_failures.jsonl"
+  paired_results_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/paired_results.jsonl"
+  wrong_demos_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/wrong_demos.jsonl"
+  error_demos_path: "reports/hotpotqa_round01_full_dataset_fact_memory_v21/error_demos.jsonl"
+  retrieval_index_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/index_topk3/manifest.json"
+  paraphrase_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/materialization_manifest.json"
+  manifest_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/run_manifest.json"
+  preflight_receipt_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/preflight_receipt.json"
+  report_json_path: "reports/hotpotqa_round01_full_dataset_fact_memory_v21/report.json"
+  report_markdown_path: "reports/hotpotqa_round01_full_dataset_fact_memory_v21/report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
@@ -139,7 +143,7 @@ agent_graph:
   recovery_policy: "preserve_diagnose_repair_augment"
   require_unique_output: true
   require_all_agents_reach_output: true
-  required_evidence_tool_id: "hotpotqa.qa_memory"
+  required_evidence_tool_id: "hotpotqa.fact_memory"
   require_evidence_relation: true
   director_feedback_mode: "control_plane"
   model_catalog_path: "config/model_catalog_hotpotqa_qa_memory_v10.yaml"

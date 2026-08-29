@@ -5,9 +5,10 @@ FlowSteer's ToolRegistry/ReAct boundary and SkillFlow's dynamic search/read
 execution shape: retrieval happens only when an Agent dispatches a Tool
 action, never as evaluation-time prefetch.
 
-The registry supports the existing task-scoped public-passage index and the
-global paired QA-memory indices.  In the passage condition, ``task_id``
-selects the current task's public context.  In the QA-memory condition it is
+The registry supports the existing task-scoped public-passage index and
+global QA-memory or declarative-fact indices.  In the passage condition,
+``task_id`` selects the current task's public context.  In a global-memory
+condition it is
 only evaluation-call provenance in the receipt and is never passed to global
 ``search(query, k)`` or ``read(memory_id)``.  Results are projected through an
 explicit corpus-specific allowlist.
@@ -30,9 +31,9 @@ from .hotpotqa_transductive_qa_memory_index import (
     TRANSDUCTIVE_EVALUATION_REGIME,
     TRANSDUCTIVE_QA_MEMORY_CORPUS_VERSION,
 )
-from .hotpotqa_full_dataset_qa_memory_index import (
+from .hotpotqa_full_dataset_fact_memory_index import (
     FULL_DATASET_EVALUATION_SCOPE,
-    FULL_DATASET_QA_MEMORY_CORPUS_VERSION,
+    FULL_DATASET_FACT_MEMORY_CORPUS_VERSION,
 )
 from .react_execution import ToolReactExecutionAdapter
 from .tool_runtime import (
@@ -46,21 +47,30 @@ from .tool_runtime import (
 
 HOTPOTQA_RETRIEVAL_TOOL_ID = "qa-retrieval"
 HOTPOTQA_QA_MEMORY_TOOL_ID = "hotpotqa.qa_memory"
+HOTPOTQA_FACT_MEMORY_TOOL_ID = "hotpotqa.fact_memory"
 HOTPOTQA_DATASET_SCOPE = ("hotpotqa",)
 
 _PASSAGE_INDEX_KIND = "public_passage"
 _QA_MEMORY_INDEX_KIND = "train_qa_memory"
 _TRANSDUCTIVE_QA_MEMORY_INDEX_KIND = "transductive_qa_memory"
-_FULL_DATASET_QA_MEMORY_INDEX_KIND = "full_dataset_qa_memory"
+_FULL_DATASET_FACT_MEMORY_INDEX_KIND = "full_dataset_fact_memory"
 _QA_MEMORY_RETRIEVAL_SUFFICIENCY = frozenset({"supported", "unsupported"})
 
 
-def _is_qa_memory_index_kind(index_kind: str) -> bool:
+def _is_global_memory_index_kind(index_kind: str) -> bool:
     return index_kind in {
         _QA_MEMORY_INDEX_KIND,
         _TRANSDUCTIVE_QA_MEMORY_INDEX_KIND,
-        _FULL_DATASET_QA_MEMORY_INDEX_KIND,
+        _FULL_DATASET_FACT_MEMORY_INDEX_KIND,
     }
+
+
+def _is_fact_memory_index_kind(index_kind: str) -> bool:
+    return index_kind == _FULL_DATASET_FACT_MEMORY_INDEX_KIND
+
+
+def _is_memory_tool_id(tool_id: str) -> bool:
+    return tool_id in {HOTPOTQA_QA_MEMORY_TOOL_ID, HOTPOTQA_FACT_MEMORY_TOOL_ID}
 
 
 def _normalized_retrieval_query(query: str) -> str:
@@ -231,6 +241,16 @@ def _index_identity(
         "frozen_validation_count": ("frozen_validation_count",),
         "evaluation_overlap_count": ("evaluation_overlap_count",),
         "contains_evaluation_answers": ("contains_evaluation_answers",),
+        "contains_evaluation_source_facts": (
+            "contains_evaluation_source_facts",
+        ),
+        "contains_raw_questions": ("contains_raw_questions",),
+        "contains_raw_answers": ("contains_raw_answers",),
+        "document_format": ("document_format",),
+        "indexed_text_field": ("indexed_text_field",),
+        "fact_count": ("fact_count",),
+        "question_rewrite_count": ("question_rewrite_count",),
+        "semantic_rewrite_coverage": ("semantic_rewrite_coverage",),
         "evaluation_regime": ("evaluation_regime",),
         "evaluation_scope": ("evaluation_scope",),
         "official_heldout_eligible": ("official_heldout_eligible",),
@@ -307,19 +327,34 @@ def _index_kind(index: _EmbeddingIndex) -> str:
         if search_parameters != ("query", "k") or read_parameters != ("memory_id",):
             raise TypeError("QA-memory manifest and global search/read signatures differ")
         return _TRANSDUCTIVE_QA_MEMORY_INDEX_KIND
-    if corpus_version == FULL_DATASET_QA_MEMORY_CORPUS_VERSION:
+    if corpus_version == FULL_DATASET_FACT_MEMORY_CORPUS_VERSION:
         source_splits = _optional_manifest_field(manifest, "source_splits")
         if tuple(source_splits) != ("train", "validation"):
-            raise ValueError("full-dataset QA-memory source splits differ")
-        if _optional_manifest_field(manifest, "contains_evaluation_answers") is not True:
-            raise ValueError("full-dataset QA-memory must declare evaluation answers")
+            raise ValueError("full-dataset fact-memory source splits differ")
+        if (
+            _optional_manifest_field(manifest, "contains_evaluation_source_facts")
+            is not True
+        ):
+            raise ValueError(
+                "full-dataset fact-memory must declare evaluation source facts"
+            )
+        if _optional_manifest_field(manifest, "contains_raw_questions") is not False:
+            raise ValueError("full-dataset fact-memory must exclude raw questions")
+        if _optional_manifest_field(manifest, "contains_raw_answers") is not False:
+            raise ValueError("full-dataset fact-memory must exclude raw answers")
+        if _optional_manifest_field(manifest, "document_format") != (
+            "declarative_fact_only"
+        ):
+            raise ValueError("full-dataset fact-memory document format differs")
+        if _optional_manifest_field(manifest, "indexed_text_field") != "fact_text":
+            raise ValueError("full-dataset fact-memory indexed field differs")
         if (
             _optional_manifest_field(manifest, "evaluation_scope")
             != FULL_DATASET_EVALUATION_SCOPE
         ):
-            raise ValueError("full-dataset QA-memory evaluation scope differs")
+            raise ValueError("full-dataset fact-memory evaluation scope differs")
         if _optional_manifest_field(manifest, "official_heldout_eligible") is not False:
-            raise ValueError("full-dataset QA-memory cannot be held-out eligible")
+            raise ValueError("full-dataset fact-memory cannot be held-out eligible")
         evaluation_overlap_count = _optional_manifest_field(
             manifest, "evaluation_overlap_count"
         )
@@ -327,10 +362,12 @@ def _index_kind(index: _EmbeddingIndex) -> str:
             not isinstance(evaluation_overlap_count, int)
             or evaluation_overlap_count < 1
         ):
-            raise ValueError("full-dataset QA-memory evaluation overlap differs")
+            raise ValueError("full-dataset fact-memory evaluation overlap differs")
         if search_parameters != ("query", "k") or read_parameters != ("memory_id",):
-            raise TypeError("QA-memory manifest and global search/read signatures differ")
-        return _FULL_DATASET_QA_MEMORY_INDEX_KIND
+            raise TypeError(
+                "fact-memory manifest and global search/read signatures differ"
+            )
+        return _FULL_DATASET_FACT_MEMORY_INDEX_KIND
     if search_parameters != ("task_id", "query", "k") or read_parameters not in {
         ("task_id", "doc_id"),
         ("task_id", "passage_id"),
@@ -453,6 +490,49 @@ def _public_memory(raw_memory: object, *, expected_memory_id: str) -> dict[str, 
     }
 
 
+def _public_fact_hit(
+    raw_hit: object,
+    *,
+    expected_rank: int,
+) -> dict[str, object]:
+    memory_id = _required_text(
+        _field(raw_hit, "memory_id"), field_name="fact search hit memory_id"
+    )
+    rank = _field(raw_hit, "rank")
+    if type(rank) is not int or rank != expected_rank:
+        raise ValueError("fact search ranks must be contiguous and one-based")
+    similarity = _field(raw_hit, "similarity")
+    if type(similarity) not in {int, float} or not math.isfinite(float(similarity)):
+        raise ValueError("fact search similarity must be finite")
+    return {
+        "memory_id": memory_id,
+        "fact_snippet": _required_text(
+            _field(raw_hit, "fact_snippet"),
+            field_name="fact search hit snippet",
+        ),
+        "similarity": float(similarity),
+        "rank": rank,
+    }
+
+
+def _public_fact(
+    raw_fact: object,
+    *,
+    expected_memory_id: str,
+) -> dict[str, object]:
+    memory_id = _required_text(
+        _field(raw_fact, "memory_id"), field_name="read fact memory_id"
+    )
+    if memory_id != expected_memory_id:
+        raise ValueError("fact read returned a different memory_id")
+    return {
+        "memory_id": memory_id,
+        "fact_text": _required_text(
+            _field(raw_fact, "fact_text"), field_name="read fact text"
+        ),
+    }
+
+
 @dataclass(slots=True)
 class HotpotQAEmbeddingToolBackend:
     """Dispatch either task-scoped passage or global train-memory retrieval."""
@@ -488,7 +568,7 @@ class HotpotQAEmbeddingToolBackend:
         if type(k) is not int or k != self.frozen_top_k:
             raise ValueError("search k differs from the frozen embedding top-k")
 
-        if _is_qa_memory_index_kind(self.index_kind):
+        if _is_global_memory_index_kind(self.index_kind):
             candidate = self.index.search(query, k)
         else:
             candidate = self.index.search(self.task_id, query, k)
@@ -497,7 +577,14 @@ class HotpotQAEmbeddingToolBackend:
             raise TypeError("embedding search must return a sequence of hits")
         if len(raw_hits) > self.frozen_top_k:
             raise ValueError("embedding search returned more than frozen top-k hits")
-        if _is_qa_memory_index_kind(self.index_kind):
+        if _is_fact_memory_index_kind(self.index_kind):
+            hits = [
+                _public_fact_hit(raw_hit, expected_rank=rank)
+                for rank, raw_hit in enumerate(raw_hits, start=1)
+            ]
+            resource_id_key = "memory_ids"
+            resource_ids = [str(hit["memory_id"]) for hit in hits]
+        elif _is_global_memory_index_kind(self.index_kind):
             hits = [
                 _public_memory_hit(raw_hit, expected_rank=rank)
                 for rank, raw_hit in enumerate(raw_hits, start=1)
@@ -531,7 +618,7 @@ class HotpotQAEmbeddingToolBackend:
         _validate_action(request, "read")
         id_field = (
             "memory_id"
-            if _is_qa_memory_index_kind(self.index_kind)
+            if _is_global_memory_index_kind(self.index_kind)
             else "doc_id"
         )
         if set(request.arguments) != {id_field}:
@@ -544,12 +631,26 @@ class HotpotQAEmbeddingToolBackend:
                 f"read {id_field} was not returned by a successful search"
             )
 
-        if _is_qa_memory_index_kind(self.index_kind):
+        if _is_global_memory_index_kind(self.index_kind):
             candidate = self.index.read(resource_id)
         else:
             candidate = self.index.read(self.task_id, resource_id)
         raw_value = await candidate if inspect.isawaitable(candidate) else candidate
-        if _is_qa_memory_index_kind(self.index_kind):
+        if _is_fact_memory_index_kind(self.index_kind):
+            public_fact = _public_fact(
+                raw_value,
+                expected_memory_id=resource_id,
+            )
+            return ToolResult(
+                {
+                    "operation": "read",
+                    "task_id": self.task_id,
+                    "retrieval_index": dict(self.index_identity),
+                    "memory_id": resource_id,
+                    "fact": public_fact,
+                }
+            )
+        if _is_global_memory_index_kind(self.index_kind):
             public_memory = _public_memory(
                 raw_value,
                 expected_memory_id=resource_id,
@@ -636,18 +737,18 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
         self,
         request: AgentRequest,
     ) -> Mapping[str, object]:
-        """Bind QA-memory completion to a worker retrieval assessment.
+        """Bind global-memory completion to a worker retrieval assessment.
 
         DIRECT_REUSE: SkillFlow's bounded Agent completion remains one
         ``StructuredAction``.  This HotpotQA compatibility schema replaces
-        the unconstrained text artifact only for the QA-memory resource: the
+        the unconstrained text artifact only for a global-memory resource: the
         worker reads the complete frozen top-k group, then reports whether a
         selected record supports the current public task or the whole group
         is unsupported.  The judgment does not change AgentGraph roles,
         relations, or terminal semantics.
         """
 
-        if self._active_retrieval_tool_id() != HOTPOTQA_QA_MEMORY_TOOL_ID:
+        if not _is_memory_tool_id(self._active_retrieval_tool_id()):
             return super()._completion_arguments_schema(request)
         del request
         return {
@@ -716,9 +817,9 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             self._max_tool_calls - state.dispatched_tool_calls,
         )
         successful_read_count = len(state.read_doc_ids)
-        if tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID:
+        if _is_memory_tool_id(tool_id):
             # NECESSARY_ADAPTATION: every member of the frozen embedding top-k
-            # is a paired QA record. Completion is admitted only after
+            # is a retrieved evidence record. Completion is admitted only after
             # the worker has inspected the complete returned group, so an
             # unsupported assessment cannot be made from rank 1 alone.
             if state.latest_search_doc_ids and state.latest_unread_doc_ids:
@@ -731,8 +832,8 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
                 return frozenset(), False
             return frozenset({(tool_id, "search")}), False
         # DIRECT_REUSE: SkillFlow/FlowSteer's shared QA retrieval adapter
-        # admits completion after one successful public read.  QA-memory hits
-        # are complete paired-QA demonstrations rather than task-scoped
+        # admits completion after one successful public read. Global-memory hits
+        # are complete evidence records rather than task-scoped
         # passage hops, so forcing a second search/read only adds an unrelated
         # example and consumes the bounded ReAct turn budget.
         if successful_read_count >= 1:
@@ -808,7 +909,7 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
                 + "."
             )
         elif completion_admitted and not actions:
-            if tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID:
+            if _is_memory_tool_id(tool_id):
                 next_action = (
                     "Current action mask: complete only. Judge the fully read top-k "
                     "group against the current query and public task passages. "
@@ -831,7 +932,7 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             )
         query_scope = self._retrieval_query_scope or request.problem
         completion_example = '{"value":"evidence-supported artifact"}'
-        if tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID:
+        if _is_memory_tool_id(tool_id):
             completion_example = json.dumps(
                 {
                     "value": {
@@ -864,7 +965,7 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             )
             + ". Do not "
             "repeat a normalized successful query. Embedding similarity identifies "
-            "semantic-neighbor QA records; it is not factual entailment for "
+            "semantic-neighbor records; similarity is not factual entailment for "
             "the current question. Complete only on the admitted terminal state, "
             "after the semantic-alignment check, with exactly "
             + completion_example
@@ -928,7 +1029,7 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             return "hotpotqa_dynamic_search_required"
         if "read" not in successful_actions:
             return "hotpotqa_dynamic_read_required"
-        if tool_id == HOTPOTQA_QA_MEMORY_TOOL_ID:
+        if _is_memory_tool_id(tool_id):
             arguments = getattr(action, "arguments", None)
             value = (
                 arguments.get("value")
@@ -995,7 +1096,7 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
                 if operation != "read" or result.get("operation") != "read":
                     continue
                 request_arguments = request_value.get("arguments")
-                memory = result.get("memory")
+                memory = result.get("memory", result.get("fact"))
                 if (
                     isinstance(request_arguments, Mapping)
                     and isinstance(request_arguments.get("memory_id"), str)
@@ -1033,7 +1134,7 @@ def build_hotpotqa_embedding_tool_registry(
     ``frozen_top_k`` must be present in the index manifest.  Supplying it here
     is an assertion and cannot override the manifest, which keeps validation
     runs fail-closed against architecture-development configuration drift.
-    ``task_id`` scopes the legacy passage index; for global QA-memory it is only
+    ``task_id`` scopes the legacy passage index; for global memory it is only
     recorded as the evaluation-call context in Tool results/receipts.
     """
 
@@ -1074,7 +1175,7 @@ def build_hotpotqa_embedding_tool_registry(
         },
     }
     read_identifier = (
-        "memory_id" if _is_qa_memory_index_kind(index_kind) else "doc_id"
+        "memory_id" if _is_global_memory_index_kind(index_kind) else "doc_id"
     )
     read_schema = {
         "title": "read",
@@ -1169,7 +1270,75 @@ def build_hotpotqa_embedding_tool_registry(
             "paraphrase_provenance": {"type": "string"},
         },
     }
-    if _is_qa_memory_index_kind(index_kind):
+    fact_hit_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["memory_id", "fact_snippet", "similarity", "rank"],
+        "properties": {
+            "memory_id": {"type": "string"},
+            "fact_snippet": {"type": "string"},
+            "similarity": {"type": "number"},
+            "rank": {"type": "integer", "minimum": 1},
+        },
+    }
+    fact_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["memory_id", "fact_text"],
+        "properties": {
+            "memory_id": {"type": "string"},
+            "fact_text": {"type": "string"},
+        },
+    }
+    if _is_fact_memory_index_kind(index_kind):
+        output_schema = {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "operation",
+                        "task_id",
+                        "retrieval_index",
+                        "query",
+                        "k",
+                        "memory_ids",
+                        "hits",
+                    ],
+                    "properties": {
+                        "operation": {"const": "search"},
+                        "task_id": {"type": "string"},
+                        "retrieval_index": {"type": "object"},
+                        "query": {"type": "string"},
+                        "k": {"const": manifest_top_k},
+                        "memory_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "hits": {"type": "array", "items": fact_hit_schema},
+                    },
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "operation",
+                        "task_id",
+                        "retrieval_index",
+                        "memory_id",
+                        "fact",
+                    ],
+                    "properties": {
+                        "operation": {"const": "read"},
+                        "task_id": {"type": "string"},
+                        "retrieval_index": {"type": "object"},
+                        "memory_id": {"type": "string"},
+                        "fact": fact_schema,
+                    },
+                },
+            ]
+        }
+    elif _is_global_memory_index_kind(index_kind):
         output_schema = {
             "oneOf": [
                 {
@@ -1297,6 +1466,7 @@ def build_hotpotqa_embedding_tool_registry(
 
 __all__ = [
     "HOTPOTQA_DATASET_SCOPE",
+    "HOTPOTQA_FACT_MEMORY_TOOL_ID",
     "HOTPOTQA_QA_MEMORY_TOOL_ID",
     "HOTPOTQA_RETRIEVAL_TOOL_ID",
     "HotpotQAEmbeddingToolBackend",

@@ -153,17 +153,21 @@ def _format_upstream(
     return "\n\n".join(rendered)
 
 
-def _uses_qa_memory(request: AgentRequest) -> bool:
-    """Return whether this worker or its routed inputs carry QA-memory data."""
+def _retrieval_memory_kind(request: AgentRequest) -> str | None:
+    """Return the model-visible retrieval record kind, if one is routed."""
 
-    if any(tool_id.endswith(".qa_memory") for tool_id in request.agent.allowed_tools):
-        return True
-    return any(
-        isinstance(receipt.get("tool_id"), str)
-        and str(receipt["tool_id"]).endswith(".qa_memory")
+    tool_ids = [*request.agent.allowed_tools]
+    tool_ids.extend(
+        str(receipt["tool_id"])
         for message in request.upstream
         for receipt in message.tool_receipts
+        if isinstance(receipt.get("tool_id"), str)
     )
+    if any(tool_id.endswith(".fact_memory") for tool_id in tool_ids):
+        return "fact"
+    if any(tool_id.endswith(".qa_memory") for tool_id in tool_ids):
+        return "qa"
+    return None
 
 
 def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
@@ -174,7 +178,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         "value",
         request.agent.execution_mode,
     )
-    qa_memory_context = _uses_qa_memory(request)
+    memory_kind = _retrieval_memory_kind(request)
     if execution_mode in {"react", "coding"}:
         # SkillFlow's BoundedAgent asks the policy for one StructuredAction per
         # model turn.  The execution adapter, not this provider boundary,
@@ -190,7 +194,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "observation; a complete action supplies the declared node "
             "artifact. Do not emit <answer> tags in this internal action."
         )
-        if qa_memory_context:
+        if memory_kind == "qa":
             protocol += (
                 " QA-memory search returns semantic-neighbor paired QA records, not "
                 "automatically facts about the current question. Before completing, "
@@ -199,6 +203,14 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "retrieved canonical answer only when those fields are semantically "
                 "aligned. Otherwise state that the retrieved example does not cover "
                 "the current fact and do not transfer its answer to the current task."
+            )
+        elif memory_kind == "fact":
+            protocol += (
+                " Memory search returns semantic neighbors, not automatic entailment. "
+                "Before completing, align the current question and each read record "
+                "by entity identity, predicate or relation, qualifiers, and requested "
+                "answer slot. Use retrieved content only when those fields are "
+                "semantically aligned; otherwise report unsupported retrieval."
             )
     elif request.is_format_agent:
         protocol = (
@@ -232,7 +244,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "or an explanation. If the task supplies legal or admissible actions and asks "
             "for one action, return exactly one listed executable action with no explanation."
         )
-        if qa_memory_context:
+        if memory_kind == "qa":
             protocol += (
                 " Treat upstream QA-memory records as retrieved demonstrations. "
                 "A routed retrieval_sufficiency=unsupported artifact is an explicit "
@@ -242,6 +254,20 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "canonical answer. Only retrieval_sufficiency=unsupported "
                 "admits parametric fallback. For retrieval_sufficiency=supported, "
                 "consume the worker-selected memory candidate while preserving the "
+                "current entity binding, relation, qualifiers, and requested answer "
+                "slot; do not replace it with an ungrounded parametric candidate. An "
+                "embedding similarity score without the worker's supported assessment "
+                "is not factual support."
+            )
+        elif memory_kind == "fact":
+            protocol += (
+                " Treat upstream memory records as retrieved evidence. "
+                "A routed retrieval_sufficiency=unsupported artifact is an explicit "
+                "worker abstention: do not use that record for the current task, and "
+                "answer directly from the public task and any other valid routed "
+                "evidence. Only retrieval_sufficiency=unsupported "
+                "admits parametric fallback. For retrieval_sufficiency=supported, "
+                "consume the worker-selected evidence while preserving the "
                 "current entity binding, relation, qualifiers, and requested answer "
                 "slot; do not replace it with an ungrounded parametric candidate. An "
                 "embedding similarity score without the worker's supported assessment "
@@ -257,12 +283,20 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "Do not present a task-level final answer and "
             "do not use <answer> tags."
         )
-        if qa_memory_context:
+        if memory_kind == "qa":
             protocol += (
                 " For QA-memory inputs, explicitly check entity binding, predicate or "
                 "relation, qualifiers and the requested answer slot before using a "
                 "retrieved answer. Preserve a clear coverage failure when the memory "
                 "is only an analogous QA record; do not convert semantic "
+                "similarity into unsupported factual evidence."
+            )
+        elif memory_kind == "fact":
+            protocol += (
+                " For memory inputs, explicitly check entity binding, predicate or "
+                "relation, qualifiers and the requested answer slot before using a "
+                "retrieved fact. Preserve a clear coverage failure when the memory "
+                "is only analogous; do not convert semantic "
                 "similarity into unsupported factual evidence."
             )
     if request.is_format_agent:
