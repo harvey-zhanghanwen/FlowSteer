@@ -1075,6 +1075,14 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["actor"], modify_domain["agent_ids"])
         self.assertEqual(["contract"], modify_domain["mutable_fields"])
 
+        truncated_state = dict(stalled_state)
+        truncated_state["environment_truncated"] = True
+        truncated_state["remaining_action_budget"] = 0
+        with patch.object(
+            canvas, "public_environment_state", return_value=truncated_state
+        ):
+            self.assertIsNone(canvas._stateful_no_progress_receipt())
+
         repaired = await canvas.step(
             json.dumps(
                 {
@@ -1095,6 +1103,106 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Apply one ReAct control cycle", gateway.requests[-1].problem)
         self.assertNotIn("Execution interface:", gateway.requests[-1].problem)
         self.assertNotIn("graded_score", str(canvas.public_environment_state()))
+
+    async def test_webshop_truncated_no_progress_admits_finish(self) -> None:
+        class TruncatedWebShopSession(FakeSession):
+            environment_id = "fake:webshop:truncated"
+            task_family = "webshop"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = {
+                    "has_search_bar": False,
+                    "clickables": ["6.6ft", "Buy Now"],
+                }
+
+            def reset(self) -> str:
+                self.reset_count += 1
+                return "Product page with size options 6.6ft and Buy Now"
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                return (
+                    "Product page with size options 6.6ft and Buy Now",
+                    0.0,
+                    False,
+                    {"graded_score": 0.0},
+                )
+
+        repeated_option = json.dumps(
+            {
+                "resource_id": "webshop",
+                "kind": "tool",
+                "name": "click",
+                "arguments": {"target": "6.6ft"},
+                "skill_id": None,
+            }
+        )
+        session = TruncatedWebShopSession()
+        gateway = SequenceGateway([repeated_option, repeated_option])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=2,
+            stepwise_director=True,
+            structured_actions=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="buy the exact requested size",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "continue",
+                "finish",
+            ),
+        )
+        await canvas.step(
+            json.dumps(
+                {
+                    "action": "add_agent",
+                    "agent_id": "actor",
+                    "model_id": "m",
+                    "contract": "Select an exact constraint match.",
+                    "execution_mode": "react",
+                    "allowed_tools": [environment.tool_id],
+                }
+            )
+        )
+        await canvas.step('{"action":"set_output","agent_id":"actor"}')
+        await canvas.step('{"action":"continue"}')
+
+        state = canvas.public_environment_state()
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertTrue(state["environment_truncated"])
+        self.assertEqual(0, state["remaining_action_budget"])
+        self.assertTrue(state["public_progress"]["no_progress"]["detected"])
+        self.assertIsNone(canvas._stateful_no_progress_receipt())
+        self.assertTrue(canvas.finish_admissibility()["admissible"])
+        self.assertIn("finish", canvas.model_admissible_action_types())
+        self.assertNotIn("continue", canvas.model_admissible_action_types())
+
+        finished = await canvas.step('{"action":"finish"}')
+        self.assertTrue(finished.accepted)
+        self.assertTrue(finished.done)
 
     async def test_ragen_session_calls_deployed_adapter_signature(self) -> None:
         class FakeRAGEN:

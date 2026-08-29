@@ -837,6 +837,17 @@ class AgentWorkflowEnv:
         state = self.public_environment_state()
         if state is None:
             return None
+        # A measured no-progress loop can be repaired only while another
+        # environment transition is legal.  SkillFlow evaluates a bounded
+        # episode after terminal state or action-budget truncation; at that
+        # boundary FlowSteer's explicit FINISH must remain admissible instead
+        # of being masked by stale transition history.
+        if (
+            state.get("environment_terminal") is True
+            or state.get("environment_truncated") is True
+            or state.get("remaining_action_budget") == 0
+        ):
+            return None
         progress = state.get("public_progress")
         if not isinstance(progress, Mapping):
             return None
