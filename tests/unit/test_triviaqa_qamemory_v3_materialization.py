@@ -12,6 +12,7 @@ from src.interactive.triviaqa_qa_memory import (
     validate_qa_memory_against_sources,
 )
 from scripts.generate_triviaqa_qa_memory_paraphrases import (
+    GENERATION_ROUND_SEED_STRIDE,
     ANSWER_VERIFICATION_SYSTEM_PROMPT,
     ANSWER_REPAIR_SYSTEM_PROMPT,
     QUESTION_REPAIR_SYSTEM_PROMPT,
@@ -24,8 +25,10 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     build_synonym_repair_messages,
     build_verification_messages,
     _birth_event_is_target_relation,
+    _admitted_generation_seeds,
     _exact_question_identity_contaminated_fields,
     _has_lexical_or_phrase_replacement,
+    _generation_round_indices,
     _identity_token_preserved,
     _leading_answer_slot_anchor,
     _leading_answer_slot_anchor_preserved,
@@ -36,11 +39,13 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _answer_statement_has_lexical_relation_lineage,
     _canonicalize_answer_statement_from_accepted_alias,
     _quoted_scope_preserved,
+    _quoted_spans,
     _quoted_attribution_qa,
     _restore_immutable_quoted_slots,
     _original_interrogative_head_omitted,
     _participation_marker_preserved,
     _restore_authoritative_source_transpositions,
+    _repair_fact_terminal_punctuation,
     _semantic_relation_and_scope_preserved,
     _possessive_name_answer_statement,
     _canonical_answer_is_explicit_compound,
@@ -53,6 +58,8 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _dataset_pair_fallback_text,
     _is_dataset_pair_fallback_record,
     _validate_dataset_pair_fallback_record,
+    build_fact_memory_projection,
+    FactProjectionAdmissionError,
     SemanticPreservationError,
     LocalQwen35Paraphraser,
     load_resume_records,
@@ -65,6 +72,7 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     parse_question_repair_response,
     parse_synonym_repair_response,
     parse_verification_response,
+    validate_self_contained_declarative_fact,
 )
 
 
@@ -81,7 +89,7 @@ def _source() -> TriviaQATrainSource:
     )
 
 
-def test_dataset_pair_fallback_has_explicit_separate_provenance() -> None:
+def test_dataset_pair_fallback_is_a_resume_gap_not_a_formal_fact() -> None:
     source = TriviaQATrainSource(
         source_train_task_id="triviaqa:qz_6732",
         base_task_id="triviaqa:qz_6732",
@@ -112,13 +120,176 @@ def test_dataset_pair_fallback_has_explicit_separate_provenance() -> None:
     assert record.paraphrase_answer_statement == statement
     assert _is_dataset_pair_fallback_record(record)
     _validate_dataset_pair_fallback_record(record, source)
-    validate_resume_record_admission((record,), (source,))
+    with pytest.raises(
+        FactProjectionAdmissionError,
+        match="not a semantic paraphrase or fact",
+    ):
+        validate_resume_record_admission((record,), (source,))
     accepted, repairs = partition_resume_records_for_semantic_repair(
         (record,),
         (source,),
     )
-    assert accepted == (record,)
-    assert repairs == ()
+    assert accepted == ()
+    assert repairs == (source.source_train_task_id,)
+    with pytest.raises(
+        FactProjectionAdmissionError,
+        match="cannot enter a fact-memory release",
+    ):
+        build_fact_memory_projection((record,), (source,), expected_count=1)
+
+
+@pytest.mark.parametrize(
+    "fact_text, message",
+    (
+        (
+            "For this TriviaQA dataset source prompt, the paired response is "
+            "Zambezi.",
+            "wrapper",
+        ),
+        ("Which river contains the Kariba Dam? Zambezi.", "not a question"),
+        ("It contains the Zambezi.", "anaphoric"),
+        ("The river is Zambezi.", "generic subject"),
+        ("The Kariba Dam contains Zambezi", "complete declarative sentence"),
+    ),
+)
+def test_fact_projection_rejects_non_declarative_or_contextless_payloads(
+    fact_text: str,
+    message: str,
+) -> None:
+    with pytest.raises(FactProjectionAdmissionError, match=message):
+        validate_self_contained_declarative_fact(_source(), fact_text)
+
+
+def test_resume_partition_repairs_old_strict_non_fact_before_full_parse() -> None:
+    source = _source()
+    record = _record(
+        statement=(
+            "Question: Which river contains the Kariba Dam? "
+            "Answer: Zambezi."
+        )
+    )
+
+    accepted, repairs = partition_resume_records_for_semantic_repair(
+        (record,),
+        (source,),
+    )
+
+    assert accepted == ()
+    assert repairs == (source.source_train_task_id,)
+
+
+def test_fact_projection_allows_question_mark_inside_quoted_title() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:tc_247",
+        base_task_id="triviaqa:tc_247",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question='Who recorded the song "When You Are Strange?"?',
+        canonical_answer="The Doors",
+        native_split="train",
+    )
+    fact = 'The Doors recorded the song "When You Are Strange?".'
+
+    assert validate_self_contained_declarative_fact(source, fact) == fact
+
+
+def test_fact_terminal_punctuation_repair_changes_only_the_delimiter() -> None:
+    assert _repair_fact_terminal_punctuation(
+        "The height of Goliath is Six cubits and a span,"
+    ) == "The height of Goliath is Six cubits and a span."
+    assert _repair_fact_terminal_punctuation(
+        'The song is "Piano Man"'
+    ) == 'The song is "Piano Man".'
+    assert _repair_fact_terminal_punctuation(
+        'The character asked, "Save me, Superman?"'
+    ) == 'The character asked, "Save me, Superman?"'
+
+
+def test_generation_round_start_preserves_history_and_uses_fresh_rounds() -> None:
+    assert tuple(
+        _generation_round_indices(
+            generation_round_start=8,
+            generation_round_count=3,
+        )
+    ) == (8, 9, 10)
+    admitted = _admitted_generation_seeds(
+        base_seed=20260827,
+        selection_index=17,
+        generation_round_start=8,
+        generation_round_count=3,
+        max_retries=2,
+    )
+    assert 20260827 + 17 in admitted
+    assert 20260827 + 17 + 7 * GENERATION_ROUND_SEED_STRIDE + 2 in admitted
+    assert 20260827 + 17 + 8 * GENERATION_ROUND_SEED_STRIDE in admitted
+    assert 20260827 + 17 + 10 * GENERATION_ROUND_SEED_STRIDE + 2 in admitted
+    assert 20260827 + 17 + 11 * GENERATION_ROUND_SEED_STRIDE not in admitted
+
+
+def test_fact_projection_separates_agent_fields_from_qa_provenance() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:tc_999",
+        base_task_id="triviaqa:tc_999",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="Which river was the Kariba Dam built on?",
+        canonical_answer="Zambezi",
+        native_split="train",
+        accepted_answers_for_admission=("Zambezi", "Zambezi River"),
+    )
+    record = TriviaQAQAMemoryRecord.create(
+        source=source,
+        paraphrase_question=(
+            "Name the waterway on which the Kariba Dam was constructed."
+        ),
+        paraphrase_answer_statement=(
+            "The Kariba Dam was built on the Zambezi river."
+        ),
+        paraphrase_version="triviaqa.qa_memory.paraphrase.v12",
+        paraphrase_method=(
+            "semantic-preserving-question-and-answer-paraphrase"
+        ),
+        generator_provider="local-openai-compatible",
+        model_id="supervisor_theta",
+        model_revision="Qwen3.5-9B-local",
+        prompt_template_version="triviaqa.qa_memory.qa_paraphrase.v12",
+        generation_seed=20260827,
+    )
+
+    facts, provenance = build_fact_memory_projection(
+        (record,),
+        (source,),
+        expected_count=1,
+    )
+
+    assert set(facts[0]) == {
+        "schema_version",
+        "memory_id",
+        "tool_id",
+        "fact_text",
+    }
+    assert facts[0]["tool_id"] == "triviaqa.qa_memory"
+    assert facts[0]["fact_text"] == (
+        "The Kariba Dam was built on the Zambezi river."
+    )
+    serialized_fact = json.dumps(facts[0], sort_keys=True)
+    for forbidden in (
+        "original_question",
+        "accepted_answers",
+        "canonical_answer",
+        "paraphrase_question",
+        "Question:",
+        "Answer:",
+    ):
+        assert forbidden not in serialized_fact
+    assert provenance[0]["original_question"] == source.original_question
+    assert provenance[0]["accepted_answers"] == ["Zambezi", "Zambezi River"]
+    assert provenance[0]["canonical_answer"] == "Zambezi"
+    assert provenance[0]["paraphrase_question"] == (
+        "Name the waterway on which the Kariba Dam was constructed."
+    )
 
 
 def _record(
@@ -1372,6 +1543,34 @@ def test_quote_slot_recovery_restores_multiple_ordered_unicode_slots() -> None:
     )
 
 
+def test_quote_slots_preserve_curly_contractions_and_nested_single_quotes() -> None:
+    contraction_source = (
+        "Which film director’s epitaph reads ‘I’m in on a plot’?"
+    )
+    assert _quoted_spans(contraction_source) == frozenset(
+        {"I’m in on a plot"}
+    )
+    assert _restore_immutable_quoted_slots(
+        contraction_source,
+        "Identify the director whose epitaph reads ‘I am in on a plot’.",
+    ) == "Identify the director whose epitaph reads ‘I’m in on a plot’."
+
+    nested_source = (
+        "Convict George Joseph Smith was known as the "
+        "‘Brides in the ‘what’ murderer’?"
+    )
+    assert _quoted_spans(nested_source) == frozenset(
+        {"Brides in the ‘what’ murderer"}
+    )
+    assert _restore_immutable_quoted_slots(
+        nested_source,
+        "State the missing word in the ‘Brides in the ‘which’ murderer’ label.",
+    ) == (
+        "State the missing word in the "
+        "‘Brides in the ‘what’ murderer’ label."
+    )
+
+
 def test_generate_routes_quote_only_failure_through_slot_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1748,6 +1947,21 @@ def test_identity_token_allows_only_possessive_apostrophe_orthography(
     assert not _identity_token_preserved(
         curly_possessive,
         frozenset({f"{base[:-1]}x's"}),
+    )
+
+
+def test_identity_token_preserves_unicode_apostrophe_entity_orthography() -> None:
+    assert _identity_token_preserved(
+        "o’brien",
+        frozenset({"o'brien"}),
+    )
+    assert _identity_token_preserved(
+        "o'brien",
+        frozenset({"o’brien"}),
+    )
+    assert not _identity_token_preserved(
+        "o’brien",
+        frozenset({"obrien"}),
     )
 
 
@@ -3008,7 +3222,8 @@ def test_deterministic_question_fallback_fails_closed_for_unsafe_shapes(
 def test_sentence_boundary_operators_are_not_named_entities() -> None:
     identities = _capitalized_identity_tokens(
         "I'm ready. Don't guess. Name Liverpool's river. "
-        "You're certain; Identify Sony's label."
+        "You're certain; Identify Sony's label. According to Mary O’Brien. "
+        "Under pressure these details matter."
     )
 
     assert "i'm" not in identities
@@ -3016,8 +3231,41 @@ def test_sentence_boundary_operators_are_not_named_entities() -> None:
     assert "name" not in identities
     assert "you're" not in identities
     assert "identify" not in identities
+    assert "according" not in identities
+    assert "under" not in identities
     assert "liverpool's" in identities
+    assert "mary" in identities
+    assert "o’brien" in identities
     assert "sony's" in identities
+
+
+@pytest.mark.parametrize(
+    ("original", "canonical", "expected"),
+    (
+        (
+            "The Catcher in the Rye?",
+            "J D Salinger",
+            'State what the clue "The Catcher in the Rye" denotes.',
+        ),
+        (
+            "1313 Webfoot Walk, Duckburg, Calisota",
+            "Donald Duck",
+            (
+                "State the entity associated with Calisota, Duckburg, "
+                "at 1313 Webfoot Walk."
+            ),
+        ),
+    ),
+)
+def test_deterministic_fragment_repair_adds_only_a_neutral_query_frame(
+    original: str,
+    canonical: str,
+    expected: str,
+) -> None:
+    source = _semantic_source(original, canonical)
+
+    assert _deterministic_question_paraphrase(source) == expected
+    assert " ".join(original.split()).casefold() not in expected.casefold()
 
 
 def test_contraction_exception_is_position_sensitive_and_quotes_stay_immutable() -> None:

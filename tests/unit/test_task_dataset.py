@@ -9,6 +9,7 @@ from src.interactive.task_dataset import (
     hotpotqa_question_scope,
     iter_task_records,
     qa_answer_argument_constraint,
+    qa_answer_cardinality_constraint,
     qa_answer_type_constraint,
     task_record_from_mapping,
 )
@@ -128,6 +129,9 @@ def test_shared_qa_answer_argument_constraint_is_question_only_and_conservative(
         ("Who are Metallica's current members?", "multiple"),
         ("What are the names of the two founders?", "multiple"),
         ("Name all members of the group.", "multiple"),
+        ("Name the two founders of the group.", "multiple"),
+        ("Name the East African countries which lie on the equator.", "multiple"),
+        ("Name the East African country which lies on the equator.", "single"),
         ("Which magazine was started first, A or B?", "single"),
         ("Who narrated the documentary?", "single"),
     ],
@@ -137,6 +141,7 @@ def test_hotpot_answer_cardinality_constraint_uses_question_surface_only(
     cardinality: str,
 ) -> None:
     assert hotpotqa_answer_cardinality_constraint(question) == cardinality
+    assert qa_answer_cardinality_constraint(question) == cardinality
 
 
 def test_iter_task_records_reports_jsonl_line(tmp_path):

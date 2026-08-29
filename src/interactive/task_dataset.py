@@ -244,10 +244,48 @@ def qa_answer_cardinality_constraint(rendered_question: str) -> str:
     normalized = " ".join(question.casefold().split())
     if re.search(
         r"^(?:what (?:are|were) the names?\b|who (?:are|were)\b|"
-        r"name (?:all|the)\b)",
+        r"name all\b|"
+        r"name (?:the )?(?:two|three|four|five|six|seven|eight|nine|ten|\d+)\b)",
         normalized,
     ):
         return "multiple"
+
+    # In the imperative construction ``Name the <noun phrase> ...``, ``the``
+    # does not itself license a multiple answer.  Use the nominal head before
+    # a relative-clause or prepositional boundary instead: ``country`` is
+    # single, while ``countries`` and ``members`` are multiple.  This remains
+    # question-only and deliberately avoids inspecting retrieved evidence or
+    # evaluator answers.
+    name_the_match = re.match(
+        r"^name the (?P<noun_phrase>.+?)"
+        r"(?:\s+(?:who|which|that|whose|where|when|of|in|on|at|from|with|"
+        r"for|to|during|after|before)\b|[?.!,]|$)",
+        normalized,
+    )
+    if name_the_match is not None:
+        noun_tokens = re.findall(
+            r"[a-z]+(?:-[a-z]+)?", name_the_match.group("noun_phrase")
+        )
+        if noun_tokens:
+            nominal_head = noun_tokens[-1]
+            singular_s_exceptions = {
+                "analysis",
+                "basis",
+                "census",
+                "corpus",
+                "crisis",
+                "news",
+                "series",
+                "species",
+                "status",
+                "thesis",
+            }
+            if (
+                nominal_head.endswith("s")
+                and not nominal_head.endswith("ss")
+                and nominal_head not in singular_s_exceptions
+            ):
+                return "multiple"
     return "single"
 
 

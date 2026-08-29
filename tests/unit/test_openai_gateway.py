@@ -465,6 +465,11 @@ class MessageTests(unittest.TestCase):
         self.assertIn("never change an alias, abbreviation", formatter_user)
         self.assertIn(composite_candidate, formatter_user)
         self.assertIn("do not shorten", formatter_user)
+        self.assertIn(
+            "no whitespace or newline between the tags",
+            formatter_user,
+        )
+        self.assertIn("literal word `None`", formatter_user)
         self.assertNotIn("OUTPUT ANSWER VALUE ONLY", formatter_user)
         self.assertNotIn("PRESERVE SYMBOLIC FORMS", formatter_user)
         self.assertNotIn(original_question, formatter_system)
@@ -822,6 +827,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "encode that requested value as the answer-bearing proposition's "
             "object_or_attribute_value",
+            payload["messages"][0]["content"],
+        )
+        self.assertIn(
+            'answer_cardinality exactly to "single"',
             payload["messages"][0]["content"],
         )
 

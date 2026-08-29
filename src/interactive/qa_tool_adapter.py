@@ -61,6 +61,8 @@ from .tool_runtime import (
 # search action that produces its opaque passage_id.
 QA_RETRIEVAL_TOOL_ID = "qa-retrieval"
 TRIVIAQA_QA_MEMORY_TOOL_ID = "triviaqa.qa_memory"
+_QA_MEMORY_RECORD_KIND = "qa_memory"
+_FACT_MEMORY_RECORD_KIND = "fact_memory"
 QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL = "qa_verified_answer_lineage_v2"
 DEFAULT_QA_DATASET_SCOPE = ("hotpotqa", "triviaqa")
 _QA_MEMORY_OPTIONAL_FIELDS = (
@@ -104,9 +106,51 @@ _QA_MEMORY_CANDIDATE_FIELDS = (
     "paraphrase_answer_statement",
     "canonical_answer",
 )
+_FACT_MEMORY_FIELDS = (
+    "memory_id",
+    "fact_text",
+)
+_FACT_MEMORY_CANDIDATE_FIELDS = (
+    "rank",
+    "similarity",
+    "memory_id",
+    "fact_text",
+)
 _SUPPORTED_QA_RETRIEVAL_TOOL_IDS = frozenset(
     {QA_RETRIEVAL_TOOL_ID, TRIVIAQA_QA_MEMORY_TOOL_ID}
 )
+
+
+def _fact_memory_receipt_batch(
+    tool_receipts: Sequence[Mapping[str, object]],
+) -> bool:
+    """Return whether a successful search publishes the fact-memory wire."""
+
+    for receipt in tool_receipts:
+        if (
+            not isinstance(receipt, Mapping)
+            or receipt.get("tool_id") != TRIVIAQA_QA_MEMORY_TOOL_ID
+            or receipt.get("error_type") is not None
+        ):
+            continue
+        request = receipt.get("request")
+        result = receipt.get("result")
+        if (
+            not isinstance(request, Mapping)
+            or request.get("action") != "search"
+            or not isinstance(result, Mapping)
+            or result.get("completed") is not True
+        ):
+            continue
+        value = result.get("value", result)
+        hits = value.get("hits") if isinstance(value, Mapping) else None
+        if isinstance(hits, list) and hits and all(
+            isinstance(hit, Mapping)
+            and set(hit) == set(_FACT_MEMORY_CANDIDATE_FIELDS)
+            for hit in hits
+        ):
+            return True
+    return False
 
 
 def _qa_memory_relevant_candidates(
@@ -160,6 +204,11 @@ def _qa_memory_relevant_candidates(
         admitted_ids = frozenset(relevant_ids)
         for candidate in candidates:
             if not isinstance(candidate, Mapping):
+                continue
+            # ``fact_memory`` deliberately has no canonical answer field.  It
+            # remains ordinary receipt-grounded evidence for the Reasoner and
+            # must never enter the legacy QA-pair constrained-decoding path.
+            if "fact_text" in candidate:
                 continue
             memory_id = candidate.get("memory_id")
             answer = candidate.get("canonical_answer")
@@ -2992,20 +3041,36 @@ def _question_named_constraint_tokens(
     """Return explicit question-side named scope tokens outside the entity."""
 
     entity_anchor = _question_entity_anchor_tokens(original_question)
+    normalized_question = _normalize_abnormal_possessive_surface(
+        original_question
+    )
     named: set[str] = set()
     for index, match in enumerate(
         re.finditer(
             r"[^\W\d_]+(?:[-'’][^\W\d_]+)*",
-            _normalize_abnormal_possessive_surface(original_question),
+            normalized_question,
             flags=re.UNICODE,
         )
     ):
         surface = match.group(0)
         token = surface.casefold()
+        # ``No`` in public chart-rank surfaces such as ``No 1`` or
+        # ``No. 1`` is an abbreviation for "number", not a named entity or
+        # title token. Keep the public question unchanged; only prevent the
+        # query-scope gate from treating this marker as a proper name.
+        numeric_rank_marker = bool(
+            token == "no"
+            and re.match(
+                r"\s*\.?\s*\d+\b",
+                normalized_question[match.end() :],
+                flags=re.UNICODE,
+            )
+        )
         if (
             not surface[:1].isupper()
             or (index == 0 and token in _QUESTION_ANCHOR_WH_WORDS)
             or token in _RELATION_CONTEXT_STOPWORDS
+            or numeric_rank_marker
             or any(
                 _relation_token_variants(token)
                 & _relation_token_variants(anchor)
@@ -3610,8 +3675,60 @@ def _public_search_transition_mirror(
         return False, ()
     action_query = arguments.get("query")
     action_limit = arguments.get("limit")
-    raw_passage_ids = result.get("passage_ids")
+    resource_id = executed_action.get("resource_id")
+    raw_memory_ids = result.get("memory_ids")
     raw_hits = result.get("hits")
+    if (
+        resource_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+        and isinstance(raw_memory_ids, list)
+        and isinstance(raw_hits, list)
+        and raw_hits
+        and all(
+            isinstance(hit, Mapping) and "fact_text" in hit
+            for hit in raw_hits
+        )
+    ):
+        verified_fact_hits = True
+        normalized_ids: list[str] = []
+        for expected_rank, (memory_id, hit) in enumerate(
+            zip(raw_memory_ids, raw_hits),
+            start=1,
+        ):
+            if (
+                not isinstance(memory_id, str)
+                or not memory_id.strip()
+                or memory_id != memory_id.strip()
+                or not isinstance(hit, Mapping)
+                or set(hit) != set(_FACT_MEMORY_CANDIDATE_FIELDS)
+                or hit.get("memory_id") != memory_id
+                or hit.get("rank") != expected_rank
+                or isinstance(hit.get("similarity"), bool)
+                or not isinstance(hit.get("similarity"), (int, float))
+                or not isinstance(hit.get("fact_text"), str)
+                or not hit["fact_text"].strip()
+                or hit["fact_text"] != hit["fact_text"].strip()
+            ):
+                verified_fact_hits = False
+                continue
+            normalized_ids.append(memory_id)
+        verified = bool(
+            observation.get("observation_status") == "success"
+            and executed_action.get("kind") == "tool"
+            and executed_action.get("name") == "search"
+            and set(arguments) == {"query", "limit"}
+            and isinstance(action_query, str)
+            and bool(action_query.strip())
+            and action_query == result.get("query")
+            and type(action_limit) is int
+            and action_limit > 0
+            and action_limit == result.get("top_k")
+            and result.get("operation") == "search"
+            and len(raw_memory_ids) == len(raw_hits)
+            and len(normalized_ids) == len(raw_memory_ids)
+            and verified_fact_hits
+        )
+        return verified, tuple(normalized_ids) if verified else ()
+    raw_passage_ids = result.get("passage_ids")
     if not isinstance(raw_passage_ids, list) or not isinstance(raw_hits, list):
         return False, ()
     if len(raw_passage_ids) != len(raw_hits):
@@ -3627,7 +3744,6 @@ def _public_search_transition_mirror(
         "snippet",
         "title",
     }
-    resource_id = executed_action.get("resource_id")
     admitted_hit_fields = required_hit_fields | {
         "similarity",
         *(
@@ -3712,7 +3828,8 @@ def _public_read_transition_mirror(
     if result_passage_id is None:
         result_passage_id = _retrieval_record_id(passage)
     passage_passage_id = _retrieval_record_id(passage)
-    passage_text = passage.get("text")
+    fact_record = "fact_text" in passage
+    passage_text = passage.get("fact_text" if fact_record else "text")
     verified = bool(
         observation.get("observation_status") == "success"
         and executed_action.get("kind") == "tool"
@@ -3731,6 +3848,10 @@ def _public_read_transition_mirror(
         and result.get("operation") == "read"
         and isinstance(passage_text, str)
         and bool(passage_text.strip())
+        and (
+            not fact_record
+            or set(passage) == set(_FACT_MEMORY_FIELDS)
+        )
     )
     return verified, passage_text.strip() if verified else None
 
@@ -4740,8 +4861,21 @@ def _qa_memory_projection(
 
 
 def _is_qa_memory_index(index: _RetrievalIndex) -> bool:
-    return (
+    record_kind = getattr(index.manifest, "record_kind", None)
+    if record_kind is None and (
         getattr(index.manifest, "tool_id", None)
+        == TRIVIAQA_QA_MEMORY_TOOL_ID
+    ):
+        # Backward compatibility for the first QA-memory manifest revision.
+        record_kind = _QA_MEMORY_RECORD_KIND
+    return record_kind == _QA_MEMORY_RECORD_KIND
+
+
+def _is_fact_memory_index(index: _RetrievalIndex) -> bool:
+    return (
+        getattr(index.manifest, "record_kind", None)
+        == _FACT_MEMORY_RECORD_KIND
+        and getattr(index.manifest, "tool_id", None)
         == TRIVIAQA_QA_MEMORY_TOOL_ID
     )
 
@@ -4783,6 +4917,11 @@ def _semantic_compatible_read_receipt(
                 if isinstance(memory_id, str):
                     passage.setdefault("passage_id", memory_id)
                     value.setdefault("passage_id", memory_id)
+                fact_text = passage.get("fact_text")
+                if isinstance(fact_text, str) and fact_text.strip():
+                    passage.setdefault("text", fact_text)
+                    passage.setdefault("title", fact_text)
+                    passage.setdefault("document_id", memory_id)
                 value.setdefault("passage", passage)
     return compatible
 
@@ -4821,10 +4960,42 @@ class QASearchToolBackend:
             )
 
         qa_memory = _is_qa_memory_index(self.index)
+        fact_memory = _is_fact_memory_index(self.index)
         raw_hits = self.index.search(query, limit=limit)
         hits = await raw_hits if inspect.isawaitable(raw_hits) else raw_hits
         public_hits: list[dict[str, object]] = []
         for hit in hits:
+            if fact_memory:
+                fact_fields = _qa_memory_projection(
+                    hit,
+                    fields=_FACT_MEMORY_FIELDS,
+                )
+                memory_id = fact_fields.get("memory_id")
+                fact_text = fact_fields.get("fact_text")
+                similarity = getattr(hit, "similarity", None)
+                if (
+                    not isinstance(memory_id, str)
+                    or not memory_id.strip()
+                    or memory_id != memory_id.strip()
+                    or not isinstance(fact_text, str)
+                    or not fact_text.strip()
+                    or fact_text != fact_text.strip()
+                    or isinstance(similarity, bool)
+                    or not isinstance(similarity, (int, float))
+                ):
+                    raise ValueError(
+                        "fact-memory search hits require memory_id, fact_text, "
+                        "and numeric similarity"
+                    )
+                public_hits.append(
+                    {
+                        "memory_id": memory_id,
+                        "rank": int(getattr(hit, "rank")),
+                        "similarity": float(similarity),
+                        "fact_text": fact_text,
+                    }
+                )
+                continue
             qa_memory_fields = (
                 _qa_memory_projection(hit, fields=_QA_MEMORY_SEARCH_FIELDS)
                 if qa_memory
@@ -4860,6 +5031,17 @@ class QASearchToolBackend:
             if similarity is not None:
                 public_hit["similarity"] = float(similarity)
             public_hits.append(public_hit)
+        if fact_memory:
+            return ToolResult(
+                {
+                    "operation": "search",
+                    "retrieval_index": dict(self.index_identity),
+                    "query": query,
+                    "top_k": limit,
+                    "memory_ids": [hit["memory_id"] for hit in public_hits],
+                    "hits": public_hits,
+                }
+            )
         result: dict[str, object] = {
             "operation": "search",
             "retrieval_index": dict(self.index_identity),
@@ -4885,7 +5067,8 @@ class QAReadToolBackend:
         # affinity preserved by this async adapter boundary.
         _validate_action(request, "read")
         qa_memory = _is_qa_memory_index(self.index)
-        id_field = "memory_id" if qa_memory else "passage_id"
+        fact_memory = _is_fact_memory_index(self.index)
+        id_field = "memory_id" if qa_memory or fact_memory else "passage_id"
         if set(request.arguments) != {id_field}:
             raise ValueError(f"read arguments must contain exactly {id_field}")
         passage_id = request.arguments[id_field]
@@ -4896,6 +5079,29 @@ class QAReadToolBackend:
         passage = (
             await raw_passage if inspect.isawaitable(raw_passage) else raw_passage
         )
+        if fact_memory:
+            public_memory = _qa_memory_projection(
+                passage,
+                fields=_FACT_MEMORY_FIELDS,
+            )
+            if (
+                public_memory.get("memory_id") != passage_id
+                or not isinstance(public_memory.get("fact_text"), str)
+                or not public_memory["fact_text"].strip()
+                or public_memory["fact_text"] != public_memory["fact_text"].strip()
+            ):
+                raise ValueError(
+                    "fact-memory read record must contain matching memory_id "
+                    "and non-empty fact_text"
+                )
+            return ToolResult(
+                {
+                    "operation": "read",
+                    "retrieval_index": dict(self.index_identity),
+                    "memory_id": passage_id,
+                    "memory": public_memory,
+                }
+            )
         public_passage = {
             "passage_id": str(getattr(passage, "passage_id")),
             "document_id": str(getattr(passage, "document_id")),
@@ -5012,8 +5218,20 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         )
         self._retrieval_tool_id = retrieval_tool_id
         self._frozen_search_limit: int | None = None
+        self._fact_memory = False
         if retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID:
             capability = tool_registry.require_capability(retrieval_tool_id)
+            record_kind = capability.output_schema.get(
+                "x-flowsteer-record-kind"
+            )
+            if record_kind not in {
+                _QA_MEMORY_RECORD_KIND,
+                _FACT_MEMORY_RECORD_KIND,
+            }:
+                raise ValueError(
+                    "TriviaQA memory Tool capability must publish record_kind"
+                )
+            self._fact_memory = record_kind == _FACT_MEMORY_RECORD_KIND
             search_schema = capability.action_schemas.get("search")
             properties = (
                 search_schema.get("properties")
@@ -5066,6 +5284,13 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             default=(),
         )
 
+    def _expected_source_task_id(self) -> str | None:
+        """Keep evaluator/task identity outside the fact-memory execution path."""
+
+        if self._fact_memory or self._sampling_coordinate is None:
+            return None
+        return self._sampling_coordinate.task_id
+
     def _unified_factual_protocol(self, request: AgentRequest) -> bool:
         return (
             self._task_type == "factual_qa"
@@ -5111,6 +5336,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         original_question = qa_question_scope(request.problem)
         validated_receipts: list[Mapping[str, object]] = []
         for message in messages:
+            if message.target_agent_id != request.agent.id:
+                continue
             message_receipts = tuple(
                 receipt
                 for receipt in message.tool_receipts
@@ -5124,11 +5351,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 parametric_fallback_after_coverage_failure=(
                     self._parametric_fallback_after_coverage_failure
                 ),
-                expected_source_task_id=(
-                    None
-                    if self._sampling_coordinate is None
-                    else self._sampling_coordinate.task_id
-                ),
+                expected_source_task_id=self._expected_source_task_id(),
             ) is not None:
                 continue
             validated_receipts.extend(message_receipts)
@@ -6313,11 +6536,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             value = receipt_result.get("value", receipt_result)
             if not isinstance(value, Mapping) or value.get("operation") != "read":
                 continue
-            passage = value.get("passage")
+            passage = value.get("memory", value.get("passage"))
+            passage_text = (
+                passage.get("fact_text", passage.get("text"))
+                if isinstance(passage, Mapping)
+                else None
+            )
             if (
                 not isinstance(passage, Mapping)
-                or not isinstance(passage.get("text"), str)
-                or not passage["text"].strip()
+                or not isinstance(passage_text, str)
+                or not passage_text.strip()
             ):
                 continue
             arguments = receipt_request.get("arguments")
@@ -6419,7 +6647,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     if isinstance(arguments, Mapping):
                         query = arguments.get("query", query)
                         top_k = arguments.get("limit", top_k)
-                raw_ids = result.get("passage_ids")
+                raw_ids = result.get("passage_ids", result.get("memory_ids"))
                 if isinstance(raw_ids, list):
                     for value in raw_ids:
                         if not isinstance(value, str) or not value.strip():
@@ -6461,11 +6689,20 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     location_containment_repair_hit_counts.append(
                         len(latest_search_passage_ids)
                     )
-            elif (
-                result.get("operation") == "read"
-                and isinstance(result.get("passage"), Mapping)
-                and isinstance(result["passage"].get("text"), str)
-                and bool(result["passage"]["text"].strip())
+            elif result.get("operation") == "read" and isinstance(
+                result.get("memory", result.get("passage")),
+                Mapping,
+            ) and isinstance(
+                result.get("memory", result.get("passage", {})).get(
+                    "fact_text",
+                    result.get("memory", result.get("passage", {})).get("text"),
+                ),
+                str,
+            ) and bool(
+                result.get("memory", result.get("passage", {})).get(
+                    "fact_text",
+                    result.get("memory", result.get("passage", {})).get("text"),
+                ).strip()
             ):
                 latest_successful_operation = "read"
                 latest_successful_read_index = observation_index
@@ -6480,9 +6717,9 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         str,
                     )
                 ):
-                    passage = result["passage"]
+                    passage = result.get("memory", result.get("passage"))
                     assert isinstance(passage, Mapping)
-                    passage_text = passage.get("text")
+                    passage_text = passage.get("fact_text", passage.get("text"))
                     passage_title = passage.get("title")
                     named_scope = _explicit_named_geographic_scope(
                         qa_question_scope(request.problem)
@@ -6518,9 +6755,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     if relation_grounded:
                         location_containment_repair_read_count += 1
                         location_relation_grounding_pending = False
-                raw_passage_id = result.get("passage_id")
+                read_record = result.get("memory", result.get("passage"))
+                assert isinstance(read_record, Mapping)
+                raw_passage_id = result.get("memory_id", result.get("passage_id"))
                 if not isinstance(raw_passage_id, str):
-                    raw_passage_id = result["passage"].get("passage_id")
+                    raw_passage_id = _retrieval_record_id(read_record)
                 if not isinstance(raw_passage_id, str) and isinstance(
                     executed_action, Mapping
                 ):
@@ -7049,6 +7288,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             and semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
             and self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
         ):
+            retrieved_record_label = (
+                "self-contained declarative fact"
+                if self._fact_memory
+                else "QA pair"
+            )
             # PROJECT_NECESSARY_ADAPTATION: SkillFlow owns the ordered
             # search(query, top-k) -> read(memory_id) Tool transitions.  The
             # worker must preserve the complete embedding-ranked candidate set
@@ -7096,7 +7340,8 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                             "knowledge_base_coverage_failure",
                                         ],
                                         "description": (
-                                            "After reading every returned QA pair, use "
+                                            "After reading every returned "
+                                            f"{retrieved_record_label}, use "
                                             "evidence_found only when at least one "
                                             "record matches the question entity and "
                                             "requested relation and supplies the answer. "
@@ -8645,6 +8890,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
                     and self._retrieval_tool_id
                     == TRIVIAQA_QA_MEMORY_TOOL_ID
+                    and not self._fact_memory
                     and self._sampling_coordinate is not None
                     and isinstance(response, AgentResponse)
                 ):
@@ -8966,6 +9212,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 semantic_evidence_retriever_protocol
                 == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
                 and self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+                and not self._fact_memory
                 and self._sampling_coordinate is not None
             ):
                 exc.qa_memory_query_task_id = (
@@ -9138,23 +9385,36 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 and request.semantic_protocol
                 == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
             ):
-                terminal_wire += (
-                    " As the Evidence Retriever for triviaqa.qa_memory, "
-                    "arguments.value must contain only memory_ids. Copy every "
-                    "memory_id from the latest successful embedding search in "
-                    "original rank order after reading each one in that same "
-                    "order. The runtime deterministically projects the complete "
-                    "ranked candidate list, including rank, similarity, "
-                    "source_train_task_id, paraphrase_question, "
-                    "paraphrase_answer_statement, and canonical_answer, from "
-                    "the matching search/read receipts; do not copy or guess "
-                    "those fields. Search observations expose candidate "
-                    "questions and opaque IDs only; answer fields become "
-                    "available only after each read(memory_id). The Reasoner "
-                    "owns semantic selection over the routed top-k list, and the "
-                    "Verifier and Format Agent retain their existing lineage "
-                    "responsibilities."
-                )
+                if self._fact_memory:
+                    terminal_wire += (
+                        " As the Evidence Retriever for triviaqa.qa_memory, "
+                        "copy every memory_id from the latest successful "
+                        "embedding search in original rank order after reading "
+                        "each one in that same order. The runtime projects only "
+                        "memory_id, rank, similarity, and the self-contained "
+                        "declarative fact_text from matching search/read receipts. "
+                        "Do not infer a hidden question, canonical answer, source "
+                        "task, or evaluator label. The routed Reasoner owns "
+                        "semantic answer selection from fact_text."
+                    )
+                else:
+                    terminal_wire += (
+                        " As the Evidence Retriever for triviaqa.qa_memory, "
+                        "arguments.value must contain only memory_ids. Copy every "
+                        "memory_id from the latest successful embedding search in "
+                        "original rank order after reading each one in that same "
+                        "order. The runtime deterministically projects the complete "
+                        "ranked candidate list, including rank, similarity, "
+                        "source_train_task_id, paraphrase_question, "
+                        "paraphrase_answer_statement, and canonical_answer, from "
+                        "the matching search/read receipts; do not copy or guess "
+                        "those fields. Search observations expose candidate "
+                        "questions and opaque IDs only; answer fields become "
+                        "available only after each read(memory_id). The Reasoner "
+                        "owns semantic selection over the routed top-k list, and the "
+                        "Verifier and Format Agent retain their existing lineage "
+                        "responsibilities."
+                    )
             elif completion_admitted:
                 terminal_wire += (
                     " As the Evidence Retriever, arguments.value must contain "
@@ -9872,6 +10132,253 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         return False
 
     @staticmethod
+    def _fact_memory_completion_receipt_projection(
+        *,
+        original_question: str,
+        selection_artifact: str,
+        tool_receipts: Sequence[Mapping[str, object]],
+        parametric_fallback_after_coverage_failure: bool = False,
+    ) -> tuple[str | None, str | None]:
+        """Project one complete embedding-ranked fact batch from worker receipts."""
+
+        try:
+            selection = json.loads(selection_artifact)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None, "TriviaQA fact-memory completion must select memory_ids"
+        if not isinstance(selection, Mapping):
+            return None, "TriviaQA fact-memory completion must select memory_ids"
+        selected_ids = selection.get("memory_ids")
+        if (
+            not isinstance(selected_ids, list)
+            or not selected_ids
+            or any(
+                not isinstance(memory_id, str)
+                or not memory_id.strip()
+                or memory_id != memory_id.strip()
+                for memory_id in selected_ids
+            )
+            or len(selected_ids) != len(set(selected_ids))
+        ):
+            return None, (
+                "TriviaQA fact-memory memory_ids must be unique non-empty "
+                "trimmed strings in embedding rank order"
+            )
+
+        retrieval_status: str | None = None
+        relevant_memory_ids: list[str] | None = None
+        if parametric_fallback_after_coverage_failure:
+            retrieval_status = selection.get("retrieval_status")
+            raw_relevant_ids = selection.get("relevant_memory_ids")
+            if retrieval_status not in {
+                "evidence_found",
+                _KNOWLEDGE_BASE_COVERAGE_FAILURE,
+            }:
+                return None, (
+                    "TriviaQA fact-memory retrieval_status must be "
+                    "evidence_found or knowledge_base_coverage_failure"
+                )
+            if (
+                not isinstance(raw_relevant_ids, list)
+                or any(
+                    not isinstance(memory_id, str)
+                    or not memory_id.strip()
+                    or memory_id != memory_id.strip()
+                    for memory_id in raw_relevant_ids
+                )
+                or len(raw_relevant_ids) != len(set(raw_relevant_ids))
+            ):
+                return None, (
+                    "TriviaQA fact-memory relevant_memory_ids must be unique "
+                    "non-empty trimmed strings"
+                )
+            relevant_set = set(raw_relevant_ids)
+            if raw_relevant_ids != [
+                memory_id
+                for memory_id in selected_ids
+                if memory_id in relevant_set
+            ]:
+                return None, (
+                    "TriviaQA fact-memory relevant_memory_ids must be a subset "
+                    "of memory_ids in embedding rank order"
+                )
+            if retrieval_status == "evidence_found" and not raw_relevant_ids:
+                return None, (
+                    "TriviaQA fact-memory evidence_found requires at least one "
+                    "relevant_memory_id"
+                )
+            if (
+                retrieval_status == _KNOWLEDGE_BASE_COVERAGE_FAILURE
+                and raw_relevant_ids
+            ):
+                return None, (
+                    "TriviaQA fact-memory knowledge_base_coverage_failure "
+                    "requires an empty relevant_memory_ids list"
+                )
+            relevant_memory_ids = list(raw_relevant_ids)
+
+        latest_search: tuple[int, Mapping[str, object], Mapping[str, object]] | None = None
+        for receipt_index, receipt in enumerate(tool_receipts):
+            if (
+                not isinstance(receipt, Mapping)
+                or receipt.get("tool_id") != TRIVIAQA_QA_MEMORY_TOOL_ID
+                or receipt.get("error_type") is not None
+            ):
+                continue
+            request = receipt.get("request")
+            result = receipt.get("result")
+            if not isinstance(request, Mapping) or not isinstance(result, Mapping):
+                continue
+            arguments = request.get("arguments")
+            value = result.get("value", result)
+            if not isinstance(arguments, Mapping) or not isinstance(value, Mapping):
+                continue
+            if (
+                request.get("action") != "search"
+                or result.get("completed") is not True
+                or value.get("operation") != "search"
+                or set(arguments) != {"query", "limit"}
+                or not isinstance(arguments.get("query"), str)
+                or not arguments["query"].strip()
+                or type(arguments.get("limit")) is not int
+                or arguments["limit"] < 1
+                or value.get("query") != arguments["query"]
+                or value.get("top_k") != arguments["limit"]
+            ):
+                continue
+            raw_ids = value.get("memory_ids")
+            hits = value.get("hits")
+            if (
+                not isinstance(raw_ids, list)
+                or not raw_ids
+                or len(raw_ids) != len(set(raw_ids))
+                or not isinstance(hits, list)
+                or len(hits) != len(raw_ids)
+                or any(
+                    not isinstance(hit, Mapping)
+                    or set(hit) != set(_FACT_MEMORY_CANDIDATE_FIELDS)
+                    for hit in hits
+                )
+            ):
+                continue
+            latest_search = (receipt_index, arguments, value)
+        if latest_search is None:
+            return None, (
+                "TriviaQA fact-memory memory_ids do not equal one successful "
+                "embedding search top-k result"
+            )
+        search_index, search_arguments, search_value = latest_search
+        if search_value.get("memory_ids") != selected_ids:
+            return None, (
+                "TriviaQA fact-memory memory_ids must exactly equal the latest "
+                "successful embedding search result"
+            )
+
+        hits = search_value["hits"]
+        assert isinstance(hits, list)
+        hit_by_id: dict[str, Mapping[str, object]] = {}
+        for expected_rank, (memory_id, hit) in enumerate(
+            zip(selected_ids, hits),
+            start=1,
+        ):
+            assert isinstance(hit, Mapping)
+            similarity = hit.get("similarity")
+            fact_text = hit.get("fact_text")
+            if (
+                hit.get("memory_id") != memory_id
+                or hit.get("rank") != expected_rank
+                or isinstance(similarity, bool)
+                or not isinstance(similarity, (int, float))
+                or not isinstance(fact_text, str)
+                or not fact_text.strip()
+                or fact_text != fact_text.strip()
+            ):
+                return None, (
+                    "TriviaQA fact-memory search hits must contain exact "
+                    "memory_id/rank/similarity/fact_text fields in rank order"
+                )
+            hit_by_id[memory_id] = hit
+
+        read_by_id: dict[str, Mapping[str, object]] = {}
+        observed_read_order: list[str] = []
+        for receipt in tool_receipts[search_index + 1 :]:
+            if (
+                not isinstance(receipt, Mapping)
+                or receipt.get("tool_id") != TRIVIAQA_QA_MEMORY_TOOL_ID
+                or receipt.get("error_type") is not None
+            ):
+                continue
+            request = receipt.get("request")
+            result = receipt.get("result")
+            if not isinstance(request, Mapping) or not isinstance(result, Mapping):
+                continue
+            arguments = request.get("arguments")
+            value = result.get("value", result)
+            if (
+                request.get("action") != "read"
+                or result.get("completed") is not True
+                or not isinstance(arguments, Mapping)
+                or set(arguments) != {"memory_id"}
+                or not isinstance(value, Mapping)
+                or value.get("operation") != "read"
+            ):
+                continue
+            memory_id = arguments.get("memory_id")
+            memory = value.get("memory")
+            if (
+                not isinstance(memory_id, str)
+                or memory_id not in hit_by_id
+                or not isinstance(memory, Mapping)
+                or set(memory) != set(_FACT_MEMORY_FIELDS)
+                or value.get("memory_id") != memory_id
+                or memory.get("memory_id") != memory_id
+                or memory.get("fact_text") != hit_by_id[memory_id].get("fact_text")
+            ):
+                continue
+            if memory_id in read_by_id:
+                return None, (
+                    "TriviaQA fact-memory top-k contains a duplicate successful "
+                    "read(memory_id) receipt"
+                )
+            observed_read_order.append(memory_id)
+            read_by_id[memory_id] = memory
+        if observed_read_order != selected_ids:
+            return None, (
+                "TriviaQA fact-memory completion requires one successful "
+                "read(memory_id) for every embedding hit in original rank order"
+            )
+
+        projected: dict[str, object] = {
+            "question_scope": original_question,
+            "retrieval_query": search_arguments["query"],
+            "top_k": search_arguments["limit"],
+            "candidates": [
+                {
+                    "rank": hit_by_id[memory_id]["rank"],
+                    "similarity": float(hit_by_id[memory_id]["similarity"]),
+                    "memory_id": memory_id,
+                    "fact_text": read_by_id[memory_id]["fact_text"],
+                }
+                for memory_id in selected_ids
+            ],
+        }
+        if parametric_fallback_after_coverage_failure:
+            projected.update(
+                {
+                    "retrieval_status": retrieval_status,
+                    "relevant_memory_ids": relevant_memory_ids,
+                }
+            )
+        return (
+            json.dumps(
+                projected,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            None,
+        )
+
+    @staticmethod
     def _qa_memory_evidence_retriever_completion_issue(
         *,
         original_question: str,
@@ -9884,6 +10391,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
 
         from .agent_workflow_env import AgentWorkflowEnv
 
+        fact_memory = _fact_memory_receipt_batch(tool_receipts)
         required_fields = _QA_MEMORY_EVIDENCE_ARTIFACT_FIELDS + (
             _QA_MEMORY_RETRIEVAL_STATUS_FIELDS
             if parametric_fallback_after_coverage_failure
@@ -9904,11 +10412,11 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         if (
             not isinstance(retrieval_query, str)
             or not retrieval_query.strip()
-            or retrieval_query != retrieval_query.strip()
         ):
             return (
                 "TriviaQA QA-memory Evidence Retriever retrieval_query must "
-                "be non-empty trimmed text"
+                "be non-empty text copied exactly from the successful search "
+                "Tool receipt"
             )
         top_k = fields.get("top_k")
         if type(top_k) is not int or top_k < 1:
@@ -9929,9 +10437,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "TriviaQA QA-memory Evidence Retriever candidate "
                     f"{index} must be an object"
                 )
-            if set(candidate) != set(_QA_MEMORY_CANDIDATE_FIELDS):
+            expected_candidate_fields = (
+                _FACT_MEMORY_CANDIDATE_FIELDS
+                if fact_memory
+                else _QA_MEMORY_CANDIDATE_FIELDS
+            )
+            if set(candidate) != set(expected_candidate_fields):
                 return (
-                    "TriviaQA QA-memory Evidence Retriever candidate "
+                    "TriviaQA memory Evidence Retriever candidate "
                     f"{index} fields must equal the ranked candidate schema"
                 )
             memory_id = candidate.get("memory_id")
@@ -10056,6 +10569,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         expected_source_task_id: str | None = None,
     ) -> tuple[str | None, str | None]:
         """Project a complete embedding-ranked batch from exact Tool receipts."""
+
+        if _fact_memory_receipt_batch(tool_receipts):
+            return QARetrievalReactExecutionAdapter._fact_memory_completion_receipt_projection(
+                original_question=original_question,
+                selection_artifact=selection_artifact,
+                tool_receipts=tool_receipts,
+                parametric_fallback_after_coverage_failure=(
+                    parametric_fallback_after_coverage_failure
+                ),
+            )
 
         from .agent_workflow_env import AgentWorkflowEnv
 
@@ -10980,11 +11503,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 parametric_fallback_after_coverage_failure=(
                     self._parametric_fallback_after_coverage_failure
                 ),
-                expected_source_task_id=(
-                    None
-                    if self._sampling_coordinate is None
-                    else self._sampling_coordinate.task_id
-                ),
+                expected_source_task_id=self._expected_source_task_id(),
             )
             if projected is not None:
                 return projected
@@ -11018,11 +11537,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     parametric_fallback_after_coverage_failure=(
                         self._parametric_fallback_after_coverage_failure
                     ),
-                    expected_source_task_id=(
-                        None
-                        if self._sampling_coordinate is None
-                        else self._sampling_coordinate.task_id
-                    ),
+                    expected_source_task_id=self._expected_source_task_id(),
                 )
             )
             if projection_issue is not None or projected is None:
@@ -11086,7 +11601,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "result": dict(value),
                 }
             )
-            raw_passage_ids = value.get("passage_ids")
+            raw_passage_ids = value.get(
+                "passage_ids",
+                value.get("memory_ids"),
+            )
             successful_search_hit_counts.append(
                 len(
                     {
@@ -11190,11 +11708,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                 parametric_fallback_after_coverage_failure=(
                     self._parametric_fallback_after_coverage_failure
                 ),
-                expected_source_task_id=(
-                    None
-                    if self._sampling_coordinate is None
-                    else self._sampling_coordinate.task_id
-                ),
+                expected_source_task_id=self._expected_source_task_id(),
             )
             if issue is None:
                 return None
@@ -12133,7 +12647,13 @@ def build_qa_tool_registry(
     scope = tuple(dataset_scope)
     identity = _index_identity(index)
     version = str(identity["index_id"])
-    qa_memory = resolved_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+    memory_resource = resolved_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
+    qa_memory = _is_qa_memory_index(index)
+    fact_memory = _is_fact_memory_index(index)
+    if memory_resource and not (qa_memory or fact_memory):
+        raise ValueError(
+            "TriviaQA memory manifest record_kind must be qa_memory or fact_memory"
+        )
     frozen_top_k = getattr(index.manifest, "frozen_top_k", None)
     if frozen_top_k is not None and (
         type(frozen_top_k) is not int or frozen_top_k < 1
@@ -12171,12 +12691,14 @@ def build_qa_tool_registry(
         },
     }
     search_input_schema["properties"]["query"]["description"] = (
-        "A focused query for the missing public fact or relation."
+        "A focused query for the missing fact or relation."
     )
     search_input_schema["properties"]["limit"]["description"] = (
-        "The positive number of ranked public passages to return."
+        "The positive number of ranked fact records to return."
+        if fact_memory
+        else "The positive number of ranked public passages to return."
     )
-    read_id_field = "memory_id" if qa_memory else "passage_id"
+    read_id_field = "memory_id" if memory_resource else "passage_id"
     read_input_schema = {
         "type": "object",
         "additionalProperties": False,
@@ -12198,28 +12720,36 @@ def build_qa_tool_registry(
         "retrieval_index",
         "query",
         "top_k",
-        "passage_ids",
         "hits",
     ]
+    if not fact_memory:
+        search_required.append("passage_ids")
     search_properties: dict[str, object] = {
         "operation": {"const": "search"},
         "retrieval_index": identity_schema,
         "query": {"type": "string"},
         "top_k": {"type": "integer"},
-        "passage_ids": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
         "hits": {"type": "array", "items": {"type": "object"}},
     }
-    read_required = ["operation", "retrieval_index", "passage_id", "passage"]
+    if not fact_memory:
+        search_properties["passage_ids"] = {
+            "type": "array",
+            "items": {"type": "string"},
+        }
+    read_required = ["operation", "retrieval_index"]
     read_properties: dict[str, object] = {
         "operation": {"const": "read"},
         "retrieval_index": identity_schema,
-        "passage_id": {"type": "string"},
-        "passage": {"type": "object"},
     }
-    if qa_memory:
+    if not fact_memory:
+        read_required.extend(("passage_id", "passage"))
+        read_properties.update(
+            {
+                "passage_id": {"type": "string"},
+                "passage": {"type": "object"},
+            }
+        )
+    if memory_resource:
         search_required.append("memory_ids")
         search_properties["memory_ids"] = {
             "type": "array",
@@ -12232,6 +12762,32 @@ def build_qa_tool_registry(
                 "memory": {"type": "object"},
             }
         )
+    if fact_memory:
+        fact_text_schema = {"type": "string", "minLength": 1}
+        memory_id_schema = {"type": "string", "minLength": 1}
+        search_properties["hits"] = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(_FACT_MEMORY_CANDIDATE_FIELDS),
+                "properties": {
+                    "memory_id": memory_id_schema,
+                    "rank": {"type": "integer", "minimum": 1},
+                    "similarity": {"type": "number"},
+                    "fact_text": fact_text_schema,
+                },
+            },
+        }
+        read_properties["memory"] = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(_FACT_MEMORY_FIELDS),
+            "properties": {
+                "memory_id": memory_id_schema,
+                "fact_text": fact_text_schema,
+            },
+        }
     retrieval_capability = ToolCapability(
         tool_id=resolved_tool_id,
         dataset_scope=scope,
@@ -12243,6 +12799,13 @@ def build_qa_tool_registry(
             "oneOf": [search_input_schema, read_input_schema],
         },
         output_schema={
+            "x-flowsteer-record-kind": (
+                _FACT_MEMORY_RECORD_KIND
+                if fact_memory
+                else _QA_MEMORY_RECORD_KIND
+                if qa_memory
+                else "passage"
+            ),
             "oneOf": [
                 {
                     "type": "object",
@@ -12345,15 +12908,23 @@ def open_qa_tool_registry(
         if not isinstance(manifest_value, Mapping):
             raise SkillFlowRetrievalError("QA retrieval manifest must be a mapping")
         if (
-            manifest_value.get("record_kind") != "qa_memory"
+            manifest_value.get("record_kind")
+            not in {_QA_MEMORY_RECORD_KIND, _FACT_MEMORY_RECORD_KIND}
             or manifest_value.get("tool_id") != TRIVIAQA_QA_MEMORY_TOOL_ID
         ):
             raise SkillFlowRetrievalError(
-                "directory index is not a TriviaQA QA-memory index"
+                "directory index is not a TriviaQA QA-memory/fact-memory index"
             )
-        from .triviaqa_qa_memory import TriviaQAQAMemoryIndex
+        from .triviaqa_qa_memory import (
+            TriviaQAFactMemoryIndex,
+            TriviaQAQAMemoryIndex,
+        )
 
-        retrieval_index_class = TriviaQAQAMemoryIndex
+        retrieval_index_class = (
+            TriviaQAFactMemoryIndex
+            if manifest_value.get("record_kind") == _FACT_MEMORY_RECORD_KIND
+            else TriviaQAQAMemoryIndex
+        )
     else:
         retrieval_index_class = _load_retrieval_index_class(Path(skillflow_source))
     try:

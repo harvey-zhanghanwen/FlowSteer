@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Materialize semantic-preserving TriviaQA native-train Q-A paraphrases.
+"""Materialize semantic-preserving TriviaQA fact memories and provenance.
 
 Source binding is checked before the local Qwen3.5 OpenAI-compatible endpoint
-is contacted.  The model generates a reworded question and a relation-bearing
-declarative answer statement from each frozen canonical Q-A pair.  Depending
-on the explicit CLI protocol, fixed evaluation Q-A records are either excluded
-for split-isolated retrieval or retained for the in-database protocol.
+is contacted.  The model generates a reworded question and a self-contained,
+relation-bearing declarative fact from each frozen canonical Q-A pair.  The
+question, canonical answer, accepted aliases, and generation provenance remain
+outside the Agent-facing corpus.  Only the declarative ``fact_text`` projection
+is eligible for embedding and child-Agent retrieval.
 """
 
 from __future__ import annotations
@@ -59,6 +60,12 @@ SEMANTIC_ADMISSION_VERSION = "triviaqa.qa_memory.semantic_admission.v14"
 PARAPHRASE_METHOD = "semantic-preserving-question-and-answer-paraphrase"
 GENERATOR_PROVIDER = "local-openai-compatible"
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
+FULL_NATIVE_UNIQUE_QA_COUNT = 76_523
+FACT_MEMORY_SCHEMA_VERSION = "flowsteer.triviaqa.fact_memory.record.v1"
+FACT_PROVENANCE_SCHEMA_VERSION = (
+    "flowsteer.triviaqa.fact_memory.provenance.v1"
+)
+FACT_MEMORY_TOOL_ID = "triviaqa.qa_memory"
 DATASET_PAIR_FALLBACK_METHOD = "dataset-question-answer-pair-association"
 DATASET_PAIR_FALLBACK_PROVIDER = "deterministic-dataset-binding"
 DATASET_PAIR_FALLBACK_MODEL_ID = "deterministic-dataset-pair-association"
@@ -126,11 +133,15 @@ _NUMBER_OR_DATE_TOKEN = re.compile(
 )
 _DOUBLE_QUOTED_SPAN = re.compile(r'"([^\"]+)"|“([^”]+)”')
 _SINGLE_QUOTED_SPAN = re.compile(
-    r"(?<!\w)'([^']+)'(?!\w)|(?<!\w)‘([^’]+)’(?!\w)"
+    r"(?<!\w)'((?:[^']|(?<=\w)'(?=\w))+)'(?!\w)"
+    + r"|(?<!\w)‘((?:[^‘’]|(?<=\w)’(?=\w)|"
+    r"‘(?:[^‘’]|(?<=\w)’(?=\w))+’)+)’(?!\w)"
 )
 _ORDERED_QUOTED_SLOT = re.compile(
     r'"([^\"]+)"|“([^”]+)”|'
-    r"(?<!\w)'([^']+)'(?!\w)|(?<!\w)‘([^’]+)’(?!\w)"
+    r"(?<!\w)'((?:[^']|(?<=\w)'(?=\w))+)'(?!\w)"
+    + r"|(?<!\w)‘((?:[^‘’]|(?<=\w)’(?=\w)|"
+    r"‘(?:[^‘’]|(?<=\w)’(?=\w))+’)+)’(?!\w)"
 )
 _LEADING_DOT_LITERAL = re.compile(
     r"(?<!\w)\.([^\W_]+(?:['’-][^\W_]+)*)",
@@ -158,6 +169,45 @@ _SENTENCE_BOUNDARY_IMPERATIVE = frozenset(
         "supply",
         "tell",
     }
+)
+_SENTENCE_BOUNDARY_NON_ENTITY_WORDS = frozenset(
+    {
+        "according",
+        "following",
+        "given",
+        "his",
+        "her",
+        "its",
+        "located",
+        "our",
+        "their",
+        "these",
+        "this",
+        "those",
+        "under",
+        "upon",
+        "your",
+    }
+)
+_FACT_QA_WRAPPER = re.compile(
+    r"(?:\b(?:question|answer|prompt|response)\s*:|"
+    r"\b(?:dataset\s+source\s+prompt|paired\s+response|"
+    r"corresponding\s+answer)\b|\bthe\s+answer\s+is\b)",
+    re.IGNORECASE,
+)
+_FACT_ANAPHORIC_SUBJECT = re.compile(
+    r"^(?:it|he|she|they|this|that|these|those)\b",
+    re.IGNORECASE,
+)
+_FACT_INTERROGATIVE_HEAD = re.compile(
+    r"^(?:(?:who|what|which|where|when|why|how)\s+"
+    r"(?:is|are|was|were|did|does|do|has|have|had|can|could|"
+    r"would|will)\b|(?:name|identify|tell)\b)",
+    re.IGNORECASE,
+)
+_GENERIC_FACT_SUBJECT = (
+    r"(?:answer|response|person|man|woman|place|country|city|river|"
+    r"number|year|date|title|name|word|term|thing)"
 )
 _OBSERVED_RESPONSE_KEY_TYPOS = {
     ".paraphrase_question": "paraphrase_question",
@@ -224,6 +274,15 @@ class SemanticPreservationError(ValueError):
     valid rows may be regenerated.  Schema, provenance, answer leakage, and
     every pre-existing admission error remain ordinary ``ValueError`` failures
     and therefore stay fail-closed.
+    """
+
+
+class FactProjectionAdmissionError(ValueError):
+    """A semantically paired row is not an Agent-facing declarative fact.
+
+    The exception is a narrow resume-repair boundary.  It permits a previously
+    admitted Q-A row to be regenerated under the fact-only contract without
+    converting unrelated schema or provenance corruption into model work.
     """
 
 
@@ -705,12 +764,15 @@ def _identity_token_preserved(
 ) -> bool:
     """Permit adding possessive syntax, but never remove it from an entity."""
 
-    if required in observed_tokens:
+    normalized_required = required.replace("’", "'")
+    normalized_observed = frozenset(
+        token.replace("’", "'") for token in observed_tokens
+    )
+    if normalized_required in normalized_observed:
         return True
-    if required.endswith(("'s", "’s")):
-        base = required[:-2]
-        return f"{base}'s" in observed_tokens or f"{base}’s" in observed_tokens
-    return f"{required}'s" in observed_tokens or f"{required}’s" in observed_tokens
+    if normalized_required.endswith("'s"):
+        return False
+    return f"{normalized_required}'s" in normalized_observed
 
 
 def _has_lexical_or_phrase_replacement(original: str, paraphrase: str) -> bool:
@@ -1658,6 +1720,7 @@ def _sentence_boundary_non_entity_token(
     return bool(
         _LEADING_INTERROGATIVE_CONTRACTION.fullmatch(token)
         or token.casefold() in _SENTENCE_BOUNDARY_IMPERATIVE
+        or token.casefold() in _SENTENCE_BOUNDARY_NON_ENTITY_WORDS
     )
 
 
@@ -1966,6 +2029,44 @@ def _nonnegative_integer(value: str) -> int:
     if parsed < 0:
         raise argparse.ArgumentTypeError("value must be non-negative")
     return parsed
+
+
+def _generation_round_indices(
+    *,
+    generation_round_start: int,
+    generation_round_count: int,
+) -> range:
+    """Return only the fresh deterministic seed rounds for this resume."""
+
+    if generation_round_start < 0 or generation_round_count < 1:
+        raise ValueError("generation round start/count are invalid")
+    return range(
+        generation_round_start,
+        generation_round_start + generation_round_count,
+    )
+
+
+def _admitted_generation_seeds(
+    *,
+    base_seed: int,
+    selection_index: int,
+    generation_round_start: int,
+    generation_round_count: int,
+    max_retries: int,
+) -> frozenset[int]:
+    """Admit historical rounds plus this resume's newly available rounds."""
+
+    if base_seed < 0 or selection_index < 0 or max_retries < 0:
+        raise ValueError("generation seed inputs are invalid")
+    stop = generation_round_start + generation_round_count
+    return frozenset(
+        base_seed
+        + selection_index
+        + generation_round * GENERATION_ROUND_SEED_STRIDE
+        + retry
+        for generation_round in range(stop)
+        for retry in range(max_retries + 1)
+    )
 
 
 def build_paraphrase_messages(source: TriviaQATrainSource) -> list[dict[str, str]]:
@@ -2548,6 +2649,103 @@ def _exact_question_identity_contaminated_fields(
     return frozenset(contaminated)
 
 
+def validate_self_contained_declarative_fact(
+    source: TriviaQATrainSource,
+    fact_text: object,
+) -> str:
+    """Admit one fact-only retrieval payload using offline Q-A metadata.
+
+    The original question and canonical answer are used only here, before the
+    Agent-facing projection is written.  They never become projected fields or
+    embedding text.  This boundary deliberately rejects Q-A wrappers and
+    question fragments even when an answer span happens to be present.
+    """
+
+    if not isinstance(fact_text, str) or not fact_text.strip():
+        raise FactProjectionAdmissionError("fact_text must be non-empty text")
+    fact = " ".join(fact_text.split())
+    if _FACT_QA_WRAPPER.search(fact):
+        raise FactProjectionAdmissionError(
+            "fact_text contains a Question/Answer/prompt/response wrapper"
+        )
+
+    # A question mark inside an immutable quoted title or quotation remains
+    # part of that fact.  Any question mark in the surrounding clause means the
+    # record is still an interrogative or a question-plus-answer concatenation.
+    unquoted_surface = _ORDERED_QUOTED_SLOT.sub(" quoted material ", fact)
+    if "?" in unquoted_surface or _FACT_INTERROGATIVE_HEAD.match(fact):
+        raise FactProjectionAdmissionError(
+            "fact_text must be a declarative statement, not a question"
+        )
+    if _FACT_ANAPHORIC_SUBJECT.match(fact):
+        raise FactProjectionAdmissionError(
+            "fact_text begins with an unbound anaphoric subject"
+        )
+
+    punctuation_surface = fact.rstrip('"\'\u2019\u201d)]} ')
+    container_surface = fact.rstrip(")]} ")
+    quoted_terminal_punctuation = re.search(
+        r"[?!.][\"'\u2019\u201d]\Z",
+        container_surface,
+    )
+    if (
+        not punctuation_surface.endswith((".", "!"))
+        and quoted_terminal_punctuation is None
+    ):
+        raise FactProjectionAdmissionError(
+            "fact_text must end as a complete declarative sentence"
+        )
+
+    canonical = " ".join(source.canonical_answer.split())
+    if not exact_canonical_span_preserved(fact, canonical):
+        raise FactProjectionAdmissionError(
+            "fact_text does not preserve the canonical fact value"
+        )
+    if not relation_bearing_answer_statement(fact, canonical):
+        raise FactProjectionAdmissionError(
+            "fact_text is a bare answer without a relation-bearing context"
+        )
+
+    canonical_pattern = re.escape(canonical)
+    generic_binding = re.compile(
+        rf"^(?:(?:the\s+)?{_GENERIC_FACT_SUBJECT}\s+"
+        rf"(?:is|are|was|were)\s+(?:the\s+)?{canonical_pattern}|"
+        rf"{canonical_pattern}\s+(?:is|are|was|were)\s+"
+        rf"(?:the\s+)?{_GENERIC_FACT_SUBJECT})[.!]\Z",
+        re.IGNORECASE,
+    )
+    if generic_binding.fullmatch(fact):
+        raise FactProjectionAdmissionError(
+            "fact_text binds the answer only to a generic subject"
+        )
+    if not _answer_statement_has_lexical_relation_lineage(
+        original_question=source.original_question,
+        canonical_answer=canonical,
+        answer_statement=fact,
+    ):
+        raise FactProjectionAdmissionError(
+            "fact_text has no relation lineage from the source question"
+        )
+    return fact
+
+
+def _repair_fact_terminal_punctuation(fact_text: str) -> str:
+    """Repair only a missing or comma-like terminal sentence delimiter."""
+
+    fact = " ".join(fact_text.split()).strip()
+    if not fact:
+        return fact
+    match = re.fullmatch(r"(?P<body>.*?)(?P<closers>[\"'\u2019\u201d)\]}]*)", fact)
+    assert match is not None
+    body = match.group("body").rstrip()
+    closers = match.group("closers")
+    if body.endswith((".", "!", "?")):
+        return fact
+    if body.endswith((",", ";", ":")):
+        body = body[:-1].rstrip()
+    return f"{body}{closers}."
+
+
 def _dataset_pair_fallback_text(
     source: TriviaQATrainSource,
 ) -> tuple[str, str]:
@@ -2808,6 +3006,7 @@ def parse_paraphrase_response(
             "paraphrase_answer_statement does not bind the exact canonical "
             "label to the selected listed option"
         )
+    statement = validate_self_contained_declarative_fact(source, statement)
     # Run the new semantic boundary last.  Resume partitioning is therefore
     # allowed to repair only an otherwise valid row; every older deterministic
     # admission failure remains fail-closed.
@@ -2872,7 +3071,7 @@ def validate_resume_record_admission(
     records: Sequence[TriviaQAQAMemoryRecord],
     sources: Sequence[TriviaQATrainSource],
 ) -> None:
-    """Re-run the current deterministic v7 boundary on every checkpoint row."""
+    """Re-run the strict semantic/fact boundary on every checkpoint row."""
 
     source_by_id = {
         source.source_train_task_id: source for source in sources
@@ -2882,8 +3081,9 @@ def validate_resume_record_admission(
         if source is None:
             raise ValueError("resume row references a non-train source")
         if _is_dataset_pair_fallback_record(record):
-            _validate_dataset_pair_fallback_record(record, source)
-            continue
+            raise FactProjectionAdmissionError(
+                "dataset-pair fallback is not a semantic paraphrase or fact"
+            )
         parse_paraphrase_response(
             json.dumps(
                 {
@@ -2902,12 +3102,12 @@ def partition_resume_records_for_semantic_repair(
     records: Sequence[TriviaQAQAMemoryRecord],
     sources: Sequence[TriviaQATrainSource],
 ) -> tuple[tuple[TriviaQAQAMemoryRecord, ...], tuple[str, ...]]:
-    """Partition only newly detected semantic drift into regeneration.
+    """Partition semantic drift and legacy non-facts into regeneration.
 
-    Catching the dedicated exception, rather than ``ValueError``, is the
-    explicit repair boundary: malformed JSON/schema, source mismatches,
-    answer leakage, provenance errors, and all older admission failures abort
-    resume instead of being silently converted into new model work.
+    Catching only the two dedicated semantic/fact exceptions, rather than
+    ``ValueError``, is the explicit repair boundary: malformed JSON/schema,
+    source mismatches, answer leakage, provenance errors, and all unrelated
+    admission failures abort resume instead of becoming silent model work.
     """
 
     source_by_id = {
@@ -2921,9 +3121,17 @@ def partition_resume_records_for_semantic_repair(
             raise ValueError("resume row references a non-train source")
         if _is_dataset_pair_fallback_record(record):
             _validate_dataset_pair_fallback_record(record, source)
-            accepted.append(record)
+            repair_source_ids.append(record.source_train_task_id)
             continue
         try:
+            # Run the fact-only admission boundary first.  An older strict
+            # Q-A row can otherwise fail an earlier generic parser check
+            # (wrapper, question fragment, missing canonical span) and abort
+            # the entire resume before it is classified as a fact repair.
+            validate_self_contained_declarative_fact(
+                source,
+                record.paraphrase_answer_statement,
+            )
             parse_paraphrase_response(
                 json.dumps(
                     {
@@ -2936,7 +3144,7 @@ def partition_resume_records_for_semantic_repair(
                 ),
                 source,
             )
-        except SemanticPreservationError:
+        except (SemanticPreservationError, FactProjectionAdmissionError):
             repair_source_ids.append(record.source_train_task_id)
             continue
         accepted.append(record)
@@ -2978,6 +3186,132 @@ def order_pending_sources_for_resume(
         )
         target.append(source)
     return tuple((*untouched_tail, *resume_gaps))
+
+
+def build_fact_memory_projection(
+    records: Sequence[TriviaQAQAMemoryRecord],
+    sources: Sequence[TriviaQATrainSource],
+    *,
+    expected_count: int | None = None,
+) -> tuple[tuple[dict[str, object], ...], tuple[dict[str, object], ...]]:
+    """Split strict materialization into fact corpus and external provenance.
+
+    The first tuple is the complete Agent-facing/indexable allowlist.  The
+    second tuple is an offline provenance sidecar and is never an input to the
+    embedding model or retrieval Tool.
+    """
+
+    if expected_count is not None and (
+        type(expected_count) is not int or expected_count < 1
+    ):
+        raise ValueError("expected_count must be a positive integer")
+    validate_qa_memory_against_sources(records, sources, require_complete=True)
+    record_by_id = {
+        record.source_train_task_id: record for record in records
+    }
+    if len(record_by_id) != len(records):
+        raise ValueError("fact projection source identities are not unique")
+    if expected_count is not None and len(records) != expected_count:
+        raise ValueError(
+            f"fact projection count is {len(records)}, expected {expected_count}"
+        )
+
+    fact_rows: list[dict[str, object]] = []
+    provenance_rows: list[dict[str, object]] = []
+    for source in sorted(sources, key=lambda item: item.selection_index):
+        record = record_by_id[source.source_train_task_id]
+        if _is_dataset_pair_fallback_record(record):
+            raise FactProjectionAdmissionError(
+                "dataset-pair fallback cannot enter a fact-memory release"
+            )
+        question, statement = parse_paraphrase_response(
+            json.dumps(
+                {
+                    "paraphrase_question": record.paraphrase_question,
+                    "paraphrase_answer_statement": (
+                        record.paraphrase_answer_statement
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            source,
+        )
+        reject_exact_question_identity_shortcut(
+            source,
+            paraphrase_question=question,
+            paraphrase_answer_statement=statement,
+        )
+        if not _has_lexical_or_phrase_replacement(
+            source.original_question,
+            question,
+        ):
+            raise FactProjectionAdmissionError(
+                "fact release question has no lexical or phrase replacement"
+            )
+        fact_text = validate_self_contained_declarative_fact(source, statement)
+        fact_rows.append(
+            {
+                "schema_version": FACT_MEMORY_SCHEMA_VERSION,
+                "memory_id": record.memory_id,
+                "tool_id": FACT_MEMORY_TOOL_ID,
+                "fact_text": fact_text,
+            }
+        )
+        accepted_answers = (
+            source.accepted_answers_for_admission
+            or (source.canonical_answer,)
+        )
+        provenance_rows.append(
+            {
+                "schema_version": FACT_PROVENANCE_SCHEMA_VERSION,
+                "memory_id": record.memory_id,
+                "source_train_task_id": source.source_train_task_id,
+                "base_task_id": source.base_task_id,
+                "selection_index": source.selection_index,
+                "original_question": source.original_question,
+                "accepted_answers": list(accepted_answers),
+                "canonical_answer": source.canonical_answer,
+                "paraphrase_question": question,
+                "fact_text": fact_text,
+                "paraphrase_version": record.paraphrase_version,
+                "paraphrase_method": record.paraphrase_method,
+                "generator_provider": record.generator_provider,
+                "model_id": record.model_id,
+                "model_revision": record.model_revision,
+                "prompt_template_version": record.prompt_template_version,
+                "generation_seed": record.generation_seed,
+            }
+        )
+
+    memory_ids = [str(row["memory_id"]) for row in fact_rows]
+    if len(memory_ids) != len(set(memory_ids)):
+        raise ValueError("fact projection memory_id values are not unique")
+    if len(fact_rows) != len(sources) or len(provenance_rows) != len(sources):
+        raise ValueError("fact/provenance projection coverage is incomplete")
+    return tuple(fact_rows), tuple(provenance_rows)
+
+
+def write_jsonl_projection(
+    path: str | Path,
+    rows: Sequence[Mapping[str, object]],
+) -> None:
+    """Atomically write a deterministic projection without partial release."""
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.partial")
+    with temporary.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(
+                json.dumps(
+                    dict(row),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+    temporary.replace(target)
 
 
 _DETERMINISTIC_SUBJECT_RELATIVE_VERB = re.compile(
@@ -3238,6 +3572,31 @@ def _deterministic_question_paraphrase(
                 f"{subject_wh.group('verb')} {subject_wh.group('tail')}"
             )
 
+    if (
+        candidate is None
+        and _primary_answer_slot(original) is None
+        and not _quoted_spans(original)
+    ):
+        # Native TriviaQA contains a small number of answer-slot-free clue
+        # fragments.  Give only those fragments a neutral denotation frame;
+        # no entity token or clue content is paraphrased or inferred.
+        if original.endswith(("?", ".")):
+            clue = original[:-1].rstrip()
+            if len(_LEXICAL_TOKEN.findall(clue)) >= 2:
+                candidate = f'State what the clue "{clue}" denotes.'
+        else:
+            address = re.fullmatch(
+                r"(?P<street>\d+[^,]+),\s*(?P<locality>[^,]+),\s*"
+                r"(?P<region>[^,]+)",
+                original,
+            )
+            if address is not None:
+                candidate = (
+                    "State the entity associated with "
+                    f"{address.group('region')}, {address.group('locality')}, "
+                    f"at {address.group('street')}."
+                )
+
     if candidate is None:
         return None
     return _finish_deterministic_question_candidate(source, candidate)
@@ -3375,6 +3734,25 @@ class LocalQwen35Paraphraser:
             except ValueError:
                 pass
             return None
+
+        punctuated_statement = _repair_fact_terminal_punctuation(
+            rejected_statement
+        )
+        if punctuated_statement != " ".join(rejected_statement.split()).strip():
+            try:
+                _, punctuated_statement = parse_paraphrase_response(
+                    json.dumps(
+                        {
+                            "paraphrase_question": question,
+                            "paraphrase_answer_statement": punctuated_statement,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    source,
+                )
+                return punctuated_statement
+            except ValueError:
+                pass
 
         alias_repaired = validated_alias_repair(rejected_statement)
         if alias_repaired is not None:
@@ -3770,7 +4148,11 @@ class LocalQwen35Paraphraser:
                     schema_error = str(parse_error).startswith(
                         "paraphrase response fields are incompatible"
                     )
-                    answer_error = str(parse_error).startswith(
+                    fact_error = isinstance(
+                        parse_error,
+                        FactProjectionAdmissionError,
+                    )
+                    answer_error = fact_error or str(parse_error).startswith(
                         "paraphrase_answer_statement"
                     )
                     question_lexical_error = str(parse_error).startswith(
@@ -4078,7 +4460,19 @@ def _parser() -> argparse.ArgumentParser:
         "--generation-rounds",
         type=_positive_integer,
         default=1,
-        help="Independent deterministic seed rounds for records rejected after retries.",
+        help=(
+            "Count of independent deterministic seed rounds for records "
+            "rejected after retries."
+        ),
+    )
+    parser.add_argument(
+        "--generation-round-start",
+        type=_nonnegative_integer,
+        default=0,
+        help=(
+            "First fresh seed-round index for pending records; existing rows "
+            "from earlier rounds remain admissible."
+        ),
     )
     parser.add_argument(
         "--concurrency",
@@ -4106,20 +4500,20 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--allow-dataset-pair-fallback",
-        action="store_true",
+        "--fact-corpus-output",
+        default=None,
         help=(
-            "After all bounded generation rounds fail, materialize an explicit "
-            "verbatim TriviaQA source-prompt/paired-response association record."
+            "Agent-facing fact-only JSONL. In full-native mode this enables "
+            "the strict 76,523-record formal release contract."
         ),
     )
     parser.add_argument(
-        "--materialize-pending-as-dataset-pair-fallback",
-        action="store_true",
+        "--provenance-output",
+        default=None,
         help=(
-            "Resume-only closure: convert already-attempted checkpoint gaps to "
-            "dataset-pair fallback records without making model calls. Requires "
-            "--allow-dataset-pair-fallback."
+            "Database-external provenance JSONL containing source Q-A and the "
+            "semantic-preserving question paraphrase. Required together with "
+            "--fact-corpus-output."
         ),
     )
     parser.add_argument("--expected-train-count", type=_positive_integer, default=512)
@@ -4140,13 +4534,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ValueError(
                 "paraphrase-version must match the current frozen prompt contract"
             )
-        if (
-            args.materialize_pending_as_dataset_pair_fallback
-            and not args.allow_dataset_pair_fallback
+        fact_release_requested = bool(args.fact_corpus_output)
+        if fact_release_requested != bool(args.provenance_output):
+            raise ValueError(
+                "fact-corpus-output and provenance-output must be supplied together"
+            )
+        if fact_release_requested and (
+            args.source_binding_mode != "full_native_unique"
+            or not args.include_validation_qa
+            or args.expected_train_count != FULL_NATIVE_UNIQUE_QA_COUNT
         ):
             raise ValueError(
-                "materialize-pending-as-dataset-pair-fallback requires "
-                "allow-dataset-pair-fallback"
+                "formal fact release requires full_native_unique, included "
+                "validation Q-A, and expected-train-count=76523"
             )
         sources, validation_ids = load_triviaqa_qa_memory_sources(
             args.train_tasks,
@@ -4263,24 +4663,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         for record in existing:
             if _is_dataset_pair_fallback_record(record):
-                if not args.allow_dataset_pair_fallback:
-                    raise ValueError(
-                        "existing dataset-pair fallback requires the explicit "
-                        "allow-dataset-pair-fallback flag"
-                    )
                 _validate_dataset_pair_fallback_record(
                     record,
                     source_by_id[record.source_train_task_id],
                 )
                 continue
-            admitted_seeds = {
-                args.base_seed
-                + record.selection_index
-                + generation_round * GENERATION_ROUND_SEED_STRIDE
-                + retry
-                for generation_round in range(args.generation_rounds)
-                for retry in range(args.max_retries + 1)
-            }
+            admitted_seeds = _admitted_generation_seeds(
+                base_seed=args.base_seed,
+                selection_index=record.selection_index,
+                generation_round_start=args.generation_round_start,
+                generation_round_count=args.generation_rounds,
+                max_retries=args.max_retries,
+            )
             if (
                 record.paraphrase_version != args.paraphrase_version
                 or record.paraphrase_method != PARAPHRASE_METHOD
@@ -4293,14 +4687,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ValueError(
                     "existing paraphrases use incompatible frozen provenance"
                 )
+        legacy_fallback_source_ids = tuple(
+            record.source_train_task_id
+            for record in existing
+            if _is_dataset_pair_fallback_record(record)
+        )
         existing, _semantic_repair_source_ids = (
             partition_resume_records_for_semantic_repair(existing, sources)
         )
         for record in existing:
             source = source_by_id[record.source_train_task_id]
             if _is_dataset_pair_fallback_record(record):
-                _validate_dataset_pair_fallback_record(record, source)
-                continue
+                raise AssertionError(
+                    "resume partition retained a dataset-pair fallback"
+                )
             reject_exact_question_identity_shortcut(
                 source,
                 paraphrase_question=record.paraphrase_question,
@@ -4323,26 +4723,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         pending_sources = list(
             order_pending_sources_for_resume(sources, tuple(records.values()))
         )
-        immediate_fallback_source_ids: list[str] = []
-        bounded_failure_fallback_source_ids: list[str] = []
-        if args.materialize_pending_as_dataset_pair_fallback:
-            for source in pending_sources:
-                record = _create_dataset_pair_fallback_record(
-                    source,
-                    paraphrase_version=args.paraphrase_version,
-                    generation_seed=args.base_seed + source.selection_index,
-                )
-                records[record.source_train_task_id] = record
-                immediate_fallback_source_ids.append(
-                    record.source_train_task_id
-                )
-            pending_sources = []
 
         def generate_one(
             source: TriviaQATrainSource,
         ) -> TriviaQAQAMemoryRecord:
             last_generation_error: RuntimeError | None = None
-            for generation_round in range(args.generation_rounds):
+            for generation_round in _generation_round_indices(
+                generation_round_start=args.generation_round_start,
+                generation_round_count=args.generation_rounds,
+            ):
                 try:
                     paraphrase, answer_statement, accepted_seed = client.generate(
                         source,
@@ -4442,36 +4831,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 tuple(records.values()),
             )
         if generation_errors:
-            if args.allow_dataset_pair_fallback:
-                for source_id, _error in generation_errors:
-                    source = source_by_id[source_id]
-                    record = _create_dataset_pair_fallback_record(
-                        source,
-                        paraphrase_version=args.paraphrase_version,
-                        generation_seed=(
-                            args.base_seed + source.selection_index
-                        ),
-                    )
-                    records[source_id] = record
-                    bounded_failure_fallback_source_ids.append(source_id)
-                write_materialized_qa_memory(
-                    output_path,
-                    tuple(records.values()),
-                )
-            else:
-                source_id, error = generation_errors[0]
-                raise RuntimeError(
-                    "bounded paraphrase generation retained all successful rows "
-                    f"but rejected {len(generation_errors)} source(s); "
-                    f"first={source_id}: {type(error).__name__}: {error}"
-                ) from error
+            source_id, error = generation_errors[0]
+            raise RuntimeError(
+                "strict fact generation retained all successful checkpoint rows "
+                f"but rejected {len(generation_errors)} source(s); "
+                f"first={source_id}: {type(error).__name__}: {error}; "
+                "resume the checkpoint instead of publishing a fallback"
+            ) from error
         completed = tuple(records.values())
         validate_qa_memory_against_sources(
             completed,
             sources,
             require_complete=True,
         )
-        write_materialized_qa_memory(output_path, completed)
         source_by_id = {
             source.source_train_task_id: source for source in sources
         }
@@ -4485,10 +4857,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             for record in completed
             if _is_dataset_pair_fallback_record(record)
         )
-        for record in dataset_pair_fallbacks:
-            _validate_dataset_pair_fallback_record(
-                record,
-                source_by_id[record.source_train_task_id],
+        if dataset_pair_fallbacks:
+            raise FactProjectionAdmissionError(
+                "formal materialization contains dataset-pair fallback records"
             )
         lexical_replacement_count = sum(
             _has_lexical_or_phrase_replacement(
@@ -4522,6 +4893,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             ).casefold()
             for record in completed
         )
+        if len(strict_paraphrases) != len(sources):
+            raise FactProjectionAdmissionError(
+                "strict semantic paraphrase coverage is incomplete"
+            )
+        if lexical_replacement_count != len(sources):
+            raise FactProjectionAdmissionError(
+                "every source question must contain a lexical or phrase replacement"
+            )
+        if exact_original_question_substring_count != 0:
+            raise FactProjectionAdmissionError(
+                "formal materialization retained an exact original question"
+            )
+        fact_rows, provenance_rows = build_fact_memory_projection(
+            completed,
+            sources,
+            expected_count=len(sources),
+        )
+        if len(fact_rows) != len(sources):
+            raise FactProjectionAdmissionError(
+                "fact_text coverage is incomplete"
+            )
+        if fact_release_requested and len(fact_rows) != FULL_NATIVE_UNIQUE_QA_COUNT:
+            raise FactProjectionAdmissionError(
+                "formal full-dataset release must contain 76523 fact_text rows"
+            )
+        # Checkpoints are written throughout generation, but no final corpus or
+        # manifest is published until every strict semantic/fact invariant has
+        # closed over the complete source set.
+        write_materialized_qa_memory(output_path, completed)
+        if fact_release_requested:
+            write_jsonl_projection(args.fact_corpus_output, fact_rows)
+            write_jsonl_projection(args.provenance_output, provenance_rows)
         semantic_repair_source_ids = tuple(_semantic_repair_source_ids)
         semantic_repair_provenance = "current_resume_partition"
         if predecessor_path is not None:
@@ -4563,9 +4966,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             else output_path.with_name("materialization_manifest.json")
         )
         manifest = {
-            "schema_version": (
-                "flowsteer.triviaqa.qa_memory.materialization.v2"
-            ),
+            "schema_version": "flowsteer.triviaqa.fact_memory.materialization.v1",
             "record_count": len(completed),
             "unique_source_count": len(
                 {record.base_task_id for record in completed}
@@ -4586,14 +4987,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 record.source_train_task_id
                 for record in dataset_pair_fallbacks
             ),
-            "bounded_failure_fallback_count": len(
-                bounded_failure_fallback_source_ids
-            ),
-            "pending_gap_fallback_count": len(
-                immediate_fallback_source_ids
-            ),
-            "bypass_generation_for_pending": (
-                args.materialize_pending_as_dataset_pair_fallback
+            "bounded_failure_fallback_count": 0,
+            "pending_gap_fallback_count": 0,
+            "bypass_generation_for_pending": False,
+            "fallback_disabled": True,
+            "legacy_fallback_regeneration_count": len(
+                legacy_fallback_source_ids
             ),
             "lexical_or_phrase_replacement_count": (
                 lexical_replacement_count
@@ -4625,8 +5024,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             "exact_original_question_substring_count": (
                 exact_original_question_substring_count
             ),
+            "fact_memory_schema_version": FACT_MEMORY_SCHEMA_VERSION,
+            "fact_text_count": len(fact_rows),
+            "fact_projection_fields": [
+                "schema_version",
+                "memory_id",
+                "tool_id",
+                "fact_text",
+            ],
+            "embedding_text_field": "fact_text",
+            "original_question_indexed": False,
+            "canonical_answer_indexed": False,
+            "accepted_answers_indexed": False,
+            "paraphrase_question_indexed": False,
+            "fact_corpus_output": (
+                str(Path(args.fact_corpus_output).resolve())
+                if fact_release_requested
+                else None
+            ),
+            "provenance_output": (
+                str(Path(args.provenance_output).resolve())
+                if fact_release_requested
+                else None
+            ),
             "generation_concurrency": args.concurrency,
             "generation_rounds": args.generation_rounds,
+            "generation_round_start": args.generation_round_start,
+            "generation_round_count": args.generation_rounds,
             "generation_round_seed_stride": GENERATION_ROUND_SEED_STRIDE,
             "checkpoint_every": checkpoint_every,
             "seed_paraphrase_reused_count": seed_reused_count,
@@ -4656,8 +5080,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         json.dumps(
             {
-                "schema_version": "flowsteer.triviaqa.qa_memory.materialization.v2",
+                "schema_version": (
+                    "flowsteer.triviaqa.fact_memory.materialization.v1"
+                ),
                 "output": str(output_path.resolve()),
+                "fact_corpus_output": (
+                    str(Path(args.fact_corpus_output).resolve())
+                    if fact_release_requested
+                    else None
+                ),
+                "provenance_output": (
+                    str(Path(args.provenance_output).resolve())
+                    if fact_release_requested
+                    else None
+                ),
                 "record_count": len(completed),
                 "unique_source_count": len(
                     {record.base_task_id for record in completed}
@@ -4666,6 +5102,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     record.cycled_training_sample for record in completed
                 ),
                 "paraphrase_version": args.paraphrase_version,
+                "generation_round_start": args.generation_round_start,
+                "generation_round_count": args.generation_rounds,
                 "validation_content_used": args.include_validation_qa,
                 "original_dataset_binding": original_dataset_binding,
                 "materialization_manifest": str(manifest_path.resolve()),

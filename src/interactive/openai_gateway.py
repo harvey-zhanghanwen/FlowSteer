@@ -484,6 +484,39 @@ def _structured_upstream_artifact(value: str) -> Mapping[str, object] | None:
     return parsed if isinstance(parsed, Mapping) else None
 
 
+def _has_fact_memory_upstream(request: AgentRequest) -> bool:
+    """Recognize fact-only worker artifacts on explicit Agent communication."""
+
+    messages = list(request.upstream)
+    if request.phase is ExecutionPhase.REVISION and request.peer_draft is not None:
+        messages.append(request.peer_draft)
+    for message in messages:
+        if message.target_agent_id != request.agent.id:
+            continue
+        artifact = _structured_upstream_artifact(message.artifact)
+        candidates = artifact.get("candidates") if artifact is not None else None
+        if (
+            isinstance(candidates, list)
+            and candidates
+            and all(
+                isinstance(candidate, Mapping)
+                and set(candidate)
+                == {"memory_id", "rank", "similarity", "fact_text"}
+                for candidate in candidates
+            )
+            and any(
+                isinstance(receipt, Mapping)
+                and receipt.get("tool_id") == "triviaqa.qa_memory"
+                and isinstance(receipt.get("request"), Mapping)
+                and receipt["request"].get("action") == "read"
+                and receipt.get("error_type") is None
+                for receipt in message.tool_receipts
+            )
+        ):
+            return True
+    return False
+
+
 def _has_qa_memory_coverage_failure(request: AgentRequest) -> bool:
     """Recognize an all-Retriever typed QA-memory coverage diagnosis."""
 
@@ -711,6 +744,9 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     hotpot_semantic = request.semantic_protocol == "hotpotqa_verified_answer_slot_v1"
     unified_qa_semantic = request.semantic_protocol == "qa_verified_answer_lineage_v2"
     semantic_lineage = hotpot_semantic or unified_qa_semantic
+    fact_memory_upstream = bool(
+        unified_qa_semantic and _has_fact_memory_upstream(request)
+    )
     parametric_fallback_reasoner = bool(
         unified_qa_semantic
         and semantic_role == "reasoner"
@@ -761,6 +797,15 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                         + "Bind entity identity and the requested relation to "
                         "successful qa-retrieval read Tool receipts; if that "
                         "grounding is absent, do not guess or fabricate evidence."
+                        + (
+                            " Routed memory records are self-contained declarative "
+                            "fact_text evidence, not Question/Answer pairs. Derive "
+                            "the candidate semantically from those fact_text read "
+                            "receipts; no hidden canonical answer or accepted-answer "
+                            "label is available."
+                            if fact_memory_upstream
+                            else ""
+                        )
                     )
                 )
             )
@@ -815,7 +860,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             if parametric_fallback_reasoner
             else _QA_REASONER_PROTOCOL
         ) + " Do not use <answer> tags."
-        if parametric_fallback_reasoner:
+        if unified_qa_semantic:
             from .task_dataset import (
                 qa_answer_cardinality_constraint,
                 qa_answer_type_constraint,
@@ -827,6 +872,14 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "and answer_cardinality exactly to "
                 f"{json.dumps(qa_answer_cardinality_constraint(request.problem))}."
             )
+            if fact_memory_upstream and not parametric_fallback_reasoner:
+                protocol += (
+                    " Routed memory records are self-contained declarative "
+                    "fact_text evidence, not Question/Answer pairs. Derive the "
+                    "candidate semantically from the explicitly routed fact_text "
+                    "read receipts. Do not assume a hidden canonical answer, "
+                    "accepted-answer label, or source-task identity."
+                )
     elif semantic_lineage and semantic_role == "verifier":
         protocol = (
             _HOTPOTQA_VERIFIER_PROTOCOL
@@ -971,8 +1024,13 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                     "change an alias, abbreviation, unit, date, spelling, or "
                     "symbolic form. Enclose that complete unchanged value in "
                     "exactly one <answer>...</answer> wrapper, with no text "
-                    "outside it. If one explicit Candidate answer is absent, "
-                    "return exactly <answer></answer>."
+                    "outside it and no whitespace or newline between the tags "
+                    "and the first or last character of the copied value. A "
+                    "non-empty Candidate answer that resembles a null marker, "
+                    "including the literal word `None`, is still literal answer "
+                    "text and must be copied unchanged; only an absent Candidate "
+                    "answer label denotes no value. If one explicit Candidate "
+                    "answer is absent, return exactly <answer></answer>."
                 )
         else:
             common = FORMAT_PROMPT.format(

@@ -825,6 +825,68 @@ class AgentWorkflowEnv:
             f"its contract must instead describe how it will {responsibility}"
         )
 
+    @staticmethod
+    def _qa_conjunctive_contract_scope_issue(
+        *,
+        role_family: str,
+        question: str,
+        contract: str,
+    ) -> Optional[str]:
+        """Reject a task-specific contract that drops one conjunctive scope.
+
+        A neutral responsibility contract remains legal. When a Retriever or
+        Reasoner instead copies task-specific named/entity terms from a public
+        conjunctive question, it must preserve the complete conjunction. This
+        action-admission check neither prescribes a topology nor exposes an
+        answer, evidence record, or evaluator field to the Director.
+        """
+
+        if role_family not in {"evidence_retriever", "reasoner"}:
+            return None
+        if re.search(r"\b(?:and|or)\b", question, flags=re.IGNORECASE) is None:
+            return None
+        from .qa_tool_adapter import (
+            _question_entity_anchor_tokens,
+            _question_named_constraint_tokens,
+            _relation_token_variants,
+            _scope_tokens,
+        )
+
+        required_tokens = tuple(
+            dict.fromkeys(
+                (
+                    *_question_entity_anchor_tokens(question),
+                    *_question_named_constraint_tokens(question),
+                )
+            )
+        )
+        if len(required_tokens) < 2:
+            return None
+        contract_tokens = _scope_tokens(contract)
+        matched = frozenset(
+            required
+            for required in required_tokens
+            if any(
+                _relation_token_variants(required)
+                & _relation_token_variants(candidate)
+                for candidate in contract_tokens
+            )
+        )
+        # A neutral role contract intentionally contains no task-specific term.
+        if not matched:
+            return None
+        missing = tuple(
+            required for required in required_tokens if required not in matched
+        )
+        if not missing:
+            return None
+        return (
+            "task-specific Agent contract narrows the public conjunctive "
+            "question scope: either use a neutral responsibility contract or "
+            "preserve every named/entity conjunct; "
+            f"missing_scope_tokens={list(missing)!r}"
+        )
+
     def _role_conditional_registered_execution_profiles(
         self,
     ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
@@ -6452,12 +6514,15 @@ class AgentWorkflowEnv:
 
         if not self._uses_semantic_lineage_protocol():
             return None
-        obligation_entries: Tuple[Tuple[str, str], ...]
+        obligation_entries: Tuple[Tuple[str, str, str], ...]
         if action.action_type is AgentActionType.ADD_SUBGRAPH:
             obligation_entries = tuple(
-                ((spec.role_family or "").casefold(), value)
+                ((spec.role_family or "").casefold(), field_name, value)
                 for spec in action.agents
-                for value in (spec.contract, spec.completion_condition)
+                for field_name, value in (
+                    ("contract", spec.contract),
+                    ("completion_condition", spec.completion_condition),
+                )
                 if value is not None
             )
         elif action.action_type is AgentActionType.MODIFY_AGENT:
@@ -6472,17 +6537,32 @@ class AgentWorkflowEnv:
                 else current_role
             )
             obligation_entries = tuple(
-                (modified_role, value)
-                for value in (action.contract, action.completion_condition)
+                (modified_role, field_name, value)
+                for field_name, value in (
+                    ("contract", action.contract),
+                    ("completion_condition", action.completion_condition),
+                )
                 if value is not None
             )
         else:
             return None
-        obligations = tuple(value for _, value in obligation_entries)
+        obligations = tuple(value for _, _, value in obligation_entries)
         if not obligations:
             return None
 
         question = hotpotqa_question_scope(self._problem)
+        for role_family, field_name, obligation in obligation_entries:
+            if field_name != "contract":
+                continue
+            conjunctive_scope_issue = (
+                self._qa_conjunctive_contract_scope_issue(
+                    role_family=role_family,
+                    question=question,
+                    contract=obligation,
+                )
+            )
+            if conjunctive_scope_issue is not None:
+                return conjunctive_scope_issue
         context = self._problem
         if context.endswith(question) and context != question:
             context = context[: -len(question)]
@@ -6570,7 +6650,7 @@ class AgentWorkflowEnv:
             r"documents?|records?|fields?|samples?|models?)\b",
             flags=re.IGNORECASE,
         )
-        for role_family, obligation in obligation_entries:
+        for role_family, _, obligation in obligation_entries:
             # The existing Tool-contract gate below owns concrete invocation
             # syntax and returns its specific repair feedback.  Do not
             # misclassify digits inside query/limit/passage_id arguments as a
@@ -7845,12 +7925,24 @@ class AgentWorkflowEnv:
         if not isinstance(value, Mapping) or value.get("operation") != "read":
             return False
         record = value.get(record_field)
+        fact_memory_record = bool(
+            isinstance(record, Mapping) and "fact_text" in record
+        )
+        record_text = (
+            record.get("fact_text" if fact_memory_record else "text")
+            if isinstance(record, Mapping)
+            else None
+        )
         return (
             isinstance(record, Mapping)
             and value.get(record_id_field) == request_record_id
             and record.get(record_id_field) == request_record_id
-            and isinstance(record.get("text"), str)
-            and bool(record["text"].strip())
+            and isinstance(record_text, str)
+            and bool(record_text.strip())
+            and (
+                not fact_memory_record
+                or set(record) == {"memory_id", "fact_text"}
+            )
         )
 
     @staticmethod
@@ -7877,9 +7969,10 @@ class AgentWorkflowEnv:
             else "passage"
         ]
         assert isinstance(record, Mapping)
-        text = record["text"]
+        fact_memory_record = "fact_text" in record
+        text = record["fact_text" if fact_memory_record else "text"]
         assert isinstance(text, str)
-        raw_title = record.get("title")
+        raw_title = None if fact_memory_record else record.get("title")
         passage_title = (
             raw_title.strip()
             if isinstance(raw_title, str) and raw_title.strip()
@@ -9113,7 +9206,12 @@ class AgentWorkflowEnv:
         if not isinstance(query_task_id, str) or not query_task_id.strip():
             query_task_id = None
 
-        from .qa_tool_adapter import QARetrievalReactExecutionAdapter
+        from .qa_tool_adapter import (
+            QARetrievalReactExecutionAdapter,
+            _fact_memory_receipt_batch,
+        )
+
+        fact_memory = _fact_memory_receipt_batch(retriever_receipts)
 
         completion_issue = (
             QARetrievalReactExecutionAdapter._evidence_retriever_completion_issue(
@@ -9124,7 +9222,9 @@ class AgentWorkflowEnv:
                 parametric_fallback_after_coverage_failure=(
                     self.parametric_fallback_after_coverage_failure
                 ),
-                expected_source_task_id=query_task_id,
+                expected_source_task_id=(
+                    None if fact_memory else query_task_id
+                ),
             )
         )
         if completion_issue is not None:

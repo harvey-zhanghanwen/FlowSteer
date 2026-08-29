@@ -4110,6 +4110,21 @@ class QAToolAdapterTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIsNone(error)
 
+    def test_chart_rank_no_is_not_a_named_scope_constraint(self) -> None:
+        question = "Who had a 70s No 1 hit with Let Your Love Flow?"
+
+        self.assertNotIn(
+            "no",
+            _question_named_constraint_tokens(question),
+        )
+        self.assertEqual(
+            (),
+            _missing_question_named_constraints(
+                question,
+                "Let Your Love Flow 70s number 1 hit",
+            ),
+        )
+
     def test_v23_public_action_domain_exposes_answer_free_relation_surfaces(
         self,
     ) -> None:

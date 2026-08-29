@@ -74,6 +74,23 @@ MANIFEST_FILENAME = "manifest.json"
 MEMORIES_FILENAME = "memories.jsonl"
 EMBEDDINGS_FILENAME = "embeddings.npy"
 
+# PROJECT_NECESSARY_ADAPTATION: keep the existing ``triviaqa.qa_memory`` Tool
+# resource and add a versioned data projection for the fact-only corpus.  The
+# runtime can branch on ``manifest.record_kind`` without introducing a second
+# Tool or changing the established search/read protocol.
+FACT_MEMORY_TOOL_ID = QA_MEMORY_TOOL_ID
+FACT_MEMORY_RECORD_SCHEMA_VERSION = "flowsteer.triviaqa.fact_memory.record.v1"
+FACT_MEMORY_MANIFEST_SCHEMA_VERSION = (
+    "flowsteer.triviaqa.fact_memory.manifest.v1"
+)
+FACT_MEMORY_INDEX_FORMAT = (
+    "flowsteer.triviaqa.fact-memory-embedding-index.v1"
+)
+FACT_MEMORY_RECORD_KIND = "fact_memory"
+FACT_MEMORY_CORPUS_NAME = "triviaqa-semantic-paraphrase-declarative-facts"
+FACT_MEMORY_EMBEDDING_INPUT_FIELD = "fact_text"
+FACT_MEMORIES_FILENAME = "fact_memories.jsonl"
+
 # PROJECT_NECESSARY_ADAPTATION: the earlier 512-row slice happened to contain
 # only ``tc_*`` IDs.  The canonical TriviaQA train split also contains qz_,
 # qw_, sfq_, odql_, and other public question-ID namespaces.  Keep the native
@@ -1471,27 +1488,778 @@ class TriviaQAQAMemoryIndex:
         self.close()
 
 
+# The fact-memory classes below are a thin schema adaptation of the preceding
+# QA-memory index.  Dense encoding, normalized dot-product search,
+# deterministic tie-breaking, search/read lifecycle, and atomic persistence
+# intentionally remain identical to the existing SkillFlow-compatible path.
+# The fact projection retains existing opaque memory IDs so external
+# provenance can join by ID without exposing a source identifier on the Tool
+# wire.  New rows may use the fact-specific prefix; neither prefix is decoded
+# or required to be derived from Agent-facing text.
+_FACT_MEMORY_ID = re.compile(
+    r"triviaqa-(?:qa|fact)-memory-[0-9a-f]{64}\Z"
+)
+_FACT_MEMORY_FIELDS = frozenset(
+    {"schema_version", "memory_id", "tool_id", "fact_text"}
+)
+_FACT_MEMORY_AGENT_FACING_FIELDS = (
+    "schema_version",
+    "memory_id",
+    "tool_id",
+    "fact_text",
+)
+_FACT_MEMORY_FILE_FIELDS = frozenset({"facts", "embeddings"})
+_FACT_MEMORY_QA_LABEL = re.compile(
+    r"(?im)(?:\A|\n)\s*(?:question|answer|canonical[_ ]?answer|"
+    r"accepted[_ ]?answers?|ground[_ ]?truth|q|a)\s*:"
+)
+_FACT_MEMORY_ANSWER_WRAPPER = re.compile(
+    r"(?i)\A\s*(?:the\s+)?(?:answer|response)\s+(?:is|was)\b"
+)
+
+
+def _fact_text(value: object) -> str:
+    """Validate the fact-only wire boundary without loading provenance.
+
+    Semantic preservation and question paraphrase coverage belong to the
+    upstream materializer.  The index boundary rejects the known Q-A
+    serialization forms and admits only one declarative text field.
+    """
+
+    text = _required_text(value, field_name="fact_text")
+    if _FACT_MEMORY_QA_LABEL.search(text) is not None:
+        raise ValueError("fact_text cannot contain a Question/Answer field")
+    if _FACT_MEMORY_ANSWER_WRAPPER.match(text) is not None:
+        raise ValueError("fact_text must be a self-contained declarative fact")
+    if text.endswith("?"):
+        raise ValueError("fact_text must be declarative rather than interrogative")
+    return text
+
+
+@dataclass(frozen=True, slots=True)
+class TriviaQAFactMemoryRecord:
+    """Agent-facing fact row with no source, question, or answer metadata."""
+
+    schema_version: str
+    memory_id: str
+    tool_id: str
+    fact_text: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != FACT_MEMORY_RECORD_SCHEMA_VERSION:
+            raise ValueError("fact-memory record schema version is unsupported")
+        if self.tool_id != FACT_MEMORY_TOOL_ID:
+            raise ValueError("fact-memory record tool_id is unsupported")
+        memory_id = _required_text(self.memory_id, field_name="memory_id")
+        if _FACT_MEMORY_ID.fullmatch(memory_id) is None:
+            raise ValueError("fact-memory memory_id is incompatible")
+        object.__setattr__(self, "memory_id", memory_id)
+        object.__setattr__(self, "fact_text", _fact_text(self.fact_text))
+
+    @classmethod
+    def create(cls, *, fact_text: str) -> "TriviaQAFactMemoryRecord":
+        resolved_text = _fact_text(fact_text)
+        identity = {
+            "schema_version": FACT_MEMORY_RECORD_SCHEMA_VERSION,
+            "tool_id": FACT_MEMORY_TOOL_ID,
+            "fact_text": resolved_text,
+        }
+        return cls(
+            schema_version=FACT_MEMORY_RECORD_SCHEMA_VERSION,
+            memory_id="triviaqa-fact-memory-" + _stable_sha256(identity),
+            tool_id=FACT_MEMORY_TOOL_ID,
+            fact_text=resolved_text,
+        )
+
+    def embedding_text(self) -> str:
+        """Return the exact and complete document embedding input."""
+
+        return self.fact_text
+
+    # Opaque compatibility projection for SkillFlow's RetrievalIndex protocol.
+    @property
+    def passage_id(self) -> str:
+        return self.memory_id
+
+    @property
+    def document_id(self) -> str:
+        return self.memory_id
+
+    @property
+    def title(self) -> str:
+        return "TriviaQA fact"
+
+    @property
+    def text(self) -> str:
+        return self.fact_text
+
+    def to_value(self) -> dict[str, str]:
+        return {
+            "schema_version": self.schema_version,
+            "memory_id": self.memory_id,
+            "tool_id": self.tool_id,
+            "fact_text": self.fact_text,
+        }
+
+    @classmethod
+    def from_value(cls, value: object) -> "TriviaQAFactMemoryRecord":
+        if not isinstance(value, Mapping) or set(value) != _FACT_MEMORY_FIELDS:
+            raise ValueError(
+                "fact-memory row must contain only schema_version, memory_id, "
+                "tool_id, and fact_text"
+            )
+        return cls(**{name: value[name] for name in cls.__dataclass_fields__})
+
+
+@dataclass(frozen=True, slots=True)
+class TriviaQAFactMemorySearchHit:
+    """Ranked fact hit with opaque SkillFlow compatibility identifiers."""
+
+    record: TriviaQAFactMemoryRecord
+    rank: int
+    similarity: float
+    snippet: str
+
+    def __post_init__(self) -> None:
+        _positive_integer(self.rank, field_name="rank")
+        if not isinstance(self.similarity, (int, float)) or not math.isfinite(
+            float(self.similarity)
+        ):
+            raise ValueError("similarity must be finite")
+        object.__setattr__(self, "similarity", float(self.similarity))
+        object.__setattr__(
+            self,
+            "snippet",
+            _required_text(self.snippet, field_name="snippet"),
+        )
+
+    @property
+    def passage_id(self) -> str:
+        return self.record.memory_id
+
+    @property
+    def document_id(self) -> str:
+        return self.record.memory_id
+
+    @property
+    def title(self) -> str:
+        return "TriviaQA fact"
+
+    @property
+    def memory_id(self) -> str:
+        return self.record.memory_id
+
+    @property
+    def fact_text(self) -> str:
+        return self.record.fact_text
+
+    def to_value(self) -> dict[str, object]:
+        return {
+            "passage_id": self.passage_id,
+            "document_id": self.document_id,
+            "title": self.title,
+            "snippet": self.snippet,
+            "rank": self.rank,
+            "similarity": self.similarity,
+            "memory_id": self.memory_id,
+        }
+
+
+def load_materialized_fact_memory(
+    path: str | Path,
+    *,
+    expected_count: int | None = None,
+) -> tuple[TriviaQAFactMemoryRecord, ...]:
+    """Load only the four-field Agent-facing fact projection."""
+
+    source_path = Path(path)
+    if not source_path.is_file():
+        raise FileNotFoundError("materialized TriviaQA fact-memory JSONL is unavailable")
+    records: list[TriviaQAFactMemoryRecord] = []
+    with source_path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+                records.append(TriviaQAFactMemoryRecord.from_value(value))
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"fact-memory JSON is invalid at line {line_number}: {exc}"
+                ) from exc
+    if expected_count is not None:
+        expected_count = _positive_integer(
+            expected_count,
+            field_name="expected_count",
+        )
+        if len(records) != expected_count:
+            raise ValueError(
+                f"expected {expected_count} fact-memory rows, found {len(records)}"
+            )
+    if not records:
+        raise ValueError("fact-memory must contain at least one record")
+    memory_ids = [record.memory_id for record in records]
+    if len(set(memory_ids)) != len(memory_ids):
+        raise ValueError("fact-memory memory_id values are not unique")
+    return tuple(records)
+
+
+def write_materialized_fact_memory(
+    path: str | Path,
+    records: Sequence[TriviaQAFactMemoryRecord],
+) -> None:
+    """Persist only the fact projection in canonical memory-id order."""
+
+    if not records:
+        raise ValueError("fact-memory must contain at least one record")
+    ordered = sorted(records, key=lambda record: record.memory_id)
+    if len({record.memory_id for record in ordered}) != len(ordered):
+        raise ValueError("fact-memory memory_id values are not unique")
+
+    def writer(handle: Any) -> None:
+        for record in ordered:
+            handle.write(_canonical_json(record.to_value()) + b"\n")
+
+    _write_atomic_bytes(Path(path), writer)
+
+
+def _validated_fact_files(
+    value: object,
+) -> Mapping[str, Mapping[str, str]]:
+    if not isinstance(value, Mapping) or set(value) != _FACT_MEMORY_FILE_FIELDS:
+        raise ValueError("fact-memory files manifest is incompatible")
+    expected_names = {
+        "facts": FACT_MEMORIES_FILENAME,
+        "embeddings": EMBEDDINGS_FILENAME,
+    }
+    result: dict[str, Mapping[str, str]] = {}
+    for key in sorted(_FACT_MEMORY_FILE_FIELDS):
+        entry = value[key]
+        if not isinstance(entry, Mapping) or set(entry) != _FILE_ENTRY_FIELDS:
+            raise ValueError(f"fact-memory files.{key} is incompatible")
+        name = _required_text(entry["name"], field_name=f"files.{key}.name")
+        if name != expected_names[key]:
+            raise ValueError(f"fact-memory files.{key}.name is incompatible")
+        result[key] = MappingProxyType(
+            {
+                "name": name,
+                "sha256": _required_sha256(
+                    entry["sha256"],
+                    field_name=f"files.{key}.sha256",
+                ),
+            }
+        )
+    return MappingProxyType(result)
+
+
+@dataclass(frozen=True, slots=True)
+class TriviaQAFactMemoryManifest:
+    """Versioned identity of one fact-only TriviaQA dense index."""
+
+    schema_version: str
+    format: str
+    record_kind: str
+    tool_id: str
+    retrieval_backend: str
+    index_id: str
+    corpus_name: str
+    corpus_version: str
+    memory_count: int
+    fact_only: bool
+    agent_facing_record_fields: tuple[str, ...]
+    embedding_input_field: str
+    provenance_loaded_by_index: bool
+    embedding_model: str
+    embedding_model_revision: str
+    embedding_dimension: int
+    normalization: str
+    similarity: str
+    query_prefix: str
+    frozen_top_k: int
+    snippet_characters: int
+    tool_budget: Mapping[str, int]
+    files: Mapping[str, Mapping[str, str]]
+
+    def __post_init__(self) -> None:
+        constants = {
+            "schema_version": FACT_MEMORY_MANIFEST_SCHEMA_VERSION,
+            "format": FACT_MEMORY_INDEX_FORMAT,
+            "record_kind": FACT_MEMORY_RECORD_KIND,
+            "tool_id": FACT_MEMORY_TOOL_ID,
+            "retrieval_backend": RETRIEVAL_BACKEND,
+            "corpus_name": FACT_MEMORY_CORPUS_NAME,
+            "embedding_input_field": FACT_MEMORY_EMBEDDING_INPUT_FIELD,
+            "normalization": NORMALIZATION,
+            "similarity": SIMILARITY,
+            "query_prefix": BGE_QUERY_PREFIX,
+        }
+        for field_name, expected in constants.items():
+            if getattr(self, field_name) != expected:
+                raise ValueError(
+                    f"fact-memory manifest {field_name} is unsupported"
+                )
+        if self.fact_only is not True:
+            raise ValueError("fact-memory manifest must declare fact_only=true")
+        if self.provenance_loaded_by_index is not False:
+            raise ValueError(
+                "fact-memory index cannot load the external provenance projection"
+            )
+        fields = tuple(self.agent_facing_record_fields)
+        if fields != _FACT_MEMORY_AGENT_FACING_FIELDS:
+            raise ValueError(
+                "fact-memory Agent-facing record fields are incompatible"
+            )
+        object.__setattr__(self, "agent_facing_record_fields", fields)
+        memory_count = _positive_integer(
+            self.memory_count,
+            field_name="memory_count",
+        )
+        _required_text(self.embedding_model, field_name="embedding_model")
+        _required_text(
+            self.embedding_model_revision,
+            field_name="embedding_model_revision",
+        )
+        _positive_integer(
+            self.embedding_dimension,
+            field_name="embedding_dimension",
+        )
+        frozen_top_k = _positive_integer(
+            self.frozen_top_k,
+            field_name="frozen_top_k",
+        )
+        if frozen_top_k > memory_count:
+            raise ValueError("frozen_top_k exceeds fact-memory count")
+        _positive_integer(
+            self.snippet_characters,
+            field_name="snippet_characters",
+        )
+        object.__setattr__(self, "tool_budget", _validated_tool_budget(self.tool_budget))
+        object.__setattr__(self, "files", _validated_fact_files(self.files))
+        facts_digest = self.files["facts"]["sha256"]
+        if self.corpus_version != f"sha256:{facts_digest}":
+            raise ValueError("fact-memory corpus_version differs from facts file")
+        _required_sha256(self.index_id, field_name="index_id")
+        if self.index_id != _stable_sha256(self._identity_value()):
+            raise ValueError("fact-memory index_id differs from manifest identity")
+
+    def _identity_value(self) -> dict[str, object]:
+        value = self.to_value()
+        value.pop("index_id")
+        return value
+
+    def to_value(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "format": self.format,
+            "record_kind": self.record_kind,
+            "tool_id": self.tool_id,
+            "retrieval_backend": self.retrieval_backend,
+            "index_id": self.index_id,
+            "corpus_name": self.corpus_name,
+            "corpus_version": self.corpus_version,
+            "memory_count": self.memory_count,
+            "fact_only": self.fact_only,
+            "agent_facing_record_fields": list(self.agent_facing_record_fields),
+            "embedding_input_field": self.embedding_input_field,
+            "provenance_loaded_by_index": self.provenance_loaded_by_index,
+            "embedding_model": self.embedding_model,
+            "embedding_model_revision": self.embedding_model_revision,
+            "embedding_dimension": self.embedding_dimension,
+            "normalization": self.normalization,
+            "similarity": self.similarity,
+            "query_prefix": self.query_prefix,
+            "frozen_top_k": self.frozen_top_k,
+            "snippet_characters": self.snippet_characters,
+            "tool_budget": dict(self.tool_budget),
+            "files": {key: dict(self.files[key]) for key in sorted(self.files)},
+        }
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        memory_count: int,
+        embedding_model: str,
+        embedding_model_revision: str,
+        embedding_dimension: int,
+        frozen_top_k: int,
+        snippet_characters: int,
+        max_tool_calls_per_agent_call: int,
+        max_turns_per_agent_call: int,
+        facts_sha256: str,
+        embeddings_sha256: str,
+    ) -> "TriviaQAFactMemoryManifest":
+        value: dict[str, object] = {
+            "schema_version": FACT_MEMORY_MANIFEST_SCHEMA_VERSION,
+            "format": FACT_MEMORY_INDEX_FORMAT,
+            "record_kind": FACT_MEMORY_RECORD_KIND,
+            "tool_id": FACT_MEMORY_TOOL_ID,
+            "retrieval_backend": RETRIEVAL_BACKEND,
+            "index_id": "0" * 64,
+            "corpus_name": FACT_MEMORY_CORPUS_NAME,
+            "corpus_version": f"sha256:{facts_sha256}",
+            "memory_count": memory_count,
+            "fact_only": True,
+            "agent_facing_record_fields": list(
+                _FACT_MEMORY_AGENT_FACING_FIELDS
+            ),
+            "embedding_input_field": FACT_MEMORY_EMBEDDING_INPUT_FIELD,
+            "provenance_loaded_by_index": False,
+            "embedding_model": embedding_model,
+            "embedding_model_revision": embedding_model_revision,
+            "embedding_dimension": embedding_dimension,
+            "normalization": NORMALIZATION,
+            "similarity": SIMILARITY,
+            "query_prefix": BGE_QUERY_PREFIX,
+            "frozen_top_k": frozen_top_k,
+            "snippet_characters": snippet_characters,
+            "tool_budget": {
+                "max_tool_calls_per_agent_call": max_tool_calls_per_agent_call,
+                "max_turns_per_agent_call": max_turns_per_agent_call,
+            },
+            "files": {
+                "facts": {
+                    "name": FACT_MEMORIES_FILENAME,
+                    "sha256": facts_sha256,
+                },
+                "embeddings": {
+                    "name": EMBEDDINGS_FILENAME,
+                    "sha256": embeddings_sha256,
+                },
+            },
+        }
+        identity = dict(value)
+        identity.pop("index_id")
+        value["index_id"] = _stable_sha256(identity)
+        return cls.from_value(value)
+
+    @classmethod
+    def from_value(cls, value: object) -> "TriviaQAFactMemoryManifest":
+        fields = frozenset(cls.__dataclass_fields__)
+        if not isinstance(value, Mapping) or set(value) != fields:
+            raise ValueError("fact-memory manifest fields are incompatible")
+        return cls(**{name: value[name] for name in fields})
+
+
+def build_triviaqa_fact_memory_index(
+    *,
+    facts_path: str | Path,
+    output_dir: str | Path,
+    embedding_model: str,
+    embedding_model_revision: str,
+    frozen_top_k: int,
+    max_tool_calls_per_agent_call: int,
+    max_turns_per_agent_call: int,
+    encoder: EmbeddingEncoder | None = None,
+    batch_size: int = 64,
+    snippet_characters: int = 512,
+    expected_count: int | None = None,
+) -> TriviaQAFactMemoryManifest:
+    """Build a fact-only dense index from an already-materialized projection.
+
+    The input JSONL is the complete Agent-facing data plane.  No provenance
+    path is accepted or loaded, so original questions, canonical answers,
+    aliases, task IDs, and evaluator metadata remain outside the index.
+    """
+
+    model_name = _required_text(embedding_model, field_name="embedding_model")
+    model_revision = _required_text(
+        embedding_model_revision,
+        field_name="embedding_model_revision",
+    )
+    frozen_top_k = _positive_integer(frozen_top_k, field_name="frozen_top_k")
+    batch_size = _positive_integer(batch_size, field_name="batch_size")
+    snippet_characters = _positive_integer(
+        snippet_characters,
+        field_name="snippet_characters",
+    )
+    max_tool_calls_per_agent_call = _positive_integer(
+        max_tool_calls_per_agent_call,
+        field_name="max_tool_calls_per_agent_call",
+    )
+    max_turns_per_agent_call = _positive_integer(
+        max_turns_per_agent_call,
+        field_name="max_turns_per_agent_call",
+    )
+    if max_turns_per_agent_call <= max_tool_calls_per_agent_call:
+        raise ValueError("ReAct turn budget must leave one completion turn")
+    records = load_materialized_fact_memory(
+        facts_path,
+        expected_count=expected_count,
+    )
+    if frozen_top_k > len(records):
+        raise ValueError("frozen_top_k exceeds fact-memory count")
+
+    ordered = tuple(sorted(records, key=lambda record: record.memory_id))
+    resolved_encoder = encoder or _get_embedding_model(model_name, model_revision)
+    embeddings = _normalized_embeddings(
+        resolved_encoder,
+        [record.embedding_text() for record in ordered],
+        batch_size=batch_size,
+    )
+    root = Path(output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    facts_output_path = root / FACT_MEMORIES_FILENAME
+    embeddings_path = root / EMBEDDINGS_FILENAME
+    manifest_path = root / MANIFEST_FILENAME
+
+    def write_facts(handle: Any) -> None:
+        for record in ordered:
+            handle.write(_canonical_json(record.to_value()) + b"\n")
+
+    _write_atomic_bytes(facts_output_path, write_facts)
+    _write_atomic_bytes(
+        embeddings_path,
+        lambda handle: np.save(handle, embeddings, allow_pickle=False),
+    )
+    facts_sha256 = _file_sha256(facts_output_path)
+    embeddings_sha256 = _file_sha256(embeddings_path)
+    manifest = TriviaQAFactMemoryManifest.create(
+        memory_count=len(ordered),
+        embedding_model=model_name,
+        embedding_model_revision=model_revision,
+        embedding_dimension=int(embeddings.shape[1]),
+        frozen_top_k=frozen_top_k,
+        snippet_characters=snippet_characters,
+        max_tool_calls_per_agent_call=max_tool_calls_per_agent_call,
+        max_turns_per_agent_call=max_turns_per_agent_call,
+        facts_sha256=facts_sha256,
+        embeddings_sha256=embeddings_sha256,
+    )
+    _write_atomic_bytes(
+        manifest_path,
+        lambda handle: handle.write(_canonical_json(manifest.to_value()) + b"\n"),
+    )
+    return manifest
+
+
+class TriviaQAFactMemoryIndex:
+    """Immutable fact-only index with existing search/read semantics."""
+
+    def __init__(
+        self,
+        *,
+        root: Path,
+        manifest: TriviaQAFactMemoryManifest,
+        records: tuple[TriviaQAFactMemoryRecord, ...],
+        embeddings: np.ndarray,
+        encoder: EmbeddingEncoder,
+    ) -> None:
+        self.root = root
+        self.manifest = manifest
+        self._records = records
+        self._record_by_id = {record.memory_id: record for record in records}
+        self._embeddings: np.ndarray | None = embeddings
+        self._encoder = encoder
+        self._lock = RLock()
+        self._closed = False
+
+    @classmethod
+    def open(
+        cls,
+        root: str | Path,
+        *,
+        encoder: EmbeddingEncoder | None = None,
+    ) -> "TriviaQAFactMemoryIndex":
+        root_path = Path(root)
+        if not root_path.is_dir():
+            raise FileNotFoundError(
+                "TriviaQA fact-memory index directory is unavailable"
+            )
+        manifest_path = root_path / MANIFEST_FILENAME
+        facts_path = root_path / FACT_MEMORIES_FILENAME
+        embeddings_path = root_path / EMBEDDINGS_FILENAME
+        for path in (manifest_path, facts_path, embeddings_path):
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"fact-memory index file is unavailable: {path.name}"
+                )
+        try:
+            manifest_value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("fact-memory manifest JSON is invalid") from exc
+        manifest = TriviaQAFactMemoryManifest.from_value(manifest_value)
+        if _file_sha256(facts_path) != manifest.files["facts"]["sha256"]:
+            raise ValueError("facts file differs from fact-memory manifest")
+        if _file_sha256(embeddings_path) != manifest.files["embeddings"]["sha256"]:
+            raise ValueError("embeddings file differs from fact-memory manifest")
+        records = load_materialized_fact_memory(
+            facts_path,
+            expected_count=manifest.memory_count,
+        )
+        memory_ids = [record.memory_id for record in records]
+        if memory_ids != sorted(memory_ids):
+            raise ValueError("fact-memory rows must use canonical memory_id ordering")
+        embeddings = np.load(embeddings_path, mmap_mode="r", allow_pickle=False)
+        if embeddings.dtype != np.dtype("float32"):
+            raise ValueError("fact-memory embedding dtype must be float32")
+        if embeddings.shape != (
+            manifest.memory_count,
+            manifest.embedding_dimension,
+        ):
+            raise ValueError("fact-memory embedding shape differs from manifest")
+        if not np.isfinite(embeddings).all():
+            raise ValueError("fact-memory embeddings contain non-finite values")
+        norms = np.linalg.norm(embeddings, axis=1)
+        if not np.allclose(norms, 1.0, rtol=1e-4, atol=1e-4):
+            raise ValueError("fact-memory embedding matrix is not l2-normalized")
+        resolved_encoder = encoder or _get_embedding_model(
+            manifest.embedding_model,
+            manifest.embedding_model_revision,
+        )
+        return cls(
+            root=root_path,
+            manifest=manifest,
+            records=records,
+            embeddings=embeddings,
+            encoder=resolved_encoder,
+        )
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def _require_open_embeddings(self) -> np.ndarray:
+        if self._closed or self._embeddings is None:
+            raise RuntimeError("TriviaQA fact-memory index is closed")
+        return self._embeddings
+
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int,
+    ) -> tuple[TriviaQAFactMemorySearchHit, ...]:
+        query_text = _required_text(query, field_name="query")
+        if type(limit) is not int or limit != self.manifest.frozen_top_k:
+            raise ValueError("search limit differs from frozen fact-memory top-k")
+        with self._lock:
+            embeddings = self._require_open_embeddings()
+            # BGE query enhancement is prefix + query text only.  Unlike the
+            # legacy QA-memory path, no Question: label is inserted.
+            embedding_query = f"{self.manifest.query_prefix}{query_text}"
+            query_embedding = _normalized_embeddings(
+                self._encoder,
+                [embedding_query],
+                batch_size=1,
+            )[0]
+            scores = np.asarray(embeddings @ query_embedding, dtype=np.float32)
+            order = sorted(
+                range(len(self._records)),
+                key=lambda index: (
+                    -float(scores[index]),
+                    self._records[index].memory_id,
+                ),
+            )[:limit]
+            return tuple(
+                TriviaQAFactMemorySearchHit(
+                    record=self._records[index],
+                    snippet=self._records[index].fact_text[
+                        : self.manifest.snippet_characters
+                    ],
+                    rank=rank,
+                    similarity=float(scores[index]),
+                )
+                for rank, index in enumerate(order, start=1)
+            )
+
+    def read(self, memory_id: str) -> TriviaQAFactMemoryRecord:
+        resolved_id = _required_text(memory_id, field_name="memory_id")
+        with self._lock:
+            self._require_open_embeddings()
+            try:
+                return self._record_by_id[resolved_id]
+            except KeyError as exc:
+                raise KeyError("unknown TriviaQA fact-memory memory_id") from exc
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            embeddings = self._embeddings
+            self._embeddings = None
+            self._closed = True
+            mmap = getattr(embeddings, "_mmap", None)
+            if mmap is not None:
+                mmap.close()
+
+    def __enter__(self) -> "TriviaQAFactMemoryIndex":
+        if self.closed:
+            raise RuntimeError("TriviaQA fact-memory index is closed")
+        return self
+
+    def __exit__(
+        self,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> None:
+        del exc_type, exc_value, traceback
+        self.close()
+
+
+def open_triviaqa_memory_index(
+    root: str | Path,
+    *,
+    encoder: EmbeddingEncoder | None = None,
+) -> TriviaQAQAMemoryIndex | TriviaQAFactMemoryIndex:
+    """Open legacy QA-memory or fact-memory by versioned ``record_kind``."""
+
+    manifest_path = Path(root) / MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        raise FileNotFoundError("TriviaQA memory manifest is unavailable")
+    try:
+        manifest_value = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("TriviaQA memory manifest JSON is invalid") from exc
+    if not isinstance(manifest_value, Mapping):
+        raise ValueError("TriviaQA memory manifest must be an object")
+    record_kind = manifest_value.get("record_kind")
+    if record_kind == "qa_memory":
+        return TriviaQAQAMemoryIndex.open(root, encoder=encoder)
+    if record_kind == FACT_MEMORY_RECORD_KIND:
+        return TriviaQAFactMemoryIndex.open(root, encoder=encoder)
+    raise ValueError("TriviaQA memory manifest record_kind is unsupported")
+
+
 __all__ = [
     "CORPUS_NAME",
     "DEFAULT_EMBEDDING_MODEL",
     "EMBEDDING_TEXT_TEMPLATE",
     "EMBEDDINGS_FILENAME",
+    "FACT_MEMORIES_FILENAME",
+    "FACT_MEMORY_CORPUS_NAME",
+    "FACT_MEMORY_EMBEDDING_INPUT_FIELD",
+    "FACT_MEMORY_INDEX_FORMAT",
+    "FACT_MEMORY_MANIFEST_SCHEMA_VERSION",
+    "FACT_MEMORY_RECORD_KIND",
+    "FACT_MEMORY_RECORD_SCHEMA_VERSION",
+    "FACT_MEMORY_TOOL_ID",
     "INDEX_FORMAT",
     "MANIFEST_FILENAME",
     "MANIFEST_SCHEMA_VERSION",
     "MEMORIES_FILENAME",
     "MEMORY_SCHEMA_VERSION",
     "QA_MEMORY_TOOL_ID",
+    "TriviaQAFactMemoryIndex",
+    "TriviaQAFactMemoryManifest",
+    "TriviaQAFactMemoryRecord",
+    "TriviaQAFactMemorySearchHit",
     "TriviaQAQAMemoryIndex",
     "TriviaQAQAMemoryManifest",
     "TriviaQAQAMemoryRecord",
     "TriviaQAQAMemorySearchHit",
     "TriviaQATrainSource",
     "build_triviaqa_qa_memory_index",
+    "build_triviaqa_fact_memory_index",
     "deterministic_answer_statement",
     "relation_bearing_answer_statement",
     "load_materialized_qa_memory",
+    "load_materialized_fact_memory",
     "load_triviaqa_qa_memory_sources",
     "validate_qa_memory_against_sources",
+    "open_triviaqa_memory_index",
+    "write_materialized_fact_memory",
     "write_materialized_qa_memory",
 ]

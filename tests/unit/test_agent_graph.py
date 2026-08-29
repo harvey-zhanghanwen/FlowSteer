@@ -788,8 +788,8 @@ def _trivia_semantic_graph(*, reader_to_reasoner: bool = True) -> AgentGraph:
                 "balanced",
                 "bind grounded propositions to the requested answer slot",
                 role_family="reasoner",
-                allowed_tools=(QA_RETRIEVAL_TOOL_ID,),
-                execution_mode="react",
+                allowed_tools=(),
+                execution_mode="reasoning",
                 artifact_type="semantic_candidate",
             ),
             AgentNode(
@@ -5969,8 +5969,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                                 "semantic candidate"
                             ),
                             "role_family": "reasoner",
-                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
-                            "execution_mode": "react",
+                            "allowed_tools": [],
+                            "execution_mode": "reasoning",
                         }
                     ],
                     "relations": [],
@@ -11138,6 +11138,80 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(revision, env.revision)
 
+    async def test_triviaqa_task_specific_contract_preserves_conjunctive_scope(
+        self,
+    ) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_trivia_semantic_runtime(
+                registry,
+                _ImmediateGateway(),
+            ),
+            problem=(
+                "Who wrote The Turn Of The Screw in the 19th century and "
+                "The Ambassadors in the 20th?"
+            ),
+            execute_on_edit=False,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+            recovery_policy="preserve_diagnose_repair_augment",
+            required_evidence_tool_id=QA_RETRIEVAL_TOOL_ID,
+        )
+
+        narrowed = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "retriever",
+                            "model_id": "balanced",
+                            "contract": (
+                                "retrieve evidence for The Turn Of The Screw "
+                                "and its author"
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+
+        self.assertFalse(narrowed.accepted)
+        self.assertIn(
+            "narrows the public conjunctive question scope",
+            narrowed.feedback,
+        )
+        self.assertIn("ambassadors", narrowed.feedback.casefold())
+        self.assertFalse(env.graph.has_node("retriever"))
+
+        neutral = await env.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "retriever",
+                            "model_id": "balanced",
+                            "contract": (
+                                "retrieve answer-free evidence for the original "
+                                "entity and requested relation"
+                            ),
+                            "role_family": "evidence_retriever",
+                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                            "execution_mode": "react",
+                        }
+                    ],
+                    "relations": [],
+                }
+            )
+        )
+
+        self.assertTrue(neutral.accepted, neutral.feedback)
+
     async def test_triviaqa_retriever_contract_rejects_question_external_literals(
         self,
     ) -> None:
@@ -11538,8 +11612,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                                 "in London from retrieved evidence"
                             ),
                             "role_family": "reasoner",
-                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
-                            "execution_mode": "react",
+                            "allowed_tools": [],
+                            "execution_mode": "reasoning",
                         }
                     ],
                     "relations": [],
@@ -11565,8 +11639,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                                 "Dench to receipt-grounded evidence"
                             ),
                             "role_family": "reasoner",
-                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
-                            "execution_mode": "react",
+                            "allowed_tools": [],
+                            "execution_mode": "reasoning",
                         }
                     ],
                     "relations": [],
@@ -11607,8 +11681,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                                 "Smith Square, Greater London) as the answer."
                             ),
                             "role_family": "reasoner",
-                            "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
-                            "execution_mode": "react",
+                            "allowed_tools": [],
+                            "execution_mode": "reasoning",
                         }
                     ],
                     "relations": [],
@@ -11655,8 +11729,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                                 "model_id": "balanced",
                                 "contract": conflicting_contract,
                                 "role_family": "reasoner",
-                                "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
-                                "execution_mode": "react",
+                                "allowed_tools": [],
+                                "execution_mode": "reasoning",
                             }
                         ],
                         "relations": [],
@@ -11735,8 +11809,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         current = env.graph.get_node("reasoner")
         self.assertEqual(repaired_contract, current.contract)
         self.assertEqual("reasoner", current.role_family)
-        self.assertEqual("react", current.execution_mode.value)
-        self.assertEqual((QA_RETRIEVAL_TOOL_ID,), current.allowed_tools)
+        self.assertEqual("reasoning", current.execution_mode.value)
+        self.assertEqual((), current.allowed_tools)
         self.assertEqual([], gateway.requests)
 
     async def test_hotpot_formatter_contract_cannot_be_mutated_to_an_answer(self) -> None:
