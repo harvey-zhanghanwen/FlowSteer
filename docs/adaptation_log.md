@@ -718,3 +718,9 @@ change was made during profile selection.
 - Added a focused regression test for failed HealthBench preflight diagnosis.
   The completion runner suite now passes 38 tests. The failure remains a
   grader-account blocker, not an AgentGraph/GPU0 runtime failure.
+- Failed evaluator preflights now also write a bounded, structured
+  `preflight_receipt.json` before the runner exits. The receipt contains only
+  synthetic-fixture status, evaluator identity, grader telemetry, and clipped
+  provider diagnostics; it contains no benchmark conversation, rubric, or
+  reference response. The failed preflight remains terminal and cannot fall
+  through into benchmark generation.

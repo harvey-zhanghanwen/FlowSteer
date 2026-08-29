@@ -677,8 +677,9 @@ def test_healthbench_preflight_failure_exposes_grader_receipt_without_case_data(
                 "healthbench_professional",
             )
         )
-    except _MODULE.CompletionBenchmarkRoundError as error:
+    except _MODULE.EvaluatorPreflightError as error:
         message = str(error)
+        receipt = error.preflight_receipt
     else:
         raise AssertionError("HealthBench preflight failure was not raised")
 
@@ -686,6 +687,25 @@ def test_healthbench_preflight_failure_exposes_grader_receipt_without_case_data(
     assert "bad_response_body" in message
     assert "status_code': 500" in message
     assert "rubric" not in message
+    assert receipt == {
+        "schema_version": "flowsteer.evaluator_preflight.v1",
+        "passed": False,
+        "dataset_key": "healthbench_professional",
+        "fixture": "synthetic_non_benchmark",
+        "termination": "grader_error",
+        "evaluator_version": None,
+        "grader_model": None,
+        "grader_reasoning_effort": None,
+        "grader_api_calls": None,
+        "grader_latency_ms": None,
+        "grader_error": {
+            "error_type": "InternalServerError",
+            "message": "provider returned bad_response_body",
+        },
+        "provider_errors": [
+            {"error_type": "InternalServerError", "status_code": 500}
+        ],
+    }
 
 
 def test_environment_preflight_uses_fixed_training_record(tmp_path):

@@ -88,6 +88,14 @@ class CompletionBenchmarkRoundError(RuntimeError):
     """The fixed benchmark evaluation protocol could not complete."""
 
 
+class EvaluatorPreflightError(CompletionBenchmarkRoundError):
+    """The evaluator rejected its synthetic preflight with a safe receipt."""
+
+    def __init__(self, message: str, receipt: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.preflight_receipt = dict(receipt)
+
+
 _BENCHMARKS: Mapping[str, Mapping[str, Any]] = {
     "hotpotqa": {
         "label": "HotpotQA",
@@ -1143,10 +1151,30 @@ async def _run_evaluator_preflight(
                     for item in provider_errors
                     if isinstance(item, Mapping)
                 ]
-            raise CompletionBenchmarkRoundError(
+            failure_receipt = {
+                "schema_version": "flowsteer.evaluator_preflight.v1",
+                "passed": False,
+                "dataset_key": dataset_key,
+                "fixture": "synthetic_non_benchmark",
+                "termination": receipt.get("termination"),
+                "evaluator_version": receipt.get("evaluator_version"),
+                "grader_model": receipt.get("grader_model"),
+                "grader_reasoning_effort": receipt.get(
+                    "grader_reasoning_effort"
+                ),
+                "grader_api_calls": receipt.get("grader_api_calls"),
+                "grader_latency_ms": receipt.get("grader_latency_ms"),
+                "grader_error": {
+                    "error_type": error_type,
+                    "message": error_message,
+                },
+                "provider_errors": provider_statuses,
+            }
+            raise EvaluatorPreflightError(
                 "synthetic HealthBench Professional evaluator preflight failed: "
                 f"grader_error={error_type}: {error_message}; "
-                f"provider_errors={provider_statuses}"
+                f"provider_errors={provider_statuses}",
+                failure_receipt,
             )
         return {
             "passed": True,
@@ -3433,6 +3461,9 @@ async def run_completion_benchmark_round(
         _write_json(paths["manifest"], manifest)
         _write_json(paths["preflight"], preflight)
     except Exception as exc:
+        failed_preflight_receipt = getattr(exc, "preflight_receipt", None)
+        if isinstance(failed_preflight_receipt, Mapping):
+            _write_json(paths["preflight"], failed_preflight_receipt)
         manifest.update(
             status="failed_runtime_preflight",
             error=_safe_error(exc),
