@@ -63,6 +63,9 @@ _LEXICAL_TOKEN = re.compile(r"[^\W_]+(?:['’-][^\W_]+)*", re.UNICODE)
 # separator or an attached article cannot create a false rejection.  Actual
 # changed, added, or removed numbers still fail deterministically.
 _ARABIC_NUMBER_ATOM = re.compile(r"(?<!\d)\d[\d,]*(?!\d)")
+_DATE_COMMA_SEPARATOR = re.compile(
+    r"(?<!\d)(?P<day>\d{1,2}),(?P<year>\d{4})(?!\d)"
+)
 _ROMAN_NUMERAL_TOKEN = re.compile(r"\b[IVXLCDM]{2,}\b")
 _WORLD_WAR_ABBREVIATION = re.compile(r"\bWW(?P<roman>I{1,3})\b", re.IGNORECASE)
 _QUOTED_SPAN = re.compile(r'"([^\"]+)"|“([^”]+)”|(?<!\w)[\'‘]([^\'’]+)[\'’](?!\w)')
@@ -197,9 +200,17 @@ def _missing_identity_tokens(required_text: str, observed_text: str) -> frozense
 
 
 def _number_or_date_counts(text: str) -> Counter[str]:
+    # NECESSARY_HOTPOT_ADAPTATION: TriviaQA's immutable-number boundary
+    # compares numeric atoms rather than typography.  A comma between a
+    # one/two-digit day and a four-digit year is a date delimiter, not a
+    # thousands separator (``April 13,1979`` == ``April 13, 1979``).
+    normalized_text = _DATE_COMMA_SEPARATOR.sub(
+        r"\g<day> \g<year>",
+        text,
+    )
     values = [
         match.group(0).replace(",", "")
-        for match in _ARABIC_NUMBER_ATOM.finditer(text)
+        for match in _ARABIC_NUMBER_ATOM.finditer(normalized_text)
     ]
     values.extend(
         match.group(0).casefold()
@@ -342,9 +353,11 @@ def validate_hotpotqa_fact_statement(
     fact = " ".join(_required_text(fact_statement, "fact_statement").split())
     if _FACT_QA_WRAPPER.search(fact):
         raise ValueError("fact_statement contains a Question/Answer wire")
-    unquoted = _QUOTED_SPAN.sub(" quoted material ", fact)
-    if "?" in unquoted or re.match(
-        r"^(?:who|what|which|where|when|why|how|name|identify)\b",
+    terminal_surface = fact.rstrip('"\'’”)]} ')
+    if terminal_surface.endswith("?") or re.match(
+        r"^(?:who|what|which|where|when|why|how|name|identify|"
+        r"are|can|could|did|do|does|had|has|have|is|should|"
+        r"was|were|will|would)\b",
         fact,
         re.IGNORECASE,
     ):

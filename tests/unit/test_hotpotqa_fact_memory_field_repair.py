@@ -449,29 +449,35 @@ def test_repeated_fact_forces_rotating_source_reconstruction(
     )
     calls: list[Mapping[str, object]] = []
     fact_repairs = 0
+    fact_verifications = 0
 
     async def fake_generate_json(**kwargs: object):
-        nonlocal fact_repairs
+        nonlocal fact_repairs, fact_verifications
         calls.append(dict(kwargs))
         request_id = str(kwargs["request_id"])
         if ":generate:" in request_id:
             return {
                 "paraphrase_question": "Was Atlas authored by Ada?",
-                "fact_statement": "Did Ada author Atlas.",
+                "fact_statement": "Ada authored Atlas.",
             }, {"request_id": request_id}
         if "repair-fact" in request_id:
             fact_repairs += 1
             return {
                 "fact_statement": (
-                    "Did Ada author Atlas."
+                    "Ada authored Atlas."
                     if fact_repairs == 1
-                    else "Ada authored Atlas."
+                    else "Atlas was authored by Ada."
                 )
             }, {"request_id": request_id}
         if "verify-question" in request_id:
             return _question_verification(), {"request_id": request_id}
         if "verify-fact" in request_id:
-            return _fact_verification(), {"request_id": request_id}
+            fact_verifications += 1
+            return (
+                _fact_verification(fact_supported_by_qa=False)
+                if fact_verifications < 3
+                else _fact_verification()
+            ), {"request_id": request_id}
         raise AssertionError(f"unexpected request: {request_id}")
 
     monkeypatch.setattr(materializer, "_generate_json", fake_generate_json)
@@ -487,7 +493,7 @@ def test_repeated_fact_forces_rotating_source_reconstruction(
         )
     )
 
-    assert candidate["fact_statement"] == "Ada authored Atlas."
+    assert candidate["fact_statement"] == "Atlas was authored by Ada."
     repair_calls = [
         call for call in calls if "repair-fact" in str(call["request_id"])
     ]
@@ -514,6 +520,57 @@ def test_repeated_fact_forces_rotating_source_reconstruction(
         True,
         False,
     ]
+
+
+def test_complete_fact_gets_local_terminal_punctuation_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(8)
+    calls: list[Mapping[str, object]] = []
+
+    async def fake_generate_json(**kwargs: object):
+        calls.append(dict(kwargs))
+        request_id = str(kwargs["request_id"])
+        if ":generate:" in request_id:
+            return {
+                "paraphrase_question": "Which individual wrote Atlas?",
+                "fact_statement": "Atlas was authored by Ada Lovelace",
+            }, {"request_id": request_id}
+        if "verify-question" in request_id:
+            return _question_verification(), {"request_id": request_id}
+        if "verify-fact" in request_id:
+            return _fact_verification(), {"request_id": request_id}
+        raise AssertionError(f"unexpected request: {request_id}")
+
+    monkeypatch.setattr(materializer, "_generate_json", fake_generate_json)
+    candidate, receipt = asyncio.run(
+        materializer._materialize_one(
+            source,
+            index=0,
+            model=object(),
+            provider=object(),
+            seed=47,
+            max_attempts=2,
+            generation_rounds=1,
+        )
+    )
+
+    assert candidate["fact_statement"] == "Atlas was authored by Ada Lovelace."
+    assert not any(
+        "repair-fact" in str(call["request_id"])
+        for call in calls
+    )
+    second_fact = receipt["attempt_receipts"][1]["fact"]
+    assert second_fact["repair_strategy"] == "terminal_punctuation_only"
+    assert second_fact["generation_response"] == {
+        "local_surface_repair": "terminal_punctuation_only"
+    }
+    assert materializer._repair_missing_terminal_punctuation(
+        "Ada Lovelace"
+    ) is None
+    assert materializer._clause_requires_synonym_repair(
+        "fact_statement removed an immutable entity from the answer clause"
+    )
 
 
 def test_clause_identical_tail_uses_synonym_repair_and_clause_verifier(

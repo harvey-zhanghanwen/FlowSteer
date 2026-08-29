@@ -34,6 +34,7 @@ from scripts.materialize_hotpotqa_qa_memory import (  # noqa: E402
 from src.interactive.config_loader import load_model_registry  # noqa: E402
 from src.interactive.hotpotqa_full_dataset_fact_memory_index import (  # noqa: E402
     _ARABIC_NUMBER_ATOM,
+    _FINITE_CLAUSE_VERB,
     _ROMAN_NUMERAL_TOKEN,
     _WORLD_WAR_ABBREVIATION,
     _content_tokens,
@@ -52,10 +53,10 @@ from src.interactive.hotpotqa_qa_memory_index import (  # noqa: E402
 )
 
 
-PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v7"
-PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v7"
+PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v8"
+PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v8"
 PARAPHRASE_PROVENANCE = (
-    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v7"
+    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v8"
 )
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
 
@@ -154,6 +155,27 @@ _CLAUSE_SYNONYM_REJECTION_MARKERS = (
     "removed a number or date from the answer",
     "introduced a number or date",
     "must be a complete declarative sentence",
+    "removed an immutable entity from the answer clause",
+)
+_COMMON_FINITE_PREDICATES = frozenset(
+    {
+        "became",
+        "began",
+        "built",
+        "created",
+        "died",
+        "fell",
+        "founded",
+        "gave",
+        "made",
+        "played",
+        "produced",
+        "released",
+        "served",
+        "took",
+        "won",
+        "wrote",
+    }
 )
 
 
@@ -362,10 +384,52 @@ def _clause_requires_synonym_repair(prior_rejection: str) -> bool:
 
 
 def _complete_declarative_punctuation(text: str) -> str:
-    normalized = " ".join(text.split()).rstrip()
-    if not normalized.rstrip('"\'’”)]} ').endswith((".", "!")):
-        normalized += "."
-    return normalized
+    """DIRECT_REUSE of TriviaQA's terminal punctuation surface repair."""
+
+    normalized = " ".join(text.split()).strip()
+    match = re.fullmatch(
+        r"(?P<body>.*?)(?P<closers>[\"'’”)\]}]*)",
+        normalized,
+    )
+    assert match is not None
+    body = match.group("body").rstrip()
+    closers = match.group("closers")
+    if body.endswith((".", "!", "?")):
+        return normalized
+    if body.endswith((",", ";", ":")):
+        body = body[:-1].rstrip()
+    return f"{body}{closers}."
+
+
+def _repair_missing_terminal_punctuation(fact: str) -> str | None:
+    """Append punctuation only when the existing surface is clause-complete."""
+
+    normalized = " ".join(fact.split()).strip()
+    if not normalized or normalized.rstrip('"\'’”)]} ').endswith(
+        (".", "!", "?")
+    ):
+        return None
+    tokens = _lexical_tokens(normalized)
+    if len(tokens) < 3:
+        return None
+    identities = _identity_tokens(normalized)
+    predicate_tokens = [
+        token.casefold()
+        for token in tokens
+        if token.casefold().removesuffix("'s").removesuffix("’s")
+        not in identities
+    ]
+    has_predicate = (
+        _FINITE_CLAUSE_VERB.search(normalized) is not None
+        or any(token in _COMMON_FINITE_PREDICATES for token in predicate_tokens)
+        or any(
+            len(token) > 3 and token.endswith(("ed", "ing"))
+            for token in predicate_tokens
+        )
+    )
+    if not has_predicate:
+        return None
+    return _complete_declarative_punctuation(normalized)
 
 
 def _parse_question_repair(
@@ -767,19 +831,30 @@ async def _materialize_one(
                         )
                 if not fact_admitted:
                     try:
+                        terminal_punctuation_repair = (
+                            _repair_missing_terminal_punctuation(fact or "")
+                            if "must be a complete declarative sentence"
+                            in fact_rejection.casefold()
+                            else None
+                        )
                         clause_synonym_repair = (
                             binding_mode == "declarative_clause_paraphrase"
                             and _clause_requires_synonym_repair(
                                 fact_rejection
                             )
+                            and terminal_punctuation_repair is None
                         )
                         fact_repair_strategy = (
-                            "clause_synonym_only"
-                            if clause_synonym_repair
+                            "terminal_punctuation_only"
+                            if terminal_punctuation_repair is not None
                             else (
-                                "authoritative_answer_slot_reconstruction"
-                                if force_fact_reconstruction
-                                else _fact_repair_strategy(fact_rejection)
+                                "clause_synonym_only"
+                                if clause_synonym_repair
+                                else (
+                                    "authoritative_answer_slot_reconstruction"
+                                    if force_fact_reconstruction
+                                    else _fact_repair_strategy(fact_rejection)
+                                )
                             )
                         )
                         reconstruct_from_source = (
@@ -796,7 +871,15 @@ async def _materialize_one(
                                 % len(reconstruction_patterns)
                             ]
                             fact_reconstruction_count += 1
-                        if clause_synonym_repair:
+                        if terminal_punctuation_repair is not None:
+                            fact = terminal_punctuation_repair
+                            response = {
+                                "local_surface_repair": (
+                                    "terminal_punctuation_only"
+                                )
+                            }
+                            fact_repair_temperature = 0.0
+                        elif clause_synonym_repair:
                             clause_source_tokens = (
                                 _clause_replacement_source_tokens(source)
                             )

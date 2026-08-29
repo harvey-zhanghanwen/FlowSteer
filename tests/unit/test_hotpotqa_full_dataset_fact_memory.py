@@ -519,6 +519,41 @@ def test_binary_both_nonbinary_official_answer_uses_clause_binding() -> None:
     )
 
 
+def test_date_comma_spacing_preserves_numeric_atoms() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:date-comma",
+        base_task_id="hotpotqa:date-comma",
+        cycled=False,
+        question="What occurred on April 13,1979?",
+        canonical_answer="The Atlas release",
+    )
+    assert fact_index.validate_hotpotqa_question_rewrite(
+        source,
+        "Which event happened on April 13, 1979?",
+    )
+    with pytest.raises(ValueError, match="immutable number or date"):
+        fact_index.validate_hotpotqa_question_rewrite(
+            source,
+            "Which event happened on April 14, 1979?",
+        )
+
+
+def test_internal_title_question_mark_is_declarative_but_terminal_is_not() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:question-title",
+        base_task_id="hotpotqa:question-title",
+        cycled=False,
+        question="Which game was produced before Catan?",
+        canonical_answer="Guess Who?",
+    )
+    assert fact_index.validate_hotpotqa_fact_statement(
+        source,
+        "Guess Who? was produced before Catan.",
+    )
+    with pytest.raises(ValueError, match="must be declarative"):
+        fact_index.validate_hotpotqa_fact_statement(source, "Did X?")
+
+
 def test_materializer_has_no_fallback_option() -> None:
     parser = materializer._parser()
     option_strings = {
