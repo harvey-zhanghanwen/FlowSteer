@@ -54,10 +54,10 @@ from src.interactive.hotpotqa_qa_memory_index import (  # noqa: E402
 )
 
 
-PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v12"
-PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v12"
+PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v13"
+PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v13"
 PARAPHRASE_PROVENANCE = (
-    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v12"
+    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v13"
 )
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
 
@@ -153,6 +153,9 @@ _RELATION_REBUILD_REJECTION_MARKERS = (
     "must be declarative",
     "must be a complete declarative sentence",
     "begins with an unbound anaphoric subject",
+)
+_RAW_SURFACE_REJECTION_MARKER = (
+    "contains the complete source question lexical surface"
 )
 _ANSWER_RECONSTRUCTION_PATTERNS = (
     "literal_answer_slot_substitution",
@@ -551,6 +554,8 @@ def _answer_reconstruction_instruction(pattern: str) -> str:
 
 def _fact_repair_strategy(prior_rejection: str) -> str:
     normalized = prior_rejection.casefold()
+    if _RAW_SURFACE_REJECTION_MARKER in normalized:
+        return "semantic_surface_reconstruction"
     if any(
         marker in normalized
         for marker in _RELATION_REBUILD_REJECTION_MARKERS
@@ -899,6 +904,7 @@ async def _materialize_one(
                             fact_repair_strategy in {
                                 "authoritative_answer_slot_reconstruction",
                                 "binary_polarity_reconstruction",
+                                "semantic_surface_reconstruction",
                             }
                         )
                         reconstruction_pattern: str | None = None
@@ -987,7 +993,14 @@ async def _materialize_one(
                                     "declarative_clause_paraphrase",
                                     "binary_polarity_binding",
                                 }
-                                else 0.1
+                                and fact_repair_strategy
+                                != "semantic_surface_reconstruction"
+                                else (
+                                    0.35
+                                    if fact_repair_strategy
+                                    == "semantic_surface_reconstruction"
+                                    else 0.1
+                                )
                             )
                             repaired, response = await _generate_json(
                                 model=model,
@@ -1024,6 +1037,27 @@ async def _materialize_one(
                                     + "Every pronoun or demonstrative must have an "
                                     "explicit antecedent. State one supported fact, "
                                     "not a Q-A label or repeated relation. "
+                                    "Treat every source string as authoritative even "
+                                    "when it is malformed or conflicts with world "
+                                    "knowledge; never correct it from memory. Copy all "
+                                    "proper-name, title, alias, number, and date "
+                                    "surfaces from canonical_training_answer into the "
+                                    "fact without shortening them. If that answer "
+                                    "cannot grammatically fill the interrogative slot, "
+                                    "do not invent the missing value: instead state a "
+                                    "self-contained proposition literally supported "
+                                    "by the source question and canonical answer. "
+                                    + (
+                                        "The rejected fact retained the complete raw "
+                                        "question surface. Re-express the source "
+                                        "predicate with genuinely equivalent wording "
+                                        "and declarative word order; the output must "
+                                        "not contain the complete original-question "
+                                        "lexical sequence. "
+                                        if fact_repair_strategy
+                                        == "semantic_surface_reconstruction"
+                                        else ""
+                                    )
                                     + (
                                         "Construct it only from original_question and "
                                         "canonical_training_answer. Do not imitate the "
@@ -1160,6 +1194,14 @@ async def _materialize_one(
 
             if not fact_admitted and fact is not None:
                 try:
+                    local_surface_repair = _repair_missing_terminal_punctuation(
+                        fact
+                    )
+                    if local_surface_repair is not None:
+                        fact = local_surface_repair
+                        fact_trace["post_generation_surface_repair"] = (
+                            "terminal_punctuation_only"
+                        )
                     fact = validate_hotpotqa_fact_statement(source, fact)
                     fact_trace["deterministic_admission"] = True
                     clause_verification = (

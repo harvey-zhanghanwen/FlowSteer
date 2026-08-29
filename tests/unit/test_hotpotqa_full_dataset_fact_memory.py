@@ -678,6 +678,79 @@ def test_unbound_pronoun_still_fails_when_not_a_canonical_title() -> None:
 
 
 @pytest.mark.parametrize(
+    ("question", "fact"),
+    (
+        (
+            "Are both Those Calloways and Tomorrowland of the same genre?",
+            "Those Calloways and Tomorrowland are not both of the same genre.",
+        ),
+        (
+            "Are It Might Get Loud and Mr. Big both Canadian documentaries?",
+            "It Might Get Loud and Mr. Big are not both Canadian documentaries.",
+        ),
+    ),
+)
+def test_source_mentioned_anaphor_led_title_is_self_contained(
+    question: str,
+    fact: str,
+) -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:anaphor-title",
+        base_task_id="hotpotqa:anaphor-title",
+        cycled=False,
+        question=question,
+        canonical_answer="no",
+    )
+    assert fact_index.validate_hotpotqa_fact_statement(source, fact) == fact
+
+
+def test_title_case_internal_is_where_is_not_an_unbound_answer_slot() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:title-is-where",
+        base_task_id="hotpotqa:title-is-where",
+        cycled=False,
+        question=(
+            "Home Is Where the Hart Is starred a Canadian actor born 11 "
+            "February and appeared in how many films?"
+        ),
+        canonical_answer="more than 100 films",
+    )
+    fact = (
+        "Home Is Where the Hart Is starred a Canadian actor born on 11 "
+        "February who appeared in more than 100 films."
+    )
+    assert fact_index.validate_hotpotqa_fact_statement(source, fact) == fact
+
+
+def test_long_answer_with_ordinary_finite_predicate_is_a_clause() -> None:
+    assert fact_index.canonical_answer_is_declarative_clause(
+        (
+            "Founded in 1868, WSU consists of 13 schools and colleges "
+            "offering nearly 350 programs to more than 27,000 students"
+        ),
+        question=(
+            "Which was founded first, Stellenbosch University or Wayne State "
+            "University?"
+        ),
+    )
+
+
+def test_hyphenated_type_suffix_preserves_canonical_identity() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:hyphenated-identity",
+        base_task_id="hotpotqa:hyphenated-identity",
+        cycled=False,
+        question="Which Royal Navy battleships were the first fast battleships?",
+        canonical_answer='Queen Elizabeth"-class battleships',
+    )
+    fact = (
+        "The Queen Elizabeth-class battleships were the Royal Navy's first "
+        "fast battleships."
+    )
+    assert fact_index.validate_hotpotqa_fact_statement(source, fact) == fact
+
+
+@pytest.mark.parametrize(
     "fact",
     (
         "Did Ada Lovelace author Atlas.",

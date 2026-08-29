@@ -83,6 +83,18 @@ _FINITE_CLAUSE_VERB = re.compile(
     r"might|must|shall|should|will|would)\b",
     re.IGNORECASE,
 )
+# NECESSARY_HOTPOT_ADAPTATION: a small set of ordinary finite predicates is
+# required for upstream answer strings such as ``Founded in 1868, WSU
+# consists ...``.  The auxiliary-only predicate boundary inherited from the
+# TriviaQA adapter classified those complete propositions as answer labels.
+# This remains a sentence-shape signal only; semantic equivalence is still
+# checked by the model verifier before a fact is admitted.
+_COMMON_FINITE_CLAUSE_PREDICATE = re.compile(
+    r"\b(?:became|began|built|consists?|created|died|directed|educated|fell|"
+    r"founded|gave|made|played|produced|released|reigned|served|took|won|"
+    r"wrote)\b",
+    re.IGNORECASE,
+)
 # DIRECT_REUSE: TriviaQA ``_FACT_ANAPHORIC_SUBJECT``.  A retrieval fact must
 # bind its subject inside the indexed sentence; a leading personal or
 # demonstrative pronoun otherwise depends on context that is absent from the
@@ -105,7 +117,6 @@ _FACT_UNBOUND_ANSWER_SLOT = re.compile(
     r"\b(?:is|are|was|were)\s+(?:which|what)\s+"
     r"(?:person|individual|entity|thing|place|city|country|state|year|date|"
     r"number|film|movie|song|book|work|organization|company|team|one)\b)",
-    re.IGNORECASE,
 )
 _FACT_LEADING_INTERROGATIVE = re.compile(
     r"^(?:who|what|which|where|when|why|how|name|identify|"
@@ -213,6 +224,17 @@ def _identity_token_preserved(
     )
     if normalized_required in normalized_observed:
         return True
+    # Hyphenated class/type suffixes and optional spacing around the Hawaiian
+    # okina are equivalent proper-name typography, not entity deletion.
+    if any(
+        token.startswith(f"{normalized_required}-")
+        or (
+            normalized_required.endswith("ʻ")
+            and token.startswith(normalized_required)
+        )
+        for token in normalized_observed
+    ):
+        return True
     if normalized_required.endswith("'s"):
         return False
     return f"{normalized_required}'s" in normalized_observed
@@ -296,7 +318,10 @@ def _contains_ordered_tokens(text: str, required: Sequence[str]) -> bool:
     )
     for required_token in required:
         folded = required_token.casefold().replace("’", "'")
-        if not any(token == folded for token in observed):
+        if not any(
+            token == folded or token.startswith(f"{folded}-")
+            for token in observed
+        ):
             return False
     return True
 
@@ -338,6 +363,39 @@ def _leading_will_is_source_entity(source_question: str, fact: str) -> bool:
             re.IGNORECASE,
         )
     )
+
+
+def _leading_anaphor_is_source_entity(
+    source_question: str,
+    fact: str,
+) -> bool:
+    """Recognize source-mentioned titles such as ``Those Calloways``.
+
+    This is deliberately narrower than a generic proper-noun heuristic: the
+    leading two-or-more-token title surface must occur verbatim in the source
+    question, start with the otherwise-anaphoric token, and be followed in the
+    fact by a predicate boundary.  Bare ``It/Those ...`` references remain
+    invalid.
+    """
+
+    tokens = _lexical_tokens(fact)
+    if len(tokens) < 3 or tokens[0].casefold() not in {
+        "it", "this", "that", "these", "those"
+    }:
+        return False
+    for length in range(min(6, len(tokens) - 1), 1, -1):
+        candidate = " ".join(tokens[:length])
+        if not _contains_contiguous_lexical_surface(source_question, candidate):
+            continue
+        if not any(token[:1].isupper() for token in tokens[1:length]):
+            continue
+        remainder_tokens = tokens[length:]
+        remainder = " ".join(remainder_tokens)
+        if _FINITE_CLAUSE_VERB.search(remainder) or _COMMON_FINITE_CLAUSE_PREDICATE.search(
+            remainder
+        ):
+            return True
+    return False
 
 
 def canonical_answer_is_declarative_clause(
@@ -385,13 +443,17 @@ def canonical_answer_is_declarative_clause(
     # answers are complete punctuated sentences.  Terminal-period + finite
     # predicate is a fail-closed sentence signal that does not classify
     # unpunctuated song/film titles containing auxiliaries as propositions.
+    has_finite_predicate = (
+        _FINITE_CLAUSE_VERB.search(normalized) is not None
+        or _COMMON_FINITE_CLAUSE_PREDICATE.search(normalized) is not None
+    )
     if (
         len(answer_tokens) >= 3
         and normalized.endswith(".")
-        and _FINITE_CLAUSE_VERB.search(normalized) is not None
+        and has_finite_predicate
     ) or (
         len(answer_tokens) >= 12
-        and _FINITE_CLAUSE_VERB.search(normalized) is not None
+        and has_finite_predicate
     ):
         return True
     if question is None or (
@@ -481,7 +543,13 @@ def validate_hotpotqa_fact_statement(
         )
     ):
         raise ValueError("fact_statement must be declarative")
-    if _FACT_ANAPHORIC_SUBJECT.match(structural_fact):
+    if (
+        _FACT_ANAPHORIC_SUBJECT.match(structural_fact)
+        and not _leading_anaphor_is_source_entity(
+            source.question,
+            structural_fact,
+        )
+    ):
         raise ValueError("fact_statement begins with an unbound anaphoric subject")
     if _FACT_UNBOUND_ANSWER_SLOT.search(structural_fact):
         raise ValueError("fact_statement contains an unbound interrogative answer slot")

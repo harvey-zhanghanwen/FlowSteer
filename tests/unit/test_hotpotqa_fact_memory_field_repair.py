@@ -673,11 +673,11 @@ def test_complete_fact_gets_local_terminal_punctuation_only(
         "repair-fact" in str(call["request_id"])
         for call in calls
     )
-    second_fact = receipt["attempt_receipts"][1]["fact"]
-    assert second_fact["repair_strategy"] == "terminal_punctuation_only"
-    assert second_fact["generation_response"] == {
-        "local_surface_repair": "terminal_punctuation_only"
-    }
+    assert len(receipt["attempt_receipts"]) == 1
+    first_fact = receipt["attempt_receipts"][0]["fact"]
+    assert first_fact["post_generation_surface_repair"] == (
+        "terminal_punctuation_only"
+    )
     assert materializer._repair_missing_terminal_punctuation(
         "Ada Lovelace"
     ) is None
