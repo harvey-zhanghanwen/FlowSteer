@@ -1386,6 +1386,59 @@ def test_webshop_native_metric_receipt_fails_closed_when_one_metric_is_missing()
     }
 
 
+def test_agentgraph_receipts_count_canvas_runtime_error_without_double_counting():
+    canvas_error = (
+        "accepted add_agent at revision 1; execution_error="
+        '{"type":"AgentRuntimeError","message":"no output artifact",'
+        '"failed_agents":[],"blocked_agent_ids":[],"pending_agent_ids":[]}'
+    )
+    runtime_and_canvas_error = (
+        "accepted modify_agent at revision 2; execution_error="
+        '{"type":"AgentRuntimeError","message":"provider failed",'
+        '"failed_agents":[{"agent_id":"actor",'
+        '"error_type":"ProviderRequestError"}]}'
+    )
+    embedded_agent_text = (
+        "accepted continue at revision 3; execution_result="
+        '{"output":"agent said execution_error=not a Canvas receipt"}'
+    )
+    receipts = _MODULE._agentgraph_execution_receipts(
+        [
+            {
+                "turns": [
+                    {
+                        "canvas_feedback": canvas_error,
+                        "runtime_summary": {},
+                    },
+                    {
+                        "canvas_feedback": runtime_and_canvas_error,
+                        "runtime_summary": {
+                            "execution_status": "failed",
+                            "failure_records": [
+                                {"error_type": "ProviderRequestError"}
+                            ],
+                        },
+                    },
+                    {
+                        "canvas_feedback": embedded_agent_text,
+                        "runtime_summary": {},
+                    },
+                ]
+            }
+        ]
+    )
+
+    assert receipts["runtime_failed_turn_count"] == 2
+    assert receipts["runtime_failure_type_distribution"] == {
+        "AgentRuntimeError": 1,
+        "ProviderRequestError": 1,
+    }
+    assert (
+        receipts["runtime_failed_without_structured_failure_record_count"]
+        == 1
+    )
+
+
 def test_aime_wrong_demo_uses_first_runtime_failure_receipt():
     diagnosis = _MODULE._aime_wrong_demo_diagnosis(
         {

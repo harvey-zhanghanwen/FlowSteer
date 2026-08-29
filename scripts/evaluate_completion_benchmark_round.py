@@ -2778,6 +2778,55 @@ def _agentgraph_execution_receipts(
     runtime_failed_turn_count = 0
     runtime_failed_without_structured_failure_record_count = 0
 
+    def canvas_execution_error_receipt(
+        turn: Mapping[str, Any],
+    ) -> Optional[Mapping[str, Any]]:
+        """Read the Canvas-owned Runtime error fallback from saved feedback.
+
+        New trajectories normally copy ``AgentRuntimeError.failure_records``
+        into ``runtime_summary``.  Legacy and scheduler-level Runtime errors
+        can have no per-Agent record, while the lossless Canvas feedback still
+        contains ``execution_error=<json>``.  Do not scan inside the separate
+        ``execution_result`` payload: Agent output is untrusted work product
+        and may itself contain that text.
+        """
+
+        feedback = turn.get("canvas_feedback")
+        if not isinstance(feedback, str):
+            return None
+        canvas_prefix = feedback.split("; execution_result=", 1)[0]
+        marker = "execution_error="
+        marker_index = canvas_prefix.find(marker)
+        if marker_index < 0:
+            return None
+        raw_payload = canvas_prefix[marker_index + len(marker) :].lstrip()
+        try:
+            payload, _ = json.JSONDecoder().raw_decode(raw_payload)
+        except (TypeError, ValueError):
+            return {"type": "untyped_canvas_execution_error"}
+        if not isinstance(payload, Mapping):
+            return {"type": "untyped_canvas_execution_error"}
+        return payload
+
+    def canvas_failure_types(receipt: Mapping[str, Any]) -> tuple[str, ...]:
+        failed_agents = receipt.get("failed_agents")
+        if isinstance(failed_agents, Sequence) and not isinstance(
+            failed_agents, (str, bytes)
+        ):
+            error_types = tuple(
+                str(item["error_type"])
+                for item in failed_agents
+                if isinstance(item, Mapping)
+                and isinstance(item.get("error_type"), str)
+                and item.get("error_type")
+            )
+            if error_types:
+                return error_types
+        receipt_type = receipt.get("type")
+        if isinstance(receipt_type, str) and receipt_type:
+            return (receipt_type,)
+        return ("untyped_canvas_execution_error",)
+
     for trajectory in trajectories:
         graph = _evaluated_graph(trajectory)
         nodes = graph.get("nodes") if isinstance(graph, Mapping) else None
@@ -2845,7 +2894,10 @@ def _agentgraph_execution_receipts(
                             provider_attempt_count += raw_attempts
 
             runtime = turn.get("runtime_summary")
-            if not isinstance(runtime, Mapping) or runtime.get("execution_status") != "failed":
+            runtime = runtime if isinstance(runtime, Mapping) else {}
+            runtime_reported_failure = runtime.get("execution_status") == "failed"
+            canvas_error_receipt = canvas_execution_error_receipt(turn)
+            if not runtime_reported_failure and canvas_error_receipt is None:
                 continue
             runtime_failed_turn_count += 1
             failure_records = runtime.get("failure_records")
@@ -2853,6 +2905,9 @@ def _agentgraph_execution_receipts(
                 failure_records, (str, bytes)
             ) or not failure_records:
                 runtime_failed_without_structured_failure_record_count += 1
+                if canvas_error_receipt is not None:
+                    for failure_type in canvas_failure_types(canvas_error_receipt):
+                        runtime_failure_types[failure_type] += 1
                 continue
             for failure in failure_records:
                 if not isinstance(failure, Mapping):
