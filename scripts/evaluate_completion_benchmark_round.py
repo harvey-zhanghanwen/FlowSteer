@@ -1123,8 +1123,30 @@ async def _run_evaluator_preflight(
             )
         )
         if not passed:
+            grader_error = receipt.get("grader_error")
+            if isinstance(grader_error, Mapping):
+                error_type = str(grader_error.get("error_type") or "unknown")
+                error_message = str(grader_error.get("message") or "unknown")[:500]
+            else:
+                error_type = "unknown"
+                error_message = "unknown"
+            provider_errors = receipt.get("provider_errors")
+            provider_statuses = []
+            if isinstance(provider_errors, Sequence) and not isinstance(
+                provider_errors, (str, bytes)
+            ):
+                provider_statuses = [
+                    {
+                        "error_type": str(item.get("error_type") or "unknown"),
+                        "status_code": item.get("status_code"),
+                    }
+                    for item in provider_errors
+                    if isinstance(item, Mapping)
+                ]
             raise CompletionBenchmarkRoundError(
-                "synthetic HealthBench Professional evaluator preflight failed"
+                "synthetic HealthBench Professional evaluator preflight failed: "
+                f"grader_error={error_type}: {error_message}; "
+                f"provider_errors={provider_statuses}"
             )
         return {
             "passed": True,
@@ -1498,18 +1520,38 @@ async def _collect_direct(
         else:
             rescored.append(dict(candidate))
 
-    by_task = {
-        task_id: value
-        for task_id, value in _by_task(rescored).items()
-        for task in selected
-        if task.task_id == task_id
-        and hotpot_round._direct_resume_matches(
+    def direct_generation_resume_matches(
+        value: Mapping[str, Any],
+        task: TaskRecord,
+    ) -> bool:
+        if hotpot_round._direct_resume_matches(
             value,
             task=task,
             model_id=model_id,
             protocol=protocol,
             seed=seed,
+        ):
+            return True
+        evaluation = value.get("evaluation")
+        return bool(
+            _dataset_key(task) == "healthbench_professional"
+            and value.get("task_id") == task.task_id
+            and value.get("model_id") == model_id
+            and value.get("protocol") == protocol
+            and value.get("generation_seed") == seed
+            and isinstance(value.get("final_answer"), str)
+            and isinstance(value.get("execution"), Mapping)
+            and isinstance(evaluation, Mapping)
+            and evaluation.get("evaluator_version")
+            == evaluator_version_for(task)
         )
+
+    by_task = {
+        task_id: value
+        for task_id, value in _by_task(rescored).items()
+        for task in selected
+        if task.task_id == task_id
+        and direct_generation_resume_matches(value, task)
     }
     hotpot_round._persist_ordered(path, selected, by_task)
 

@@ -5,6 +5,7 @@ import unittest
 
 from src.interactive.agent_graph import AgentGraph, AgentGraphValidationError, AgentNode, AgentRelation
 from src.interactive.agent_runtime import (
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
     AgentRequest,
     AgentResponse,
     AgentRuntime,
@@ -99,6 +100,57 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("answer", routed.request_or_dependency)
         self.assertEqual(routed.content, routed.artifact)
         self.assertEqual(snapshot.to_dict(), graph.snapshot().to_dict())
+
+    async def test_versioned_chain_routes_producer_context(self) -> None:
+        catalog = registry()
+
+        class StopGateway(RecordingGateway):
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(
+                    f"artifact from {request.agent.id}",
+                    {"finish_reason": "stop"},
+                )
+
+        gateway = StopGateway()
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            artifact_communication_profile=(
+                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+            ),
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "a",
+                    "m1",
+                    "Produce one evidence artifact.",
+                    role_family="evidence",
+                    completion_condition="Return supported evidence.",
+                ),
+                AgentNode("b", "m2", "Use the routed evidence artifact."),
+            ],
+            [AgentRelation("a", "b", True, False)],
+            output_agent_id="b",
+        )
+
+        result = await runtime.execute(graph, "question", run_id="context")
+        request_b = next(item for item in gateway.requests if item.agent.id == "b")
+        routed = request_b.upstream[0]
+
+        self.assertEqual("m1", routed.source_model_id)
+        self.assertEqual("Produce one evidence artifact.", routed.source_contract)
+        self.assertEqual("reasoning", routed.source_execution_mode)
+        self.assertEqual("evidence", routed.source_role_family)
+        self.assertEqual(
+            "Return supported evidence.",
+            routed.source_completion_condition,
+        )
+        self.assertEqual("stop", routed.source_finish_reason)
+        provenance = result.output_metadata["b"]["input_artifact_provenance"][0]
+        self.assertEqual("m1", provenance["source_model_id"])
+        self.assertEqual("stop", provenance["source_finish_reason"])
 
     async def test_runtime_routes_target_keyed_public_failure_continuation(
         self,
@@ -718,6 +770,58 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             initial.output_metadata["b"]["artifact_version"],
             reused.output_metadata["b"]["artifact_version"],
+        )
+
+    async def test_versioned_component_cache_misses_on_artifact_version_change(
+        self,
+    ) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            artifact_communication_profile=(
+                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+            ),
+        )
+        graph = AgentGraph(
+            [
+                AgentNode("a", "m1", "produce evidence"),
+                AgentNode("b", "m2", "consume evidence"),
+            ],
+            [AgentRelation("a", "b", True, False)],
+            output_agent_id="b",
+        )
+        cache = {}
+        initial = await runtime.execute(
+            graph,
+            "question",
+            run_id="versioned-initial",
+            execution_cache=cache,
+        )
+        prior_metadata = {
+            agent_id: dict(metadata)
+            for agent_id, metadata in initial.output_metadata.items()
+        }
+        prior_metadata["a"]["artifact_version"] = "versioned:new"
+        gateway.requests.clear()
+
+        updated = await runtime.execute(
+            graph,
+            "question",
+            run_id="versioned-updated",
+            prior_outputs=initial.outputs,
+            prior_output_metadata=prior_metadata,
+            dirty_agents={"b"},
+            execution_cache=cache,
+        )
+
+        self.assertEqual(["b"], [request.agent.id for request in gateway.requests])
+        self.assertEqual(("b",), updated.executed_agent_ids)
+        self.assertEqual(("a",), updated.reused_agent_ids)
+        self.assertEqual(
+            "versioned:new",
+            gateway.requests[0].upstream[0].artifact_version,
         )
 
     async def test_component_cache_misses_when_upstream_artifact_changes(self) -> None:

@@ -652,6 +652,42 @@ def test_evaluator_preflight_receipt_drops_answer_bearing_outcome_fields():
     assert "reward" not in receipt
 
 
+def test_healthbench_preflight_failure_exposes_grader_receipt_without_case_data():
+    class FailedGrader:
+        async def preflight(self):
+            return {
+                "termination": "grader_error",
+                "grader_error": {
+                    "error_type": "InternalServerError",
+                    "message": "provider returned bad_response_body",
+                },
+                "provider_errors": [
+                    {"error_type": "InternalServerError", "status_code": 500}
+                ],
+            }
+
+    backend = SimpleNamespace(healthbench_professional_grader=FailedGrader())
+
+    try:
+        asyncio.run(
+            _MODULE._run_evaluator_preflight(
+                backend,
+                _evaluation_config("healthbench_professional"),
+                _ROOT,
+                "healthbench_professional",
+            )
+        )
+    except _MODULE.CompletionBenchmarkRoundError as error:
+        message = str(error)
+    else:
+        raise AssertionError("HealthBench preflight failure was not raised")
+
+    assert "InternalServerError" in message
+    assert "bad_response_body" in message
+    assert "status_code': 500" in message
+    assert "rubric" not in message
+
+
 def test_environment_preflight_uses_fixed_training_record(tmp_path):
     config = _evaluation_config("webshop")
     train_path = tmp_path / "train.jsonl"

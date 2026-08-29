@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from src.interactive.agent_graph import AgentNode
 from src.interactive.agent_runtime import (
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
     AgentRequest,
     CommunicationCondition,
     ExecutionPhase,
@@ -38,6 +39,7 @@ def request(
     upstream_artifact: str = "evidence",
     semantic_protocol: str = "none",
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL,
+    artifact_communication_profile: str = "legacy",
 ) -> AgentRequest:
     provider = ProviderSpec(
         "provider",
@@ -71,6 +73,7 @@ def request(
         is_format_predecessor=is_format_predecessor,
         communication_condition=communication_condition,
         semantic_protocol=semantic_protocol,
+        artifact_communication_profile=artifact_communication_profile,
         upstream=(
             UpstreamMessage(
                 "source",
@@ -97,6 +100,72 @@ def request(
 
 
 class MessageTests(unittest.TestCase):
+    def test_versioned_upstream_renders_producer_context_once(self) -> None:
+        upstream = UpstreamMessage(
+            "source",
+            "agent",
+            "evidence",
+            graph_revision=2,
+            artifact_version="source-v2",
+            source_model_id="model-a",
+            source_contract="Collect the evidence required by the task.",
+            source_execution_mode="reasoning",
+            source_role_family="evidence",
+            source_completion_condition="Return one supported artifact.",
+            source_finish_reason="stop",
+        )
+        agent_request = replace(
+            request(
+                artifact_communication_profile=(
+                    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+                )
+            ),
+            upstream=(upstream, upstream),
+        )
+
+        messages = build_agent_messages(agent_request)
+        visible = messages[1]["content"]
+
+        self.assertEqual(1, visible.count("[Upstream artifact]"))
+        self.assertEqual(1, visible.count("artifact:\nevidence"))
+        self.assertIn("artifact_version: source-v2", visible)
+        self.assertIn("source_model_id: model-a", visible)
+        self.assertIn("source_execution_mode: reasoning", visible)
+        self.assertIn("source_finish_reason: stop", visible)
+        self.assertIn("source_contract_provenance:", visible)
+        self.assertIn("Collect the evidence required by the task.", visible)
+        self.assertIn("provenance describing why its artifact", messages[0]["content"])
+
+    def test_versioned_revision_uses_same_peer_envelope(self) -> None:
+        peer = UpstreamMessage(
+            "peer",
+            "agent",
+            "peer draft",
+            message_type="candidate",
+            graph_revision=3,
+            artifact_version="peer-v3",
+            source_model_id="model-peer",
+            source_contract="Review the current candidate.",
+            source_execution_mode="reasoning",
+            source_finish_reason="stop",
+        )
+        agent_request = replace(
+            request(
+                ExecutionPhase.REVISION,
+                artifact_communication_profile=(
+                    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+                ),
+            ),
+            peer_draft=peer,
+        )
+
+        visible = build_agent_messages(agent_request)[1]["content"]
+
+        self.assertIn("Peer artifact envelope", visible)
+        self.assertIn("artifact_version: peer-v3", visible)
+        self.assertIn("source_model_id: model-peer", visible)
+        self.assertIn("source_contract_provenance:\nReview the current candidate.", visible)
+
     def test_healthbench_conversation_preserves_native_roles_and_content(self) -> None:
         problem = render_model_visible_conversation(
             (

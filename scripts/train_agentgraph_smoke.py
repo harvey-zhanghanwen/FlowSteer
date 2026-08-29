@@ -2152,6 +2152,9 @@ class LiveSmokeBackend:
                     tool_registry=tool_registry,
                     dataset_id=source_key,
                     semantic_protocol=semantic_protocol,
+                    artifact_communication_profile=(
+                        self.runtime.artifact_communication_profile
+                    ),
                 )
             except BaseException:
                 prepared.cleanup()
@@ -2183,6 +2186,9 @@ class LiveSmokeBackend:
                 tool_registry=tool_registry,
                 dataset_id=source_key,
                 semantic_protocol=semantic_protocol,
+                artifact_communication_profile=(
+                    self.runtime.artifact_communication_profile
+                ),
             )
             return runtime, tool_registry, lambda: None
 
@@ -2218,6 +2224,9 @@ class LiveSmokeBackend:
                     tool_registry=opened.registry,
                     dataset_id=source_key,
                     semantic_protocol=semantic_protocol,
+                    artifact_communication_profile=(
+                        self.runtime.artifact_communication_profile
+                    ),
                 )
             except BaseException:
                 opened.close()
@@ -2259,6 +2268,9 @@ class LiveSmokeBackend:
                 tool_registry=resources.tool_registry,
                 dataset_id=source_key,
                 semantic_protocol=semantic_protocol,
+                artifact_communication_profile=(
+                    self.runtime.artifact_communication_profile
+                ),
             )
 
             # EnvironmentExecutionAdapter closes the request-scoped simulator
@@ -2339,6 +2351,9 @@ class LiveSmokeBackend:
                 tool_registry=opened.registry,
                 dataset_id=source_key,
                 semantic_protocol=semantic_protocol,
+                artifact_communication_profile=(
+                    self.runtime.artifact_communication_profile
+                ),
             )
         except BaseException:
             opened.close()
@@ -2531,6 +2546,9 @@ class LiveSmokeBackend:
             registry,
             gateway,
             timeout_seconds=execution_timeout_seconds,
+            artifact_communication_profile=str(
+                graph_config.get("artifact_communication_profile", "legacy")
+            ),
         )
         evidence_store = EvidenceStore(_resolve(root, str(storage["root"])))
         skill_pipeline: Optional[SkillEvidencePipeline] = None

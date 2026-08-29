@@ -1,0 +1,32 @@
+{
+  "schema_version": "flowsteer.healthbench_professional.artifact_routing_report.v1",
+  "condition_id": "healthbench_professional_artifact_routing_v3",
+  "dataset_key": "healthbench_professional",
+  "benchmark_slice": "public_test",
+  "sample_count": 525,
+  "primary_metric": "overall_score_length_adjusted",
+  "status": "blocked_evaluator_preflight",
+  "blocker": {
+    "stage": "synthetic_evaluator_preflight",
+    "error_type": "PermissionDeniedError",
+    "status_code": 403,
+    "provider_code": "insufficient_quota",
+    "bounded_provider_attempts": 3
+  },
+  "v3": {
+    "direct_metric": null,
+    "agentgraph_metric": null,
+    "generation_started": false,
+    "training_performed": false,
+    "skill_enabled": false
+  },
+  "last_complete_same_protocol": {
+    "condition_id": "healthbench_professional_official_v1",
+    "direct_overall_score_length_adjusted": 0.19172803126027108,
+    "agentgraph_overall_score_length_adjusted": 0.20239464574643176,
+    "agentgraph_minus_direct": 0.010666614486160686,
+    "direct_evaluator_valid": 525,
+    "agentgraph_evaluator_valid": 503,
+    "agentgraph_terminal_failures": 22
+  }
+}

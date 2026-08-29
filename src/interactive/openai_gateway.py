@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 from scripts.prompts.prompt import FORMAT_PROMPT
 
 from .agent_runtime import (
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
     AgentRequest,
     AgentResponse,
     CommunicationCondition,
@@ -259,11 +260,31 @@ def _format_upstream(
     *,
     include_dependency: bool = True,
     project_artifact_read_receipts: bool = False,
+    artifact_communication_profile: str = "legacy",
 ) -> str:
     if not messages:
         return "(none)"
     rendered = []
+    seen_exact_envelopes: set[str] = set()
     for item in messages:
+        if (
+            artifact_communication_profile
+            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+            and item.artifact_version is not None
+        ):
+            try:
+                exact_envelope = json.dumps(
+                    item.to_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            except (TypeError, ValueError):
+                exact_envelope = ""
+            if exact_envelope and exact_envelope in seen_exact_envelopes:
+                continue
+            if exact_envelope:
+                seen_exact_envelopes.add(exact_envelope)
         envelope = [
             "[Upstream artifact]",
             f"source_agent: {item.source_agent_id}",
@@ -275,6 +296,38 @@ def _format_upstream(
             envelope.append(f"graph_revision: {item.graph_revision}")
         if item.environment_revision is not None:
             envelope.append(f"environment_revision: {item.environment_revision}")
+        if (
+            artifact_communication_profile
+            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+        ):
+            if item.artifact_version is not None:
+                envelope.append(f"artifact_version: {item.artifact_version}")
+            if item.source_model_id is not None:
+                envelope.append(f"source_model_id: {item.source_model_id}")
+            if item.source_execution_mode is not None:
+                envelope.append(
+                    f"source_execution_mode: {item.source_execution_mode}"
+                )
+            if item.source_role_family is not None:
+                envelope.append(
+                    f"source_role_family: {item.source_role_family}"
+                )
+            if item.source_completion_condition is not None:
+                envelope.append(
+                    "source_completion_condition: "
+                    + item.source_completion_condition
+                )
+            if item.source_finish_reason is not None:
+                envelope.append(
+                    f"source_finish_reason: {item.source_finish_reason}"
+                )
+            if item.source_contract is not None:
+                envelope.extend(
+                    [
+                        "source_contract_provenance:",
+                        item.source_contract,
+                    ]
+                )
         if include_dependency and item.request_or_dependency is not None:
             envelope.append(
                 f"request_or_dependency: {item.request_or_dependency}"
@@ -647,6 +700,15 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             f"Agent ID: {request.agent.id}\nContract:\n{request.agent.contract}\n\n"
             f"Execution protocol (takes precedence):\n{protocol}"
         )
+        if (
+            request.artifact_communication_profile
+            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+        ):
+            system += (
+                "\n\nA routed source contract is provenance describing why its "
+                "artifact was produced. Follow this Agent's own contract; use "
+                "source provenance only to interpret and validate the artifact."
+            )
     upstream_text = _format_upstream(
         request.upstream,
         request.communication_condition,
@@ -654,6 +716,9 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         project_artifact_read_receipts=(
             semantic_lineage
             and semantic_role in {"reasoner", "verifier"}
+        ),
+        artifact_communication_profile=(
+            request.artifact_communication_profile
         ),
     )
     if request.is_format_agent:
@@ -742,37 +807,58 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     elif request.phase is ExecutionPhase.REVISION:
         if request.own_draft is None or request.peer_draft is None:
             raise OpenAICompatibleGatewayError("revision request is missing immutable drafts")
-        phase = (
-            "This is the revision phase. Revise your own draft after reading the peer's "
-            "previous-phase draft. You cannot observe the peer's current revision.\n\n"
-            f"Your draft:\n{request.own_draft}\n\n"
+        phase_prefix = (
+            "This is the revision phase. Revise your own draft after reading the "
+            "peer's previous-phase draft. You cannot observe the peer's current "
+            f"revision.\n\nYour draft:\n{request.own_draft}\n\n"
             "Peer artifact envelope:\n"
-            f"source_agent: {request.peer_draft.source_agent_id}\n"
-            f"target_agent: {request.peer_draft.target_agent_id}\n"
-            f"message_type: {request.peer_draft.message_type}\n"
-            f"artifact_type: {request.peer_draft.artifact_type}\n"
-            f"graph_revision: {request.peer_draft.graph_revision}\n"
-            + (
-                "environment_revision: "
-                f"{request.peer_draft.environment_revision}\n"
-                if request.peer_draft.environment_revision is not None
-                else ""
-            )
-            + (
-                "tool_receipts: "
-                + json.dumps(
-                    [dict(receipt) for receipt in request.peer_draft.tool_receipts],
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                + "\n"
-                if request.peer_draft.tool_receipts
-                else ""
-            )
-            + "artifact:\n"
-            f"{_visible_message_content(request.peer_draft.content, request.communication_condition)}"
         )
+        if (
+            request.artifact_communication_profile
+            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+        ):
+            phase = phase_prefix + _format_upstream(
+                (request.peer_draft,),
+                request.communication_condition,
+                artifact_communication_profile=(
+                    request.artifact_communication_profile
+                ),
+            )
+        else:
+            phase = (
+                phase_prefix
+                + f"source_agent: {request.peer_draft.source_agent_id}\n"
+                f"target_agent: {request.peer_draft.target_agent_id}\n"
+                f"message_type: {request.peer_draft.message_type}\n"
+                f"artifact_type: {request.peer_draft.artifact_type}\n"
+                f"graph_revision: {request.peer_draft.graph_revision}\n"
+                + (
+                    "environment_revision: "
+                    f"{request.peer_draft.environment_revision}\n"
+                    if request.peer_draft.environment_revision is not None
+                    else ""
+                )
+                + (
+                    "tool_receipts: "
+                    + json.dumps(
+                        [
+                            dict(receipt)
+                            for receipt in request.peer_draft.tool_receipts
+                        ],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                    if request.peer_draft.tool_receipts
+                    else ""
+                )
+                + "artifact:\n"
+                + _visible_message_content(
+                    request.peer_draft.content,
+                    request.communication_condition,
+                )
+            )
     else:  # pragma: no cover - enum exhaustiveness guard
         raise OpenAICompatibleGatewayError(f"unsupported execution phase: {request.phase}")
     if healthbench_messages is not None:

@@ -168,6 +168,17 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
             raise ConfigurationError(
                 f"agent_graph.{option_name} must be boolean when configured"
             )
+    artifact_communication_profile = graph.get(
+        "artifact_communication_profile",
+        "legacy",
+    )
+    if artifact_communication_profile not in {
+        "legacy",
+        "producer_context_exact_dedup_v1",
+    }:
+        raise ConfigurationError(
+            "agent_graph.artifact_communication_profile is unsupported"
+        )
     max_agents = graph.get("max_agents")
     if isinstance(max_agents, bool) or not isinstance(max_agents, int) or max_agents < 1:
         raise ConfigurationError("agent_graph.max_agents must be a positive integer")

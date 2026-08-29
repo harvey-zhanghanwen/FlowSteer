@@ -33,6 +33,18 @@ class CommunicationCondition(str, Enum):
     UPSTREAM_MASKED = "upstream_masked"
 
 
+ARTIFACT_COMMUNICATION_LEGACY = "legacy"
+ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1 = (
+    "producer_context_exact_dedup_v1"
+)
+_ARTIFACT_COMMUNICATION_PROFILES = frozenset(
+    {
+        ARTIFACT_COMMUNICATION_LEGACY,
+        ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
+    }
+)
+
+
 def _communication_condition(
     value: Union[CommunicationCondition, str],
 ) -> CommunicationCondition:
@@ -68,6 +80,12 @@ class UpstreamMessage:
     environment_revision: Optional[int] = None
     tool_receipts: Tuple[Mapping[str, object], ...] = ()
     artifact_version: Optional[str] = None
+    source_model_id: Optional[str] = None
+    source_contract: Optional[str] = None
+    source_execution_mode: Optional[str] = None
+    source_role_family: Optional[str] = None
+    source_completion_condition: Optional[str] = None
+    source_finish_reason: Optional[str] = None
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -103,6 +121,21 @@ class UpstreamMessage:
             or not self.artifact_version.strip()
         ):
             raise ValueError("artifact_version must be non-empty when supplied")
+        for value, name in (
+            (self.source_model_id, "source_model_id"),
+            (self.source_contract, "source_contract"),
+            (self.source_execution_mode, "source_execution_mode"),
+            (self.source_role_family, "source_role_family"),
+            (
+                self.source_completion_condition,
+                "source_completion_condition",
+            ),
+            (self.source_finish_reason, "source_finish_reason"),
+        ):
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(f"{name} must be non-empty when supplied")
         if not isinstance(self.tool_receipts, tuple) or any(
             not isinstance(item, Mapping) for item in self.tool_receipts
         ):
@@ -137,6 +170,12 @@ class UpstreamMessage:
             "graph_revision": self.graph_revision,
             "environment_revision": self.environment_revision,
             "artifact_version": self.artifact_version,
+            "source_model_id": self.source_model_id,
+            "source_contract": self.source_contract,
+            "source_execution_mode": self.source_execution_mode,
+            "source_role_family": self.source_role_family,
+            "source_completion_condition": self.source_completion_condition,
+            "source_finish_reason": self.source_finish_reason,
             "request_or_dependency": self.request_or_dependency,
             "dependency": self.request_or_dependency,
             "tool_receipts": [dict(item) for item in self.tool_receipts],
@@ -166,6 +205,7 @@ class AgentRequest:
     own_draft: Optional[str] = None
     peer_draft: Optional[UpstreamMessage] = None
     semantic_protocol: str = "none"
+    artifact_communication_profile: str = ARTIFACT_COMMUNICATION_LEGACY
     # SkillFlow continuation state: a repaired Agent keeps the public
     # Action--Observation history and measured Tool receipts from its failed
     # bounded execution.  These fields never contain hidden reasoning and do
@@ -191,6 +231,12 @@ class AgentRequest:
             "qa_verified_answer_lineage_v2",
         }:
             raise ValueError("unsupported AgentRequest semantic_protocol")
+        if self.artifact_communication_profile not in (
+            _ARTIFACT_COMMUNICATION_PROFILES
+        ):
+            raise ValueError(
+                "unsupported AgentRequest artifact communication profile"
+            )
         if any(not isinstance(item, Mapping) for item in self.action_history):
             raise TypeError("AgentRequest.action_history must contain mappings")
         if any(not isinstance(item, Mapping) for item in self.prior_tool_receipts):
@@ -281,6 +327,38 @@ def _environment_revision_from_metadata(
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
         return None
     return raw
+
+
+def _finish_reason_from_metadata(
+    metadata: Mapping[str, object],
+) -> Optional[str]:
+    raw = metadata.get("finish_reason")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw.strip()
+
+
+def _producer_context(
+    node: AgentNode,
+    metadata: Mapping[str, object],
+    *,
+    artifact_communication_profile: str,
+) -> Dict[str, Optional[str]]:
+    """Project the existing Agent declaration into one routed artifact."""
+
+    if (
+        artifact_communication_profile
+        != ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+    ):
+        return {}
+    return {
+        "source_model_id": node.model_id,
+        "source_contract": node.contract,
+        "source_execution_mode": node.execution_mode.value,
+        "source_role_family": node.role_family,
+        "source_completion_condition": node.completion_condition,
+        "source_finish_reason": _finish_reason_from_metadata(metadata),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,7 +466,7 @@ class ComponentExecutionCacheEntry:
 
 ComponentExecutionCache = MutableMapping[str, ComponentExecutionCacheEntry]
 
-_COMPONENT_EXECUTION_INPUT_IDENTITY_VERSION = "agentgraph.component-input.v1"
+_COMPONENT_EXECUTION_INPUT_IDENTITY_VERSION = "agentgraph.component-input.v2"
 _TOOL_RECEIPT_TRANSPORT_FIELDS = frozenset(
     {
         "ended_at_monotonic",
@@ -553,6 +631,7 @@ class AgentRuntime:
         tool_registry: Optional[ToolRegistry] = None,
         dataset_id: Optional[str] = None,
         semantic_protocol: str = "none",
+        artifact_communication_profile: str = ARTIFACT_COMMUNICATION_LEGACY,
     ) -> None:
         if max_concurrency is not None and (
             type(max_concurrency) is not int or max_concurrency <= 0
@@ -570,6 +649,8 @@ class AgentRuntime:
             "qa_verified_answer_lineage_v2",
         }:
             raise ValueError("unsupported AgentRuntime semantic_protocol")
+        if artifact_communication_profile not in _ARTIFACT_COMMUNICATION_PROFILES:
+            raise ValueError("unsupported AgentRuntime artifact communication profile")
         self.model_registry = model_registry
         self.gateway = gateway
         adapters: Dict[str, AgentExecutionAdapter] = {
@@ -589,6 +670,7 @@ class AgentRuntime:
         self.tool_registry = tool_registry
         self.dataset_id = None if dataset_id is None else dataset_id.strip()
         self.semantic_protocol = semantic_protocol
+        self.artifact_communication_profile = artifact_communication_profile
         self.timeout_seconds = timeout_seconds
         self._global_semaphore = (
             asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
@@ -673,9 +755,10 @@ class AgentRuntime:
         The identity mirrors FlowSteer's node-cache ``operator + inputs``
         boundary for the heterogeneous AgentGraph scheduler.  It contains every
         field that changes the model-visible task, contract, model, execution
-        semantics, or routed public artifact.  Run IDs, graph revisions, and
-        artifact-version IDs remain provenance coordinates and intentionally do
-        not force a semantically identical model call to run again.
+        semantics, or routed public artifact. Run IDs and graph revisions remain
+        transport coordinates. Under the versioned producer-context profile,
+        the routed artifact version is part of the declared dependency and a
+        version change invalidates downstream reuse.
         """
 
         format_predecessor_ids = {
@@ -722,6 +805,24 @@ class AgentRuntime:
                             "target_agent_id": message.target_agent_id,
                             "message_type": message.message_type,
                             "artifact_type": message.artifact_type,
+                            "artifact_version": (
+                                message.artifact_version
+                                if self.artifact_communication_profile
+                                == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+                                else None
+                            ),
+                            "source_model_id": message.source_model_id,
+                            "source_contract": message.source_contract,
+                            "source_execution_mode": (
+                                message.source_execution_mode
+                            ),
+                            "source_role_family": message.source_role_family,
+                            "source_completion_condition": (
+                                message.source_completion_condition
+                            ),
+                            "source_finish_reason": (
+                                message.source_finish_reason
+                            ),
                             "request_or_dependency": (
                                 message.request_or_dependency
                             ),
@@ -739,6 +840,9 @@ class AgentRuntime:
                 ),
                 "problem": problem,
                 "semantic_protocol": self.semantic_protocol,
+                "artifact_communication_profile": (
+                    self.artifact_communication_profile
+                ),
                 "communication_condition": communication_condition.value,
                 "component_agent_ids": list(component),
                 "agents": agents,
@@ -1603,6 +1707,13 @@ class AgentRuntime:
                     retriever_draft_metadata
                 ),
                 artifact_version=retriever_draft_request.request_id,
+                **_producer_context(
+                    nodes[retriever_id],
+                    retriever_draft_metadata,
+                    artifact_communication_profile=(
+                        self.artifact_communication_profile
+                    ),
+                ),
             )
             reasoner_draft_request = self._request(
                 agent=nodes[reasoner_id],
@@ -1661,6 +1772,13 @@ class AgentRuntime:
                         reasoner_draft_metadata
                     ),
                     artifact_version=reasoner_draft_request.request_id,
+                    **_producer_context(
+                        nodes[reasoner_id],
+                        reasoner_draft_metadata,
+                        artifact_communication_profile=(
+                            self.artifact_communication_profile
+                        ),
+                    ),
                 ),
                 problem=problem,
                 run_id=run_id,
@@ -1704,6 +1822,13 @@ class AgentRuntime:
                         retriever_revision_metadata
                     ),
                     artifact_version=retriever_revision_request.request_id,
+                    **_producer_context(
+                        nodes[retriever_id],
+                        retriever_revision_metadata,
+                        artifact_communication_profile=(
+                            self.artifact_communication_profile
+                        ),
+                    ),
                 ),
                 problem=problem,
                 run_id=run_id,
@@ -1799,6 +1924,13 @@ class AgentRuntime:
                     reasoner_draft_metadata
                 ),
                 artifact_version=reasoner_draft_request.request_id,
+                **_producer_context(
+                    nodes[reasoner_id],
+                    reasoner_draft_metadata,
+                    artifact_communication_profile=(
+                        self.artifact_communication_profile
+                    ),
+                ),
             )
             verifier_initial_request = self._request(
                 agent=nodes[verifier_id],
@@ -1857,6 +1989,13 @@ class AgentRuntime:
                         verifier_initial_metadata
                     ),
                     artifact_version=verifier_initial_request.request_id,
+                    **_producer_context(
+                        nodes[verifier_id],
+                        verifier_initial_metadata,
+                        artifact_communication_profile=(
+                            self.artifact_communication_profile
+                        ),
+                    ),
                 ),
                 problem=problem,
                 run_id=run_id,
@@ -1900,6 +2039,13 @@ class AgentRuntime:
                         reasoner_revision_metadata
                     ),
                     artifact_version=reasoner_revision_request.request_id,
+                    **_producer_context(
+                        nodes[reasoner_id],
+                        reasoner_revision_metadata,
+                        artifact_communication_profile=(
+                            self.artifact_communication_profile
+                        ),
+                    ),
                 ),
                 problem=problem,
                 run_id=run_id,
@@ -1976,6 +2122,13 @@ class AgentRuntime:
                 ),
                 tool_receipts=_tool_receipts_from_metadata(right_draft.metadata),
                 artifact_version=right_draft_request.request_id,
+                **_producer_context(
+                    nodes[right_id],
+                    right_draft.metadata,
+                    artifact_communication_profile=(
+                        self.artifact_communication_profile
+                    ),
+                ),
             ),
             problem=problem,
             run_id=run_id,
@@ -2004,6 +2157,13 @@ class AgentRuntime:
                 ),
                 tool_receipts=_tool_receipts_from_metadata(left_draft.metadata),
                 artifact_version=left_draft_request.request_id,
+                **_producer_context(
+                    nodes[left_id],
+                    left_draft.metadata,
+                    artifact_communication_profile=(
+                        self.artifact_communication_profile
+                    ),
+                ),
             ),
             problem=problem,
             run_id=run_id,
@@ -2088,6 +2248,13 @@ class AgentRuntime:
                                 )
                             ).strip()
                             else None
+                        ),
+                        **_producer_context(
+                            nodes[source_id],
+                            output_metadata.get(source_id, {}),
+                            artifact_communication_profile=(
+                                self.artifact_communication_profile
+                            ),
                         ),
                     )
                 )
@@ -2216,6 +2383,9 @@ class AgentRuntime:
             own_draft=own_draft,
             peer_draft=peer_draft,
             semantic_protocol=self.semantic_protocol,
+            artifact_communication_profile=(
+                self.artifact_communication_profile
+            ),
             action_history=action_history,
             prior_tool_receipts=prior_tool_receipts,
             continuation_source_agent_id=continuation_source_agent_id,

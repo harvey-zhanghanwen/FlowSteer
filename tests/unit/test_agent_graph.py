@@ -22,6 +22,7 @@ from src.interactive.agent_graph import (
     GraphMutationError,
 )
 from src.interactive.agent_runtime import (
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
     AgentFailureRecord,
     AgentRequest,
     AgentResponse,
@@ -2066,9 +2067,16 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_task_scoped_cache_reuses_restored_component_input(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()
-        env = AgentWorkflowEnv(
+        runtime = AgentRuntime(
             registry,
             gateway,
+            artifact_communication_profile=(
+                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+            ),
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
             problem="question",
             execute_on_edit=True,
             reuse_unchanged_agent_inputs=True,
@@ -2099,6 +2107,17 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             restored_independent.execution.execution_reuse_receipts
         )
+        independent_feedback = json.loads(
+            restored_independent.feedback.split("execution_result=", 1)[1]
+        )
+        artifact_b = next(
+            item
+            for item in independent_feedback["agent_artifacts"]
+            if item["agent_id"] == "b"
+        )
+        self.assertEqual("fast", artifact_b["model_id"])
+        self.assertIsNotNone(artifact_b["artifact_version"])
+        self.assertTrue(independent_feedback["execution_reuse_receipts"])
 
         restored_related = await env.step(
             '{"action":"set_relation","source_id":"a","target_id":"b",'
@@ -2106,13 +2125,33 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(restored_related.execution_reused)
         self.assertEqual(request_count, len(gateway.requests))
+        related_feedback = json.loads(
+            restored_related.feedback.split("execution_result=", 1)[1]
+        )
+        related_artifact_b = next(
+            item
+            for item in related_feedback["agent_artifacts"]
+            if item["agent_id"] == "b"
+        )
+        self.assertEqual(["a"], related_artifact_b["upstream_source_ids"])
+        self.assertEqual(
+            {"a": related_artifact_b["input_artifact_versions"]["a"]},
+            related_artifact_b["input_artifact_versions"],
+        )
 
     async def test_reciprocal_edit_executes_one_bounded_two_agent_block(self) -> None:
         registry = make_registry()
         gateway = _ImmediateGateway()
-        env = AgentWorkflowEnv(
+        runtime = AgentRuntime(
             registry,
             gateway,
+            artifact_communication_profile=(
+                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+            ),
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
             problem="question",
             execute_on_edit=True,
             recovery_policy="preserve_diagnose_repair_augment",
@@ -2135,6 +2174,16 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             {"draft", "revision"},
             {call.request.phase.value for call in block_calls},
         )
+        feedback = json.loads(
+            reciprocal.feedback.split("execution_result=", 1)[1]
+        )
+        artifacts = {
+            item["agent_id"]: item for item in feedback["agent_artifacts"]
+        }
+        self.assertEqual(["b"], artifacts["a"]["upstream_source_ids"])
+        self.assertEqual(["a"], artifacts["b"]["upstream_source_ids"])
+        self.assertIsNotNone(artifacts["a"]["artifact_version"])
+        self.assertIsNotNone(artifacts["b"]["artifact_version"])
 
     async def test_nonsemantic_preserve_repairs_terminal_reachability_before_finish(
         self,

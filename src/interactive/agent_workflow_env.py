@@ -24,6 +24,7 @@ from .agent_graph import (
     GraphValidationResult,
 )
 from .agent_runtime import (
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
     AgentFailureRecord,
     AgentGateway,
     AgentRuntime,
@@ -4391,6 +4392,51 @@ class AgentWorkflowEnv:
         # FlowSteer's progressive Canvas returns the just-executed workflow
         # result to the policy after an edit.  Keep this receipt deliberately
         # compact: it is state feedback, not a task-specific Director template.
+        enriched_artifact_feedback = (
+            self.runtime.artifact_communication_profile
+            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+        )
+
+        def input_records(
+            agent_id: str,
+            call: object,
+        ) -> list[dict[str, object]]:
+            records: list[dict[str, object]] = []
+            request = getattr(call, "request", None)
+            if request is not None:
+                records.extend(item.to_dict() for item in request.upstream)
+                if enriched_artifact_feedback and request.peer_draft is not None:
+                    records.append(request.peer_draft.to_dict())
+            elif enriched_artifact_feedback:
+                raw = execution.output_metadata.get(agent_id, {}).get(
+                    "input_artifact_provenance",
+                    (),
+                )
+                if isinstance(raw, (list, tuple)):
+                    records.extend(
+                        dict(item) for item in raw if isinstance(item, Mapping)
+                    )
+            if not enriched_artifact_feedback:
+                return records
+            deduplicated: list[dict[str, object]] = []
+            seen_versions: set[tuple[object, ...]] = set()
+            for record in records:
+                version = record.get("artifact_version")
+                key = (
+                    record.get("source_agent_id"),
+                    record.get("target_agent_id"),
+                    record.get("message_type"),
+                    version,
+                    record.get("artifact_type"),
+                    record.get("artifact", record.get("content")),
+                )
+                if version is not None and key in seen_versions:
+                    continue
+                if version is not None:
+                    seen_versions.add(key)
+                deduplicated.append(record)
+            return deduplicated
+
         answer = execution.final_answer
         if answer is not None and len(answer) > 400:
             answer = answer[:397] + "..."
@@ -4401,67 +4447,133 @@ class AgentWorkflowEnv:
         ]
         output_request = output_calls[-1].request if output_calls else None
         output_inbox = []
-        if output_request is not None:
-            for message in output_request.upstream[:4]:
-                content = " ".join(message.content.split())
+        if output_request is not None or enriched_artifact_feedback:
+            for record in input_records(
+                execution.output_agent_id or "",
+                output_calls[-1] if output_calls else None,
+            )[:4]:
+                content_value = record.get(
+                    "artifact",
+                    record.get("content", ""),
+                )
+                content = " ".join(str(content_value).split())
                 if len(content) > 160:
                     content = content[:157] + "..."
-                output_inbox.append(
-                    {
-                        "source_agent_id": message.source_agent_id,
-                        "target_agent_id": message.target_agent_id,
-                        "message_type": message.message_type,
-                        "artifact_type": message.artifact_type,
-                        "graph_revision": message.graph_revision,
-                        "environment_revision": message.environment_revision,
-                        "request_or_dependency": message.request_or_dependency,
-                        "tool_receipt_count": len(message.tool_receipts),
+                raw_tool_receipts = record.get("tool_receipts", ())
+                tool_receipts = (
+                    tuple(
+                        item
+                        for item in raw_tool_receipts
+                        if isinstance(item, Mapping)
+                    )
+                    if isinstance(raw_tool_receipts, (list, tuple))
+                    else ()
+                )
+                compact_record = {
+                        "source_agent_id": record.get("source_agent_id"),
+                        "target_agent_id": record.get("target_agent_id"),
+                        "message_type": record.get("message_type"),
+                        "artifact_type": record.get("artifact_type"),
+                        "graph_revision": record.get("graph_revision"),
+                        "environment_revision": record.get(
+                            "environment_revision"
+                        ),
+                        "request_or_dependency": record.get(
+                            "request_or_dependency",
+                            record.get("dependency"),
+                        ),
+                        "tool_receipt_count": len(tool_receipts),
                         "tool_ids": sorted(
                             {
                                 str(receipt.get("tool_id"))
-                                for receipt in message.tool_receipts
+                                for receipt in tool_receipts
                                 if receipt.get("tool_id") is not None
                             }
                         ),
                         "content_preview": content,
-                    }
-                )
+                }
+                if enriched_artifact_feedback:
+                    compact_record.update(
+                        {
+                            "artifact_version": record.get("artifact_version"),
+                            "source_model_id": record.get("source_model_id"),
+                            "source_execution_mode": record.get(
+                                "source_execution_mode"
+                            ),
+                            "source_role_family": record.get(
+                                "source_role_family"
+                            ),
+                            "source_completion_condition": record.get(
+                                "source_completion_condition"
+                            ),
+                            "source_finish_reason": record.get(
+                                "source_finish_reason"
+                            ),
+                        }
+                    )
+                output_inbox.append(compact_record)
         calls_by_agent = {
             call.request.agent.id: call for call in execution.calls
         }
         agent_artifacts = []
         for agent_id, artifact in sorted(execution.outputs.items()):
             call = calls_by_agent.get(agent_id)
+            node = self._graph.get_node(agent_id)
+            metadata = execution.output_metadata.get(agent_id, {})
+            routed_inputs = input_records(agent_id, call)
             preview = " ".join(artifact.split())
             if len(preview) > 160:
                 preview = preview[:157] + "..."
             agent_artifacts.append(
                 {
                     "agent_id": agent_id,
-                    "model_id": None if call is None else call.request.model.model_id,
-                    "role_family": self._graph.get_node(agent_id).role_family,
-                    "execution_mode": self._graph.get_node(
-                        agent_id
-                    ).execution_mode.value,
-                    "allowed_tools": list(
-                        self._graph.get_node(agent_id).allowed_tools
+                    "model_id": (
+                        node.model_id
+                        if enriched_artifact_feedback
+                        else (
+                            None
+                            if call is None
+                            else call.request.model.model_id
+                        )
                     ),
-                    "artifact_type": self._graph.get_node(
-                        agent_id
-                    ).artifact_type,
-                    "completion_condition": self._graph.get_node(
-                        agent_id
-                    ).completion_condition,
+                    "role_family": node.role_family,
+                    "execution_mode": node.execution_mode.value,
+                    "allowed_tools": list(
+                        node.allowed_tools
+                    ),
+                    "artifact_type": node.artifact_type,
+                    "completion_condition": node.completion_condition,
                     "execution_role": (
                         "format" if agent_id == execution.output_agent_id else "worker"
                     ),
                     "is_output_agent": agent_id == execution.output_agent_id,
                     "upstream_source_ids": (
-                        []
-                        if call is None
-                        else [item.source_agent_id for item in call.request.upstream]
+                        list(
+                            dict.fromkeys(
+                                str(item.get("source_agent_id"))
+                                for item in routed_inputs
+                                if item.get("source_agent_id") is not None
+                            )
+                        )
                     ),
                     "artifact_preview": preview,
+                    **(
+                        {
+                            "artifact_version": metadata.get(
+                                "artifact_version"
+                            ),
+                            "input_artifact_versions": dict(
+                                metadata.get("input_artifact_versions", {})
+                            )
+                            if isinstance(
+                                metadata.get("input_artifact_versions"),
+                                Mapping,
+                            )
+                            else {},
+                        }
+                        if enriched_artifact_feedback
+                        else {}
+                    ),
                 }
             )
         result = json.dumps(
@@ -4478,6 +4590,16 @@ class AgentWorkflowEnv:
                 "topology": self._graph.topology_statistics(),
                 "output_inbox": output_inbox,
                 "agent_artifacts": agent_artifacts,
+                **(
+                    {
+                        "execution_reuse_receipts": [
+                            dict(receipt)
+                            for receipt in execution.execution_reuse_receipts
+                        ]
+                    }
+                    if enriched_artifact_feedback
+                    else {}
+                ),
                 **(
                     {"recovery_state": self.recovery_state()}
                     if self.recovery_policy

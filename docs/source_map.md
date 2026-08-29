@@ -375,3 +375,32 @@ partially complete because the configured grader account returned an
 insufficient-quota error after 510 Direct and 488 AgentGraph evaluations.
 The report preserves those counts separately from inference completion and
 does not promote the partial condition to the HealthBench best-profile.
+
+### HealthBench Professional Artifact communication v3 source classification
+
+The opt-in profile
+`agent_graph.artifact_communication_profile=producer_context_exact_dedup_v1`
+keeps the unified AgentGraph and the HealthBench task/evaluator adapters
+unchanged.
+
+| v3 boundary | Source and classification |
+| --- | --- |
+| Relation-scoped Artifact routing and incremental execution | **Direct reuse** of the current FlowSteer-derived `AgentRuntime._upstream` and progressive Canvas execution boundary. No broadcast channel, medical role, or fixed topology is added. |
+| Producer contract/model/execution mode/completion condition, Artifact version, provider finish reason, and Tool receipt provenance | **Necessary typed-envelope adaptation** over the existing `UpstreamMessage`. The fields are existing Agent declarations or measured Runtime receipts; no model-generated metadata is fabricated. |
+| Exact duplicate envelope suppression | **Thin adaptation** of SkillFlow's exact repeated Action--Observation reuse rule. Only a byte-identical serialized envelope with the same non-empty Artifact version is suppressed in one model input. Different producers, versions, bodies, Tool receipts, or contracts remain visible; no semantic-similarity deletion is used. |
+| Version-aware component reuse | **Necessary adaptation** of FlowSteer's `operator + inputs` node-cache boundary. Under v3 only, a routed Artifact version change invalidates downstream reuse; legacy profiles retain the prior transport-version-insensitive behavior. |
+| Reciprocal `peer_draft` and cache-reuse communication in Canvas feedback | **Receipt projection adaptation** over already persisted Runtime provenance. The Director receives compact 160-character previews plus versions and execution receipts; full Artifact bodies remain in the trajectory and are not duplicated into Canvas feedback. |
+| HealthBench Direct evaluator-only retry | **Evaluation wiring adaptation**. A matching existing Direct response remains frozen when its reference grader receipt is invalid, so later attempts re-score the same text instead of regenerating the comparator. |
+| Failed HealthBench evaluator preflight diagnosis | **Evaluation observability adaptation**. The runner preserves the grader error type/message and provider error type/status in its bounded manifest error. It does not expose private cases to the model, weaken the evaluator gate, or continue into benchmark generation after a failed preflight. |
+
+The v3 condition continues to use `repetition_penalty=1.05`. This is an
+inference decoding parameter, not a reward. Skill retrieval/evolution, GRPO,
+LoRA, backward, optimizer updates, MACE, Bayesian updates, and medical Tool use
+remain disabled.
+
+The fixed 525-task v3 selection is byte-for-byte aligned with v1 and v2, but
+the 2026-08-29 live canary stopped before benchmark generation because the
+pinned grader returned HTTP 403 `insufficient_quota` on all three bounded
+provider attempts. Therefore v3 has no valid official score yet. The completed
+v1 result remains the only full-denominator comparison; v2 remains explicitly
+partial-evaluator evidence.

@@ -70,6 +70,15 @@ class ConfigLoaderTests(unittest.TestCase):
                 validate_agent_graph_config(config)
 
         config = load_yaml("config/training_agent_graph.yaml")
+        config["agent_graph"]["artifact_communication_profile"] = (
+            "producer_context_exact_dedup_v1"
+        )
+        validate_agent_graph_config(config)
+        config["agent_graph"]["artifact_communication_profile"] = "unknown"
+        with self.assertRaises(ConfigurationError):
+            validate_agent_graph_config(config)
+
+        config = load_yaml("config/training_agent_graph.yaml")
         config["director"]["execute_on_edit"] = False
         with self.assertRaises(ConfigurationError):
             validate_agent_graph_config(config)

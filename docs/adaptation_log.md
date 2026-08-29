@@ -680,3 +680,41 @@ change was made during profile selection.
   score; v2 therefore does not replace the completed official-v1 best-profile.
 - The versioned Chinese status report is
   `reports/healthbench_professional_inference_loop_v2/evaluation_report_zh.md`.
+
+## 2026-08-29: HealthBench Professional Artifact communication v3
+
+- Created the independent condition
+  `config/evaluation_healthbench_professional_artifact_routing_v3.yaml`; v2
+  code, config, trajectories, and reports remain recoverable and are not mixed
+  into the v3 AgentGraph evidence directory.
+- Added an opt-in producer-context Artifact envelope containing the existing
+  source Agent model, free-text contract, execution mode, optional role
+  metadata, completion condition, provider finish reason, Artifact version,
+  and existing Tool receipts.
+- Reused the same renderer for directed and reciprocal communication. Exact
+  duplicate suppression applies only to identical versioned envelopes; it
+  never merges approximate medical text or independent producers.
+- Made v3 component-cache identity depend on the routed Artifact version and
+  producer context while retaining the legacy profile for historical configs.
+- Repaired compact Canvas feedback so reciprocal `peer_draft` communication
+  and cache-reused provenance remain observable. Artifact bodies stay capped
+  at the existing 160-character preview in Director feedback.
+- Preserved matching HealthBench Direct generations across evaluator failures;
+  retries grade the same response instead of generating a replacement.
+- Retained Qwen3.5-9B, the empty Tool condition, `repetition_penalty=1.05`, the
+  fixed 525 public-test selection, and the pinned HealthBench reference
+  evaluator. No Skill, training, GRPO, LoRA, backward, optimizer, MACE, or
+  Bayesian path is enabled.
+- Static verification completed: the focused Gateway/Runtime/Canvas suite
+  passed 255 tests plus 56 subtests, and config/completion-runner tests passed
+  51 tests plus 23 subtests. Live Stable Zero and full evaluator results are
+  recorded only after their corresponding commands actually finish.
+- Prepare-only selected the same ordered 525 public-test tasks as v1/v2. Two
+  canary attempts were stopped at the synthetic evaluator preflight before any
+  benchmark generation. After loading the existing project environment, the
+  pinned grader returned HTTP 403 `insufficient_quota` on all three bounded
+  provider retries. This is recorded in the v3 manifest; no v3 metric is
+  inferred from historical results.
+- Added a focused regression test for failed HealthBench preflight diagnosis.
+  The completion runner suite now passes 38 tests. The failure remains a
+  grader-account blocker, not an AgentGraph/GPU0 runtime failure.
