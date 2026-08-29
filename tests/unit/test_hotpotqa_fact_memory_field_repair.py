@@ -152,7 +152,7 @@ def test_field_level_repair_preserves_admitted_question_and_repairs_only_fact(
 
 
 @pytest.mark.parametrize(
-    ("source", "paraphrase", "fact", "expected_mode", "fact_problem_prefix"),
+    ("source", "paraphrase", "fact", "expected_mode"),
     (
         (
             _source(
@@ -163,14 +163,12 @@ def test_field_level_repair_preserves_admitted_question_and_repairs_only_fact(
             "Which impairment did singer Al Hibbler live with?",
             "Singer Al Hibbler could not see.",
             "declarative_clause_paraphrase",
-            "Dataset answer clause:",
         ),
         (
             _source(2),
             "Which individual wrote Atlas?",
             "Ada Lovelace authored Atlas.",
             "answer_slot_binding",
-            "Dataset answer:\n",
         ),
     ),
 )
@@ -180,7 +178,6 @@ def test_clausal_answer_and_short_span_use_distinct_binding_modes(
     paraphrase: str,
     fact: str,
     expected_mode: str,
-    fact_problem_prefix: str,
 ) -> None:
     calls: list[Mapping[str, object]] = []
 
@@ -216,12 +213,117 @@ def test_clausal_answer_and_short_span_use_distinct_binding_modes(
     fact_verification = next(
         call for call in calls if "verify-fact" in str(call["request_id"])
     )
-    assert fact_problem_prefix in str(fact_verification["problem"])
+    fact_problem = json.loads(str(fact_verification["problem"]))
+    assert fact_problem["fact_binding_mode"] == expected_mode
+    assert fact_problem["canonical_training_answer"] == source.canonical_answer
+    assert fact_problem["declarative_fact"] == fact
     if expected_mode == "declarative_clause_paraphrase":
-        assert "Source question:" in str(fact_verification["problem"])
-        assert source.question in str(fact_verification["problem"])
+        assert fact_problem["original_question"] == source.question
     else:
         assert source.canonical_answer in fact
+
+
+def test_targeted_repair_uses_triviaqa_immutable_and_answer_slot_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(
+        3,
+        question="In 2012, who authored Atlas?",
+        answer="Ada Lovelace",
+    )
+    calls: list[Mapping[str, object]] = []
+    fact_verifications = 0
+
+    async def fake_generate_json(**kwargs: object):
+        nonlocal fact_verifications
+        calls.append(dict(kwargs))
+        request_id = str(kwargs["request_id"])
+        if ":generate:" in request_id:
+            return {
+                "paraphrase_question": "In 2013, which person wrote Atlas?",
+                "fact_statement": "Ada Lovelace authored Atlas.",
+            }, {"request_id": request_id}
+        if "repair-question" in request_id:
+            return {
+                "paraphrase_question": "In 2012, which person wrote Atlas?",
+            }, {"request_id": request_id}
+        if "repair-fact" in request_id:
+            return {
+                "fact_statement": (
+                    "In 2012, Atlas was authored by Ada Lovelace."
+                ),
+            }, {"request_id": request_id}
+        if "verify-question" in request_id:
+            return _question_verification(), {"request_id": request_id}
+        if "verify-fact" in request_id:
+            fact_verifications += 1
+            return (
+                _fact_verification(relation_direction_preserved=False)
+                if fact_verifications == 1
+                else _fact_verification()
+            ), {"request_id": request_id}
+        raise AssertionError(f"unexpected request: {request_id}")
+
+    monkeypatch.setattr(materializer, "_generate_json", fake_generate_json)
+    candidate, receipt = asyncio.run(
+        materializer._materialize_one(
+            source,
+            index=0,
+            model=object(),
+            provider=object(),
+            seed=29,
+            max_attempts=2,
+            generation_rounds=1,
+        )
+    )
+
+    assert candidate["paraphrase_question"] == (
+        "In 2012, which person wrote Atlas?"
+    )
+    assert candidate["fact_statement"] == (
+        "In 2012, Atlas was authored by Ada Lovelace."
+    )
+    question_repair = next(
+        call for call in calls if "repair-question" in str(call["request_id"])
+    )
+    question_payload = json.loads(str(question_repair["problem"]))
+    assert question_payload["immutable_number_or_date_tokens"] == ["2012"]
+    assert question_payload["immutable_original_entity_tokens"] == ["Atlas"]
+    assert question_payload["forbidden_question_canonical_tokens"] == [
+        "ada",
+        "lovelace",
+    ]
+    assert "canonical_training_answer" not in question_payload
+
+    fact_repair = next(
+        call for call in calls if "repair-fact" in str(call["request_id"])
+    )
+    fact_payload = json.loads(str(fact_repair["problem"]))
+    assert fact_payload["canonical_training_answer"] == "Ada Lovelace"
+    assert fact_payload["immutable_answer_entity_tokens"] == [
+        "Ada",
+        "Lovelace",
+    ]
+    assert fact_payload["allowed_fact_number_or_date_tokens"] == ["2012"]
+    assert "relation_direction_preserved" in fact_payload[
+        "prior_admission_result"
+    ]
+
+    question_verification = next(
+        call for call in calls if "verify-question" in str(call["request_id"])
+    )
+    verifier_payload = json.loads(str(question_verification["problem"]))
+    assert verifier_payload["canonical_answer_leakage_checked_deterministically"] is True
+    assert "canonical_training_answer" not in verifier_payload
+    assert "answer_not_revealed" in materializer._REQUIRED_QUESTION_VERIFICATION_FIELDS
+    assert {
+        "answer_slot_bound",
+        "relation_direction_preserved",
+        "no_new_fact_or_relation",
+    }.issubset(materializer._REQUIRED_FACT_VERIFICATION_FIELDS)
+    assert receipt["attempt_receipts"][0]["fact"]["failed_fields"] == [
+        "relation_direction_preserved"
+    ]
 
 
 def test_rejected_materialization_receipt_persists_candidate_and_failed_fields(

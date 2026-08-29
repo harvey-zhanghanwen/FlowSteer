@@ -32,6 +32,13 @@ from scripts.materialize_hotpotqa_qa_memory import (  # noqa: E402
 )
 from src.interactive.config_loader import load_model_registry  # noqa: E402
 from src.interactive.hotpotqa_full_dataset_fact_memory_index import (  # noqa: E402
+    _ARABIC_NUMBER_ATOM,
+    _ROMAN_NUMERAL_TOKEN,
+    _WORLD_WAR_ABBREVIATION,
+    _content_tokens,
+    _identity_tokens,
+    _lexical_tokens,
+    _quoted_spans,
     FULL_DATASET_EVALUATION_SCOPE,
     canonical_answer_is_declarative_clause,
     load_hotpotqa_full_dataset_qa_sources,
@@ -44,10 +51,10 @@ from src.interactive.hotpotqa_qa_memory_index import (  # noqa: E402
 )
 
 
-PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v3"
-PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v3"
+PROMPT_VERSION = "hotpotqa.full_dataset_fact.qwen35.field_repair.v4"
+PARAPHRASE_VERSION = "hotpotqa-full-dataset-declarative-fact-v4"
 PARAPHRASE_PROVENANCE = (
-    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v3"
+    "local-qwen3.5-9b-semantic-rewrite-and-field-verification-v4"
 )
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
 
@@ -69,6 +76,7 @@ QUESTION_VERIFICATION_SCHEMA = _json_schema(
         "question_changed": {"type": "boolean"},
         "constraints_preserved": {"type": "boolean"},
         "answer_slot_preserved": {"type": "boolean"},
+        "answer_not_revealed": {"type": "boolean"},
     }
 )
 FACT_VERIFICATION_SCHEMA = _json_schema(
@@ -78,6 +86,9 @@ FACT_VERIFICATION_SCHEMA = _json_schema(
         "fact_supported_by_qa": {"type": "boolean"},
         "canonical_span_preserved_when_required": {"type": "boolean"},
         "no_qa_wire_format": {"type": "boolean"},
+        "answer_slot_bound": {"type": "boolean"},
+        "relation_direction_preserved": {"type": "boolean"},
+        "no_new_fact_or_relation": {"type": "boolean"},
     }
 )
 _REQUIRED_QUESTION_VERIFICATION_FIELDS = tuple(
@@ -114,6 +125,95 @@ def _generated_text(generated: Mapping[str, object], field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be non-empty text")
     return " ".join(value.split())
+
+
+def _immutable_number_or_date_surfaces(text: str) -> tuple[str, ...]:
+    """Project the exact surfaces protected by deterministic admission."""
+
+    values = [
+        match.group(0).rstrip(",")
+        for match in _ARABIC_NUMBER_ATOM.finditer(text)
+    ]
+    values.extend(
+        match.group(0) for match in _ROMAN_NUMERAL_TOKEN.finditer(text)
+    )
+    values.extend(
+        match.group(0) for match in _WORLD_WAR_ABBREVIATION.finditer(text)
+    )
+    return tuple(dict.fromkeys(values))
+
+
+def _immutable_identity_surfaces(text: str) -> tuple[str, ...]:
+    """Render HotpotQA's normalized identity boundary as source surfaces."""
+
+    identities = _identity_tokens(text)
+    values: list[str] = []
+    for token in _lexical_tokens(text):
+        normalized = token.casefold()
+        if normalized.endswith(("'s", "’s")):
+            normalized = normalized[:-2]
+        if normalized in identities:
+            values.append(token)
+    return tuple(dict.fromkeys(values))
+
+
+def _question_immutable_payload(
+    source: HotpotQATrainQASource,
+) -> dict[str, object]:
+    """Thin adaptation of TriviaQA's immutable-field request payload."""
+
+    canonical_tokens = set(_content_tokens(source.canonical_answer))
+    question_tokens = set(_content_tokens(source.question))
+    return {
+        "original_question": source.question,
+        "immutable_original_entity_tokens": list(
+            _immutable_identity_surfaces(source.question)
+        ),
+        "immutable_number_or_date_tokens": list(
+            _immutable_number_or_date_surfaces(source.question)
+        ),
+        "immutable_quoted_spans": sorted(_quoted_spans(source.question)),
+        "forbidden_question_canonical_tokens": sorted(
+            canonical_tokens - question_tokens
+        ),
+    }
+
+
+def _fact_binding_payload(
+    source: HotpotQATrainQASource,
+    *,
+    binding_mode: str,
+) -> dict[str, object]:
+    """Build TriviaQA-calibrated answer-slot binding metadata."""
+
+    return {
+        "original_question": source.question,
+        "canonical_training_answer": source.canonical_answer,
+        "fact_binding_mode": binding_mode,
+        "immutable_answer_entity_tokens": list(
+            _immutable_identity_surfaces(source.canonical_answer)
+        ),
+        "immutable_answer_number_or_date_tokens": list(
+            _immutable_number_or_date_surfaces(source.canonical_answer)
+        ),
+        "allowed_fact_number_or_date_tokens": list(
+            _immutable_number_or_date_surfaces(
+                f"{source.question} {source.canonical_answer}"
+            )
+        ),
+        "immutable_answer_quoted_spans": sorted(
+            _quoted_spans(source.canonical_answer)
+        ),
+    }
+
+
+def _problem_payload(value: Mapping[str, object]) -> str:
+    return json.dumps(
+        dict(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _candidate(
@@ -155,6 +255,11 @@ async def _materialize_one(
             question=source.question,
         )
         else "answer_slot_binding"
+    )
+    question_source_payload = _question_immutable_payload(source)
+    fact_source_payload = _fact_binding_payload(
+        source,
+        binding_mode=binding_mode,
     )
     question: str | None = None
     fact: str | None = None
@@ -217,12 +322,21 @@ async def _materialize_one(
                             + "Every pronoun or demonstrative must have an explicit "
                             "antecedent inside the same fact. State the fact itself; "
                             "do not describe an answer, question, query, or inquiry. "
-                            "Do not add entities, aliases, facts, or Q-A labels. "
+                            "Copy every supplied immutable field exactly and keep "
+                            "every forbidden canonical token out of the paraphrased "
+                            "question. For answer-slot binding, retain the source "
+                            "predicate, arguments, direction, polarity, and scope; "
+                            "substitute the answer semantics only into the requested "
+                            "slot. State the supported relation once rather than "
+                            "restating the question or appending a bare answer. Do "
+                            "not add entities, aliases, facts, or Q-A labels. "
                             "Return only the requested JSON fields."
                         ),
-                        problem=(
-                            f"Source question:\n{source.question}\n\n"
-                            f"Dataset answer:\n{source.canonical_answer}"
+                        problem=_problem_payload(
+                            {
+                                **question_source_payload,
+                                **fact_source_payload,
+                            }
                         ),
                         request_id=(
                             f"hotpotqa-full-dataset-fact:{index:06d}:"
@@ -257,12 +371,17 @@ async def _materialize_one(
                                 "multi-hop path, answer slot, name, number, date, "
                                 "and quoted span. Replace at least one non-entity "
                                 "word or phrase; changing only word order is invalid. "
-                                "Do not reveal the answer. Return only JSON."
+                                "Treat the immutable fields as exact dataset strings; "
+                                "never correct, replace, delete, or complete them from "
+                                "world knowledge. Do not use any forbidden canonical "
+                                "token or reveal the answer. Return only JSON."
                             ),
-                            problem=(
-                                f"Source question:\n{source.question}\n\n"
-                                f"Rejected paraphrase:\n{question or ''}\n\n"
-                                f"Prior admission result:\n{question_rejection}"
+                            problem=_problem_payload(
+                                {
+                                    **question_source_payload,
+                                    "rejected_question": question or "",
+                                    "prior_admission_result": question_rejection,
+                                }
                             ),
                             request_id=(
                                 f"hotpotqa-full-dataset-fact:{index:06d}:"
@@ -314,22 +433,21 @@ async def _materialize_one(
                                 + "Every pronoun or demonstrative must have an explicit "
                                 "antecedent inside the same fact. State the fact itself; "
                                 "do not describe an answer, question, query, or inquiry. "
-                                "Do not add entities, aliases, or Q-A labels. "
+                                "Copy supplied immutable answer fields exactly. Bind "
+                                "the canonical answer only to the original answer slot; "
+                                "retain the source predicate, argument direction, "
+                                "polarity, scope, and constraints. Express one supported "
+                                "relation once; do not loop over, duplicate, or append a "
+                                "second rendering of the same relation. Do not add "
+                                "entities, aliases, or Q-A labels. "
                                 "Return only JSON."
                             ),
-                            problem=(
-                                (
-                                    f"Source question:\n{source.question}\n\n"
-                                    f"Dataset answer clause:\n"
-                                    f"{source.canonical_answer}\n\n"
-                                    if binding_mode
-                                    == "declarative_clause_paraphrase"
-                                    else
-                                    f"Source question:\n{source.question}\n\n"
-                                    f"Dataset answer:\n{source.canonical_answer}\n\n"
-                                )
-                                + f"Rejected fact:\n{fact or ''}\n\n"
-                                + f"Prior admission result:\n{fact_rejection}"
+                            problem=_problem_payload(
+                                {
+                                    **fact_source_payload,
+                                    "rejected_fact": fact or "",
+                                    "prior_admission_result": fact_rejection,
+                                }
                             ),
                             request_id=(
                                 f"hotpotqa-full-dataset-fact:{index:06d}:"
@@ -362,12 +480,21 @@ async def _materialize_one(
                             "paraphrase. Preserve entity identity, relation, scope, "
                             "constraints, multi-hop path, answer slot, and answer "
                             "cardinality. Surface wording must genuinely change. "
-                            "Do not solve the question. Evaluate each boolean "
+                            "Treat the source as an authoritative dataset string; do "
+                            "not correct it from world knowledge. Canonical-answer "
+                            "leakage and immutable numbers/dates are also checked "
+                            "deterministically. Do not solve the question. Evaluate each boolean "
                             "independently and return only JSON."
                         ),
-                        problem=(
-                            f"Source question:\n{source.question}\n\n"
-                            f"Paraphrased question:\n{question}"
+                        problem=_problem_payload(
+                            {
+                                "original_question": source.question,
+                                "paraphrased_question": question,
+                                "canonical_answer_leakage_checked_deterministically": True,
+                                "immutable_number_or_date_tokens": question_source_payload[
+                                    "immutable_number_or_date_tokens"
+                                ],
+                            }
                         ),
                         request_id=(
                             f"hotpotqa-full-dataset-fact:{index:06d}:"
@@ -429,21 +556,19 @@ async def _materialize_one(
                             + "Reject any unresolved pronoun or demonstrative and any "
                             "answer/question/query/inquiry meta-framing. Reject added "
                             "entities, aliases, facts, numbers, or "
-                            "dates. Evaluate every boolean independently and "
+                            "dates. The answer must occupy the original answer slot, "
+                            "with the source relation direction, polarity, scope, and "
+                            "constraints intact. Reject a bare answer, a question "
+                            "restatement with an appended answer, or repeated renderings "
+                            "of the same relation. Treat source strings as authoritative "
+                            "and do not fact-check them. Evaluate every boolean independently and "
                             "return only JSON."
                         ),
-                        problem=(
-                            (
-                                f"Source question:\n{source.question}\n\n"
-                                f"Dataset answer clause:\n"
-                                f"{source.canonical_answer}\n\n"
-                                if binding_mode
-                                == "declarative_clause_paraphrase"
-                                else
-                                f"Source question:\n{source.question}\n\n"
-                                f"Dataset answer:\n{source.canonical_answer}\n\n"
-                            )
-                            + f"Declarative fact:\n{fact}"
+                        problem=_problem_payload(
+                            {
+                                **fact_source_payload,
+                                "declarative_fact": fact,
+                            }
                         ),
                         request_id=(
                             f"hotpotqa-full-dataset-fact:{index:06d}:"
