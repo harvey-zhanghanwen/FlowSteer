@@ -5364,6 +5364,18 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
     ) -> bool:
         from .agent_workflow_env import AgentWorkflowEnv
 
+        # Fact-memory already uses the canonical ``read(memory_id)`` wire and
+        # AgentWorkflowEnv validates its exact ``memory_id/fact_text`` record.
+        # Preserve that strict path before constructing the legacy
+        # passage-shaped compatibility view used by older QA-memory semantic
+        # validators.  The compatibility view intentionally adds passage
+        # fields and therefore cannot satisfy the fact-memory exact-field
+        # boundary.
+        if AgentWorkflowEnv._successful_read_receipt(
+            receipt,
+            retrieval_tool_id,
+        ):
+            return True
         return AgentWorkflowEnv._successful_read_receipt(
             _semantic_compatible_read_receipt(receipt, retrieval_tool_id),
             retrieval_tool_id,
@@ -5376,6 +5388,12 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
     ) -> Optional[str]:
         from .agent_workflow_env import AgentWorkflowEnv
 
+        direct_text = AgentWorkflowEnv._successful_read_text(
+            receipt,
+            retrieval_tool_id,
+        )
+        if direct_text is not None:
+            return direct_text
         return AgentWorkflowEnv._successful_read_text(
             _semantic_compatible_read_receipt(receipt, retrieval_tool_id),
             retrieval_tool_id,

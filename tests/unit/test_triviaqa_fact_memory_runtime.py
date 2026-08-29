@@ -336,6 +336,32 @@ class TriviaQAFactMemoryRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_react_adapter_admits_canonical_fact_read_receipt(self) -> None:
+        receipt = _fact_receipts()[1]
+
+        self.assertTrue(
+            QARetrievalReactExecutionAdapter._successful_read_receipt(
+                receipt,
+                TRIVIAQA_QA_MEMORY_TOOL_ID,
+            )
+        )
+        self.assertEqual(
+            "Ada Lovelace wrote the first published algorithm.",
+            QARetrievalReactExecutionAdapter._successful_read_text(
+                receipt,
+                TRIVIAQA_QA_MEMORY_TOOL_ID,
+            ),
+        )
+
+        leaked = json.loads(json.dumps(receipt))
+        leaked["result"]["value"]["memory"]["canonical_answer"] = "Ada Lovelace"
+        self.assertFalse(
+            QARetrievalReactExecutionAdapter._successful_read_receipt(
+                leaked,
+                TRIVIAQA_QA_MEMORY_TOOL_ID,
+            )
+        )
+
     def test_reasoner_schema_and_prompt_have_no_canonical_answer_constraint(self) -> None:
         projected, issue = (
             QARetrievalReactExecutionAdapter._qa_memory_completion_receipt_projection(
