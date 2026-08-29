@@ -297,14 +297,17 @@ def validate_hotpotqa_fact_statement(
     if not observed_numbers.issubset(allowed_numbers):
         raise ValueError("fact_statement introduced a number or date")
     canonical = " ".join(source.canonical_answer.split())
+    # The raw canonical answer is provenance-only.  Even when it already
+    # looks like a complete sentence, it cannot be the indexed fact payload;
+    # require a distinct semantic realization for every answer type.
+    if _normalized_text(fact) == _normalized_text(canonical):
+        raise ValueError(
+            "fact_statement is identical to the canonical answer"
+        )
     if canonical_answer_is_declarative_clause(
         canonical,
         question=source.question,
     ):
-        if _normalized_text(fact) == _normalized_text(canonical):
-            raise ValueError(
-                "clausal canonical answer must receive a semantic rewrite"
-            )
         required_answer_identities = _identity_tokens(canonical)
         if _missing_identity_tokens(canonical, fact):
             raise ValueError(

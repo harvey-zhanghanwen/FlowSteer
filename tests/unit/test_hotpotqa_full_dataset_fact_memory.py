@@ -176,6 +176,27 @@ def test_materialization_rejects_verbatim_question_and_qa_wire() -> None:
     with pytest.raises(ValueError, match="Question/Answer"):
         materialize_hotpotqa_declarative_facts((source,), (qa_wire,))
 
+    sentence_answer = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:raw-answer",
+        base_task_id="hotpotqa:raw-answer",
+        cycled=False,
+        question="How many genera and species are in Stachyuraceae?",
+        canonical_answer=(
+            "Stachyuraceae contains a single genus with eight species."
+        ),
+    )
+    raw_answer = _materialization(
+        sentence_answer,
+        fact=sentence_answer.canonical_answer,
+    )
+    raw_answer["paraphrase_question"] = (
+        "What are the genus and species counts within Stachyuraceae?"
+    )
+    with pytest.raises(ValueError, match="identical to the canonical answer"):
+        materialize_hotpotqa_declarative_facts(
+            (sentence_answer,), (raw_answer,)
+        )
+
 
 @pytest.mark.parametrize(
     ("question", "answer", "paraphrase", "fact"),
