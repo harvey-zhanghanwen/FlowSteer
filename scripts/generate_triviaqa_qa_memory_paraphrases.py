@@ -537,6 +537,56 @@ def _primary_answer_slot(question: str) -> tuple[str, tuple[str, ...]] | None:
     return None
 
 
+def _is_bare_source_fragment(text: str) -> bool:
+    """Recognize a source fragment that has no answer-bearing construction."""
+
+    normalized = " ".join(text.split()).strip()
+    if not normalized or "?" in normalized:
+        return False
+    tokens = tuple(_LEXICAL_TOKEN.findall(normalized.lstrip('"“‘')))
+    if not tokens:
+        return False
+    return tokens[0].casefold() not in {
+        "complete",
+        "finish",
+        "give",
+        "how",
+        "identify",
+        "name",
+        "specify",
+        "state",
+        "supply",
+        "tell",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "why",
+    }
+
+
+def _is_bare_fragment_semantic_expansion(
+    original: str,
+    candidate: str,
+) -> bool:
+    """Require a changed relation-bearing expansion around a bare fragment."""
+
+    if not _is_bare_source_fragment(original):
+        return False
+    normalized_original = " ".join(original.split())
+    normalized_candidate = " ".join(candidate.split())
+    if normalized_candidate.casefold() == normalized_original.casefold():
+        return False
+    added_content = (
+        _content_token_counts(normalized_candidate)
+        - _content_token_counts(normalized_original)
+    )
+    return sum(added_content.values()) >= 2
+
+
 def _birth_event_is_target_relation(question: str) -> bool:
     """Require birth lineage only when the question asks through ``born``.
 
@@ -596,6 +646,11 @@ def _birth_event_is_target_relation(question: str) -> bool:
 def _who_answer_slot_family_preserved(original: str, paraphrase: str) -> bool:
     """Keep a person/entity WH slot from becoming an object or label slot."""
 
+    if _is_bare_source_fragment(original):
+        # A bare title or complete quotation can contain relative clauses such
+        # as "the police, who investigate crime". Those tokens are source
+        # content, not the answer-bearing construction.
+        return True
     original_slot = _primary_answer_slot(original)
     if original_slot is None or original_slot[0] not in {"who", "whom", "whose"}:
         return True
@@ -1583,8 +1638,15 @@ def _literal_slot_substitution_preserved(
     canonical_tokens = tuple(
         token.casefold() for token in _LEXICAL_TOKEN.findall(canonical_answer)
     )
+    canonical_suffix = re.compile(
+        r";\s*the selected listed option is "
+        + re.escape(" ".join(canonical_answer.split()))
+        + r"\.\s*\Z",
+        re.IGNORECASE,
+    )
+    literal_statement = canonical_suffix.sub("", answer_statement)
     statement_tokens = tuple(
-        token.casefold() for token in _LEXICAL_TOKEN.findall(answer_statement)
+        token.casefold() for token in _LEXICAL_TOKEN.findall(literal_statement)
     )
     if not original_tokens or not canonical_tokens or not statement_tokens:
         return False
@@ -1787,14 +1849,14 @@ def _listed_choice_answer_binding_preserved(
         return True
     if not exact_canonical_span_preserved(statement, canonical) or "?" in statement:
         return False
-    canonical_pattern = re.escape(canonical)
+    canonical_pattern = rf"(?<!\w){re.escape(canonical)}(?!\w)"
     selected_label = re.compile(
         rf"\bselected\b[^.;:]*\b(?:option|choice|answer)\b[^.;:]*"
-        rf"{canonical_pattern}(?:\b|\Z)",
+        rf"{canonical_pattern}",
         re.IGNORECASE,
     )
     label_selected = re.compile(
-        rf"{canonical_pattern}(?:\b|\Z)[^.;:]*\b(?:option|choice|answer)\b"
+        rf"{canonical_pattern}[^.;:]*\b(?:option|choice|answer)\b"
         rf"[^.;:]*\bselected\b",
         re.IGNORECASE,
     )
@@ -2811,9 +2873,15 @@ def _exact_question_identity_contaminated_fields(
     question = " ".join(paraphrase_question.split()).casefold()
     statement = " ".join(paraphrase_answer_statement.split()).casefold()
     contaminated: set[str] = set()
-    if original in question:
+    if original in question and not _is_bare_fragment_semantic_expansion(
+        source.original_question,
+        paraphrase_question,
+    ):
         contaminated.add("paraphrase_question")
-    if original in statement:
+    if original in statement and not _is_bare_fragment_semantic_expansion(
+        source.original_question,
+        paraphrase_answer_statement,
+    ):
         contaminated.add("paraphrase_answer_statement")
     return frozenset(contaminated)
 

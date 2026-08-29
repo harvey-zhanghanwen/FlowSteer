@@ -4558,6 +4558,119 @@ def test_v7_listed_choice_repair_keeps_exact_canonical_option_label() -> None:
         )
 
 
+def test_listed_choice_binding_accepts_nonword_terminal_canonical() -> None:
+    question = (
+        "Approximately what percentage of Valentine's cards are bought by "
+        "women? 50%, 70% or 85%?"
+    )
+    statement = (
+        "Approximately 85% of Valentine's cards are bought by women; "
+        "the selected listed option is 85%."
+    )
+
+    assert _listed_choice_answer_binding_preserved(
+        original_question=question,
+        canonical_answer="85%",
+        answer_statement=statement,
+    )
+
+
+def test_literal_slot_binding_ignores_only_exact_selected_option_suffix() -> None:
+    question = (
+        "Which King created the George Cross medal? George III, George V or "
+        "George VI?"
+    )
+    statement = (
+        "George VI created the George Cross medal. George III, George V or "
+        "George VI; the selected listed option is George VI."
+    )
+
+    assert _literal_slot_substitution_preserved(
+        original_question=question,
+        canonical_answer="George VI",
+        answer_statement=statement,
+    )
+
+
+def test_balanced_standalone_quote_relative_who_is_not_answer_slot() -> None:
+    source = _semantic_source(
+        (
+            '"In the criminal justice system, the people are represented by '
+            "two groups: the police, who investigate crime. These are their "
+            'stories."'
+        ),
+        "Law and Order",
+    )
+
+    pair = _standalone_quoted_denotation_pair(source)
+
+    assert pair is not None
+    assert _deterministic_strict_pair(source) == pair
+
+
+def test_bare_title_fragment_requires_relation_bearing_semantic_expansion() -> None:
+    source = _semantic_source(
+        "The Man that Got Away",
+        "A Star is Born",
+    )
+    question = "Identify the work connected with The Man that Got Away."
+    statement = "The Man that Got Away is connected with A Star is Born."
+
+    parsed = parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": question,
+                "paraphrase_answer_statement": statement,
+            }
+        ),
+        source,
+    )
+
+    assert parsed == (question, statement)
+    assert _exact_question_identity_contaminated_fields(
+        source,
+        paraphrase_question=question,
+        paraphrase_answer_statement=statement,
+    ) == frozenset()
+    assert _exact_question_identity_contaminated_fields(
+        source,
+        paraphrase_question="The Man that Got Away is a work.",
+        paraphrase_answer_statement="The Man that Got Away is a work.",
+    ) == frozenset(
+        {"paraphrase_question", "paraphrase_answer_statement"}
+    )
+
+
+def test_bare_book_fragment_relative_who_is_not_answer_slot() -> None:
+    source = _semantic_source(
+        (
+            "Book Stieg Larsson – The Girl with the Dragon Tattoo and The "
+            "Girl Who Kicked the Hornets’ Nest"
+        ),
+        "The Girl Who Played with Fire",
+    )
+    question = (
+        "Identify the missing Book by Stieg Larsson associated with The Girl "
+        "with the Dragon Tattoo and The Girl Who Kicked the Hornets’ Nest."
+    )
+    statement = (
+        "The Stieg Larsson book associated with The Girl with the Dragon "
+        "Tattoo and The Girl Who Kicked the Hornets’ Nest is The Girl Who "
+        "Played with Fire."
+    )
+
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": question,
+                "paraphrase_answer_statement": statement,
+            },
+            ensure_ascii=False,
+        ),
+        source,
+    ) == (question, statement)
+
+
 @pytest.mark.parametrize(
     ("question", "canonical", "statement"),
     (
