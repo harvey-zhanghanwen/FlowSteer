@@ -1533,6 +1533,13 @@ class AgentWorkflowEnv:
                         for source_id, target_id in protected_edges
                     ):
                         continue
+                    if self._webshop_stateful_reciprocal_relation(
+                        source_id=source_id,
+                        target_id=target_id,
+                        source_to_target=source_to_target,
+                        target_to_source=target_to_source,
+                    ):
+                        continue
                     encoded_source_id = source_id
                     encoded_target_id = target_id
                     encoded_source_to_target = source_to_target
@@ -1559,6 +1566,40 @@ class AgentWorkflowEnv:
                         }
                     )
         return candidates
+
+    def _webshop_stateful_reciprocal_relation(
+        self,
+        *,
+        source_id: Optional[str],
+        target_id: Optional[str],
+        source_to_target: Optional[bool],
+        target_to_source: Optional[bool],
+    ) -> bool:
+        """Match the Runtime's unsupported WebShop reciprocal execution case.
+
+        FlowSteer's reciprocal relation is executed as a two-Agent
+        draft/revision block.  SkillFlow's WebShop adapter instead binds one
+        mutable episode to a serialized Action--Observation loop.  Runtime
+        therefore already rejects a stateful Tool owner in a reciprocal block;
+        this predicate projects the same boundary into the revision-local
+        ``SET_RELATION`` domain without restricting independent or one-way
+        AgentGraph relations.
+        """
+
+        if (
+            self.required_tool_id != "webshop.environment"
+            or source_to_target is not True
+            or target_to_source is not True
+            or not isinstance(source_id, str)
+            or not isinstance(target_id, str)
+        ):
+            return False
+        return any(
+            self._graph.has_node(agent_id)
+            and self.required_tool_id
+            in self._graph.get_node(agent_id).allowed_tools
+            for agent_id in (source_id, target_id)
+        )
 
     def _model_admissible_relation_candidates(self) -> list[dict[str, object]]:
         """Return the exact state-conditioned FlowSteer relation domain."""
@@ -4332,6 +4373,22 @@ class AgentWorkflowEnv:
             return self._reject_after_count(
                 action,
                 "edit rejected: " + required_tool_profile_issue,
+            )
+        if (
+            action.action_type is AgentActionType.SET_RELATION
+            and self._webshop_stateful_reciprocal_relation(
+                source_id=action.source_id,
+                target_id=action.target_id,
+                source_to_target=action.source_to_target,
+                target_to_source=action.target_to_source,
+            )
+        ):
+            return self._reject_after_count(
+                action,
+                "edit rejected: stateful Tool 'webshop.environment' cannot "
+                "execute inside a reciprocal Agent block; use an independent "
+                "or one-way relation",
+                feedback_code="stateful_reciprocal_relation_unsupported",
             )
         # Provider/model availability is a Runtime boundary shared by generic
         # FlowSteer Canvas tasks and semantic QA tasks.  Apply its exact live

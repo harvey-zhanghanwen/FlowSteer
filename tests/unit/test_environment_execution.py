@@ -938,6 +938,96 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("set_output", restored)
         self.assertNotEqual(("modify_agent",), restored)
 
+    async def test_webshop_live_relation_domain_excludes_stateful_reciprocal_block(
+        self,
+    ) -> None:
+        class WebShopSession(FakeSession):
+            environment_id = "fake:webshop:relation-domain"
+            task_family = "webshop"
+
+        session = WebShopSession()
+        gateway = SequenceGateway([])
+        environment = resources(session=session, gateway=gateway, max_turns=1)
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="complete the shopping task",
+            graph=AgentGraph(
+                [
+                    AgentNode(
+                        "actor",
+                        "m",
+                        "Act on the current public shopping state.",
+                        allowed_tools=(environment.tool_id,),
+                        execution_mode="react",
+                    ),
+                    AgentNode("peer", "m", "Process routed public artifacts."),
+                ]
+            ),
+            execute_on_edit=False,
+            required_tool_id=environment.tool_id,
+            allowed_actions=("set_relation",),
+        )
+
+        candidates = canvas.model_admissible_action_targets()["set_relation"][
+            "candidates"
+        ]
+        self.assertEqual(
+            {
+                (True, False),
+                (False, True),
+            },
+            {
+                (
+                    candidate["source_to_target"],
+                    candidate["target_to_source"],
+                )
+                for candidate in candidates
+            },
+        )
+        reciprocal = await canvas.step(
+            '{"action":"set_relation","source_id":"actor",'
+            '"target_id":"peer","source_to_target":true,'
+            '"target_to_source":true}'
+        )
+        self.assertFalse(reciprocal.accepted)
+        self.assertEqual(
+            "stateful_reciprocal_relation_unsupported",
+            reciprocal.feedback_code,
+        )
+        self.assertEqual(0, canvas.revision)
+
+        one_way = await canvas.step(
+            '{"action":"set_relation","source_id":"actor",'
+            '"target_id":"peer","source_to_target":true,'
+            '"target_to_source":false}'
+        )
+        self.assertTrue(one_way.accepted)
+        independent_candidate = {
+            "source_id": "actor",
+            "target_id": "peer",
+            "source_to_target": False,
+            "target_to_source": False,
+        }
+        self.assertIn(
+            independent_candidate,
+            canvas.model_admissible_action_targets()["set_relation"][
+                "candidates"
+            ],
+        )
+        self.assertEqual(0, len(gateway.requests))
+
     async def test_webshop_search_action_uses_public_search_bar_semantics(self) -> None:
         class WebShopSession(FakeSession):
             environment_id = "fake:webshop"
