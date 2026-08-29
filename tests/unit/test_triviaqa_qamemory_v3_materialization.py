@@ -80,6 +80,12 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _typed_subject_trailing_context_pair,
     _bounded_possessive_relation_pair,
     _bounded_typed_subject_relation_pair,
+    _simple_why_auxiliary_pair,
+    _standalone_quoted_denotation_pair,
+    _wedding_anniversary_duration_pair,
+    _proclamation_year_statement_pair,
+    _elliptical_sonnet_line_count_pair,
+    _quoted_relation_slot_pair,
     _fronted_context_subject_wh_pair,
     _leading_copular_object_wh_pair,
     _network_identifier_contrast_pair,
@@ -4362,6 +4368,77 @@ def test_bounded_object_wh_families_reject_nearby_shapes(
                 "Identify the condiment that was known as ’’Wilson’s "
                 "gravy\".",
                 "HP sauce was known as ’’Wilson’s gravy\".",
+            ),
+        ),
+        (
+            _simple_why_auxiliary_pair,
+            (
+                "Why was Erika Schinegger stripped of her 1966 downhill "
+                "skiing world title?"
+            ),
+            "She was a man",
+            (
+                "For what reason was Erika Schinegger stripped of her 1966 "
+                "downhill skiing world title?",
+                "The reason Erika Schinegger was stripped of her 1966 "
+                "downhill skiing world title is that She was a man.",
+            ),
+        ),
+        (
+            _standalone_quoted_denotation_pair,
+            '"Your name will also go on the list; what is it?"',
+            "Don’t tell him Pike.",
+            (
+                "Identify what the quoted passage ‘Your name will also go "
+                "on the list; what is it?’ denotes.",
+                "The quoted passage ‘Your name will also go on the list; "
+                "what is it?’ denotes Don’t tell him Pike.",
+            ),
+        ),
+        (
+            _wedding_anniversary_duration_pair,
+            (
+                "If you were celebrating your pearl wedding anniversary "
+                "for how many years have you been married?"
+            ),
+            "30",
+            (
+                "If you were observing your pearl wedding anniversary, for "
+                "how many years have you been married?",
+                "If you were celebrating your pearl wedding anniversary, "
+                "you have been married for 30 years.",
+            ),
+        ),
+        (
+            _proclamation_year_statement_pair,
+            "State of Israel is proclaimed.",
+            "1948",
+            (
+                "In which year was State of Israel proclaimed?",
+                "State of Israel was proclaimed in 1948.",
+            ),
+        ),
+        (
+            _elliptical_sonnet_line_count_pair,
+            "Lines traditionally in a sonnet?",
+            "14",
+            (
+                "How many lines does a sonnet traditionally have?",
+                "A sonnet traditionally has 14 lines.",
+            ),
+        ),
+        (
+            _quoted_relation_slot_pair,
+            (
+                "In the game ‘Mortal Kombat’, what phrase is heard when "
+                "Scorpion uses his spear?"
+            ),
+            "‘Get over here’",
+            (
+                "In the game ‘Mortal Kombat’, which phrase can be heard "
+                "when Scorpion uses his spear?",
+                "In the game ‘Mortal Kombat’, the phrase heard when Scorpion "
+                "uses his spear is ‘Get over here’.",
             ),
         ),
     ),

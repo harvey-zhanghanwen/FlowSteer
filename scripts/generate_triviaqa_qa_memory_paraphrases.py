@@ -4578,6 +4578,98 @@ def _if_you_are_eating_pair(
     )
 
 
+_QUOTED_RELATION_SLOT = re.compile(
+    r"(?:"
+    r"(?i:In the)\s+(?P<heard_context>game\s+‘[^?‘’]{1,160}’),\s+"
+    r"(?i:what phrase is heard)\s+(?P<heard_tail>[^?]{1,200})"
+    r"|(?P<better_context>Invented by [^?,]{1,160} in the [^?,]{1,40}),\s+"
+    r"(?i:what is the)\s+(?P<better_title>‘[^?‘’]{1,200}’)\s+"
+    r"(?i:better known as)"
+    r"|(?P<original_context>Situated in [^?,]{1,100}),\s+"
+    r"(?i:what was the original name of the)\s+"
+    r"(?P<original_title>‘[^?‘’]{1,200}’)"
+    r'|(?P<theme_quote>"[^"?]{1,300}")\s+'
+    r"(?i:is the theme music to which film and long running TV series)"
+    r'|(?P<rule_quote>"[^"?]{1,400}")\.\s+'
+    r"(?i:what is the second rule)"
+    r")\?"
+)
+
+
+def _quoted_relation_slot_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind five corpus-bounded quotation/title relation frames."""
+
+    original = " ".join(source.original_question.split())
+    if (
+        _answer_slot_count(original) != 1
+        or _COORDINATED_QUESTION_SLOT.search(original) is not None
+    ):
+        return None
+    match = _QUOTED_RELATION_SLOT.fullmatch(original)
+    if match is None:
+        return None
+
+    if match.group("heard_context") is not None:
+        context = match.group("heard_context")
+        tail = match.group("heard_tail")
+        question_candidate = (
+            f"In the {context}, which phrase can be heard {tail}?"
+        )
+        statement = (
+            f"In the {context}, the phrase heard {tail} is "
+            f"{source.canonical_answer}"
+        )
+    elif match.group("better_context") is not None:
+        context = match.group("better_context")
+        title = match.group("better_title")
+        embedded_context = context[:1].lower() + context[1:]
+        question_candidate = (
+            f"{context}, by what name is the {title} more commonly known?"
+        )
+        statement = (
+            f"The {title}, {embedded_context}, is better known as "
+            f"{source.canonical_answer}"
+        )
+    elif match.group("original_context") is not None:
+        context = match.group("original_context")
+        title = match.group("original_title")
+        question_candidate = (
+            f"{context}, what was the former name of the {title}?"
+        )
+        statement = (
+            f"{context}, the original name of the {title} was "
+            f"{source.canonical_answer}"
+        )
+    elif match.group("theme_quote") is not None:
+        quote = match.group("theme_quote")
+        question_candidate = (
+            f"{quote} serves as theme music for which film and long "
+            "running TV series?"
+        )
+        statement = (
+            f"{quote} is the theme music to {source.canonical_answer}"
+        )
+    else:
+        quote = match.group("rule_quote")
+        if quote is None:
+            return None
+        question_candidate = f"{quote}. Which rule comes second?"
+        statement = (
+            f"Following {quote}, the second rule is: "
+            f"{source.canonical_answer}"
+        )
+
+    question = _finish_deterministic_question_candidate(
+        source,
+        question_candidate,
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(statement)
+
+
 _QUOTED_TITLE_CANONICAL = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9 .,&-]{0,80}"
 )
@@ -4638,6 +4730,155 @@ def _quoted_title_slot_pair(
     if question is None:
         return None
     return question, _declarative_statement(statement)
+
+
+def _simple_why_auxiliary_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind a single reason slot under the admitted ``will|was`` frame."""
+
+    original = " ".join(source.original_question.split())
+    if (
+        _answer_slot_count(original) != 1
+        or len(_QUESTION_SLOT_TOKEN.findall(original)) != 1
+    ):
+        return None
+    future = re.fullmatch(
+        r"(?i:why will you)\s+(?P<predicate>.+)\?",
+        original,
+    )
+    stripped = re.fullmatch(
+        r"(?i:why was)\s+(?P<subject>Erika Schinegger)\s+"
+        r"(?P<predicate>stripped .+)\?",
+        original,
+    )
+    if future is not None:
+        rest = f"will you {future.group('predicate')}"
+        fact_body = f"you will {future.group('predicate')}"
+    elif stripped is not None:
+        rest = f"was {stripped.group('subject')} {stripped.group('predicate')}"
+        fact_body = f"{stripped.group('subject')} was {stripped.group('predicate')}"
+    else:
+        return None
+    question = _finish_deterministic_question_candidate(
+        source,
+        f"For what reason {rest}?",
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"The reason {fact_body} is that {source.canonical_answer}"
+    )
+
+
+def _standalone_quoted_denotation_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Give one balanced standalone quotation a denotation carrier."""
+
+    original = " ".join(source.original_question.split())
+    if len(original) < 3:
+        return None
+    matching_closer = {'"': '"', "“": "”"}.get(original[0])
+    if matching_closer is None or original[-1] != matching_closer:
+        return None
+    content = original[1:-1].strip()
+    if not content or len(content) > 2_000:
+        return None
+    question = _finish_deterministic_question_candidate(
+        source,
+        f"Identify what the quoted passage ‘{content}’ denotes.",
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        "The quoted passage "
+        f"‘{content}’ denotes {source.canonical_answer}"
+    )
+
+
+def _wedding_anniversary_duration_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind a numeric duration in the bounded wedding-anniversary frame."""
+
+    original = " ".join(source.original_question.split())
+    canonical = " ".join(source.canonical_answer.split())
+    if re.fullmatch(r"[0-9]{1,3}", canonical) is None:
+        return None
+    match = re.fullmatch(
+        r"If you were celebrating your "
+        r"(?P<label>[^?]{1,80}) wedding anniversary for how many years "
+        r"have you been married\?",
+        original,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    label = match.group("label")
+    question = _finish_deterministic_question_candidate(
+        source,
+        (
+            f"If you were observing your {label} wedding anniversary, "
+            "for how many years have you been married?"
+        ),
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"If you were celebrating your {label} wedding anniversary, "
+        f"you have been married for {canonical} years"
+    )
+
+
+def _proclamation_year_statement_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Convert one proclamation event fragment into a bounded year relation."""
+
+    original = " ".join(source.original_question.split())
+    canonical = " ".join(source.canonical_answer.split())
+    if re.fullmatch(r"(?:1[0-9]{3}|20[0-9]{2})", canonical) is None:
+        return None
+    match = re.fullmatch(
+        r"(?P<entity>[^.?!]{2,160}) is proclaimed\.",
+        original,
+    )
+    if match is None:
+        return None
+    entity = match.group("entity")
+    question = _finish_deterministic_question_candidate(
+        source,
+        f"In which year was {entity} proclaimed?",
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"{entity} was proclaimed in {canonical}"
+    )
+
+
+def _elliptical_sonnet_line_count_pair(
+    source: TriviaQATrainSource,
+) -> tuple[str, str] | None:
+    """Bind the numeric answer in the admitted sonnet line-count relation."""
+
+    original = " ".join(source.original_question.split())
+    canonical = " ".join(source.canonical_answer.split())
+    if (
+        original.casefold() != "lines traditionally in a sonnet?"
+        or re.fullmatch(r"[0-9]{1,3}", canonical) is None
+    ):
+        return None
+    question = _finish_deterministic_question_candidate(
+        source,
+        "How many lines does a sonnet traditionally have?",
+    )
+    if question is None:
+        return None
+    return question, _declarative_statement(
+        f"A sonnet traditionally has {canonical} lines"
+    )
 
 
 def _bounded_imperative_nominal_pair(
@@ -5146,7 +5387,13 @@ def _deterministic_strict_pair(
         _say_was_object_wh_pair(source),
         _bare_terminal_action_pair(source),
         _if_you_are_eating_pair(source),
+        _quoted_relation_slot_pair(source),
         _quoted_title_slot_pair(source),
+        _simple_why_auxiliary_pair(source),
+        _standalone_quoted_denotation_pair(source),
+        _wedding_anniversary_duration_pair(source),
+        _proclamation_year_statement_pair(source),
+        _elliptical_sonnet_line_count_pair(source),
         _bounded_imperative_nominal_pair(source),
         _postal_address_fact_pair(source),
         _bounded_listed_choice_pair(source),
