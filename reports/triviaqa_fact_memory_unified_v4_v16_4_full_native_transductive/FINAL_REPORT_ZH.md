@@ -32,7 +32,9 @@ Evaluator 为 `triviaqa.official.answer.v1`，固定分母为 128。
 | frozen Top-K | 5 |
 | Top-K selection split | architecture development |
 
-原始 Question/Answer 只作为数据库外 provenance/evaluation metadata；Agent-facing embedding input 是自包含 `fact_text`。
+原始 Question/Answer 只作为数据库外 provenance/evaluation metadata；Agent-facing embedding input 字段是 `fact_text`。
+
+完成审计发现，manifest 的结构性计数虽然为 76,523/76,523，但不能证明每条事实在语义上都自包含。实际反例 `fact_memory.jsonl:116` 为 `The company called it Frosted food.`，仍含未消解指代并缺少实体锚点。因此当前 full-native-v1 **不满足“76,523 条全部 self-contained”这一严格要求**；本报告的 128 题结果只对应这个已冻结但存在已知语料缺陷的 v1 数据条件。根据用户“停止继续构建数据库”的最新要求，本轮未修复该记录、未重建索引。
 
 ## fixed128 结果
 
@@ -147,6 +149,7 @@ fixed128 前 16 个同题样本上，thinking 的 EM 与 F1 均下降 **6.25 个
 - thinking：关闭；默认 next-run 指向 non-thinking profile。
 - fixed128：采用已完成的 non-thinking 128/128，不重跑。
 - 数据库：使用已完成 full-native-v1；停止 strict-v2 后续构建。
+- 数据合同：记录数、字段隔离和索引合同通过；全量语义 self-contained gate 未通过，存在上述已确认反例。
 - GPU4 数据构建服务：已关闭。
 - 训练：未发生。
 - 后续优先修复项：terminal early stopping、Verifier relation repair、accepted-answer canonicalization；本轮不自动修改架构或重跑评测。
