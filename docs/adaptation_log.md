@@ -799,3 +799,9 @@ change was made during profile selection.
   formal v3 retrieval prediction or AgentGraph trajectory existed, so this
   version change does not mix or relabel a prior benchmark result. The frozen
   525-task selection remains unchanged.
+- After the restored grader account passed credential routing but the exact
+  grader endpoint returned transient HTTP 429/500 upstream-load failures, the
+  existing bounded reference-worker retry setting was raised from three to
+  six physical provider attempts. The grader model, reasoning effort,
+  evaluator code, rubric aggregation, samples, generation condition, and
+  score are unchanged; every retry remains visible in the grader receipt.

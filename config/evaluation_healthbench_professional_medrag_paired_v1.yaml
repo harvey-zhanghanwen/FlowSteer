@@ -146,7 +146,7 @@ evaluation:
   healthbench_request_timeout_seconds: 180.0
   healthbench_worker_timeout_seconds: 600.0
   healthbench_max_parse_attempts: 2
-  healthbench_max_provider_attempts: 3
+  healthbench_max_provider_attempts: 6
   max_environment_steps: 20
   swebench_harness_enabled: false
   invalid_evaluator_action: "persist_and_exclude"
