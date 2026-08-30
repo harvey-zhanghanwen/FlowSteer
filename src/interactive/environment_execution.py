@@ -137,6 +137,7 @@ class _EnvironmentRolloutState:
 
     episode: _EnvironmentEpisode
     episode_id: str
+    original_task_instruction: str
     reset_receipt: dict[str, object]
     receipts: list[dict[str, object]] = field(default_factory=list)
     evaluator_trace: list[dict[str, object]] = field(default_factory=list)
@@ -902,6 +903,30 @@ def _webshop_norm(text: object) -> str:
     ).strip()
 
 
+def _webshop_price_limit(task_instruction: str) -> Optional[float]:
+    """Thin-adapt SkillFlow's public WebShop price-limit parser."""
+
+    match = re.search(
+        r"price\s+lower\s+than\s*\$?\s*([0-9]+(?:\.[0-9]+)?)",
+        str(task_instruction).lower(),
+    )
+    return float(match.group(1)) if match is not None else None
+
+
+def _webshop_product_price(observation: object) -> Optional[float]:
+    """Thin-adapt SkillFlow's public product-page price parser."""
+
+    for token in _webshop_tokens(observation):
+        match = re.search(
+            r"price:\s*\$\s*([0-9]+(?:\.[0-9]+)?)",
+            token,
+            flags=re.IGNORECASE,
+        )
+        if match is not None:
+            return float(match.group(1))
+    return None
+
+
 def _webshop_tokens(observation: object) -> list[str]:
     """Split the two public WebShop observation formats used by SkillFlow."""
 
@@ -1010,11 +1035,12 @@ def _webshop_clicked_option_assignments(
 
 def _webshop_model_visible_actions(
     *,
+    task_instruction: str = "",
     observation: object,
     receipts: Sequence[Mapping[str, object]],
     native_actions: Sequence[str],
 ) -> tuple[tuple[str, ...], dict[str, list[str]], dict[str, str]]:
-    """Remove only the already-selected same-product option assignment.
+    """Project state-dependent WebShop actions without changing native legality.
 
     The returned action list is a model-input projection.  Native legal actions
     remain unchanged in environment and evaluator receipts.
@@ -1023,13 +1049,238 @@ def _webshop_model_visible_actions(
     groups, _ = _webshop_parse_product_options(observation)
     selected = _webshop_clicked_option_assignments(receipts, groups)
     selected_values = {_webshop_norm(value) for value in selected.values()}
+    purchase = _webshop_purchase_preconditions(
+        task_instruction=task_instruction,
+        observation=observation,
+        receipts=receipts,
+    )
     visible: list[str] = []
     for action in native_actions:
         match = re.fullmatch(r"click\[(.*)\]", action, flags=re.IGNORECASE)
         if match is not None and _webshop_norm(match.group(1)) in selected_values:
             continue
+        if (
+            match is not None
+            and match.group(1).strip().casefold() == "buy now"
+            and purchase["admissible"] is not True
+        ):
+            continue
+        if _webshop_repeats_unchanged_click(
+            action=action,
+            observation=observation,
+            receipts=receipts,
+        ):
+            continue
         visible.append(action)
     return tuple(visible), groups, selected
+
+
+def _webshop_option_targets(
+    task_instruction: str,
+    groups: Mapping[str, Sequence[str]],
+) -> dict[str, list[str]]:
+    """Match public task text to option values visible on the current page.
+
+    WebShop exposes option labels and values in the public observation.  This
+    projection performs only deterministic normalization over those public
+    strings; it does not read the evaluator goal object or reward.
+    """
+
+    task_normalized = _webshop_norm(task_instruction)
+    targets: dict[str, list[str]] = {}
+    for group, values in groups.items():
+        group_normalized = _webshop_norm(group)
+        group_aliases = {group_normalized}
+        if group_normalized in {"flavor", "flavour", "flavor name"}:
+            group_aliases.update({"flavor", "flavour", "flavor name"})
+        matches: list[tuple[int, str]] = []
+        for value in values:
+            normalized = _webshop_norm(value)
+            if not normalized:
+                continue
+            compact = normalized.replace(" ", "")
+            explicit_binding = False
+            for label in group_aliases:
+                label_pattern = re.escape(label)
+                value_patterns = {re.escape(normalized)}
+                if len(compact) >= 5:
+                    value_patterns.add(re.escape(compact))
+                for value_pattern in value_patterns:
+                    if re.search(
+                        rf"(?:^| ){label_pattern}(?: is| of| equals|:)? "
+                        rf"{value_pattern}(?: |$)",
+                        task_normalized,
+                    ) is not None or re.search(
+                        rf"(?:^| ){value_pattern} {label_pattern}(?: |$)",
+                        task_normalized,
+                    ) is not None:
+                        explicit_binding = True
+                        break
+                if explicit_binding:
+                    break
+            if group_normalized == "color":
+                color_patterns = {re.escape(normalized)}
+                if len(compact) >= 5:
+                    color_patterns.add(re.escape(compact))
+                explicit_binding = explicit_binding or any(
+                    re.search(
+                        rf"(?:^| ){pattern} (?:color|colored)(?: |$)",
+                        task_normalized,
+                    ) is not None
+                    or re.search(
+                        rf"(?:^| )with {pattern} color(?: |$)",
+                        task_normalized,
+                    ) is not None
+                    for pattern in color_patterns
+                )
+            if explicit_binding:
+                matches.append((len(compact), str(value)))
+        if not matches:
+            continue
+        longest = max(length for length, _ in matches)
+        targets[group] = [
+            value for length, value in matches if length == longest
+        ]
+    return targets
+
+
+def _webshop_option_values_equivalent(left: object, right: object) -> bool:
+    left_normalized = _webshop_norm(left)
+    right_normalized = _webshop_norm(right)
+    if left_normalized == right_normalized:
+        return True
+    return (
+        len(left_normalized.replace(" ", "")) >= 5
+        and left_normalized.replace(" ", "")
+        == right_normalized.replace(" ", "")
+    )
+
+
+def _webshop_purchase_preconditions(
+    *,
+    task_instruction: str,
+    observation: object,
+    receipts: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Return public option-binding preconditions for a purchase action."""
+
+    groups, _ = _webshop_parse_product_options(observation)
+    selected = _webshop_clicked_option_assignments(receipts, groups)
+    targets = _webshop_option_targets(task_instruction, groups)
+    missing = [group for group in targets if group not in selected]
+    mismatched = [
+        group
+        for group, values in targets.items()
+        if group in selected
+        and not any(
+            _webshop_option_values_equivalent(selected[group], value)
+            for value in values
+        )
+    ]
+    price_limit = _webshop_price_limit(task_instruction)
+    product_price = _webshop_product_price(observation)
+    price_evidence_missing = price_limit is not None and product_price is None
+    price_exceeds_limit = bool(
+        price_limit is not None
+        and product_price is not None
+        and product_price > price_limit
+    )
+    return {
+        "admissible": (
+            not missing
+            and not mismatched
+            and not price_evidence_missing
+            and not price_exceeds_limit
+        ),
+        "required_option_targets": targets,
+        "selected_options": selected,
+        "missing_option_groups": missing,
+        "mismatched_option_groups": mismatched,
+        "price_limit": price_limit,
+        "product_price": product_price,
+        "price_evidence_missing": price_evidence_missing,
+        "price_exceeds_limit": price_exceeds_limit,
+        "source": "public_task_and_observation",
+    }
+
+
+def _webshop_zero_result_queries(
+    receipts: Sequence[Mapping[str, object]],
+) -> tuple[str, ...]:
+    """Return normalized exact queries with an observed zero-result page."""
+
+    queries: list[str] = []
+    seen: set[str] = set()
+    for receipt in receipts:
+        if receipt.get("state_advanced") is not True:
+            continue
+        action = receipt.get("action")
+        next_observation = receipt.get("next_observation")
+        if not isinstance(action, str) or not isinstance(next_observation, str):
+            continue
+        match = re.fullmatch(r"search\[(.*)\]", action, flags=re.IGNORECASE)
+        total = re.search(
+            r"\bTotal\s+results\s*:\s*([0-9]+)\b",
+            next_observation,
+            flags=re.IGNORECASE,
+        )
+        if match is None or total is None or int(total.group(1)) != 0:
+            continue
+        query = _webshop_norm(match.group(1))
+        if query and query not in seen:
+            seen.add(query)
+            queries.append(query)
+    return tuple(queries)
+
+
+def _webshop_repeats_unchanged_click(
+    *,
+    action: str,
+    observation: object,
+    receipts: Sequence[Mapping[str, object]],
+) -> bool:
+    """Detect a click already observed to leave this exact public state unchanged."""
+
+    if re.fullmatch(r"click\[(.*)\]", action, flags=re.IGNORECASE) is None:
+        return False
+    return any(
+        receipt.get("state_advanced") is True
+        and receipt.get("action") == action
+        and receipt.get("observation") == observation
+        and receipt.get("next_observation") == observation
+        for receipt in receipts
+    )
+
+
+def _webshop_action_precondition_failure(
+    *,
+    action: str,
+    task_instruction: str,
+    observation: object,
+    receipts: Sequence[Mapping[str, object]],
+) -> Optional[str]:
+    """Validate one sampled action against public state-dependent constraints."""
+
+    search = re.fullmatch(r"search\[(.*)\]", action, flags=re.IGNORECASE)
+    if search is not None:
+        query = _webshop_norm(search.group(1))
+        if query in _webshop_zero_result_queries(receipts):
+            return "known_zero_result_query"
+    if _webshop_repeats_unchanged_click(
+        action=action,
+        observation=observation,
+        receipts=receipts,
+    ):
+        return "repeated_unchanged_click"
+    if action.casefold() == "click[buy now]":
+        purchase = _webshop_purchase_preconditions(
+            task_instruction=task_instruction,
+            observation=observation,
+            receipts=receipts,
+        )
+        if purchase["admissible"] is not True:
+            return "purchase_option_precondition"
+    return None
 
 
 def _webshop_task_constraints(task: str) -> tuple[str, ...]:
@@ -1083,6 +1334,7 @@ def _webshop_task_constraints(task: str) -> tuple[str, ...]:
 def _public_transition_summary(
     *,
     task_family: str,
+    task_instruction: str = "",
     observation: str,
     receipts: Sequence[Mapping[str, object]],
 ) -> dict[str, object]:
@@ -1127,6 +1379,9 @@ def _public_transition_summary(
             {
                 "action": latest.get("action"),
                 "observation_status": latest.get("observation_status"),
+                "precondition_failure_reason": latest.get(
+                    "precondition_failure_reason"
+                ),
                 "state_advanced": latest.get("state_advanced"),
                 "observation_changed": observation_changed,
                 "terminal": latest.get("terminal") is True,
@@ -1159,24 +1414,22 @@ def _public_transition_summary(
         and recent_transitions[-4] == recent_transitions[-2]
         and recent_transitions[-3] == recent_transitions[-1]
     )
-    latest_is_successful_webshop_search = bool(
-        task_family.casefold() == "webshop"
-        and isinstance(latest, Mapping)
-        and latest.get("state_advanced") is True
-        and isinstance(latest.get("action"), str)
-        and re.fullmatch(
-            r"search\[(.*)\]",
-            str(latest["action"]),
-            flags=re.IGNORECASE,
-        )
-    )
     no_progress_reasons: list[str] = []
-    # WebShop permits the same query to be submitted again after navigation.
-    # It is a legal state transition and cannot, by itself, trigger Canvas
-    # recovery or suppress another environment action.
-    if repeated_state_action_count >= 2 and not latest_is_successful_webshop_search:
+    if (
+        isinstance(latest, Mapping)
+        and latest.get("observation_status") == "precondition_failed"
+    ):
+        reason = latest.get("precondition_failure_reason")
+        no_progress_reasons.append(
+            str(reason) if isinstance(reason, str) and reason else "precondition_failed"
+        )
+    # A repeated exact public state--action--state transition is measured
+    # no-progress even when the native WebShop action remains legal.  The
+    # environment/evaluator domain stays lossless; only the next model/Canvas
+    # decision consumes this public diagnosis.
+    if repeated_state_action_count >= 2:
         no_progress_reasons.append("repeated_state_action")
-    if action_cycle and not latest_is_successful_webshop_search:
+    if action_cycle:
         no_progress_reasons.append("action_cycle")
 
     # SkillFlow conditions every next Action on public observed history.  Keep
@@ -1251,12 +1504,21 @@ def _public_transition_summary(
                 }
         groups, title = _webshop_parse_product_options(observation)
         selected_options = _webshop_clicked_option_assignments(receipts, groups)
+        purchase_preconditions = _webshop_purchase_preconditions(
+            task_instruction=task_instruction,
+            observation=observation,
+            receipts=receipts,
+        )
         summary.update(
             {
                 "recent_search_queries": searches[-3:],
+                "zero_result_queries": list(
+                    _webshop_zero_result_queries(receipts)
+                ),
                 "opened_asins": opened_asins[-8:],
                 "recent_click_targets": click_targets[-8:],
                 "latest_search_outcome": latest_search_outcome,
+                "purchase_preconditions": purchase_preconditions,
                 "current_product": (
                     {
                         "title": title,
@@ -1302,6 +1564,7 @@ def _public_state_feedback(
     task_instruction = _original_task_instruction(request.problem)
     progress = _public_transition_summary(
         task_family=task_family,
+        task_instruction=task_instruction,
         observation=observation,
         receipts=receipts,
     )
@@ -1312,6 +1575,7 @@ def _public_state_feedback(
             "Latest Action--Observation result: "
             f"action={latest_transition.get('action')!r}; "
             f"status={latest_transition.get('observation_status')}; "
+            f"precondition_failure={latest_transition.get('precondition_failure_reason')}; "
             f"observation_changed={latest_transition.get('observation_changed')}; "
             "the resulting public state is the current observation below."
         )
@@ -1403,6 +1667,13 @@ def _public_state_feedback(
                 f"query={latest_search_outcome.get('query')!r}; "
                 f"outcome={latest_search_outcome.get('outcome')}."
             )
+        zero_result_queries = progress.get("zero_result_queries")
+        if isinstance(zero_result_queries, (list, tuple)) and zero_result_queries:
+            lines.append(
+                "Observed zero-result queries (do not repeat exactly): "
+                + " | ".join(str(value) for value in zero_result_queries[-6:])
+                + "."
+            )
         current_product = progress.get("current_product")
         if isinstance(current_product, Mapping):
             title = current_product.get("title")
@@ -1429,6 +1700,20 @@ def _public_state_feedback(
                     )
                     + "."
                 )
+        purchase = progress.get("purchase_preconditions")
+        if isinstance(purchase, Mapping) and purchase.get("admissible") is not True:
+            missing = purchase.get("missing_option_groups", ())
+            mismatched = purchase.get("mismatched_option_groups", ())
+            lines.append(
+                "Purchase preconditions not satisfied: "
+                f"missing_option_groups={list(missing) if isinstance(missing, (list, tuple)) else []}; "
+                f"mismatched_option_groups={list(mismatched) if isinstance(mismatched, (list, tuple)) else []}; "
+                f"price_limit={purchase.get('price_limit')}; "
+                f"product_price={purchase.get('product_price')}; "
+                f"price_evidence_missing={purchase.get('price_evidence_missing')}; "
+                f"price_exceeds_limit={purchase.get('price_exceeds_limit')}; "
+                "satisfy the public option bindings and price bound before purchase."
+            )
 
     recent_actions = completed_actions[-6:]
     if recent_actions:
@@ -1625,6 +1910,7 @@ class EnvironmentExecutionAdapter:
     ) -> tuple[_EnvironmentRolloutState, Token[Optional[_EnvironmentEpisode]]]:
         episode, token = await self._environment_backend.begin(request)
         session = episode.session
+        original_task_instruction = _original_task_instruction(request.problem)
         reset_actions, _ = _admissible_actions(
             session.task_family,
             session.available_actions,
@@ -1635,6 +1921,7 @@ class EnvironmentExecutionAdapter:
             "environment_episode_id": episode_id,
             "environment_id": session.environment_id,
             "environment_revision": 0,
+            "original_task_instruction": original_task_instruction,
             "observation": episode.observation,
             "admissible_actions": list(reset_actions),
             "terminal": False,
@@ -1643,6 +1930,7 @@ class EnvironmentExecutionAdapter:
             _EnvironmentRolloutState(
                 episode=episode,
                 episode_id=episode_id,
+                original_task_instruction=original_task_instruction,
                 reset_receipt=reset_receipt,
             ),
             token,
@@ -1666,6 +1954,7 @@ class EnvironmentExecutionAdapter:
         model_visible_actions = native_admissible_actions
         if episode.session.task_family.casefold() == "webshop":
             model_visible_actions, _, _ = _webshop_model_visible_actions(
+                task_instruction=state.original_task_instruction,
                 observation=episode.observation,
                 receipts=state.receipts,
                 native_actions=native_admissible_actions,
@@ -1673,6 +1962,7 @@ class EnvironmentExecutionAdapter:
         last = state.receipts[-1] if state.receipts else None
         public_progress = _public_transition_summary(
             task_family=episode.session.task_family,
+            task_instruction=state.original_task_instruction,
             observation=episode.observation,
             receipts=state.receipts,
         )
@@ -1680,6 +1970,7 @@ class EnvironmentExecutionAdapter:
             "environment_episode_id": state.episode_id,
             "environment_id": episode.session.environment_id,
             "task_family": episode.session.task_family,
+            "original_task_instruction": state.original_task_instruction,
             "environment_revision": episode.revision,
             "last_action": None if last is None else last.get("action"),
             "state_advanced": None if last is None else last.get("state_advanced"),
@@ -1788,6 +2079,7 @@ class EnvironmentExecutionAdapter:
         model_visible_actions = native_admissible_actions
         if session.task_family.casefold() == "webshop":
             model_visible_actions, _, _ = _webshop_model_visible_actions(
+                task_instruction=state.original_task_instruction,
                 observation=episode.observation,
                 receipts=state.receipts,
                 native_actions=native_admissible_actions,
@@ -1882,6 +2174,27 @@ class EnvironmentExecutionAdapter:
                 admissible_actions=model_visible_actions,
                 webshop_has_search_bar=has_search_bar,
             )
+            # A provider may still emit a native-legal action removed from the
+            # model-visible domain by a public state precondition.  Parse that
+            # semantic action against the lossless native domain only to emit
+            # a typed precondition receipt; never dispatch it to the Tool.
+            if action is None and model_visible_actions != native_admissible_actions:
+                native_candidate, native_status = _parse_webshop_structured_action(
+                    raw_action,
+                    admissible_actions=native_admissible_actions,
+                    webshop_has_search_bar=has_search_bar,
+                )
+                if native_candidate is not None and (
+                    _webshop_action_precondition_failure(
+                        action=native_candidate,
+                        task_instruction=state.original_task_instruction,
+                        observation=episode.observation,
+                        receipts=state.receipts,
+                    )
+                    is not None
+                ):
+                    action = native_candidate
+                    observation_status = native_status
         else:
             action = _parse_action(
                 raw_action,
@@ -1890,6 +2203,69 @@ class EnvironmentExecutionAdapter:
                 webshop_has_search_bar=has_search_bar,
             )
             observation_status = "success" if action is not None else "parse_error"
+
+        precondition_failure: Optional[str] = None
+        if action is not None and session.task_family.casefold() == "webshop":
+            precondition_failure = _webshop_action_precondition_failure(
+                action=action,
+                task_instruction=state.original_task_instruction,
+                observation=episode.observation,
+                receipts=state.receipts,
+            )
+        if action is not None and precondition_failure is not None:
+            state.turns_used = turn
+            state.receipts.append(
+                {
+                    "receipt_type": "environment_transition",
+                    "environment_episode_id": state.episode_id,
+                    "environment_id": session.environment_id,
+                    "turn": turn,
+                    "environment_revision_before": episode.revision,
+                    "environment_revision_after": episode.revision,
+                    "observation": episode.observation,
+                    "admissible_actions": list(native_admissible_actions),
+                    "model_visible_admissible_actions": list(model_visible_actions),
+                    "raw_model_output": raw_action,
+                    "action": action,
+                    "next_observation": episode.observation,
+                    "next_admissible_actions": list(native_admissible_actions),
+                    "terminal": False,
+                    "state_advanced": False,
+                    "observation_status": "precondition_failed",
+                    "precondition_failure_reason": precondition_failure,
+                    "public_state": public_state,
+                }
+            )
+            state.evaluator_trace.append(
+                {
+                    "step": turn - 1,
+                    "observation": episode.raw_observation,
+                    "legal_actions": list(native_admissible_actions),
+                    "action": "<INVALID>",
+                    "raw_graph_output": "",
+                    "structured_action_output": (
+                        raw_action if self._structured_actions else None
+                    ),
+                    "structured_action_status": "precondition_failed",
+                    "next_observation": episode.raw_observation,
+                    "feedback": (
+                        "[INVALID] Public action precondition failed: "
+                        f"{precondition_failure}."
+                    ),
+                    "reward": 0.0,
+                    "done": False,
+                    "state_advanced": False,
+                    "parse_error": False,
+                    "precondition_failed": True,
+                    "precondition_failure_reason": precondition_failure,
+                    "info": {
+                        "precondition_failed": True,
+                        "reason": precondition_failure,
+                    },
+                    "public_state": public_state,
+                }
+            )
+            return
 
         if action is None:
             state.turns_used = turn
@@ -2057,6 +2433,13 @@ class EnvironmentExecutionAdapter:
         async with self._step_lock:
             if self._stepwise_director and self._live_state is not None:
                 state = self._live_state
+                if (
+                    _original_task_instruction(request.problem)
+                    != state.original_task_instruction
+                ):
+                    raise EnvironmentExecutionError(
+                        "original task instruction changed inside one environment episode"
+                    )
                 token = self._environment_backend.bind(state.episode)
             else:
                 state, token = await self._new_state(request)

@@ -111,7 +111,7 @@ def resources(
 
 
 class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
-    def test_legal_repeated_search_is_public_outcome_not_no_progress(self) -> None:
+    def test_repeated_identical_search_transition_is_no_progress(self) -> None:
         receipt = {
             "state_advanced": True,
             "action": "search[blue steel table]",
@@ -133,8 +133,8 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         assert isinstance(no_progress, dict)
         self.assertTrue(latest["observation_changed"])
         self.assertTrue(latest["result_is_current_state"])
-        self.assertFalse(no_progress["detected"])
-        self.assertEqual([], no_progress["reasons"])
+        self.assertTrue(no_progress["detected"])
+        self.assertEqual(["repeated_state_action"], no_progress["reasons"])
         self.assertEqual(2, no_progress["repeated_state_action_count"])
         self.assertEqual(
             {
@@ -1577,7 +1577,8 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         assert isinstance(progress, dict)
         self.assertTrue(progress["no_progress"]["detected"])
         self.assertEqual(
-            ["repeated_state_action"], progress["no_progress"]["reasons"]
+            ["repeated_unchanged_click", "repeated_state_action"],
+            progress["no_progress"]["reasons"],
         )
         episode_id = stalled_state["environment_episode_id"]
         self.assertEqual(("modify_agent",), canvas.model_admissible_action_types())
@@ -1605,7 +1606,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(repaired.accepted)
         self.assertEqual(episode_id, canvas.public_environment_state()["environment_episode_id"])
         self.assertEqual(
-            ["click[6.6ft]", "click[6.6ft]", "click[Buy Now]"],
+            ["click[6.6ft]", "click[Buy Now]"],
             session.actions,
         )
         self.assertIn("Current Agent contract:", gateway.requests[-1].problem)
