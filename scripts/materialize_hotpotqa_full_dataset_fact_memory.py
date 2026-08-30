@@ -209,6 +209,16 @@ _COMMON_FINITE_PREDICATES = frozenset(
         "wrote",
     }
 )
+_NUMERIC_ANSWER_SLOT = re.compile(
+    r"\b(?:what|which|in what|during which)\s+year\b|"
+    r"\bwhen\b|\bwhich\s+date\b|\bhow\s+many\b",
+    re.IGNORECASE,
+)
+_BINARY_AFFIRMATIVE_BOTH = re.compile(
+    r"^(?P<subjects>.+?\band\b.+?),?\s+are\s+both\s+"
+    r"(?P<predicate>.+?)\?\s*$",
+    re.IGNORECASE,
+)
 
 
 class FactMaterializationRejected(RuntimeError):
@@ -605,6 +615,41 @@ def _select_public_context_passages(
     )
 
 
+def _source_qa_semantics_are_defined(
+    source: HotpotQATrainQASource,
+) -> bool:
+    """Classify whether the upstream Q/A strings define a bindable relation."""
+
+    question_tokens = tuple(
+        token.casefold() for token in _lexical_tokens(source.question)
+    )
+    answer_tokens = tuple(
+        token.casefold() for token in _lexical_tokens(source.canonical_answer)
+    )
+    if question_tokens == answer_tokens:
+        return False
+    if _NUMERIC_ANSWER_SLOT.search(source.question) and not (
+        _immutable_number_or_date_surfaces(source.canonical_answer)
+    ):
+        return False
+    return True
+
+
+def _binary_affirmative_fronted_fact(
+    source: HotpotQATrainQASource,
+) -> str | None:
+    """Convert ``A and B are both P?`` + yes into declarative fronting."""
+
+    if _binary_answer_label(source.canonical_answer) != "yes":
+        return None
+    match = _BINARY_AFFIRMATIVE_BOTH.fullmatch(source.question.strip())
+    if match is None:
+        return None
+    subjects = " ".join(match.group("subjects").split())
+    predicate = " ".join(match.group("predicate").split())
+    return f"Both {subjects} are {predicate}."
+
+
 def _binary_answer_label(answer: str) -> str | None:
     normalized = " ".join(answer.split()).rstrip(" .!?").casefold()
     return normalized if normalized in _HOTPOTQA_BINARY_ANSWERS else None
@@ -678,6 +723,7 @@ async def _materialize_one(
     fact_candidate_count = 0
     fact_candidate_keys: set[str] = set()
     force_fact_reconstruction = False
+    fact_from_public_context = False
     attempt_receipts: list[dict[str, object]] = []
 
     for generation_round in range(generation_rounds):
@@ -769,6 +815,7 @@ async def _materialize_one(
                         generated, "paraphrase_question"
                     )
                     fact = _generated_text(generated, "fact_statement")
+                    fact_from_public_context = False
                     fact_candidate_key = fact.casefold()
                     fact_candidate_repeated = (
                         fact_candidate_key in fact_candidate_keys
@@ -923,12 +970,27 @@ async def _materialize_one(
                             in fact_rejection.casefold()
                             else None
                         )
+                        binary_surface_repair = (
+                            _binary_affirmative_fronted_fact(source)
+                            if (
+                                binding_mode == "binary_polarity_binding"
+                                and _RAW_SURFACE_REJECTION_MARKER
+                                in fact_rejection.casefold()
+                            )
+                            else None
+                        )
                         clause_synonym_repair = (
                             binding_mode == "declarative_clause_paraphrase"
                             and _clause_requires_synonym_repair(
                                 fact_rejection
                             )
                             and terminal_punctuation_repair is None
+                            and re.match(
+                                r"^(?:he|she|it|they|this|that|these|those)\b",
+                                source.canonical_answer,
+                                re.IGNORECASE,
+                            )
+                            is None
                         )
                         clause_source_tokens = (
                             _clause_replacement_source_tokens(source)
@@ -948,6 +1010,7 @@ async def _materialize_one(
                         public_context_reconstruction = (
                             bool(selected_public_context)
                             and public_context_eligible
+                            and not fact_from_public_context
                             and fact_candidate_count >= 6
                             and terminal_punctuation_repair is None
                         )
@@ -957,18 +1020,26 @@ async def _materialize_one(
                             "terminal_punctuation_only"
                             if terminal_punctuation_repair is not None
                             else (
-                                "public_context_fact_reconstruction"
-                                if public_context_reconstruction
+                                "binary_affirmative_declarative_fronting"
+                                if binary_surface_repair is not None
                                 else (
-                                    "binary_polarity_reconstruction"
-                                    if binding_mode == "binary_polarity_binding"
+                                    "public_context_fact_repair"
+                                    if fact_from_public_context
                                     else (
-                                        "clause_synonym_only"
-                                        if clause_synonym_repair
+                                        "public_context_fact_reconstruction"
+                                        if public_context_reconstruction
                                         else (
-                                            "authoritative_answer_slot_reconstruction"
-                                            if force_fact_reconstruction
-                                            else _fact_repair_strategy(fact_rejection)
+                                            "binary_polarity_reconstruction"
+                                            if binding_mode == "binary_polarity_binding"
+                                            else (
+                                                "clause_synonym_only"
+                                                if clause_synonym_repair
+                                                else (
+                                                    "authoritative_answer_slot_reconstruction"
+                                                    if force_fact_reconstruction
+                                                    else _fact_repair_strategy(fact_rejection)
+                                                )
+                                            )
                                         )
                                     )
                                 )
@@ -1002,6 +1073,14 @@ async def _materialize_one(
                             response = {
                                 "local_surface_repair": (
                                     "terminal_punctuation_only"
+                                )
+                            }
+                            fact_repair_temperature = 0.0
+                        elif binary_surface_repair is not None:
+                            fact = binary_surface_repair
+                            response = {
+                                "local_semantic_surface_repair": (
+                                    "binary_affirmative_declarative_fronting"
                                 )
                             }
                             fact_repair_temperature = 0.0
@@ -1058,18 +1137,26 @@ async def _materialize_one(
                             )
                         else:
                             fact_repair_temperature = (
-                                0.0
-                                if binding_mode in {
-                                    "declarative_clause_paraphrase",
-                                    "binary_polarity_binding",
+                                0.4
+                                if fact_repair_strategy in {
+                                    "public_context_fact_reconstruction",
+                                    "public_context_fact_repair",
                                 }
-                                and fact_repair_strategy
-                                != "semantic_surface_reconstruction"
                                 else (
                                     0.5
                                     if fact_repair_strategy
                                     == "semantic_surface_reconstruction"
-                                    else 0.1
+                                    else (
+                                        0.0
+                                        if binding_mode
+                                        == "binary_polarity_binding"
+                                        else (
+                                            0.3
+                                            if binding_mode
+                                            == "declarative_clause_paraphrase"
+                                            else 0.1
+                                        )
+                                    )
                                 )
                             )
                             repaired, response = await _generate_json(
@@ -1096,8 +1183,10 @@ async def _materialize_one(
                                         "canonical_training_answer; choose a supported "
                                         "context proposition that stays within those "
                                         "immutable fields. "
-                                        if fact_repair_strategy
-                                        == "public_context_fact_reconstruction"
+                                        if fact_repair_strategy in {
+                                            "public_context_fact_reconstruction",
+                                            "public_context_fact_repair",
+                                        }
                                         else (
                                             "The dataset answer is a complete declarative "
                                             "clause. Semantically paraphrase that clause; "
@@ -1138,6 +1227,17 @@ async def _materialize_one(
                                     "self-contained proposition literally supported "
                                     "by the source question and canonical answer. "
                                     + (
+                                        "Keep every supported entity and relation from "
+                                        "rejected_fact, and repair only the reported "
+                                        "admission failure; do not select a new context "
+                                        "fact. Paraphrase any complete original-question "
+                                        "surface and remove any unsupported name, number, "
+                                        "or date while restoring omitted canonical spans. "
+                                        if fact_repair_strategy
+                                        == "public_context_fact_repair"
+                                        else ""
+                                    )
+                                    + (
                                         "The rejected fact retained the complete raw "
                                         "question surface. Re-express the source "
                                         "predicate with genuinely equivalent wording "
@@ -1152,8 +1252,10 @@ async def _materialize_one(
                                         (
                                             "Construct it only from the supplied public "
                                             "context and the source metadata constraints. "
-                                            if fact_repair_strategy
-                                            == "public_context_fact_reconstruction"
+                                            if fact_repair_strategy in {
+                                                "public_context_fact_reconstruction",
+                                                "public_context_fact_repair",
+                                            }
                                             else
                                             "Construct it only from original_question and "
                                             "canonical_training_answer. Do not imitate the "
@@ -1200,10 +1302,17 @@ async def _materialize_one(
                                             {
                                                 "unlabeled_public_context_passages": list(
                                                     selected_public_context
-                                                )
+                                                ),
+                                                "source_qa_semantics_are_defined": (
+                                                    _source_qa_semantics_are_defined(
+                                                        source
+                                                    )
+                                                ),
                                             }
-                                            if fact_repair_strategy
-                                            == "public_context_fact_reconstruction"
+                                            if fact_repair_strategy in {
+                                                "public_context_fact_reconstruction",
+                                                "public_context_fact_repair",
+                                            }
                                             else {}
                                         ),
                                     }
@@ -1217,6 +1326,13 @@ async def _materialize_one(
                                 temperature=fact_repair_temperature,
                             )
                             fact = _generated_text(repaired, "fact_statement")
+                        if fact_repair_strategy in {
+                            "public_context_fact_reconstruction",
+                            "public_context_fact_repair",
+                        }:
+                            fact_from_public_context = True
+                        elif fact_repair_strategy != "terminal_punctuation_only":
+                            fact_from_public_context = False
                         fact_candidate_key = fact.casefold()
                         fact_candidate_repeated = (
                             fact_candidate_key in fact_candidate_keys
@@ -1235,6 +1351,11 @@ async def _materialize_one(
                         )
                         fact_trace["answer_reconstruction_pattern"] = (
                             reconstruction_pattern
+                        )
+                        fact_trace["fact_source_mode"] = (
+                            "public_context"
+                            if fact_from_public_context
+                            else "qa_metadata"
                         )
                     except Exception as exc:
                         fact_trace["generation_error"] = (
@@ -1323,8 +1444,7 @@ async def _materialize_one(
                         binding_mode == "binary_polarity_binding"
                     )
                     public_context_verification = (
-                        fact_trace.get("repair_strategy")
-                        == "public_context_fact_reconstruction"
+                        fact_from_public_context
                     )
                     fact_verification_schema = (
                         PUBLIC_CONTEXT_FACT_VERIFICATION_SCHEMA
@@ -1360,7 +1480,11 @@ async def _materialize_one(
                         "those strings define a coherent relation, retain the "
                         "canonical surface when the passages support it, contain "
                         "no Q-A wire or provenance framing, and add no fact beyond "
-                        "the passages. Treat malformed source strings as metadata, "
+                        "the passages. When source_qa_semantics_are_defined is false, "
+                        "the semantic-preservation field is satisfied by retaining "
+                        "the source entity/canonical surface in a passage-supported "
+                        "fact; do not invent the missing answer-slot value. Treat "
+                        "malformed source strings as metadata, "
                         "not permission to invent a missing value. Do not use world "
                         "knowledge. Evaluate every boolean independently and return "
                         "only JSON."
@@ -1422,7 +1546,12 @@ async def _materialize_one(
                                     {
                                         "unlabeled_public_context_passages": list(
                                             selected_public_context
-                                        )
+                                        ),
+                                        "source_qa_semantics_are_defined": (
+                                            _source_qa_semantics_are_defined(
+                                                source
+                                            )
+                                        ),
                                     }
                                     if public_context_verification
                                     else {}
@@ -1538,6 +1667,7 @@ async def _materialize_one(
             question_rejection = "not-yet-validated"
             fact_rejection = "not-yet-validated"
             force_fact_reconstruction = False
+            fact_from_public_context = False
 
     raise FactMaterializationRejected(
         source.source_train_task_id, attempt_receipts

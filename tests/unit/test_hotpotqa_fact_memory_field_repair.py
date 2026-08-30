@@ -527,6 +527,43 @@ def test_fact_repair_strategy_reconstructs_semantics_but_preserves_immutable_fix
     ) == "preserve_and_repair_immutable_fields"
 
 
+def test_binary_affirmative_fronting_is_relation_preserving() -> None:
+    source = _source(
+        92,
+        question=(
+            "Erin Wiedner and Monte Hellman are both American film directors?"
+        ),
+        answer="yes",
+    )
+    assert materializer._binary_affirmative_fronted_fact(source) == (
+        "Both Erin Wiedner and Monte Hellman are American film directors."
+    )
+
+
+def test_source_qa_semantics_defined_detects_bare_and_numeric_mismatch() -> None:
+    assert not materializer._source_qa_semantics_are_defined(
+        _source(
+            93,
+            question="Juan Manuel Mata García",
+            answer="Juan Manuel Mata García",
+        )
+    )
+    assert not materializer._source_qa_semantics_are_defined(
+        _source(
+            94,
+            question="In what year was the statue constructed?",
+            answer="Tian Tan Buddha",
+        )
+    )
+    assert materializer._source_qa_semantics_are_defined(
+        _source(
+            95,
+            question="When did the artist die?",
+            answer="September 13, 1996",
+        )
+    )
+
+
 def test_question_synonym_only_repair_rewrites_authoritative_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
