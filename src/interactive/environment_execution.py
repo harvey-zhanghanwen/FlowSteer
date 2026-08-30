@@ -1033,6 +1033,167 @@ def _webshop_clicked_option_assignments(
     return {group: selected[group] for group in groups if group in selected}
 
 
+def _webshop_current_product_evidence(
+    observation: object,
+    receipts: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Retain public product evidence while navigating a product subpage.
+
+    WebShop's Description, Features and Reviews pages keep ``< Prev>`` but do
+    not repeat the product title, price or option groups.  SkillFlow retains
+    the visible episode history across ReAct turns; this helper applies that
+    same boundary to the stepwise Director by recovering only the most recent
+    public product-page observation in the current product scope.
+    """
+
+    current_tokens = _webshop_tokens(observation)
+    current_controls = {token.casefold() for token in current_tokens}
+    purchase_action_visible = "buy now" in current_controls
+    in_product_scope = "< prev" in current_controls
+    evidence_observation = str(observation or "") if purchase_action_visible else ""
+    current_asin = ""
+    inspected_tabs: list[str] = []
+
+    if in_product_scope:
+        for receipt in reversed(receipts):
+            raw_action = receipt.get("action")
+            if not isinstance(raw_action, str):
+                continue
+            action = raw_action.strip()
+            lowered = action.casefold()
+            if lowered.startswith("search[") or lowered == "click[back to search]":
+                break
+            match = re.fullmatch(
+                r"click\[(b[0-9a-z]{9})\]", action, flags=re.IGNORECASE
+            )
+            if match is not None:
+                current_asin = match.group(1).casefold()
+                if not evidence_observation:
+                    candidate = receipt.get("next_observation")
+                    groups, _ = _webshop_parse_product_options(candidate)
+                    if groups or "buy now" in {
+                        token.casefold() for token in _webshop_tokens(candidate)
+                    }:
+                        evidence_observation = str(candidate or "")
+                break
+            tab = re.fullmatch(
+                r"click\[(description|features|reviews)\]",
+                action,
+                flags=re.IGNORECASE,
+            )
+            if tab is not None and tab.group(1).casefold() not in inspected_tabs:
+                inspected_tabs.append(tab.group(1).casefold())
+            if not evidence_observation:
+                for field in ("observation", "next_observation"):
+                    candidate = receipt.get(field)
+                    groups, _ = _webshop_parse_product_options(candidate)
+                    if groups or "buy now" in {
+                        token.casefold() for token in _webshop_tokens(candidate)
+                    }:
+                        evidence_observation = str(candidate or "")
+                        break
+
+    groups, title = _webshop_parse_product_options(evidence_observation)
+    selected = _webshop_clicked_option_assignments(receipts, groups)
+    return {
+        "available": bool(evidence_observation),
+        "in_product_scope": in_product_scope,
+        "purchase_action_visible": purchase_action_visible,
+        "asin": current_asin or None,
+        "title": title,
+        "price": _webshop_product_price(evidence_observation),
+        "visible_option_groups": groups,
+        "selected_options": selected,
+        "inspected_tabs": list(reversed(inspected_tabs)),
+        "evidence_source": "current_public_observation_or_episode_receipts",
+    }
+
+
+def _webshop_candidate_history(
+    receipts: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Summarize public candidate visits without ranking or evaluator data."""
+
+    records: dict[str, dict[str, object]] = {}
+    order: list[str] = []
+    current_asin: Optional[str] = None
+    for receipt in receipts:
+        if receipt.get("state_advanced") is not True:
+            continue
+        raw_action = receipt.get("action")
+        if not isinstance(raw_action, str):
+            continue
+        action = raw_action.strip()
+        lowered = action.casefold()
+        asin_match = re.fullmatch(
+            r"click\[(b[0-9a-z]{9})\]", action, flags=re.IGNORECASE
+        )
+        if asin_match is not None:
+            current_asin = asin_match.group(1).casefold()
+            groups, title = _webshop_parse_product_options(
+                receipt.get("next_observation")
+            )
+            record = records.setdefault(
+                current_asin,
+                {
+                    "asin": current_asin,
+                    "title": "",
+                    "price": None,
+                    "visible_option_groups": {},
+                    "selected_options": {},
+                    "inspected_tabs": [],
+                    "visit_count": 0,
+                },
+            )
+            if current_asin not in order:
+                order.append(current_asin)
+            record["visit_count"] = int(record["visit_count"]) + 1
+            if title:
+                record["title"] = title
+            price = _webshop_product_price(receipt.get("next_observation"))
+            if price is not None:
+                record["price"] = price
+            if groups:
+                record["visible_option_groups"] = {
+                    group: list(values) for group, values in groups.items()
+                }
+            continue
+        tab_match = re.fullmatch(
+            r"click\[(description|features|reviews)\]",
+            action,
+            flags=re.IGNORECASE,
+        )
+        if tab_match is not None and current_asin in records:
+            tabs = records[current_asin]["inspected_tabs"]
+            tab = tab_match.group(1).casefold()
+            if isinstance(tabs, list) and tab not in tabs:
+                tabs.append(tab)
+            continue
+        option_match = re.fullmatch(r"click\[(.*)\]", action, flags=re.IGNORECASE)
+        if option_match is not None and current_asin in records:
+            record = records[current_asin]
+            groups = record.get("visible_option_groups", {})
+            candidates: list[tuple[str, str]] = []
+            if isinstance(groups, Mapping):
+                for group, values in groups.items():
+                    if not isinstance(values, (list, tuple)):
+                        continue
+                    for value in values:
+                        if _webshop_option_values_equivalent(
+                            option_match.group(1), value
+                        ):
+                            candidates.append((str(group), str(value)))
+            if len(candidates) == 1:
+                selected_options = record.get("selected_options")
+                if isinstance(selected_options, dict):
+                    group, value = candidates[0]
+                    selected_options[group] = value
+            continue
+        if lowered.startswith("search[") or lowered == "click[back to search]":
+            current_asin = None
+    return [records[asin] for asin in order[-6:]]
+
+
 def _webshop_model_visible_actions(
     *,
     task_instruction: str = "",
@@ -1054,11 +1215,40 @@ def _webshop_model_visible_actions(
         observation=observation,
         receipts=receipts,
     )
+    required_targets = purchase.get("required_option_targets", {})
+    protected_groups: set[str] = set()
+    if isinstance(required_targets, Mapping):
+        for group, target_values in required_targets.items():
+            if group not in selected or not isinstance(
+                target_values, (list, tuple)
+            ):
+                continue
+            if any(
+                _webshop_option_values_equivalent(selected[group], target)
+                for target in target_values
+            ):
+                protected_groups.add(str(group))
+    option_value_groups: dict[str, set[str]] = {}
+    for group, values in groups.items():
+        for value in values:
+            option_value_groups.setdefault(_webshop_norm(value), set()).add(group)
     visible: list[str] = []
     for action in native_actions:
         match = re.fullmatch(r"click\[(.*)\]", action, flags=re.IGNORECASE)
         if match is not None and _webshop_norm(match.group(1)) in selected_values:
             continue
+        if match is not None:
+            normalized_target = _webshop_norm(match.group(1))
+            candidate_groups = option_value_groups.get(normalized_target, set())
+            if len(candidate_groups) == 1:
+                candidate_group = next(iter(candidate_groups))
+                if (
+                    candidate_group in protected_groups
+                    and not _webshop_option_values_equivalent(
+                        selected[candidate_group], match.group(1)
+                    )
+                ):
+                    continue
         if (
             match is not None
             and match.group(1).strip().casefold() == "buy now"
@@ -1087,19 +1277,44 @@ def _webshop_option_targets(
     """
 
     task_normalized = _webshop_norm(task_instruction)
+    task_binding_text = re.sub(
+        r"price lower than [0-9]+(?:\.[0-9]+)?(?: dollars?)?",
+        " ",
+        task_normalized,
+    )
+    for word, number in {
+        "one": "1",
+        "two": "2",
+        "three": "3",
+        "four": "4",
+        "five": "5",
+        "six": "6",
+        "seven": "7",
+        "eight": "8",
+        "nine": "9",
+        "ten": "10",
+    }.items():
+        task_binding_text = re.sub(
+            rf"(?:^| ){word}(?= |$)",
+            lambda match, value=number: (
+                (" " if match.group(0).startswith(" ") else "") + value
+            ),
+            task_binding_text,
+        )
+    task_binding_text = re.sub(r"\s+", " ", task_binding_text).strip()
     targets: dict[str, list[str]] = {}
     for group, values in groups.items():
         group_normalized = _webshop_norm(group)
         group_aliases = {group_normalized}
         if group_normalized in {"flavor", "flavour", "flavor name"}:
             group_aliases.update({"flavor", "flavour", "flavor name"})
-        matches: list[tuple[int, str]] = []
+        matches: list[tuple[int, int, str]] = []
         for value in values:
             normalized = _webshop_norm(value)
             if not normalized:
                 continue
             compact = normalized.replace(" ", "")
-            explicit_binding = False
+            binding_confidence = 0
             for label in group_aliases:
                 label_pattern = re.escape(label)
                 value_patterns = {re.escape(normalized)}
@@ -1114,15 +1329,15 @@ def _webshop_option_targets(
                         rf"(?:^| ){value_pattern} {label_pattern}(?: |$)",
                         task_normalized,
                     ) is not None:
-                        explicit_binding = True
+                        binding_confidence = 3
                         break
-                if explicit_binding:
+                if binding_confidence == 3:
                     break
             if group_normalized == "color":
                 color_patterns = {re.escape(normalized)}
                 if len(compact) >= 5:
                     color_patterns.add(re.escape(compact))
-                explicit_binding = explicit_binding or any(
+                if any(
                     re.search(
                         rf"(?:^| ){pattern} (?:color|colored)(?: |$)",
                         task_normalized,
@@ -1132,14 +1347,137 @@ def _webshop_option_targets(
                         task_normalized,
                     ) is not None
                     for pattern in color_patterns
+                ):
+                    binding_confidence = 3
+                # SkillFlow's WebShop option suggestion accepts an exact
+                # visible color phrase from the public instruction even when
+                # the generated sentence omits the literal label ``color``.
+                if (
+                    len(compact) >= 3
+                    and re.search(
+                        rf"(?:^| ){re.escape(normalized)}(?: |$)",
+                        task_normalized,
+                    )
+                    is not None
+                ):
+                    binding_confidence = max(binding_confidence, 2)
+                coded_color = re.sub(
+                    r"^[a-z](?: [0-9]+)? ", "", normalized
+                ).strip()
+                if (
+                    coded_color != normalized
+                    and len(coded_color.replace(" ", "")) >= 3
+                    and re.search(
+                        rf"(?:^| ){re.escape(coded_color)}(?: |$)",
+                        task_binding_text,
+                    )
+                    is not None
+                ):
+                    binding_confidence = max(binding_confidence, 2)
+            if group_normalized not in {"size", "fit", "fit type", "color"}:
+                # Directly mirror SkillFlow's public option-suggestion rule:
+                # a non-size option value that occurs as a complete task
+                # phrase is an entity--attribute binding candidate.
+                if (
+                    len(compact) >= 3
+                    and re.search(
+                        rf"(?:^| ){re.escape(normalized)}(?: |$)",
+                        task_normalized,
+                    )
+                    is not None
+                ):
+                    binding_confidence = max(binding_confidence, 2)
+            if group_normalized in {
+                "size",
+                "quantity",
+                "pack",
+                "count",
+                "dimension",
+                "dimensions",
+            }:
+                # SkillFlow also aligns numeric unit requirements (for
+                # example ``6 ounce`` or ``16 count``) with visible options.
+                unit_requirements = re.findall(
+                    r"\b\d+(?:\.\d+)?\s*(?:ml|oz|ounce|ounces|cm|inch|"
+                    r"count|pack|pcs|pc)\b",
+                    task_normalized,
                 )
-            if explicit_binding:
-                matches.append((len(compact), str(value)))
+                for requirement in unit_requirements:
+                    normalized_requirement = _webshop_norm(requirement)
+                    if normalized_requirement == normalized:
+                        binding_confidence = max(binding_confidence, 2)
+                    elif normalized_requirement in normalized:
+                        binding_confidence = max(binding_confidence, 1)
+                # Numeric size/count values are high-confidence only when the
+                # complete visible value occurs outside the price clause.
+                # This covers generated forms such as ``7.5 no.``, ``52 x
+                # 63`` and ``pack of one`` without treating an adjective such
+                # as ``small end table`` as an option assignment.
+                if any(character.isdigit() for character in normalized):
+                    normalized_numeric = re.sub(
+                        r"\b(?:pack|count|pcs|pc) of ([0-9]+)\b",
+                        r"\1 pack",
+                        normalized,
+                    )
+                    task_numeric = re.sub(
+                        r"\b(?:pack|count|pcs|pc) of ([0-9]+)\b",
+                        r"\1 pack",
+                        task_binding_text,
+                    )
+                    option_variants = {
+                        normalized,
+                        normalized_numeric,
+                    }
+                    bare_number_with_size_cue = bool(
+                        re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", normalized)
+                        and re.search(
+                            rf"(?:^| ){re.escape(normalized)} "
+                            r"(?:no\.?|number)(?: |$)",
+                            task_binding_text,
+                        )
+                    )
+                    if (
+                        len(normalized.split()) >= 2
+                        or bare_number_with_size_cue
+                    ) and any(
+                        option_value
+                        and re.search(
+                            rf"(?:^| ){re.escape(option_value)}(?: |$)",
+                            task_value,
+                        )
+                        is not None
+                        for option_value in option_variants
+                        for task_value in (task_binding_text, task_numeric)
+                    ):
+                        binding_confidence = max(binding_confidence, 2)
+                    task_pack = re.search(
+                        r"\b(?:pack|count|set) of ([0-9]+)\b|"
+                        r"\b([0-9]+) (?:pack|count)\b",
+                        task_binding_text,
+                    )
+                    value_pack = re.search(
+                        r"\b(?:pack|count|set) of ([0-9]+)\b|"
+                        r"\b([0-9]+) (?:pack|count)\b",
+                        normalized,
+                    )
+                    if task_pack is not None and value_pack is not None:
+                        task_quantity = next(
+                            value for value in task_pack.groups() if value
+                        )
+                        value_quantity = next(
+                            value for value in value_pack.groups() if value
+                        )
+                        if task_quantity == value_quantity:
+                            binding_confidence = max(binding_confidence, 1)
+            if binding_confidence:
+                matches.append((binding_confidence, len(compact), str(value)))
         if not matches:
             continue
-        longest = max(length for length, _ in matches)
+        strongest = max(confidence for confidence, _, _ in matches)
         targets[group] = [
-            value for length, value in matches if length == longest
+            value
+            for confidence, _, value in matches
+            if confidence == strongest
         ]
     return targets
 
@@ -1164,8 +1502,13 @@ def _webshop_purchase_preconditions(
 ) -> dict[str, object]:
     """Return public option-binding preconditions for a purchase action."""
 
-    groups, _ = _webshop_parse_product_options(observation)
-    selected = _webshop_clicked_option_assignments(receipts, groups)
+    product = _webshop_current_product_evidence(observation, receipts)
+    groups = product["visible_option_groups"]
+    if not isinstance(groups, Mapping):
+        groups = {}
+    selected = product["selected_options"]
+    if not isinstance(selected, Mapping):
+        selected = {}
     targets = _webshop_option_targets(task_instruction, groups)
     missing = [group for group in targets if group not in selected]
     mismatched = [
@@ -1178,13 +1521,31 @@ def _webshop_purchase_preconditions(
         )
     ]
     price_limit = _webshop_price_limit(task_instruction)
-    product_price = _webshop_product_price(observation)
-    price_evidence_missing = price_limit is not None and product_price is None
+    product_price = product["price"]
+    purchase_action_visible = product["purchase_action_visible"] is True
+    product_context_available = product["available"] is True
+    price_evidence_missing = bool(
+        purchase_action_visible
+        and price_limit is not None
+        and product_price is None
+    )
     price_exceeds_limit = bool(
         price_limit is not None
         and product_price is not None
         and product_price > price_limit
     )
+    minimum_actions_to_purchase: Optional[int] = None
+    if (
+        product_context_available
+        and not price_evidence_missing
+        and not price_exceeds_limit
+        and product_price is not None
+    ):
+        required_option_actions = len(set(missing) | set(mismatched))
+        navigation_actions = 0 if purchase_action_visible else 1
+        minimum_actions_to_purchase = (
+            navigation_actions + required_option_actions + 1
+        )
     return {
         "admissible": (
             not missing
@@ -1192,14 +1553,21 @@ def _webshop_purchase_preconditions(
             and not price_evidence_missing
             and not price_exceeds_limit
         ),
+        "product_context_available": product_context_available,
+        "in_product_scope": product["in_product_scope"],
+        "purchase_action_visible": purchase_action_visible,
+        "candidate_asin": product["asin"],
+        "candidate_title": product["title"],
+        "inspected_tabs": product["inspected_tabs"],
         "required_option_targets": targets,
-        "selected_options": selected,
+        "selected_options": dict(selected),
         "missing_option_groups": missing,
         "mismatched_option_groups": mismatched,
         "price_limit": price_limit,
         "product_price": product_price,
         "price_evidence_missing": price_evidence_missing,
         "price_exceeds_limit": price_exceeds_limit,
+        "minimum_actions_to_purchase": minimum_actions_to_purchase,
         "source": "public_task_and_observation",
     }
 
@@ -1225,6 +1593,29 @@ def _webshop_zero_result_queries(
             flags=re.IGNORECASE,
         )
         if match is None or total is None or int(total.group(1)) != 0:
+            continue
+        query = _webshop_norm(match.group(1))
+        if query and query not in seen:
+            seen.add(query)
+            queries.append(query)
+    return tuple(queries)
+
+
+def _webshop_search_queries(
+    receipts: Sequence[Mapping[str, object]],
+) -> tuple[str, ...]:
+    """Return normalized queries already executed in this deterministic episode."""
+
+    queries: list[str] = []
+    seen: set[str] = set()
+    for receipt in receipts:
+        if receipt.get("state_advanced") is not True:
+            continue
+        action = receipt.get("action")
+        if not isinstance(action, str):
+            continue
+        match = re.fullmatch(r"search\[(.*)\]", action, flags=re.IGNORECASE)
+        if match is None:
             continue
         query = _webshop_norm(match.group(1))
         if query and query not in seen:
@@ -1266,6 +1657,8 @@ def _webshop_action_precondition_failure(
         query = _webshop_norm(search.group(1))
         if query in _webshop_zero_result_queries(receipts):
             return "known_zero_result_query"
+        if query in _webshop_search_queries(receipts):
+            return "repeated_search_query"
     if _webshop_repeats_unchanged_click(
         action=action,
         observation=observation,
@@ -1502,8 +1895,15 @@ def _public_transition_summary(
                     "query": search.group(1).strip(),
                     "outcome": outcome,
                 }
-        groups, title = _webshop_parse_product_options(observation)
-        selected_options = _webshop_clicked_option_assignments(receipts, groups)
+        product_evidence = _webshop_current_product_evidence(
+            observation, receipts
+        )
+        groups = product_evidence["visible_option_groups"]
+        if not isinstance(groups, Mapping):
+            groups = {}
+        selected_options = product_evidence["selected_options"]
+        if not isinstance(selected_options, Mapping):
+            selected_options = {}
         purchase_preconditions = _webshop_purchase_preconditions(
             task_instruction=task_instruction,
             observation=observation,
@@ -1519,15 +1919,27 @@ def _public_transition_summary(
                 "recent_click_targets": click_targets[-8:],
                 "latest_search_outcome": latest_search_outcome,
                 "purchase_preconditions": purchase_preconditions,
+                "candidate_history": _webshop_candidate_history(receipts),
                 "current_product": (
                     {
-                        "title": title,
+                        "asin": product_evidence["asin"],
+                        "title": product_evidence["title"],
+                        "price": product_evidence["price"],
+                        "in_product_scope": product_evidence[
+                            "in_product_scope"
+                        ],
+                        "purchase_action_visible": product_evidence[
+                            "purchase_action_visible"
+                        ],
+                        "inspected_tabs": product_evidence[
+                            "inspected_tabs"
+                        ],
                         "visible_option_groups": {
                             group: list(values) for group, values in groups.items()
                         },
-                        "selected_options": selected_options,
+                        "selected_options": dict(selected_options),
                     }
-                    if groups
+                    if product_evidence["available"] is True
                     else None
                 ),
             }
@@ -1674,11 +2086,55 @@ def _public_state_feedback(
                 + " | ".join(str(value) for value in zero_result_queries[-6:])
                 + "."
             )
+        candidate_history = progress.get("candidate_history")
+        if isinstance(candidate_history, (list, tuple)) and candidate_history:
+            lines.append("Public candidate evidence from prior visits:")
+            for candidate in candidate_history[-6:]:
+                if not isinstance(candidate, Mapping):
+                    continue
+                tabs = candidate.get("inspected_tabs", ())
+                tab_text = (
+                    ",".join(str(value) for value in tabs)
+                    if isinstance(tabs, (list, tuple)) and tabs
+                    else "none"
+                )
+                selected_options = candidate.get("selected_options", {})
+                selected_text = (
+                    ",".join(
+                        f"{group}={value}"
+                        for group, value in selected_options.items()
+                    )
+                    if isinstance(selected_options, Mapping)
+                    and selected_options
+                    else "none"
+                )
+                lines.append(
+                    "- "
+                    f"asin={candidate.get('asin')}; "
+                    f"title={candidate.get('title')}; "
+                    f"price={candidate.get('price')}; "
+                    f"selected_options={selected_text}; "
+                    f"inspected_tabs={tab_text}; "
+                    f"visit_count={candidate.get('visit_count')}."
+                )
         current_product = progress.get("current_product")
         if isinstance(current_product, Mapping):
+            asin = current_product.get("asin")
+            if isinstance(asin, str) and asin:
+                lines.append(f"Current candidate ASIN: {asin}.")
             title = current_product.get("title")
             if isinstance(title, str) and title:
                 lines.append(f"Current product title: {title}.")
+            price = current_product.get("price")
+            if isinstance(price, (int, float)) and not isinstance(price, bool):
+                lines.append(f"Current product price evidence: {price}.")
+            inspected_tabs = current_product.get("inspected_tabs")
+            if isinstance(inspected_tabs, (list, tuple)) and inspected_tabs:
+                lines.append(
+                    "Inspected product tabs retained in episode state: "
+                    + ", ".join(str(value) for value in inspected_tabs)
+                    + "."
+                )
             option_groups = current_product.get("visible_option_groups")
             if isinstance(option_groups, Mapping) and option_groups:
                 lines.append(
@@ -1689,6 +2145,16 @@ def _public_state_feedback(
                         if isinstance(values, (list, tuple))
                     )
                     + "."
+                )
+            if (
+                current_product.get("in_product_scope") is True
+                and current_product.get("purchase_action_visible") is not True
+            ):
+                lines.append(
+                    "Current page is a product detail tab. WebShop `< Prev>` "
+                    "returns to the same product page; `Back to Search` exits "
+                    "the current candidate. Retained title, price and option "
+                    "evidence above remain part of the current episode state."
                 )
             selected_options = current_product.get("selected_options")
             if isinstance(selected_options, Mapping) and selected_options:
@@ -1701,7 +2167,18 @@ def _public_state_feedback(
                     + "."
                 )
         purchase = progress.get("purchase_preconditions")
-        if isinstance(purchase, Mapping) and purchase.get("admissible") is not True:
+        if isinstance(purchase, Mapping):
+            minimum_actions = purchase.get("minimum_actions_to_purchase")
+            if isinstance(minimum_actions, int):
+                lines.append(
+                    "Minimum environment actions required to purchase the "
+                    f"current candidate from this public state: {minimum_actions}."
+                )
+        if (
+            isinstance(purchase, Mapping)
+            and purchase.get("purchase_action_visible") is True
+            and purchase.get("admissible") is not True
+        ):
             missing = purchase.get("missing_option_groups", ())
             mismatched = purchase.get("mismatched_option_groups", ())
             lines.append(
@@ -1765,6 +2242,7 @@ def _action_prompt(
     turn: int,
     max_observation_chars: int = 0,
     structured_actions: bool = False,
+    remaining_action_budget: Optional[int] = None,
 ) -> str:
     """Render SkillFlow's state/action/history boundary without a fixed role."""
 
@@ -1799,6 +2277,13 @@ def _action_prompt(
         f"Current Agent contract:\n{request.agent.contract}\n\n"
         f"Previous environment turns:\n{_history_text(receipts)}\n\n"
         f"{public_state}\n\n"
+        + (
+            f"Environment action budget remaining (including the next Action): "
+            f"{remaining_action_budget}\n\n"
+            if isinstance(remaining_action_budget, int)
+            else ""
+        )
+        +
         f"Current observation (turn {turn}):\n{visible_observation}\n\n"
         f"Admissible actions:\n{actions}\n\n"
         "Apply one ReAct control cycle: condition the next Action on the "
@@ -2097,6 +2582,7 @@ class EnvironmentExecutionAdapter:
             turn=turn,
             max_observation_chars=self._max_observation_chars,
             structured_actions=self._structured_actions,
+            remaining_action_budget=self._max_turns - state.turns_used,
         )
         public_state = _public_state_feedback(
             request,
