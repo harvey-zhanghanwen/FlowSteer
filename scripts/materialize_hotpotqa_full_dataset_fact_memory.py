@@ -1493,7 +1493,13 @@ async def _materialize_one(
                                         "membership, or relation proposition explicitly "
                                         "supported by the supplied public context and retain "
                                         "the source entity or canonical surface. Prefer a "
-                                        "proposition with no number or date. "
+                                        "proposition with no number or date. Prefer the "
+                                        "canonical entity's type, profession, or direct "
+                                        "relation as stated within one passage sentence; do "
+                                        "not preserve a cross-passage answer relation when it "
+                                        "requires a forbidden number/date token. Every item "
+                                        "in forbidden_public_context_number_or_date_tokens "
+                                        "must be absent from the generated fact. "
                                         if (
                                             fact_repair_strategy in {
                                                 "public_context_fact_reconstruction",
@@ -1538,6 +1544,14 @@ async def _materialize_one(
                                                     _forbidden_fact_number_or_date_surfaces(
                                                         source,
                                                         fact or "",
+                                                    )
+                                                ),
+                                                "forbidden_public_context_number_or_date_tokens": list(
+                                                    _forbidden_fact_number_or_date_surfaces(
+                                                        source,
+                                                        " ".join(
+                                                            selected_public_context
+                                                        ),
                                                     )
                                                 ),
                                             }
@@ -1722,6 +1736,11 @@ async def _materialize_one(
                         "do not fail syntactic, support, canonical-surface, or "
                         "no-new-fact fields merely because the malformed source "
                         "question cannot be answered by the canonical string. "
+                        "For an incoherent source Q/A, a self-contained type or "
+                        "profession proposition copied or semantically projected "
+                        "from one supplied passage is valid when it retains the "
+                        "canonical entity and introduces nothing beyond that "
+                        "passage. "
                         "Evaluate every boolean independently and return "
                         "only JSON."
                         if public_context_verification
