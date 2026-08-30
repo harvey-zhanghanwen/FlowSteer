@@ -67,6 +67,9 @@ from src.interactive.healthbench_professional_grader import (
 from src.interactive.healthbench_tool_adapter import (
     HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
 )
+from src.interactive.healthbench_evidence_adapter import (
+    HEALTHBENCH_AUTHORITATIVE_SEARCH_TOOL_ID,
+)
 from src.interactive.openai_gateway import (
     supports_local_sglang_repetition_penalty,
     supports_local_sglang_top_k,
@@ -295,9 +298,18 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         checks["evaluation.healthbench_judge_catalog_path"] = bool(
             str(evaluation.get("healthbench_judge_catalog_path", "")).strip()
         )
+        healthbench_grader_mode = evaluation.get("healthbench_grader_mode")
         checks["evaluation.healthbench_professional_mode"] = (
-            evaluation.get("healthbench_grader_mode")
-            == "openai_simple_evals_healthbench_professional_reference"
+            healthbench_grader_mode
+            in {
+                "openai_simple_evals_healthbench_professional_reference",
+                "openai_simple_evals_healthbench_professional_rubric",
+            }
+        )
+        checks["evaluation.healthbench_non_reference_grader_authorized"] = (
+            healthbench_grader_mode
+            != "openai_simple_evals_healthbench_professional_rubric"
+            or evaluation.get("healthbench_allow_non_reference_grader") is True
         )
         checks["evaluation.healthbench_private_cases_path"] = bool(
             str(evaluation.get("healthbench_private_cases_path", "")).strip()
@@ -334,6 +346,12 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
             "reasoning",
             "react",
         }
+        freeze_react_exhaustion = bounded.get(
+            "freeze_direct_react_exhaustion_as_strict_zero", False
+        )
+        checks["healthbench.freeze_direct_react_exhaustion_as_strict_zero"] = (
+            type(freeze_react_exhaustion) is bool
+        )
         if direct_execution_mode == "react":
             experiment = _mapping(config.get("experiment"), "experiment")
             direct_generation_seed = bounded.get(
@@ -358,17 +376,32 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
             checks["healthbench.protocol_equivalent_to_direct"] = (
                 bounded.get("protocol_equivalent_to_direct") is True
             )
-            checks["healthbench.direct_allowed_tools"] = (
-                bounded.get("direct_allowed_tools")
-                == [HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID]
+            configured_tool_mode = (
+                tool_runtime.get("mode")
+                if isinstance(tool_runtime, Mapping)
+                else None
+            )
+            expected_healthbench_tool = {
+                "model_driven_medrag_search": HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                "model_driven_authoritative_search": (
+                    HEALTHBENCH_AUTHORITATIVE_SEARCH_TOOL_ID
+                ),
+            }.get(configured_tool_mode)
+            checks["healthbench.direct_allowed_tools"] = bool(
+                expected_healthbench_tool is not None
+                and bounded.get("direct_allowed_tools")
+                == [expected_healthbench_tool]
             )
             checks["healthbench_tool_runtime.enabled"] = bool(
                 isinstance(tool_runtime, Mapping)
                 and tool_runtime.get("enabled") is True
             )
             checks["healthbench_tool_runtime.mode"] = bool(
-                isinstance(tool_runtime, Mapping)
-                and tool_runtime.get("mode") == "model_driven_medrag_search"
+                configured_tool_mode
+                in {
+                    "model_driven_medrag_search",
+                    "model_driven_authoritative_search",
+                }
             )
             checks["healthbench_tool_runtime.dataset_scope"] = bool(
                 isinstance(tool_runtime, Mapping)
@@ -1340,6 +1373,7 @@ def _healthbench_graph_scientific_resume_matches(
     value: Mapping[str, Any],
     task: TaskRecord,
     config: Mapping[str, Any],
+    expected_judge_model: str,
 ) -> bool:
     """Match a persisted Graph rollout to the current sampling condition."""
 
@@ -1356,8 +1390,19 @@ def _healthbench_graph_scientific_resume_matches(
         record = TrajectoryRecord.from_dict(value)
     except (KeyError, TypeError, ValueError):
         return False
+    evaluation = value.get("evaluation")
+    details = evaluation.get("details") if isinstance(evaluation, Mapping) else None
+    judge_matches = bool(
+        not isinstance(evaluation, Mapping)
+        or evaluation.get("valid") is not True
+        or (
+            isinstance(details, Mapping)
+            and details.get("judge_model") == expected_judge_model
+        )
+    )
     return bool(
         record.task.task_id == task.task_id
+        and judge_matches
         and record.sampling_receipt_verified
         and dict(record.director_sampling)
         == {
@@ -1412,7 +1457,7 @@ def _healthbench_direct_generation_identity(
         )
         if raw_penalty is not None:
             repetition_penalty = float(raw_penalty)
-    return {
+    generation_identity = {
         "schema_version": _HEALTHBENCH_DIRECT_GENERATION_IDENTITY_SCHEMA,
         "dataset_key": "healthbench_professional",
         "task_id": task.task_id,
@@ -1445,23 +1490,49 @@ def _healthbench_direct_generation_identity(
                 "max_tokens": max_action_tokens,
             },
         },
-        "medrag": {
-            "mode": str(tool_runtime["mode"]),
-            "source_identity": str(tool_runtime["source_identity"]),
-            "source_revision": str(tool_runtime["source_revision"]),
-            "expected_rows": int(tool_runtime["expected_rows"]),
-            "max_turns_per_agent_call": int(
-                tool_runtime["max_turns_per_agent_call"]
-            ),
-            "max_tool_calls_per_agent_call": int(
-                tool_runtime["max_tool_calls_per_agent_call"]
-            ),
-            "tool_timeout_seconds": float(
-                tool_runtime["tool_timeout_seconds"]
-            ),
-            "max_action_tokens": max_action_tokens,
-        },
     }
+    retrieval_identity = {
+        "mode": str(tool_runtime["mode"]),
+        "source_identity": str(tool_runtime["source_identity"]),
+        "source_revision": str(tool_runtime["source_revision"]),
+        "expected_rows": int(tool_runtime["expected_rows"]),
+        "max_turns_per_agent_call": int(
+            tool_runtime["max_turns_per_agent_call"]
+        ),
+        "max_tool_calls_per_agent_call": int(
+            tool_runtime["max_tool_calls_per_agent_call"]
+        ),
+        "tool_timeout_seconds": float(
+            tool_runtime["tool_timeout_seconds"]
+        ),
+        "max_action_tokens": max_action_tokens,
+    }
+    if tool_runtime["mode"] == "model_driven_medrag_search":
+        generation_identity["medrag"] = retrieval_identity
+    else:
+        web = _mapping(
+            tool_runtime.get("authoritative_web_search"),
+            "healthbench_tool_runtime.authoritative_web_search",
+        )
+        generation_identity["authoritative_retrieval"] = {
+            **retrieval_identity,
+            "max_successful_queries": int(
+                tool_runtime["max_successful_queries"]
+            ),
+            "require_initial_search": bool(
+                tool_runtime["require_initial_search"]
+            ),
+            "web_provider": str(web["provider"]),
+            "web_base_url": str(web["base_url"]),
+            "web_retmax": int(web["retmax"]),
+            "web_request_timeout_seconds": float(
+                web["request_timeout_seconds"]
+            ),
+            "web_minimum_interval_seconds": float(
+                web["minimum_interval_seconds"]
+            ),
+        }
+    return generation_identity
 
 
 def _react_scientific_sampling_receipt(
@@ -1657,7 +1728,8 @@ async def _direct_one(
         try:
             if tool_registry is None:
                 raise CompletionBenchmarkRoundError(
-                    "HealthBench Direct ReAct Agent has no MedRAG ToolRegistry"
+                    "HealthBench Direct ReAct Agent has no configured evidence "
+                    "ToolRegistry"
                 )
             if tuple(tool_registry.resource_ids) != expected_tools:
                 raise CompletionBenchmarkRoundError(
@@ -2019,6 +2091,19 @@ async def _collect_direct(
     )
     expected_runtime_condition_id = str(experiment.get("condition_id", ""))
     expected_tool_version = str(experiment.get("tool_version", ""))
+    freeze_react_exhaustion = bool(
+        retrieval_direct
+        and bounded.get("freeze_direct_react_exhaustion_as_strict_zero") is True
+    )
+    frozen_terminal_failure_ids = {
+        str(item.get("task_id"))
+        for item in failures
+        if freeze_react_exhaustion
+        and item.get("condition") == "direct_local_qwen35_9b"
+        and item.get("stage") == "generation_or_evaluator"
+        and "exhausted 6 turns without a valid completion"
+        in str(item.get("error", ""))
+    }
 
     def expected_generation_identity(task: TaskRecord) -> Mapping[str, Any] | None:
         if not retrieval_direct:
@@ -2113,7 +2198,12 @@ async def _collect_direct(
                 or evaluation.get("evaluator_version") != evaluator_version_for(task)
                 or (
                     _dataset_key(task) == "healthbench_professional"
-                    and evaluation.get("valid") is not True
+                    and (
+                        evaluation.get("valid") is not True
+                        or not isinstance(evaluation.get("details"), Mapping)
+                        or evaluation["details"].get("judge_model")
+                        != backend.judge_model
+                    )
                 )
             )
         ):
@@ -2175,6 +2265,14 @@ async def _collect_direct(
             and evaluation.get("valid") is True
             and evaluation.get("evaluator_version")
             == evaluator_version_for(task)
+            and (
+                _dataset_key(task) != "healthbench_professional"
+                or (
+                    isinstance(evaluation.get("details"), Mapping)
+                    and evaluation["details"].get("judge_model")
+                    == backend.judge_model
+                )
+            )
         )
 
     rescored_by_task = _by_task(rescored)
@@ -2216,6 +2314,9 @@ async def _collect_direct(
                 item.get("condition") == "direct_local_qwen35_9b"
                 for item in failures
             ),
+            "frozen_react_terminal_failures": len(
+                frozen_terminal_failure_ids
+            ),
         }
         _write_json(manifest_path, manifest)
 
@@ -2241,7 +2342,9 @@ async def _collect_direct(
     jobs = [
         asyncio.create_task(run(index, task))
         for index, task in enumerate(selected)
-        if task.task_id not in by_task and task.task_id not in pending_by_task
+        if task.task_id not in by_task
+        and task.task_id not in pending_by_task
+        and task.task_id not in frozen_terminal_failure_ids
     ]
     for completed in asyncio.as_completed(jobs):
         task, result = await completed
@@ -3947,10 +4050,21 @@ def _attach_healthbench_reference_judge(
     configured_model_id = str(evaluation["healthbench_judge_model"])
     model = judge_registry.require_model(configured_model_id)
     provider = judge_registry.provider_for(model.model_id)
-    if model.model_name != "gpt-5.4-2026-03-05":
+    provider_model = model.model_name
+    grader_mode = str(evaluation.get("healthbench_grader_mode", ""))
+    reference_grader = provider_model == "gpt-5.4-2026-03-05"
+    if reference_grader:
+        if grader_mode != "openai_simple_evals_healthbench_professional_reference":
+            raise ConfigurationError(
+                "HealthBench reference grader requires reference grader mode"
+            )
+    elif not (
+        grader_mode == "openai_simple_evals_healthbench_professional_rubric"
+        and evaluation.get("healthbench_allow_non_reference_grader") is True
+    ):
         raise ConfigurationError(
-            "HealthBench Professional reference grader must use the exact "
-            "gpt-5.4-2026-03-05 provider model"
+            "A non-reference HealthBench grader requires the versioned rubric "
+            "mode and explicit healthbench_allow_non_reference_grader=true"
         )
     if provider.api_key_env != "VECTOR_ENGINE_API_KEY":
         raise ConfigurationError(
@@ -3980,15 +4094,17 @@ def _attach_healthbench_reference_judge(
         max_provider_attempts=int(
             evaluation["healthbench_max_provider_attempts"]
         ),
+        grader_model=provider_model,
     )
     backend.healthbench_professional_grader = grader
     backend.judge = None
-    provider_model = model.model_name
     backend.judge_model = provider_model
     return {
-        "mode": "openai_simple_evals_healthbench_professional_reference",
+        "mode": grader_mode,
         "configured_model_id": configured_model_id,
         "provider_model": provider_model,
+        "reference_grader": reference_grader,
+        "paper_comparable": reference_grader,
         "catalog_path": str(catalog_path),
         "reasoning_effort": "low",
         "length_adjustment_center": 2000.0,
@@ -4394,7 +4510,12 @@ async def run_completion_benchmark_round(
         and config["healthbench_tool_runtime"].get("enabled") is True
     ):
         graph_resume_identity_match = lambda value, task: (
-            _healthbench_graph_scientific_resume_matches(value, task, config)
+            _healthbench_graph_scientific_resume_matches(
+                value,
+                task,
+                config,
+                backend.judge_model,
+            )
         )
     manifest["status"] = "direct_baseline"
     _write_json(paths["manifest"], manifest)
@@ -4414,18 +4535,32 @@ async def run_completion_benchmark_round(
         and bounded.get("direct_execution_mode") == "react"
         and len(direct) != len(active)
     ):
-        manifest.update(
-            status="failed_direct_evaluator",
-            error=(
-                "retrieval-enabled Direct comparator lacks valid evaluator "
-                f"receipts for {len(active) - len(direct)} task(s)"
-            ),
-            completed_at=_utc_now(),
+        missing_count = len(active) - len(direct)
+        frozen_failure_count = int(
+            manifest.get("direct_progress", {}).get(
+                "frozen_react_terminal_failures", 0
+            )
+        )
+        if not (
+            bounded.get("freeze_direct_react_exhaustion_as_strict_zero") is True
+            and missing_count == frozen_failure_count
+        ):
+            manifest.update(
+                status="failed_direct_evaluator",
+                error=(
+                    "retrieval-enabled Direct comparator lacks valid evaluator "
+                    f"receipts for {missing_count} task(s)"
+                ),
+                completed_at=_utc_now(),
+            )
+            _write_json(paths["manifest"], manifest)
+            raise CompletionBenchmarkRoundError(
+                "HealthBench retrieval Direct comparator is not evaluator-complete"
+            )
+        manifest["direct_progress"]["strict_zero_terminal_failures"] = (
+            missing_count
         )
         _write_json(paths["manifest"], manifest)
-        raise CompletionBenchmarkRoundError(
-            "HealthBench retrieval Direct comparator is not evaluator-complete"
-        )
 
     if direct_only:
         manifest["status"] = "paired_report_from_existing_agentgraph"

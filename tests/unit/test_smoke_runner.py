@@ -34,6 +34,11 @@ from src.interactive.healthbench_tool_adapter import (
     HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
     build_healthbench_medrag_tool_registry,
 )
+from src.interactive.healthbench_evidence_adapter import (
+    HEALTHBENCH_AUTHORITATIVE_SEARCH_TOOL_ID,
+    PubMedEUtilitiesClient,
+    build_healthbench_authoritative_tool_registry,
+)
 from src.interactive.persistence import stable_id
 from src.interactive.hotpot_training_schedule import (
     HotpotTrainingCursorState,
@@ -1167,6 +1172,51 @@ class HealthBenchMedRAGRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
         owner.close = close
         return owner
 
+    @classmethod
+    def _authoritative_registry_owner(cls):
+        documents = (
+            "Aspirin can cause gastrointestinal bleeding.",
+            "Insulin lowers blood glucose in diabetes mellitus.",
+        )
+        corpus = FrozenMedRAGBM25Corpus(
+            source_identity="skillflow-medrag-textbooks",
+            source_revision=cls.SOURCE_REVISION,
+            corpus_rows=len(documents),
+            _corpus=documents,
+            _document_ids=("fixture-0", "fixture-1"),
+            _titles=("Fixture Textbook 0", "Fixture Textbook 1"),
+            _index={
+                "avg_dl": 5.0,
+                "doc_lens": [6, 7],
+                "idf": {"aspirin": 2.0, "bleeding": 2.0},
+                "inverted_index": {
+                    "aspirin": [(0, 1)],
+                    "bleeding": [(0, 1)],
+                },
+            },
+        )
+        client = PubMedEUtilitiesClient(
+            opener=lambda *_args, **_kwargs: None,
+            minimum_interval_seconds=0.0,
+        )
+        owner = SimpleNamespace(
+            registry=build_healthbench_authoritative_tool_registry(
+                corpus,
+                pubmed_client=client,
+                timeout_seconds=20.0,
+            ),
+            closed=False,
+        )
+
+        def close() -> None:
+            if owner.closed:
+                return
+            corpus.close()
+            owner.closed = True
+
+        owner.close = close
+        return owner
+
     def _backend(self, config: dict, gateway=None):
         registry = load_model_registry(
             Path(__file__).resolve().parents[2]
@@ -1342,6 +1392,98 @@ class HealthBenchMedRAGRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
                 self._config(),
                 make_task("hotpotqa", 0),
             )
+
+    def test_authoritative_healthbench_settings_are_explicit_and_bounded(
+        self,
+    ) -> None:
+        config = self._config()
+        section = config["healthbench_tool_runtime"]
+        section.update(
+            mode="model_driven_authoritative_search",
+            max_successful_queries=2,
+            require_initial_search=True,
+            authoritative_web_search={
+                "enabled": True,
+                "provider": "ncbi_pubmed_eutils",
+                "base_url": (
+                    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+                ),
+                "tool_name": "FlowSteer-HealthBench",
+                "retmax": 3,
+                "request_timeout_seconds": 8.0,
+                "minimum_interval_seconds": 0.4,
+            },
+        )
+
+        settings = healthbench_tool_runtime_settings(config, self._task())
+
+        assert settings is not None
+        self.assertEqual(
+            "model_driven_authoritative_search", settings["mode"]
+        )
+        self.assertEqual(2, settings["max_successful_queries"])
+        self.assertTrue(settings["require_initial_search"])
+        self.assertEqual(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+            settings["authoritative_web_search"]["base_url"],
+        )
+
+        invalid = copy.deepcopy(config)
+        invalid["healthbench_tool_runtime"]["max_successful_queries"] = 3
+        invalid["healthbench_tool_runtime"]["max_tool_calls_per_agent_call"] = 2
+        with self.assertRaisesRegex(ConfigurationError, "between 1"):
+            healthbench_tool_runtime_settings(invalid, self._task())
+
+    def test_authoritative_condition_wires_one_aggregate_tool_registry(
+        self,
+    ) -> None:
+        config = self._config()
+        section = config["healthbench_tool_runtime"]
+        section.update(
+            mode="model_driven_authoritative_search",
+            max_successful_queries=2,
+            require_initial_search=True,
+            tool_timeout_seconds=20.0,
+            authoritative_web_search={
+                "enabled": True,
+                "provider": "ncbi_pubmed_eutils",
+                "base_url": (
+                    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+                ),
+                "tool_name": "FlowSteer-HealthBench",
+                "retmax": 3,
+                "request_timeout_seconds": 8.0,
+                "minimum_interval_seconds": 0.4,
+            },
+        )
+        owner = self._authoritative_registry_owner()
+        backend = self._backend(config)
+
+        with patch.object(
+            _MODULE,
+            "open_healthbench_authoritative_tool_registry",
+            return_value=owner,
+        ) as opened:
+            runtime, registry, close = backend._runtime_for_task(
+                self._task(),
+                condition_id="healthbench_medrag_react_stable_zero",
+            )
+
+        self.assertEqual(
+            (HEALTHBENCH_AUTHORITATIVE_SEARCH_TOOL_ID,),
+            registry.resource_ids,
+        )
+        self.assertIs(registry, runtime.tool_registry)
+        adapter = runtime.execution_adapters["react"]
+        self.assertTrue(adapter._require_initial_search)
+        self.assertEqual(2, adapter._max_successful_searches)
+        opened.assert_called_once()
+        self.assertEqual(
+            3,
+            opened.call_args.kwargs["pubmed_client"].retmax,
+        )
+        close()
+        self.assertTrue(owner.closed)
 
     async def test_medrag_tool_receipt_is_persisted_without_evaluator_payload(
         self,

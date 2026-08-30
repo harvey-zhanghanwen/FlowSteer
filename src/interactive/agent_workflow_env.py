@@ -58,6 +58,19 @@ _SUPPORTED_SEMANTIC_PROTOCOLS = frozenset(
 _SUPPORTED_RECOVERY_POLICIES = frozenset(
     {"default", _PRESERVE_REPAIR_RECOVERY_POLICY}
 )
+
+
+def _artifact_head_tail_preview(value: str, *, limit: int = 320) -> str:
+    """Return FlowSteer's bounded artifact preview with both ends intact."""
+
+    compact = " ".join(value.split())
+    if len(compact) <= limit:
+        return compact
+    marker = " ...[truncated]... "
+    available = limit - len(marker)
+    head = available // 2
+    tail = available - head
+    return compact[:head] + marker + compact[-tail:]
 _TYPED_RETRIEVAL_FAILURE_RETRYABILITY = {
     "knowledge_base_coverage_failure": (
         "repair_retrieval_or_database_coverage"
@@ -3266,14 +3279,42 @@ class AgentWorkflowEnv:
         )
         targets: dict[str, object] = {}
         if AgentActionType.ADD_AGENT.value in admitted:
+            used_agent_ids = set(node_ids)
+            next_index = 1
+            while f"node_{next_index}" in used_agent_ids:
+                next_index += 1
+            registered_profiles = self.runtime.registered_execution_profiles()
             targets[AgentActionType.ADD_AGENT.value] = {
+                # DIRECT_REUSE: FlowSteer's role-neutral scalar ADD boundary
+                # allocates the next available node_N identifier. SkillFlow's
+                # Runtime capability boundary supplies the exact executable
+                # (execution_mode, allowed_tools) pairs. ReAct remains an
+                # execution mode; neither projection assigns an Agent role or
+                # prescribes a topology.
+                "agent_ids": [f"node_{next_index}"],
                 "existing_agent_ids": node_ids,
                 "model_ids": list(self._available_model_ids()),
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+                "registered_execution_profiles": [
+                    {
+                        "execution_mode": execution_mode,
+                        "allowed_tools": list(allowed_tools),
+                    }
+                    for execution_mode, allowed_tools in registered_profiles
+                ],
+                "contract_semantics": "free_text",
                 "contract_min_length": 12,
                 "contract_requirements": [
                     "plain_language_responsibility",
                     "inputs_consumed",
                     "expected_artifact",
+                    "preserve_original_task_scope_and_output_form",
                 ],
             }
         if AgentActionType.ADD_SUBGRAPH.value in admitted:
@@ -3583,6 +3624,27 @@ class AgentWorkflowEnv:
                 )
                 for agent_id in modifiable_node_ids
             }
+            # Keep execution mode and Tool capability on one executable Canvas
+            # boundary.  AgentRuntime is the authority for runnable
+            # (execution_mode, allowed_tools) profiles; projecting those exact
+            # pairs lets the Director's live schema sample both fields in one
+            # MODIFY action instead of first creating an invalid intermediate
+            # declaration such as reasoning + non-empty allowed_tools.
+            registered_execution_profiles = (
+                self.runtime.registered_execution_profiles()
+            )
+            per_agent_execution_profiles = {
+                agent_id: tuple(
+                    profile
+                    for profile in registered_execution_profiles
+                    if profile
+                    != (
+                        self._graph.get_node(agent_id).execution_mode.value,
+                        tuple(self._graph.get_node(agent_id).allowed_tools),
+                    )
+                )
+                for agent_id in modifiable_node_ids
+            }
             per_agent_mutable_fields = {
                 agent_id: [
                     field
@@ -3615,6 +3677,30 @@ class AgentWorkflowEnv:
                         field == "model_id"
                         and not per_agent_model_domains[agent_id]
                     )
+                    and not (
+                        field == "execution_mode"
+                        and not any(
+                            execution_mode
+                            != self._graph.get_node(
+                                agent_id
+                            ).execution_mode.value
+                            for execution_mode, _ in (
+                                per_agent_execution_profiles[agent_id]
+                            )
+                        )
+                    )
+                    and not (
+                        field == "allowed_tools"
+                        and not any(
+                            allowed_tools
+                            != tuple(
+                                self._graph.get_node(agent_id).allowed_tools
+                            )
+                            for _, allowed_tools in (
+                                per_agent_execution_profiles[agent_id]
+                            )
+                        )
+                    )
                 ]
                 for agent_id in modifiable_node_ids
             }
@@ -3622,7 +3708,15 @@ class AgentWorkflowEnv:
             for agent_id, fields in per_agent_mutable_fields.items():
                 node = self._graph.get_node(agent_id)
                 current_values: dict[str, object] = {}
-                for field in fields:
+                current_fields = list(fields)
+                if {"execution_mode", "allowed_tools"}.intersection(fields):
+                    # The live Director schema validates and samples these as
+                    # one execution profile even when only one component can
+                    # change from the current profile.
+                    for coupled_field in ("execution_mode", "allowed_tools"):
+                        if coupled_field not in current_fields:
+                            current_fields.append(coupled_field)
+                for field in current_fields:
                     value = getattr(node, field)
                     current_values[field] = (
                         list(value) if isinstance(value, tuple) else value
@@ -3702,6 +3796,26 @@ class AgentWorkflowEnv:
                         "discrete_value_domains": per_agent_discrete_domains[
                             agent_id
                         ],
+                        **(
+                            {
+                                "execution_profiles": [
+                                    {
+                                        "execution_mode": execution_mode,
+                                        "allowed_tools": list(allowed_tools),
+                                    }
+                                    for execution_mode, allowed_tools in (
+                                        per_agent_execution_profiles[agent_id]
+                                    )
+                                ]
+                            }
+                            if {
+                                "execution_mode",
+                                "allowed_tools",
+                            }.intersection(
+                                per_agent_mutable_fields[agent_id]
+                            )
+                            else {}
+                        ),
                         **(
                             {"avoid_provider_id": avoid_provider_id}
                             if (
@@ -4368,6 +4482,330 @@ class AgentWorkflowEnv:
             ),
         )
 
+    @staticmethod
+    def _compact_react_action_observations(
+        metadata: Mapping[str, object],
+    ) -> list[dict[str, object]]:
+        """Project public ReAct Action--Observation receipts for the Director.
+
+        SkillFlow continues from the sampled public action and its observation;
+        hidden reasoning is never part of that boundary.  Keep queries, Tool
+        identity, status, source receipts and evidence provenance, while the
+        full retrieved passages remain in the immutable trajectory receipt.
+        """
+
+        raw_trace = metadata.get("react_trace", ())
+        if not isinstance(raw_trace, (list, tuple)):
+            return []
+        projected: list[dict[str, object]] = []
+        for entry in raw_trace:
+            if not isinstance(entry, Mapping):
+                continue
+            raw_action = entry.get("structured_action")
+            action = raw_action if isinstance(raw_action, Mapping) else {}
+            raw_arguments = action.get("arguments")
+            arguments = raw_arguments if isinstance(raw_arguments, Mapping) else {}
+            action_receipt: dict[str, object] = {
+                "kind": action.get("kind"),
+                "name": action.get("name"),
+                "resource_id": action.get("resource_id"),
+            }
+            query = arguments.get("query")
+            if isinstance(query, str) and query.strip():
+                action_receipt["query"] = _artifact_head_tail_preview(
+                    query,
+                    limit=240,
+                )
+            if action.get("kind") == "complete":
+                value = arguments.get("value")
+                if isinstance(value, str):
+                    action_receipt["value_characters"] = len(value)
+
+            raw_observation = entry.get("observation")
+            observation = (
+                raw_observation
+                if isinstance(raw_observation, Mapping)
+                else entry
+            )
+            observation_receipt: dict[str, object] = {}
+            for field_name in (
+                "observation_status",
+                "completed",
+                "tool_id",
+                "tool_version",
+                "public_error_code",
+                "error_type",
+            ):
+                value = observation.get(field_name)
+                if value is not None and isinstance(value, (str, bool, int, float)):
+                    observation_receipt[field_name] = value
+            repair_instruction = observation.get("repair_instruction")
+            if isinstance(repair_instruction, str) and repair_instruction.strip():
+                observation_receipt["repair_instruction"] = (
+                    _artifact_head_tail_preview(repair_instruction, limit=320)
+                )
+            raw_result = observation.get("result")
+            if isinstance(raw_result, Mapping):
+                result_receipt: dict[str, object] = {}
+                for field_name in ("operation", "query"):
+                    value = raw_result.get(field_name)
+                    if isinstance(value, str) and value.strip():
+                        result_receipt[field_name] = _artifact_head_tail_preview(
+                            value,
+                            limit=240,
+                        )
+                raw_sources = raw_result.get("source_receipts", ())
+                if isinstance(raw_sources, (list, tuple)):
+                    result_receipt["source_receipts"] = [
+                        {
+                            field_name: source.get(field_name)
+                            for field_name in (
+                                "source",
+                                "source_type",
+                                "status",
+                                "result_count",
+                                "error_type",
+                            )
+                            if source.get(field_name) is not None
+                        }
+                        for source in raw_sources[:6]
+                        if isinstance(source, Mapping)
+                    ]
+                raw_evidence = raw_result.get("evidence", ())
+                if isinstance(raw_evidence, (list, tuple)):
+                    result_receipt["evidence_count"] = len(raw_evidence)
+                    result_receipt["evidence_provenance"] = [
+                        {
+                            field_name: evidence.get(field_name)
+                            for field_name in (
+                                "rank",
+                                "source",
+                                "source_type",
+                                "document_id",
+                                "title",
+                                "date",
+                                "url",
+                            )
+                            if evidence.get(field_name) is not None
+                        }
+                        for evidence in raw_evidence[:3]
+                        if isinstance(evidence, Mapping)
+                    ]
+                if result_receipt:
+                    observation_receipt["result"] = result_receipt
+            projected.append(
+                {
+                    "turn": entry.get("turn"),
+                    "action": action_receipt,
+                    "observation": observation_receipt,
+                }
+            )
+        return projected
+
+    @classmethod
+    def _agent_call_receipts(
+        cls,
+        execution: AgentRuntimeResult,
+    ) -> list[dict[str, object]]:
+        """Return every Agent call phase and its bounded communication state."""
+
+        events: list[dict[str, object]] = []
+        for call_index, call in enumerate(execution.calls):
+            request = call.request
+            response = call.response
+            upstream = [
+                {
+                    "source_agent_id": message.source_agent_id,
+                    "target_agent_id": message.target_agent_id,
+                    "message_type": message.message_type,
+                    "artifact_type": message.artifact_type,
+                    "artifact_version": message.artifact_version,
+                    "content_characters": len(message.content),
+                    "content_preview": _artifact_head_tail_preview(
+                        message.content,
+                        limit=160,
+                    ),
+                }
+                for message in request.upstream[:6]
+            ]
+            peer_draft = request.peer_draft
+            event: dict[str, object] = {
+                "call_index": call_index,
+                "request_id": request.request_id,
+                "agent_id": request.agent.id,
+                "phase": request.phase.value,
+                "execution_mode": request.agent.execution_mode.value,
+                "allowed_tools": list(request.agent.allowed_tools),
+                "upstream_communications": upstream,
+                "own_draft": (
+                    None
+                    if request.own_draft is None
+                    else {
+                        "content_characters": len(request.own_draft),
+                        "content_preview": _artifact_head_tail_preview(
+                            request.own_draft,
+                            limit=160,
+                        ),
+                    }
+                ),
+                "peer_draft": (
+                    None
+                    if peer_draft is None
+                    else {
+                        "source_agent_id": peer_draft.source_agent_id,
+                        "target_agent_id": peer_draft.target_agent_id,
+                        "artifact_version": peer_draft.artifact_version,
+                        "content_characters": len(peer_draft.content),
+                        "content_preview": _artifact_head_tail_preview(
+                            peer_draft.content,
+                            limit=160,
+                        ),
+                    }
+                ),
+                "artifact_characters": len(response.text),
+                "artifact_preview": _artifact_head_tail_preview(
+                    response.text,
+                    limit=200,
+                ),
+            }
+            react_events = cls._compact_react_action_observations(
+                response.metadata
+            )
+            if react_events:
+                event["react_action_observations"] = react_events
+            raw_tool_receipts = response.metadata.get("tool_receipts", ())
+            if isinstance(raw_tool_receipts, (list, tuple)):
+                receipts = [
+                    receipt
+                    for receipt in raw_tool_receipts
+                    if isinstance(receipt, Mapping)
+                ]
+                if receipts:
+                    event["tool_receipt_summary"] = {
+                        "count": len(receipts),
+                        "tool_ids": sorted(
+                            {
+                                str(receipt.get("tool_id"))
+                                for receipt in receipts
+                                if receipt.get("tool_id") is not None
+                            }
+                        ),
+                        "error_count": sum(
+                            receipt.get("error_type") is not None
+                            for receipt in receipts
+                        ),
+                    }
+            events.append(event)
+        return events
+
+    def current_artifact_receipts(self) -> list[dict[str, object]]:
+        """Project revision-live Artifacts without evaluator information.
+
+        This is the generic HealthBench-compatible subset of FlowSteer's
+        revision-live artifact receipt.  It preserves freshness, producer
+        declaration and direct fan-in provenance across rejected edits without
+        adding a benchmark-specific candidate parser or role inventory.
+        """
+
+        receipts: list[dict[str, object]] = []
+        for agent_id, artifact in sorted(self._progressive_outputs.items()):
+            if not self._graph.has_node(agent_id):
+                continue
+            node = self._graph.get_node(agent_id)
+            metadata = self._progressive_output_metadata.get(agent_id, {})
+            input_versions = metadata.get("input_artifact_versions", {})
+            if not isinstance(input_versions, Mapping):
+                input_versions = {}
+            raw_tool_receipts = metadata.get("tool_receipts", ())
+            tool_receipts = (
+                [
+                    item
+                    for item in raw_tool_receipts
+                    if isinstance(item, Mapping)
+                ]
+                if isinstance(raw_tool_receipts, (list, tuple))
+                else []
+            )
+            raw_provenance = metadata.get("input_artifact_provenance", ())
+            provenance = (
+                [
+                    item
+                    for item in raw_provenance
+                    if isinstance(item, Mapping)
+                ]
+                if isinstance(raw_provenance, (list, tuple))
+                else []
+            )
+            upstream_artifacts: list[dict[str, object]] = []
+            for item in provenance[:6]:
+                raw_content = item.get(
+                    "artifact",
+                    item.get("content", item.get("artifact_body")),
+                )
+                upstream_receipt: dict[str, object] = {
+                    field_name: item.get(field_name)
+                    for field_name in (
+                        "source_agent_id",
+                        "target_agent_id",
+                        "artifact_version",
+                        "source_model_id",
+                        "source_contract",
+                        "source_execution_mode",
+                        "message_type",
+                        "artifact_type",
+                    )
+                    if item.get(field_name) is not None
+                }
+                if isinstance(raw_content, str):
+                    upstream_receipt["artifact_character_count"] = len(
+                        raw_content
+                    )
+                    upstream_receipt["artifact_preview"] = (
+                        _artifact_head_tail_preview(raw_content, limit=160)
+                    )
+                upstream_artifacts.append(upstream_receipt)
+            receipts.append(
+                {
+                    "agent_id": agent_id,
+                    "artifact_version": metadata.get(
+                        "artifact_version",
+                        metadata.get("artifact_id"),
+                    ),
+                    "graph_revision": metadata.get("graph_revision"),
+                    "model_id": node.model_id,
+                    "contract": node.contract,
+                    "execution_mode": node.execution_mode.value,
+                    "allowed_tools": list(node.allowed_tools),
+                    "is_output_agent": agent_id == self._graph.output_agent_id,
+                    "artifact_fresh": agent_id not in self._unresolved_dirty_agents,
+                    "finish_reason": metadata.get("finish_reason"),
+                    "artifact_complete": bool(
+                        metadata.get("finish_reason") != "length"
+                        and metadata.get("artifact_complete", True) is not False
+                    ),
+                    "artifact_character_count": len(artifact),
+                    "artifact_preview": _artifact_head_tail_preview(artifact),
+                    "input_artifact_versions": {
+                        str(key): value
+                        for key, value in sorted(
+                            input_versions.items(),
+                            key=lambda item: str(item[0]),
+                        )
+                    },
+                    "upstream_artifacts": upstream_artifacts,
+                    "tool_receipt_count": len(tool_receipts),
+                    "tool_ids": sorted(
+                        {
+                            str(item.get("tool_id"))
+                            for item in tool_receipts
+                            if item.get("tool_id") is not None
+                        }
+                    ),
+                    "provenance_status": "unverified_work_product",
+                }
+            )
+        return receipts
+
     def _accepted_feedback(
         self,
         action: AgentAction,
@@ -4377,8 +4815,16 @@ class AgentWorkflowEnv:
         feedback = (
             f"accepted {action.action_type.value} at revision {self._graph.revision}"
         )
+        execution_error_feedback: Optional[str] = None
+        partial_execution = False
         if execution_error is not None:
-            return f"{feedback}; {self._execution_error_feedback(execution_error)}"
+            execution_error_feedback = self._execution_error_feedback(
+                execution_error
+            )
+            if execution_error.partial_result is None:
+                return f"{feedback}; {execution_error_feedback}"
+            execution = execution_error.partial_result
+            partial_execution = True
         if execution is None:
             if self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY:
                 state = json.dumps(
@@ -4437,9 +4883,12 @@ class AgentWorkflowEnv:
                 deduplicated.append(record)
             return deduplicated
 
-        answer = execution.final_answer
-        if answer is not None and len(answer) > 400:
-            answer = answer[:397] + "..."
+        raw_answer = execution.final_answer
+        answer = (
+            None
+            if raw_answer is None
+            else _artifact_head_tail_preview(raw_answer, limit=400)
+        )
         output_calls = [
             call
             for call in execution.calls
@@ -4456,9 +4905,8 @@ class AgentWorkflowEnv:
                     "artifact",
                     record.get("content", ""),
                 )
-                content = " ".join(str(content_value).split())
-                if len(content) > 160:
-                    content = content[:157] + "..."
+                raw_content = str(content_value)
+                content = _artifact_head_tail_preview(raw_content, limit=160)
                 raw_tool_receipts = record.get("tool_receipts", ())
                 tool_receipts = (
                     tuple(
@@ -4491,6 +4939,8 @@ class AgentWorkflowEnv:
                             }
                         ),
                         "content_preview": content,
+                        "content_characters": len(raw_content),
+                        "preview_truncated": len(" ".join(raw_content.split())) > 160,
                 }
                 if enriched_artifact_feedback:
                     compact_record.update(
@@ -4521,9 +4971,11 @@ class AgentWorkflowEnv:
             node = self._graph.get_node(agent_id)
             metadata = execution.output_metadata.get(agent_id, {})
             routed_inputs = input_records(agent_id, call)
-            preview = " ".join(artifact.split())
-            if len(preview) > 160:
-                preview = preview[:157] + "..."
+            preview = _artifact_head_tail_preview(artifact, limit=160)
+            is_output_agent = agent_id == execution.output_agent_id
+            is_format_agent = bool(
+                is_output_agent and self._uses_format_agent_protocol()
+            )
             agent_artifacts.append(
                 {
                     "agent_id": agent_id,
@@ -4544,9 +4996,14 @@ class AgentWorkflowEnv:
                     "artifact_type": node.artifact_type,
                     "completion_condition": node.completion_condition,
                     "execution_role": (
-                        "format" if agent_id == execution.output_agent_id else "worker"
+                        "format"
+                        if is_format_agent
+                        else "output"
+                        if is_output_agent
+                        else "worker"
                     ),
-                    "is_output_agent": agent_id == execution.output_agent_id,
+                    "is_output_agent": is_output_agent,
+                    "is_format_agent": is_format_agent,
                     "upstream_source_ids": (
                         list(
                             dict.fromkeys(
@@ -4557,6 +5014,8 @@ class AgentWorkflowEnv:
                         )
                     ),
                     "artifact_preview": preview,
+                    "artifact_characters": len(artifact),
+                    "preview_truncated": len(" ".join(artifact.split())) > 160,
                     **(
                         {
                             "artifact_version": metadata.get(
@@ -4584,12 +5043,43 @@ class AgentWorkflowEnv:
                 # calling this value ``final_answer`` prematurely made a
                 # format-valid singleton look semantically terminal.
                 "output": answer,
+                "output_characters": (
+                    None if raw_answer is None else len(raw_answer)
+                ),
+                "output_preview_truncated": bool(
+                    raw_answer is not None
+                    and len(" ".join(raw_answer.split())) > 400
+                ),
                 "executed_agent_ids": list(execution.executed_agent_ids),
                 "reused_agent_ids": list(execution.reused_agent_ids),
                 "deferred_agent_ids": list(execution.deferred_agent_ids),
+                "accepted_action": action.to_dict(),
+                "execution_status": (
+                    "partial_failure" if partial_execution else "completed"
+                ),
+                "task_goal": {
+                    "source": "immutable_initial_task",
+                    "preserve_original_scope": True,
+                    "task_preview": _artifact_head_tail_preview(
+                        self._problem,
+                        limit=320,
+                    ),
+                },
                 "topology": self._graph.topology_statistics(),
+                "block_completion_order": [
+                    list(block) for block in execution.block_completion_order
+                ],
+                "communication_condition": (
+                    execution.communication_condition.value
+                ),
+                "unresolved_dirty_agent_ids": sorted(
+                    self._unresolved_dirty_agents
+                ),
                 "output_inbox": output_inbox,
                 "agent_artifacts": agent_artifacts,
+                "agent_call_receipts": self._agent_call_receipts(
+                    execution
+                ),
                 **(
                     {
                         "execution_reuse_receipts": [
@@ -4610,6 +5100,11 @@ class AgentWorkflowEnv:
             ensure_ascii=False,
             separators=(",", ":"),
         )
+        if execution_error_feedback is not None:
+            return (
+                f"{feedback}; {execution_error_feedback}; "
+                f"partial_execution_result={result}"
+            )
         return f"{feedback}; execution_result={result}"
 
     def _terminal_validation_error(self, answer: str) -> Optional[str]:
@@ -10537,12 +11032,13 @@ class AgentWorkflowEnv:
         elif action.action_type is AgentActionType.SET_OUTPUT:
             if action.agent_id is None:
                 raise GraphMutationError("set_output action is incomplete")
-            previous = graph.output_agent_id
             graph.set_output(action.agent_id)
-            seeds = {action.agent_id}
-            if previous is not None:
-                seeds.add(previous)
-            return graph.dirty_closure(seeds)
+            # DIRECT_REUSE: FlowSteer FINISH consumes the last execution
+            # result. SET_OUTPUT therefore changes only the pointer to an
+            # already-materialized artifact; it is not an Agent input and must
+            # not trigger a second generation. Missing artifacts remain dirty
+            # through AgentRuntime's missing-output boundary.
+            return set()
         else:
             raise GraphMutationError(f"unsupported graph edit: {action.action_type.value}")
 

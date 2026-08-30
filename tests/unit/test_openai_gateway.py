@@ -286,21 +286,24 @@ class MessageTests(unittest.TestCase):
         self.assertIn("target_agent: agent", text)
         self.assertIn("request_or_dependency: verify carefully", text)
         self.assertIn(
-            "Preserve the output form and level of detail",
+            "original task is immutable and authoritative",
             messages[0]["content"],
         )
         self.assertNotIn("<answer>", messages[0]["content"])
-        self.assertIn("exactly one listed executable action", messages[0]["content"])
+        self.assertIn("Output pointer selects an existing artifact", messages[0]["content"])
 
-    def test_intermediate_contract_forbids_task_level_answer_tag(self) -> None:
+    def test_generic_contract_preserves_task_scope_without_output_prompt_drift(self) -> None:
         messages = build_agent_messages(request(is_output_agent=False))
         system = messages[0]["content"]
-        self.assertIn("intermediate AgentGraph node", system)
-        self.assertIn("do not use <answer> tags", system)
-        self.assertIn("original relation, qualifiers, comparison criterion", system)
-        self.assertIn("independently reconstruct that evidence", system)
+        output_system = build_agent_messages(
+            request(is_output_agent=True)
+        )[0]["content"]
+        self.assertIn("original task is immutable and authoritative", system)
+        self.assertIn("cannot add, replace, or narrow", system)
+        self.assertIn("Output pointer selects an existing artifact", system)
         self.assertNotIn("direct semantic predecessor", system)
         self.assertNotIn("unique Output Agent", system)
+        self.assertEqual(system, output_system)
 
     def test_format_predecessor_has_explicit_semantic_handoff_contract(self) -> None:
         messages = build_agent_messages(

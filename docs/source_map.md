@@ -462,3 +462,84 @@ HealthBench case/answer database may enter a Tool query, corpus, Observation,
 Director feedback, Agent Artifact, or trajectory visible to a model. This
 retrieval condition adds no training, GRPO, LoRA, MACE, Bayesian update, Skill
 retrieval/injection/evolution, or learned medical memory.
+
+### HealthBench authoritative retrieval v1
+
+`config/evaluation_healthbench_professional_authoritative_paired_gpt54_rubric_v1.yaml`
+defines a new retrieval-enabled condition. It does not overwrite the
+MedRAG-only condition or the reference-compatible Tool-free conditions.
+
+| Module | Source classification | Exact boundary |
+| --- | --- | --- |
+| Frozen textbook search | **Direct SkillFlow reuse** | `FrozenMedRAGBM25Corpus` continues to use SkillFlow `training/environment.py::{_load_external_corpus,_search_external_corpus}` tokenization, BM25 constants, top-k projection, resource identity, and lifecycle. |
+| Tool registration, dispatch, timeout, schema validation, and receipts | **Direct SkillFlow-compatible project reuse** | Existing `ToolRegistry`, `ToolCapability`, `ToolReactExecutionAdapter`, and `ToolReceipt` remain authoritative; no second Agent runtime is introduced. |
+| Incremental AgentGraph execution and Artifact routing | **Direct FlowSteer-derived reuse** | Existing Canvas edit → execution → feedback, free Agent contracts, relation semantics, unique Output Agent, and explicit `FINISH` remain unchanged. Retrieval evidence travels through the existing ReAct trace and versioned Artifact envelope. |
+| PubMed retrieval | **Necessary HealthBench adaptation** | The checked FlowSteer and SkillFlow trees contain no callable Web-search backend. `healthbench_evidence_adapter.py::PubMedEUtilitiesClient` therefore uses the official NCBI `ESearch` and `EFetch` endpoints with a bounded result count and structured source receipts. It is restricted to the official NCBI E-utilities host and cannot accept rubric, reference, ground-truth, sample-ID, or evaluator fields. |
+| Aggregate evidence Tool | **Necessary HealthBench adaptation** | `healthbench-authoritative.search` interleaves the existing frozen textbook rank with PubMed results without comparing incompatible score scales. Each evidence item records source type, source, document ID, title, date, URL when provided by the source, excerpt, and rank. |
+| English query normalization and bounded complementary retrieval | **Thin adaptation of SkillFlow query pivot plus FlowSteer state-conditioned action admission** | The Tool schema asks for concise English clinical terminology because the measured frozen corpus is English and non-ASCII queries had substantially higher empty retrieval. One bounded distinct supplemental query may cover another unresolved clinical concept; duplicate actions are masked from execution. No rubric or reference answer determines query admission. |
+| Strict multi-branch StructuredAction schema | **Necessary provider-compatibility adaptation** | When both `search` and `complete` are legal, the HealthBench execution adapter supplies a strict JSON Schema `oneOf` over the existing five-field `StructuredAction` variants. It changes wire-format admission only, not the selected medical reasoning or topology. |
+| Atomic Tool transition in Canvas | **Necessary general AgentGraph compatibility adaptation** | `execution_mode=react` and `allowed_tools` may be updated in one admitted Canvas transition so the Director is not offered an impossible intermediate reasoning-Agent state. The validator remains authoritative and no medical role or fixed workflow is added. |
+
+The Web lane queries public medical literature only. HealthBench conversations
+may be reduced by the acting model to clinical search concepts, but exact
+benchmark-question lookup is not part of the Tool contract. `rubric_items`,
+physician/reference responses, canary strings, grader output, and benchmark
+answer stores remain evaluator-only. Direct and AgentGraph expose the same
+aggregate Tool, corpus revision, Web provider, query budget, timeout, generation
+condition, task IDs, and evaluator. This condition remains non-paper-comparable
+while it uses the available `gpt-5.4` alias rather than the exact dated paper
+grader identity.
+
+### HealthBench authoritative retrieval scope-preservation v2
+
+The v1 two-task canary exposed an orchestration-boundary regression rather
+than a Dataset Adapter or communication-transport failure: `SET_OUTPUT`
+invalidated and re-executed an Agent whose Artifact was already available.
+The second execution did not receive the first execution as a new upstream
+Artifact, so it repeated retrieval and replaced the prior response.  The v2
+condition reuses the source-aligned behavior already present in the main
+project tree rather than introducing a HealthBench-specific continuation path.
+
+| v2 boundary | Source and classification |
+| --- | --- |
+| `SET_OUTPUT` changes only the unique Output pointer and returns no dirty component when the selected Agent already has an Artifact | **Direct reuse** of `/ssd1/iclr/1/FlowSteer/src/interactive/agent_workflow_env.py::AgentGraphWorkflowEnv._apply_action`; this is the FlowSteer Canvas edit/execution boundary. A missing Output Artifact is still executed by the existing Runtime missing-output boundary. |
+| Ordinary Output and non-Output Agents receive the same generic execution contract; Output selection happens outside the model invocation | **Direct reuse** of `/ssd1/iclr/1/FlowSteer/src/interactive/openai_gateway.py`; this prevents pointer selection from silently changing Agent semantics. |
+| Head--tail Artifact previews with measured character counts | **Direct reuse** of the current project's generic Canvas-feedback helper, derived from the same FlowSteer progressive feedback boundary. Full Artifacts remain in trajectory receipts; only bounded feedback is shown to the Director. |
+| A free-text contract must preserve the original task scope and requested output form | **Minimal general compatibility adaptation** to the neutral Director/Canvas contract. It adds no medical role, fixed Agent count, topology, workflow template, rubric concept, or answer content. |
+| `execution_role=output` unless a real Formatter protocol is enabled | **Receipt correction** over existing terminal-protocol state. It distinguishes the unique Output pointer from a Formatter role without requiring either role in the open search space. |
+
+The new condition is
+`config/evaluation_healthbench_professional_authoritative_scope_v2_gpt54_rubric.yaml`
+with Director prompt
+`agentgraph.director.minimal-neutral-scalar.v3`.  The prompt adds one generic
+scope-preservation sentence only.  Retrieval, model, fixed 525-task ordering,
+generation settings, Tool limits, evaluator, and GPU0 service remain identical
+to authoritative v1.  The output namespace is independent, so v1 and v2
+receipts cannot be resumed or reported as one condition.  Prepare-only has
+validated the 525-task manifest; live canary and full metrics remain gated on
+their own completed receipts.
+
+### HealthBench registered execution profiles and Canvas feedback v3
+
+The scope-v2 canary proved that free AgentGraph and reciprocal execution were
+available, but its scalar `ADD_AGENT` domain omitted the Runtime execution
+profile.  Contracts that described retrieval therefore instantiated as
+`execution_mode=reasoning, allowed_tools=[]`.  The same canary also persisted
+successful ReAct and reciprocal DRAFT/REVISION details in trajectory records
+without projecting those public receipts into the next Director observation.
+
+| v3 boundary | Source and classification |
+| --- | --- |
+| Scalar `ADD_AGENT` exposes and requires the exact `(execution_mode, allowed_tools)` pair registered by `AgentRuntime` | **Direct reuse** of `/ssd1/iclr/1/FlowSteer/src/interactive/agent_workflow_env.py::AgentWorkflowEnv.model_admissible_action_targets`. This is capability admission, not an Agent role or topology rule. |
+| Constrained decoding uses one `oneOf` branch per registered execution profile | **Direct reuse** of `/ssd1/iclr/1/FlowSteer/src/interactive/director.py::director_live_action_parameter_json_schema_text`. The scalar action remains `agent_id + model_id + free-text contract + execution profile`. |
+| The collector binds the sampled `ADD_AGENT` receipt to the same live profile | **Direct reuse** of `/ssd1/iclr/1/FlowSteer/src/interactive/rollout_collector.py::_validate_hierarchical_action_receipts`; missing or unregistered pairs fail closed. |
+| Revision-live Artifact freshness and provenance remain visible after a rejected or pointer-only edit | **Thin generic reuse** of `/ssd1/iclr/1/FlowSteer/src/interactive/agent_workflow_env.py::current_artifact_receipts`; QA candidate and evaluator fields are deliberately omitted for HealthBench. |
+| Every `AgentCallRecord` phase, CommunicationEnvelope and public ReAct `StructuredAction → Observation` is projected into the next Canvas observation | **Necessary compatibility adaptation** at `_accepted_feedback`, using the existing canonical Runtime/trajectory fields. Full Artifacts and retrieved passages stay in trajectory storage; Director feedback contains bounded previews, Tool/source receipts and evidence provenance only. |
+| Persistent Director continuation keeps the full original task once, current receipts once, and compact prior Action--Observation feedback | **Direct SkillFlow/FlowSteer reuse** from SkillFlow `BoundedAgent.execute_turn` / `RolloutEngine.run` and FlowSteer Director compact-history/current-artifact logic. |
+
+`execution_mode=react` is a working mode of an Agent and is never serialized as
+an Agent role.  The v3 adaptation does not require retrieval, a minimum Agent
+count, a medical role, a reciprocal relation, or any fixed topology.  It only
+makes registered capabilities and measured execution feedback available to the
+free Director search space.  Rubrics, physician/reference responses and grader
+state remain evaluator-only.

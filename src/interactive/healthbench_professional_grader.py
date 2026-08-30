@@ -369,6 +369,7 @@ def _validate_receipt(
     *,
     task_id: str,
     candidate_answer: str,
+    expected_grader_model: str = HEALTHBENCH_PROFESSIONAL_GRADER_MODEL,
 ) -> dict[str, Any]:
     if set(result) != _RECEIPT_FIELDS:
         raise HealthBenchProfessionalGraderError(
@@ -377,7 +378,7 @@ def _validate_receipt(
     expected_constants = {
         "task_id": task_id,
         "evaluator_version": HEALTHBENCH_PROFESSIONAL_EVALUATOR_VERSION,
-        "grader_model": HEALTHBENCH_PROFESSIONAL_GRADER_MODEL,
+        "grader_model": expected_grader_model,
         "grader_reasoning_effort": HEALTHBENCH_PROFESSIONAL_REASONING_EFFORT,
         "length_adjustment_center": HEALTHBENCH_PROFESSIONAL_LENGTH_CENTER,
         "length_adjustment_penalty_per_500_chars": (
@@ -471,6 +472,7 @@ class HealthBenchProfessionalGrader:
 
     worker: PrivateJSONWorker
     private_cases: Mapping[str, Mapping[str, Any]]
+    grader_model: str = HEALTHBENCH_PROFESSIONAL_GRADER_MODEL
 
     @classmethod
     def from_private_cases_jsonl(
@@ -485,6 +487,7 @@ class HealthBenchProfessionalGrader:
         worker_timeout_seconds: float = 900.0,
         max_parse_attempts: int = 2,
         max_provider_attempts: int = 3,
+        grader_model: str = HEALTHBENCH_PROFESSIONAL_GRADER_MODEL,
         transport: JSONWorkerTransport | None = None,
     ) -> "HealthBenchProfessionalGrader":
         """Bind a pinned simple-evals checkout and private case JSONL."""
@@ -506,6 +509,8 @@ class HealthBenchProfessionalGrader:
             raise ValueError("HealthBench grader parse attempts must be positive")
         if max_provider_attempts < 1:
             raise ValueError("HealthBench grader provider attempts must be positive")
+        if type(grader_model) is not str or not grader_model.strip():
+            raise ValueError("HealthBench grader model must be non-empty")
         command = [
             str(interpreter),
             str(_WORKER),
@@ -519,6 +524,8 @@ class HealthBenchProfessionalGrader:
             str(max_parse_attempts),
             "--max-provider-attempts",
             str(max_provider_attempts),
+            "--grader-model",
+            grader_model,
         ]
         if api_base_url is not None:
             command.extend(("--api-base-url", api_base_url))
@@ -530,6 +537,7 @@ class HealthBenchProfessionalGrader:
                 transport=transport,
             ),
             private_cases=load_private_cases(private_cases_path),
+            grader_model=grader_model,
         )
 
     async def grade(self, task_id: str, candidate_answer: str) -> Mapping[str, Any]:
@@ -555,7 +563,10 @@ class HealthBenchProfessionalGrader:
         )
         return MappingProxyType(
             _validate_receipt(
-                result, task_id=task_id, candidate_answer=candidate_answer
+                result,
+                task_id=task_id,
+                candidate_answer=candidate_answer,
+                expected_grader_model=self.grader_model,
             )
         )
 
@@ -575,6 +586,7 @@ class HealthBenchProfessionalGrader:
                 result,
                 task_id=_PREFLIGHT_TASK_ID,
                 candidate_answer=_PREFLIGHT_ANSWER,
+                expected_grader_model=self.grader_model,
             )
         )
 

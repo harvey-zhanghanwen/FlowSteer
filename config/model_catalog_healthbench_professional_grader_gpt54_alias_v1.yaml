@@ -1,0 +1,21 @@
+providers:
+  - provider_id: "vectorengine-healthbench-professional-rubric-grader"
+    kind: "openai-compatible"
+    endpoint: "${VECTOR_ENGINE_BASE_URL:-https://api.vectorengine.ai/v1}"
+    max_concurrency: 8
+    api_key_env: "VECTOR_ENGINE_API_KEY"
+
+# Evaluator-only catalog. This model is absent from the AgentGraph Executor
+# catalog. It uses the same HealthBench rubric and aggregation implementation,
+# but is not the paper-reference grader identity.
+models:
+  - model_id: "healthbench-professional-rubric-grader-gpt54-alias"
+    provider_id: "vectorengine-healthbench-professional-rubric-grader"
+    model_name: "gpt-5.4"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "gpt"
+      profile: "evaluator_only;healthbench_professional;non_reference;responses_api;reasoning_effort=low"
+      max_tokens: "4096"

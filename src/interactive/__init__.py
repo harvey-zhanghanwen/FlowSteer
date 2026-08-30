@@ -145,6 +145,12 @@ from .healthbench_tool_adapter import (
     FrozenMedRAGBM25Corpus,
     open_healthbench_medrag_tool_registry,
 )
+from .healthbench_evidence_adapter import (
+    HEALTHBENCH_AUTHORITATIVE_SEARCH_TOOL_ID,
+    HealthBenchAuthoritativeReactExecutionAdapter,
+    PubMedEUtilitiesClient,
+    open_healthbench_authoritative_tool_registry,
+)
 from .swe_worktree import (
     PreparedSWEbenchWorktree,
     SWEbenchRepositoryIdentity,
@@ -254,6 +260,10 @@ __all__ = [
     'HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID',
     'FrozenMedRAGBM25Corpus',
     'open_healthbench_medrag_tool_registry',
+    'HEALTHBENCH_AUTHORITATIVE_SEARCH_TOOL_ID',
+    'HealthBenchAuthoritativeReactExecutionAdapter',
+    'PubMedEUtilitiesClient',
+    'open_healthbench_authoritative_tool_registry',
     'PreparedSWEbenchWorktree',
     'SWEbenchRepositoryIdentity',
     'prepare_swebench_worktree_for_task',

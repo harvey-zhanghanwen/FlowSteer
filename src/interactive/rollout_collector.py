@@ -31,6 +31,8 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequen
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from jsonschema import Draft202012Validator
+
 from .agent_action_parser import (
     AgentAction,
     AgentActionParseError,
@@ -2462,8 +2464,7 @@ def _validate_v3_hierarchical_action_receipt(
                 "v3 MODIFY field/Agent receipt is incomplete"
             )
         if action_value is not None and (
-            set(action_value) != {"action", "agent_id", selected_field}
-            or action_value.get("agent_id") != selected_agent_id
+            action_value.get("agent_id") != selected_agent_id
         ):
             raise ReceiptValidationError(
                 "v3 MODIFY field/Agent receipt differs from the parsed atomic patch"
@@ -2492,14 +2493,11 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError("v3 MODIFY selected an inadmissible Agent")
         if len(admitted_agent_ids) > 1:
             expected_phases.add("modify_agent_selection")
-        value_schema = parameter_schema["properties"][selected_field]
-        if (
-            action_value is not None
-            and "enum" in value_schema
-            and action_value[selected_field] not in value_schema["enum"]
+        if action_value is not None and any(
+            Draft202012Validator(parameter_schema).iter_errors(action_value)
         ):
             raise ReceiptValidationError(
-                "v3 MODIFY value is outside its discrete live domain"
+                "v3 MODIFY patch is outside its exact live parameter schema"
             )
         expected_parameter_branch = f"modify_agent:{selected_field}"
         if metadata.get("selected_add_agent_ids") is not None:
@@ -2596,14 +2594,82 @@ def _validate_v3_hierarchical_action_receipt(
         expected_parameter_branch = f"set_relation:{selected_index}"
     else:
         try:
-            director_live_action_parameter_json_schema_text(
-                selected_action,
-                domains,
+            parameter_schema = json.loads(
+                director_live_action_parameter_json_schema_text(
+                    selected_action,
+                    domains,
+                )
             )
         except ValueError as exc:
             raise ReceiptValidationError(
                 "v3 final action violates its live target domain"
             ) from exc
+        if selected_action == "add_agent" and action_value is not None:
+            add_domain = domains.get("add_agent")
+            if not isinstance(add_domain, Mapping):
+                raise ReceiptValidationError(
+                    "v3 ADD_AGENT receipt has no live target domain"
+                )
+            registered_profiles = {
+                (
+                    item.get("execution_mode"),
+                    tuple(item.get("allowed_tools", ())),
+                )
+                for item in add_domain.get(
+                    "registered_execution_profiles", ()
+                )
+                if isinstance(item, Mapping)
+                and isinstance(item.get("allowed_tools"), (list, tuple))
+            }
+            required_fields = {
+                "action",
+                "agent_id",
+                "model_id",
+                "contract",
+                "execution_mode",
+                "allowed_tools",
+            }
+            observed_profile = (
+                action_value.get("execution_mode"),
+                tuple(action_value.get("allowed_tools", ())),
+            )
+            if (
+                set(action_value) != required_fields
+                or action_value.get("agent_id")
+                not in add_domain.get("agent_ids", ())
+                or action_value.get("model_id")
+                not in add_domain.get("model_ids", ())
+                or observed_profile not in registered_profiles
+            ):
+                raise ReceiptValidationError(
+                    "v3 final ADD_AGENT parameters are outside the exact live domain"
+                )
+            if metadata.get("selected_add_agent_ids") is not None:
+                raise ReceiptValidationError(
+                    "v3 scalar ADD_AGENT receipt carries subgraph declarations"
+                )
+            if metadata.get("selected_add_agent_roles") is not None:
+                raise ReceiptValidationError(
+                    "v3 scalar ADD_AGENT receipt carries role-first declarations"
+                )
+            schema_branches = parameter_schema.get(
+                "oneOf", (parameter_schema,)
+            )
+            if not any(
+                action_value.get("agent_id")
+                in branch.get("properties", {})
+                .get("agent_id", {})
+                .get("enum", ())
+                and action_value.get("model_id")
+                in branch.get("properties", {})
+                .get("model_id", {})
+                .get("enum", ())
+                for branch in schema_branches
+                if isinstance(branch, Mapping)
+            ):
+                raise ReceiptValidationError(
+                    "v3 scalar ADD_AGENT receipt differs from its parameter schema"
+                )
         if (
             action_value is not None
             and selected_action in {"delete_agent", "set_output"}

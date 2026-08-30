@@ -805,3 +805,126 @@ change was made during profile selection.
   six physical provider attempts. The grader model, reasoning effort,
   evaluator code, rubric aggregation, samples, generation condition, and
   score are unchanged; every retry remains visible in the grader receipt.
+
+## 2026-08-30: HealthBench authoritative retrieval v1
+
+- Kept the Tool-free and MedRAG-only HealthBench conditions recoverable and
+  introduced a new artifact/config namespace for authoritative retrieval.
+- Reused the frozen 125,847-chunk SkillFlow MedRAG textbook corpus and the
+  existing ToolRegistry/ReAct/Canvas/trajectory path without adding a second
+  orchestration core.
+- Added a single aggregate `healthbench-authoritative.search` capability. It
+  returns the existing textbook evidence plus bounded live PubMed evidence
+  from NCBI E-utilities with source-level status and provenance receipts.
+- Did not add HealthBench questions, task IDs, rubrics, physician responses,
+  reference answers, grader output, or benchmark answer databases to the
+  retrieval source or Tool schema.
+- Generalized the HealthBench runtime condition parser so MedRAG-only and
+  authoritative-retrieval modes remain separately versioned and fail closed on
+  an incompatible Tool ID, source, runtime limit, or condition ID.
+- Replaced the prior first-hit-forces-completion behavior only in the new
+  condition: an Agent may issue one materially distinct supplemental clinical
+  query before completion, while duplicate searches are rejected.
+- Added a strict `oneOf` response schema for the simultaneous `search` versus
+  `complete` state to reduce StructuredAction parsing failures without fixing
+  an Agent role, medical workflow, or topology.
+- Made the model-admissible Canvas Tool transition atomic so a Director can
+  change `execution_mode` and `allowed_tools` together rather than repeatedly
+  proposing a validator-invalid reasoning-Agent intermediate state.
+- Preserved Qwen3.5-9B on GPU0, the simple-evals rubric aggregation, the fixed
+  public-test task order, and inference-only execution. No backward pass,
+  optimizer update, LoRA, GRPO, MACE, Bayesian posterior, Skill injection, or
+  Skill evolution is enabled.
+- Metrics are not recorded in this entry until a receipt-backed canary or
+  complete evaluation actually finishes. A live PubMed Tool condition is
+  reported separately from both the Tool-free and frozen MedRAG conditions.
+# 2026-08-30 — HealthBench authoritative retrieval canary receipt repair
+
+- The first paired canary completed both Direct responses and rubric grading,
+  then failed before AgentGraph execution with
+  `ReceiptValidationError: v3 MODIFY field/Agent receipt differs from the parsed atomic patch`.
+- Root cause: the Director correctly sampled the Runtime-registered atomic
+  `execution_mode + allowed_tools` profile, while the rollout receipt validator
+  still expected a legacy one-field `MODIFY_AGENT` payload.
+- Necessary project adaptation: receipt validation now accepts only a complete
+  four-field execution-profile transaction and verifies that the coupled pair
+  exactly matches one live JSON-Schema branch.  Legacy one-field MODIFY
+  validation remains unchanged.
+- No task text, rubric item, reference response, medical role, or topology was
+  added to the orchestration core.
+
+## 2026-08-30: HealthBench authoritative retrieval scope-preservation v2
+
+- Completed the authoritative-v1 two-task canary under its frozen condition.
+  Single-Agent ReAct+MedRAG+PubMed scored mean
+  `overall_score_length_adjusted=0.6341221333`; free AgentGraph scored
+  `0.4700098333`, a measured delta of `-0.1641123`.  Both tasks reached valid
+  rubric grading and explicit `FINISH`.  These two cases validate the chain
+  only and are not a 525-task benchmark estimate.
+- The trajectory receipts showed that each free Graph used one Agent and that
+  `SET_OUTPUT` re-executed it after evidence-backed output already existed.
+  The second call repeated retrieval and replaced the earlier Artifact.  The
+  complete HealthBench conversation was present at Runtime; the failure was
+  not missing task input or broken Agent communication.
+- Reused the main project implementation in which `SET_OUTPUT` is pointer-only.
+  Existing Artifacts are preserved; a genuinely missing Output Artifact still
+  executes through the generic Runtime boundary.
+- Reused the same generic execution contract for ordinary Output and
+  non-Output Agents.  Added one neutral Director constraint requiring every
+  free-text contract to preserve the original task scope and output form.
+  No medical role, fixed topology, fixed Agent count, rubric criterion, or
+  workflow template was added.
+- Corrected Canvas feedback so a unique Output Agent is labelled `output`, not
+  `format`, unless a real Formatter protocol is enabled.  Added bounded
+  head--tail Artifact previews and measured truncation receipts so the Director
+  can observe response coverage without duplicating the full response.
+- Added regression tests for pointer-only Output selection, Artifact identity
+  preservation, true output/format roles, head--tail preview, the neutral v3
+  prompt, and identical generic executor contracts.  Focused tests and Python
+  compilation passed; no live benchmark metric is inferred from static tests.
+- Added the independent v2 evaluation condition and completed prepare-only on
+  the same ordered 525 public-test tasks.  The next evidence gate is a fresh
+  two-task canary; the 525-task run is allowed only if the canary confirms no
+  `SET_OUTPUT` re-execution, no evidence loss, valid rubric grading, and legal
+  explicit `FINISH`.
+
+## 2026-08-30: HealthBench registered execution profiles and Canvas feedback v3
+
+- Confirmed the scope-v2 two-task Stable Zero canary at 2/2 valid rubric
+  evaluations and explicit `FINISH`; its mean length-adjusted score was
+  `0.5525903` for Single-Agent ReAct and `0.4759248` for AgentGraph. These are
+  canary measurements, not a 525-task benchmark estimate.
+- Identified a capability-admission defect: scalar `ADD_AGENT` did not require
+  `execution_mode` or `allowed_tools`, so all Graph nodes silently used
+  `reasoning + []` even when their free-text contract described retrieval.
+- Directly ported the main FlowSteer Runtime-owned registered execution-profile
+  domain, exact constrained-decoding branches and collector receipt binding.
+  ReAct remains an `execution_mode`, not a role; no medical role, Agent count
+  or topology is required.
+- Added revision-live Artifact receipts and ordered `AgentCallRecord`
+  projection. The next Director observation now contains the accepted Canvas
+  action/result, current Graph and remaining rounds, `single/draft/revision`
+  phases, CommunicationEnvelope previews, reciprocal block completion order,
+  public ReAct `StructuredAction → Observation` receipts, Tool/source receipts,
+  current Artifact freshness/provenance and explicit FINISH admissibility.
+- Kept the complete HealthBench conversation in the immutable initial Director
+  context. Each later observation carries only a bounded task-goal reference;
+  evidence excerpts and complete Artifact bodies remain trajectory-only to
+  avoid repeated context growth.
+- Added the independent condition
+  `healthbench_professional_authoritative_multiagent_feedback_v3_gpt54_rubric`.
+  Prepare-only validated the same ordered 525 official public-test tasks. No
+  training, backward pass, optimizer update, LoRA, GRPO, MACE, Bayesian update
+  or Skill evolution is enabled.
+- Completed the independent two-task canary. Both tasks reached explicit
+  `FINISH`, valid rubric grading and zero collection/provider failures. The
+  Single-Agent ReAct mean `overall_score_length_adjusted` was `0.6257137`; the
+  AgentGraph mean was `0.8053899`. These values are Stable Zero evidence only,
+  not a 525-task benchmark estimate.
+- Both Graphs selected the exact registered
+  `react + [healthbench-authoritative.search]` profile on their first
+  `ADD_AGENT`. Across the two tasks, the Graph executions recorded three
+  successful Tool Observations and non-empty ToolReceipt sets. Every sampled
+  action-target-domain receipt used v12; `SET_OUTPUT` made zero executor calls.
+  Model-visible Director/Agent prompts contained no rubric, physician response,
+  reference response, grader output or canary field.

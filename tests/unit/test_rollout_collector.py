@@ -624,6 +624,123 @@ def test_native_sglang_v3_uses_exact_live_relation_candidate_receipt():
     assert finish_response.metadata["request_count"] == 1
 
 
+def test_native_sglang_v3_binds_role_neutral_scalar_add_execution_profile():
+    actions = ("add_agent",)
+    domains = {
+        "add_agent": {
+            "agent_ids": ["node_1"],
+            "existing_agent_ids": [],
+            "model_ids": ["cheap-model"],
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+                "execution_mode",
+                "allowed_tools",
+            ],
+            "registered_execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": [
+                        "healthbench-authoritative.search"
+                    ],
+                },
+            ],
+            "contract_semantics": "free_text",
+            "contract_min_length": 12,
+            "contract_requirements": [
+                "plain_language_responsibility",
+                "inputs_consumed",
+                "expected_artifact",
+                "preserve_original_task_scope_and_output_form",
+            ],
+        }
+    }
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    final_action = {
+        "action": "add_agent",
+        "agent_id": "node_1",
+        "model_id": "cheap-model",
+        "contract": "Use available public evidence to answer the task.",
+        "execution_mode": "react",
+        "allowed_tools": ["healthbench-authoritative.search"],
+    }
+    client = ScriptedSGLangClient(
+        [json.dumps(final_action, separators=(",", ":"))],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    async def post_without_threadpool(payload):
+        return client._post_json(payload), 0.0, 1
+
+    client._post_with_retries = post_without_threadpool
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(
+            actions
+        ),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+
+    response = asyncio.run(client.propose("empty Canvas", **schema_request))
+
+    parameter_schema = json.loads(
+        director_live_action_parameter_json_schema_text(
+            "add_agent",
+            domains,
+        )
+    )
+    assert client.payloads[0]["sampling_params"]["json_schema"] == (
+        json.dumps(
+            parameter_schema,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    assert _validate_v3_hierarchical_action_receipt(
+        AgentActionParser().parse(response.text),
+        response.metadata,
+        schema_request,
+    ) == set()
+    for invalid_action in (
+        {
+            key: value
+            for key, value in final_action.items()
+            if key not in {"execution_mode", "allowed_tools"}
+        },
+        {
+            **final_action,
+            "execution_mode": "reasoning",
+        },
+        {
+            **final_action,
+            "role_family": "react",
+        },
+    ):
+        with pytest.raises(
+            ReceiptValidationError,
+            match="outside the exact live domain",
+        ):
+            _validate_v3_hierarchical_action_receipt(
+                AgentActionParser().parse(
+                    json.dumps(invalid_action, separators=(",", ":"))
+                ),
+                response.metadata,
+                schema_request,
+            )
+
+
 def test_native_sglang_v3_regenerates_malformed_relation_candidate_selector_once():
     candidates = [
         {
@@ -1433,6 +1550,111 @@ def test_native_sglang_v3_binds_modify_agent_and_discrete_value():
         "modify_field_selection",
         "modify_agent_selection",
     }
+
+
+def test_native_sglang_v3_validates_atomic_execution_profile_modify_receipt():
+    actions = ("modify_agent",)
+    domains = {
+        "modify_agent": {
+            "mutable_fields": ["execution_mode", "allowed_tools"],
+            "per_agent_candidates": [
+                {
+                    "agent_id": "reasoner",
+                    "mutable_fields": ["execution_mode", "allowed_tools"],
+                    "current_values": {
+                        "execution_mode": "reasoning",
+                        "allowed_tools": [],
+                    },
+                    "execution_profiles": [
+                        {
+                            "execution_mode": "react",
+                            "allowed_tools": ["healthbench-authoritative.search"],
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    final_action = {
+        "action": "modify_agent",
+        "agent_id": "reasoner",
+        "execution_mode": "react",
+        "allowed_tools": ["healthbench-authoritative.search"],
+    }
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"modify_agent","field":"allowed_tools"}',
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    async def post_without_threadpool(payload):
+        return client._post_json(payload), 0.0, 1
+
+    client._post_with_retries = post_without_threadpool
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(actions),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
+    }
+
+    response = asyncio.run(
+        client.propose(
+            "repair Canvas",
+            **schema_request,
+        )
+    )
+
+    assert response.metadata["selected_modify_agent_id"] == "reasoner"
+    assert client.payloads[1]["sampling_params"]["json_schema"] == (
+        director_live_action_parameter_json_schema_text(
+            "modify_agent",
+            domains,
+            modify_field="allowed_tools",
+            modify_agent_id="reasoner",
+        )
+    )
+    assert _validate_v3_hierarchical_action_receipt(
+        AgentActionParser().parse(response.text),
+        response.metadata,
+        schema_request,
+    ) == {"modify_field_selection"}
+    for invalid_action in (
+        {
+            "action": "modify_agent",
+            "agent_id": "reasoner",
+            "allowed_tools": ["healthbench-authoritative.search"],
+        },
+        {
+            "action": "modify_agent",
+            "agent_id": "reasoner",
+            "execution_mode": "reasoning",
+            "allowed_tools": ["healthbench-authoritative.search"],
+        },
+        {
+            **final_action,
+            "contract": "unadmitted extra field",
+        },
+    ):
+        with pytest.raises(
+            ReceiptValidationError,
+            match="outside its exact live parameter schema",
+        ):
+            _validate_v3_hierarchical_action_receipt(
+                AgentActionParser().parse(
+                    json.dumps(invalid_action, separators=(",", ":"))
+                ),
+                response.metadata,
+                schema_request,
+            )
 
 
 def test_native_sglang_v3_regenerates_one_truncated_parameter_with_exact_receipts():

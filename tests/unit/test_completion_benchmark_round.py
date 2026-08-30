@@ -126,6 +126,37 @@ def _healthbench_react_config() -> dict:
     return config
 
 
+def _healthbench_authoritative_config() -> dict:
+    config = _healthbench_react_config()
+    condition_id = "healthbench-professional-paired-authoritative-test"
+    config["experiment"].update(
+        condition_id=condition_id,
+        tool_version="skillflow.medrag+ncbi-pubmed-eutils-react.v1",
+    )
+    config["healthbench_professional_evaluation"].update(
+        direct_allowed_tools=["healthbench-authoritative.search"],
+        direct_protocol=(
+            "healthbench_professional_single_agent_react_authoritative_v1"
+        ),
+    )
+    config["healthbench_tool_runtime"].update(
+        condition_id=condition_id,
+        mode="model_driven_authoritative_search",
+        max_successful_queries=2,
+        require_initial_search=True,
+        authoritative_web_search={
+            "enabled": True,
+            "provider": "ncbi_pubmed_eutils",
+            "base_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+            "tool_name": "FlowSteer-HealthBench",
+            "retmax": 3,
+            "request_timeout_seconds": 8.0,
+            "minimum_interval_seconds": 0.4,
+        },
+    )
+    return config
+
+
 def _assert_config_rejected(config: dict, expected_check: str) -> None:
     try:
         _MODULE.validate_completion_benchmark_config(config)
@@ -228,6 +259,17 @@ def test_healthbench_react_direct_requires_paired_medrag_condition_binding():
         for section_name, section_overrides in overrides.items():
             invalid[section_name].update(section_overrides)
         _assert_config_rejected(invalid, expected_check)
+
+
+def test_healthbench_authoritative_retrieval_is_a_distinct_valid_condition():
+    config = _healthbench_authoritative_config()
+    _MODULE.validate_completion_benchmark_config(config)
+
+    invalid = deepcopy(config)
+    invalid["healthbench_professional_evaluation"]["direct_allowed_tools"] = [
+        "healthbench-medrag.search"
+    ]
+    _assert_config_rejected(invalid, "healthbench.direct_allowed_tools")
 
 
 def test_evaluation_config_allows_base_director_without_lora_adapter():

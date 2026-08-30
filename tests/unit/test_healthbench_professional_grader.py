@@ -55,7 +55,12 @@ sys.modules[_WORKER_SPEC.name] = _WORKER
 _WORKER_SPEC.loader.exec_module(_WORKER)
 
 
-def _receipt(request: dict, *, termination: str = "graded") -> bytes:
+def _receipt(
+    request: dict,
+    *,
+    termination: str = "graded",
+    grader_model: str = HEALTHBENCH_PROFESSIONAL_GRADER_MODEL,
+) -> bytes:
     answer = request["candidate_answer"]
     raw_score = 0.75 if termination == "graded" else None
     adjusted_score = (
@@ -101,7 +106,7 @@ def _receipt(request: dict, *, termination: str = "graded") -> bytes:
             else {"error_type": "SyntheticProviderError", "message": "failed"}
         ),
         "grader_latency_ms": 12.0,
-        "grader_model": HEALTHBENCH_PROFESSIONAL_GRADER_MODEL,
+        "grader_model": grader_model,
         "grader_reasoning_effort": HEALTHBENCH_PROFESSIONAL_REASONING_EFFORT,
         "grader_token_usage": {
             "input_tokens": 40,
@@ -227,6 +232,30 @@ class HealthBenchProfessionalGraderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             HEALTHBENCH_PROFESSIONAL_REASONING_EFFORT,
             result["grader_reasoning_effort"],
+        )
+
+    async def test_versioned_non_reference_grader_is_explicitly_bound(self) -> None:
+        grader_model = "gpt-5.4"
+        transport = InMemoryJSONTransport(
+            lambda encoded: _receipt(
+                json.loads(encoded), grader_model=grader_model
+            )
+        )
+        grader = HealthBenchProfessionalGrader.from_private_cases_jsonl(
+            private_cases_path=self.private_cases,
+            official_source_root=self.official_source,
+            interpreter_path=Path(sys.executable).resolve(),
+            grader_model=grader_model,
+            transport=transport,
+        )
+
+        result = await grader.preflight()
+
+        self.assertEqual(grader_model, result["grader_model"])
+        self.assertEqual(grader_model, grader.grader_model)
+        self.assertEqual(
+            ["--grader-model", grader_model],
+            list(grader.worker.command[-2:]),
         )
 
     async def test_provider_failure_is_an_invalid_receipt_not_score_zero(self) -> None:

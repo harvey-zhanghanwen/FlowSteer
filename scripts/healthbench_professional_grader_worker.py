@@ -177,6 +177,7 @@ class _BoundedResponsesSampler:
     sampler_response_type: type[Any]
     max_parse_attempts: int
     max_calls: int
+    grader_model: str = GRADER_MODEL
     max_provider_attempts: int = 3
     calls: int = 0
     attempts_by_prompt: dict[str, int] = field(default_factory=dict)
@@ -224,7 +225,7 @@ class _BoundedResponsesSampler:
             started = time.perf_counter()
             try:
                 response = self.client.responses.create(
-                    model=GRADER_MODEL,
+                    model=self.grader_model,
                     input=request_messages,
                     reasoning={"effort": REASONING_EFFORT},
                 )
@@ -278,6 +279,7 @@ def _base_receipt(
     candidate_answer: str,
     latency_ms: float,
     sampler: _BoundedResponsesSampler | None,
+    grader_model: str,
 ) -> dict[str, Any]:
     api_receipts = list(sampler.api_call_receipts) if sampler is not None else []
     return {
@@ -286,7 +288,7 @@ def _base_receipt(
         "grader_api_calls": sampler.calls if sampler is not None else 0,
         "grader_error": None,
         "grader_latency_ms": latency_ms,
-        "grader_model": GRADER_MODEL,
+        "grader_model": grader_model,
         "grader_reasoning_effort": REASONING_EFFORT,
         "grader_token_usage": _sum_usage(api_receipts),
         "length_adjustment_center": LENGTH_CENTER,
@@ -331,6 +333,7 @@ def _run(arguments: argparse.Namespace, request: dict[str, Any]) -> dict[str, An
         sampler = _BoundedResponsesSampler(
             client=OpenAI(**client_options),
             sampler_response_type=sampler_response_type,
+            grader_model=arguments.grader_model,
             max_parse_attempts=arguments.max_parse_attempts,
             max_calls=(
                 len(rubric_items)
@@ -367,6 +370,7 @@ def _run(arguments: argparse.Namespace, request: dict[str, Any]) -> dict[str, An
             candidate_answer=candidate_answer,
             latency_ms=latency_ms,
             sampler=sampler,
+            grader_model=arguments.grader_model,
         )
         receipt.update(
             {
@@ -391,6 +395,7 @@ def _run(arguments: argparse.Namespace, request: dict[str, Any]) -> dict[str, An
             candidate_answer=candidate_answer,
             latency_ms=latency_ms,
             sampler=sampler,
+            grader_model=arguments.grader_model,
         )
         receipt["grader_error"] = {
             "error_type": type(error).__name__,
@@ -411,6 +416,7 @@ if __name__ == "__main__":
     parser.add_argument("--official-source-root", required=True)
     parser.add_argument("--api-key-environment", default="OPENAI_API_KEY")
     parser.add_argument("--api-base-url")
+    parser.add_argument("--grader-model", default=GRADER_MODEL)
     parser.add_argument("--request-timeout-seconds", type=float, default=90.0)
     parser.add_argument("--max-parse-attempts", type=int, default=2)
     parser.add_argument("--max-provider-attempts", type=int, default=3)

@@ -63,6 +63,11 @@ from src.interactive.healthbench_tool_adapter import (
     HealthBenchMedRAGReactExecutionAdapter,
     open_healthbench_medrag_tool_registry,
 )
+from src.interactive.healthbench_evidence_adapter import (
+    HealthBenchAuthoritativeReactExecutionAdapter,
+    PubMedEUtilitiesClient,
+    open_healthbench_authoritative_tool_registry,
+)
 from src.interactive.hotpot_training_schedule import (
     FrozenHotpotTrainingSchedule,
     HotpotTrainingCursorState,
@@ -137,6 +142,9 @@ QA_TOOL_RUNTIME_MODE = "model_driven_search_read"
 ENVIRONMENT_RUNTIME_MODE = "model_driven_ragen_react"
 AIME_TOOL_RUNTIME_MODE = "model_driven_computation"
 HEALTHBENCH_TOOL_RUNTIME_MODE = "model_driven_medrag_search"
+HEALTHBENCH_AUTHORITATIVE_TOOL_RUNTIME_MODE = (
+    "model_driven_authoritative_search"
+)
 SWE_CODING_RUNTIME_MODE = "iterative_repository_coding"
 
 EXPECTED_SOURCE_ORDER = (
@@ -844,9 +852,15 @@ def _healthbench_tool_runtime_settings(
             "healthbench_tool_runtime is not configured for dataset "
             f"{source_key!r}"
         )
-    if section.get("mode") != HEALTHBENCH_TOOL_RUNTIME_MODE:
+    runtime_mode = section.get("mode")
+    if runtime_mode not in {
+        HEALTHBENCH_TOOL_RUNTIME_MODE,
+        HEALTHBENCH_AUTHORITATIVE_TOOL_RUNTIME_MODE,
+    }:
         raise ConfigurationError(
-            "healthbench_tool_runtime.mode must be model_driven_medrag_search"
+            "healthbench_tool_runtime.mode must be "
+            "model_driven_medrag_search or "
+            "model_driven_authoritative_search"
         )
 
     experiment = _mapping(config.get("experiment"), "experiment")
@@ -899,8 +913,9 @@ def _healthbench_tool_runtime_settings(
         raise ConfigurationError(
             "healthbench_tool_runtime.tool_timeout_seconds must be positive"
         )
-    return {
+    settings = {
         "source_key": source_key,
+        "mode": runtime_mode,
         "resource_dir": section["resource_dir"].strip(),
         "source_identity": section["source_identity"].strip(),
         "source_revision": section["source_revision"].strip(),
@@ -909,6 +924,89 @@ def _healthbench_tool_runtime_settings(
         "max_tool_calls": int(section["max_tool_calls_per_agent_call"]),
         "tool_timeout_seconds": float(timeout_seconds),
     }
+    if runtime_mode == HEALTHBENCH_AUTHORITATIVE_TOOL_RUNTIME_MODE:
+        max_successful_queries = section.get("max_successful_queries")
+        if (
+            type(max_successful_queries) is not int
+            or max_successful_queries < 1
+            or max_successful_queries > settings["max_tool_calls"]
+        ):
+            raise ConfigurationError(
+                "healthbench_tool_runtime.max_successful_queries must be an "
+                "integer between 1 and max_tool_calls_per_agent_call"
+            )
+        require_initial_search = section.get("require_initial_search")
+        if type(require_initial_search) is not bool:
+            raise ConfigurationError(
+                "healthbench_tool_runtime.require_initial_search must be bool"
+            )
+        web = _mapping(
+            section.get("authoritative_web_search"),
+            "healthbench_tool_runtime.authoritative_web_search",
+        )
+        if web.get("enabled") is not True:
+            raise ConfigurationError(
+                "healthbench_tool_runtime.authoritative_web_search.enabled "
+                "must be true"
+            )
+        if web.get("provider") != "ncbi_pubmed_eutils":
+            raise ConfigurationError(
+                "healthbench_tool_runtime.authoritative_web_search.provider "
+                "must be ncbi_pubmed_eutils"
+            )
+        base_url = web.get("base_url")
+        if (
+            not isinstance(base_url, str)
+            or base_url.rstrip("/")
+            != "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+        ):
+            raise ConfigurationError(
+                "healthbench_tool_runtime.authoritative_web_search.base_url "
+                "must be the official NCBI E-utilities endpoint"
+            )
+        tool_name = web.get("tool_name")
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            raise ConfigurationError(
+                "healthbench_tool_runtime.authoritative_web_search.tool_name "
+                "must be non-empty text"
+            )
+        retmax = web.get("retmax")
+        if type(retmax) is not int or not 1 <= retmax <= 5:
+            raise ConfigurationError(
+                "healthbench_tool_runtime.authoritative_web_search.retmax "
+                "must be an integer from 1 through 5"
+            )
+        for field_name in (
+            "request_timeout_seconds",
+            "minimum_interval_seconds",
+        ):
+            value = web.get(field_name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or float(value) <= 0
+            ):
+                raise ConfigurationError(
+                    "healthbench_tool_runtime.authoritative_web_search."
+                    f"{field_name} must be positive"
+                )
+        settings.update(
+            max_successful_queries=max_successful_queries,
+            require_initial_search=require_initial_search,
+            authoritative_web_search={
+                "provider": "ncbi_pubmed_eutils",
+                "base_url": base_url.rstrip("/"),
+                "tool_name": tool_name.strip(),
+                "retmax": retmax,
+                "request_timeout_seconds": float(
+                    web["request_timeout_seconds"]
+                ),
+                "minimum_interval_seconds": float(
+                    web["minimum_interval_seconds"]
+                ),
+            },
+        )
+    return settings
 
 
 def _environment_runtime_settings(
@@ -2195,30 +2293,71 @@ class LiveSmokeBackend:
 
         if healthbench_settings is not None:
             source_key = str(healthbench_settings["source_key"])
-            opened = open_healthbench_medrag_tool_registry(
-                corpus_root=_resolve(
+            common_open_arguments = {
+                "corpus_root": _resolve(
                     self.project_root,
                     str(healthbench_settings["resource_dir"]),
                 ),
-                source_identity=str(healthbench_settings["source_identity"]),
-                expected_source_revision=str(
+                "source_identity": str(
+                    healthbench_settings["source_identity"]
+                ),
+                "expected_source_revision": str(
                     healthbench_settings["source_revision"]
                 ),
-                expected_rows=int(healthbench_settings["expected_rows"]),
-                timeout_seconds=float(
+                "expected_rows": int(healthbench_settings["expected_rows"]),
+                "timeout_seconds": float(
                     healthbench_settings["tool_timeout_seconds"]
                 ),
+            }
+            authoritative = (
+                healthbench_settings["mode"]
+                == HEALTHBENCH_AUTHORITATIVE_TOOL_RUNTIME_MODE
             )
-            try:
-                adapter = HealthBenchMedRAGReactExecutionAdapter(
-                    gateway=self.runtime.gateway,
-                    tool_registry=opened.registry,
-                    max_turns=int(healthbench_settings["max_turns"]),
-                    max_tool_calls=int(healthbench_settings["max_tool_calls"]),
-                    max_action_tokens=tool_action_tokens,
-                    sampling_base_seed=sampling_base_seed,
-                    sampling_coordinate=sampling_coordinate,
+            if authoritative:
+                web = healthbench_settings["authoritative_web_search"]
+                pubmed_client = PubMedEUtilitiesClient(
+                    base_url=str(web["base_url"]),
+                    tool_parameter=str(web["tool_name"]),
+                    retmax=int(web["retmax"]),
+                    timeout_seconds=float(web["request_timeout_seconds"]),
+                    minimum_interval_seconds=float(
+                        web["minimum_interval_seconds"]
+                    ),
                 )
+                opened = open_healthbench_authoritative_tool_registry(
+                    **common_open_arguments,
+                    pubmed_client=pubmed_client,
+                )
+            else:
+                opened = open_healthbench_medrag_tool_registry(
+                    **common_open_arguments,
+                )
+            try:
+                adapter_arguments = {
+                    "gateway": self.runtime.gateway,
+                    "tool_registry": opened.registry,
+                    "max_turns": int(healthbench_settings["max_turns"]),
+                    "max_tool_calls": int(
+                        healthbench_settings["max_tool_calls"]
+                    ),
+                    "max_action_tokens": tool_action_tokens,
+                    "sampling_base_seed": sampling_base_seed,
+                    "sampling_coordinate": sampling_coordinate,
+                }
+                if authoritative:
+                    adapter = HealthBenchAuthoritativeReactExecutionAdapter(
+                        **adapter_arguments,
+                        require_initial_search=bool(
+                            healthbench_settings["require_initial_search"]
+                        ),
+                        max_successful_searches=int(
+                            healthbench_settings["max_successful_queries"]
+                        ),
+                    )
+                else:
+                    adapter = HealthBenchMedRAGReactExecutionAdapter(
+                        **adapter_arguments,
+                    )
                 runtime = AgentRuntime(
                     self.registry,
                     self.runtime.gateway,

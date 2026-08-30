@@ -1431,6 +1431,23 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             {"draft", "revision"},
             {call.request.phase.value for call in added.execution.calls},
         )
+        feedback = json.loads(added.feedback.split("execution_result=", 1)[1])
+        call_receipts = feedback["agent_call_receipts"]
+        self.assertEqual(4, len(call_receipts))
+        self.assertEqual(
+            [call.request.phase.value for call in added.execution.calls],
+            [receipt["phase"] for receipt in call_receipts],
+        )
+        self.assertEqual(
+            [["draft", "review"]],
+            feedback["block_completion_order"],
+        )
+        self.assertTrue(
+            any(receipt["own_draft"] is not None for receipt in call_receipts)
+        )
+        self.assertTrue(
+            any(receipt["peer_draft"] is not None for receipt in call_receipts)
+        )
         self.assertIn("reciprocal", env.graph.topology_statistics()["topology_motifs"])
 
     async def test_add_subgraph_can_select_a_distinct_format_output_agent(self) -> None:
@@ -1968,9 +1985,252 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 "plain_language_responsibility",
                 "inputs_consumed",
                 "expected_artifact",
+                "preserve_original_task_scope_and_output_form",
             ],
             domain["contract_requirements"],
         )
+
+    async def test_set_output_is_pointer_only_and_preserves_current_artifact(
+        self,
+    ) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+        )
+        added = await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced",'
+            '"contract":"produce the complete requested artifact"}'
+        )
+        self.assertTrue(added.accepted, added.feedback)
+        artifact = env._progressive_outputs["a"]
+        request_count = len(gateway.requests)
+
+        selected = await env.step('{"action":"set_output","agent_id":"a"}')
+        finished = await env.step('{"action":"finish"}')
+
+        self.assertTrue(selected.accepted, selected.feedback)
+        self.assertEqual((), selected.execution.calls)
+        self.assertEqual(("a",), selected.execution.reused_agent_ids)
+        self.assertEqual(request_count, len(gateway.requests))
+        self.assertEqual(artifact, selected.execution.outputs["a"])
+        self.assertNotIn("a", env._previous_revision_outputs)
+        self.assertTrue(finished.accepted, finished.feedback)
+        self.assertEqual(artifact, finished.final_answer)
+        self.assertEqual(request_count, len(gateway.requests))
+
+    async def test_canvas_feedback_preserves_head_tail_and_true_output_role(
+        self,
+    ) -> None:
+        registry = make_registry()
+        long_artifact = "HEAD " + ("clinical evidence " * 80) + "TAIL"
+        gateway = _SequenceGateway([long_artifact])
+        env = AgentWorkflowEnv(
+            registry,
+            gateway,
+            problem="question",
+            execute_on_edit=True,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced",'
+            '"contract":"produce the complete requested artifact"}'
+        )
+
+        selected = await env.step('{"action":"set_output","agent_id":"a"}')
+        receipt = json.loads(selected.feedback.split("execution_result=", 1)[1])
+        artifact_receipt = receipt["agent_artifacts"][0]
+
+        self.assertTrue(receipt["output_preview_truncated"])
+        self.assertEqual(len(long_artifact), receipt["output_characters"])
+        self.assertTrue(receipt["output"].startswith("HEAD"))
+        self.assertTrue(receipt["output"].endswith("TAIL"))
+        self.assertEqual("output", artifact_receipt["execution_role"])
+        self.assertTrue(artifact_receipt["is_output_agent"])
+        self.assertFalse(artifact_receipt["is_format_agent"])
+        self.assertTrue(artifact_receipt["preview_truncated"])
+        self.assertEqual(
+            len(long_artifact),
+            artifact_receipt["artifact_characters"],
+        )
+        self.assertTrue(artifact_receipt["artifact_preview"].startswith("HEAD"))
+        self.assertTrue(artifact_receipt["artifact_preview"].endswith("TAIL"))
+
+    async def test_canvas_feedback_projects_public_react_action_observation(
+        self,
+    ) -> None:
+        registry = make_registry()
+
+        class ReceiptGateway(_ImmediateGateway):
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                evidence = {
+                    "rank": 1,
+                    "source": "public-corpus",
+                    "document_id": "doc-1",
+                    "title": "Clinical reference",
+                    "url": "https://example.test/doc-1",
+                    "excerpt": "full passage remains trajectory-only",
+                }
+                return AgentResponse(
+                    "complete response",
+                    metadata={
+                        "react_trace": [
+                            {
+                                "turn": 1,
+                                "structured_action": {
+                                    "kind": "tool",
+                                    "name": "search",
+                                    "resource_id": QA_RETRIEVAL_TOOL_ID,
+                                    "arguments": {"query": "clinical query"},
+                                },
+                                "observation": {
+                                    "observation_status": "success",
+                                    "completed": True,
+                                    "tool_id": QA_RETRIEVAL_TOOL_ID,
+                                    "tool_version": "test-v1",
+                                    "result": {
+                                        "operation": "search",
+                                        "query": "clinical query",
+                                        "evidence": [evidence],
+                                        "source_receipts": [
+                                            {
+                                                "source": "public-corpus",
+                                                "status": "success",
+                                                "result_count": 1,
+                                            }
+                                        ],
+                                    },
+                                },
+                            }
+                        ],
+                        "tool_receipts": [
+                            {
+                                "tool_id": QA_RETRIEVAL_TOOL_ID,
+                                "error_type": None,
+                            }
+                        ],
+                    },
+                )
+
+        gateway = ReceiptGateway()
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": ReasoningExecutionAdapter(gateway)},
+            tool_registry=build_qa_tool_registry(_HotpotNoopRetrievalIndex()),
+            dataset_id="hotpotqa",
+            artifact_communication_profile=(
+                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+            ),
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="answer the complete task",
+            execute_on_edit=True,
+        )
+
+        added = await env.step(
+            '{"action":"add_agent","agent_id":"reader",'
+            '"model_id":"balanced","contract":"retrieve evidence and answer",'
+            '"execution_mode":"react","allowed_tools":['
+            f'"{QA_RETRIEVAL_TOOL_ID}"]}}'
+        )
+
+        self.assertTrue(added.accepted, added.feedback)
+        feedback = json.loads(added.feedback.split("execution_result=", 1)[1])
+        call_receipt = feedback["agent_call_receipts"][0]
+        self.assertEqual("react", call_receipt["execution_mode"])
+        react_receipt = call_receipt["react_action_observations"][0]
+        self.assertEqual("tool", react_receipt["action"]["kind"])
+        self.assertEqual(
+            "success",
+            react_receipt["observation"]["observation_status"],
+        )
+        self.assertEqual(
+            1,
+            react_receipt["observation"]["result"]["evidence_count"],
+        )
+        self.assertNotIn("excerpt", json.dumps(react_receipt))
+        current = env.current_artifact_receipts()[0]
+        self.assertEqual("react", current["execution_mode"])
+        self.assertTrue(current["artifact_fresh"])
+
+    async def test_modify_execution_profile_is_atomic_and_tool_only_is_rejected(
+        self,
+    ) -> None:
+        registry = make_registry()
+        gateway = _ImmediateGateway()
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": ReasoningExecutionAdapter(gateway)},
+            tool_registry=build_qa_tool_registry(_HotpotNoopRetrievalIndex()),
+            dataset_id="hotpotqa",
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            graph=AgentGraph(
+                [
+                    AgentNode(
+                        "answerer",
+                        "balanced",
+                        "Read the question and produce a grounded answer artifact.",
+                    )
+                ]
+            ),
+            problem="question",
+            allowed_actions=("modify_agent", "set_output", "finish"),
+        )
+
+        modify_domain = env.model_admissible_action_targets()["modify_agent"]
+        candidate = modify_domain["per_agent_candidates"][0]
+        self.assertIn("allowed_tools", candidate["mutable_fields"])
+        self.assertIn("execution_mode", candidate["mutable_fields"])
+        self.assertIn(
+            {
+                "execution_mode": "react",
+                "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+            },
+            candidate["execution_profiles"],
+        )
+        director_validate_live_action_target_domains(
+            ("modify_agent",),
+            {"modify_agent": modify_domain},
+        )
+
+        revision = env.revision
+        tool_only = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "answerer",
+                    "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                }
+            )
+        )
+        self.assertFalse(tool_only.accepted)
+        self.assertEqual(revision, env.revision)
+        self.assertIn("reasoning agent", tool_only.feedback)
+
+        atomic = await env.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "answerer",
+                    "execution_mode": "react",
+                    "allowed_tools": [QA_RETRIEVAL_TOOL_ID],
+                }
+            )
+        )
+        self.assertTrue(atomic.accepted, atomic.feedback)
+        node = env.graph.get_node("answerer")
+        self.assertEqual("react", node.execution_mode.value)
+        self.assertEqual((QA_RETRIEVAL_TOOL_ID,), node.allowed_tools)
 
     async def test_finish_only_mask_submits_an_admissible_progressive_output(
         self,

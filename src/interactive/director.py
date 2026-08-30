@@ -69,8 +69,37 @@ Use only action types, targets and parameters in the current admissible_action_t
 
 Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed Agent role, Agent count, workflow topology, or unlisted Skill."""
 
+# v3 retains SkillFlow's compact Supervisor boundary and adds only the
+# task-constraint invariant required by a free-text Agent contract.  It does
+# not prescribe a role, Agent count, relation, topology, medical workflow, or
+# Skill.
+SCALAR_DIRECTOR_SYSTEM_PROMPT_V3 = SCALAR_DIRECTOR_SYSTEM_PROMPT.replace(
+    "Write its free-text contract in plain language and state the Agent's "
+    "responsibility, the inputs it should use, and the expected artifact it "
+    "should produce.",
+    "Write its free-text contract in plain language and state the Agent's "
+    "responsibility, the inputs it should use, and the expected artifact it "
+    "should produce. A contract decomposes the original task; it must not add, "
+    "remove, or narrow the user's requirements or requested output form.",
+    1,
+)
+
+# v4 retains the neutral free-AgentGraph policy and makes the existing Runtime
+# boundary explicit.  ReAct is an execution mode, not an Agent role; the live
+# domain supplies the exact executable profile.  The second sentence only
+# names public Canvas feedback that is already produced after each edit.
+SCALAR_DIRECTOR_SYSTEM_PROMPT_V4 = SCALAR_DIRECTOR_SYSTEM_PROMPT_V3 + """
+
+execution_mode specifies how an Agent executes, not its role. Select exactly one registered execution profile; use react only when that Agent must invoke an admitted Tool. After each accepted edit, inspect the returned execution phases, communication envelopes, public ReAct Action--Observation receipts, current Artifacts, task goal, and finish state."""
+
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
+SCALAR_DIRECTOR_PROMPT_VERSION_V3 = (
+    "agentgraph.director.minimal-neutral-scalar.v3"
+)
+SCALAR_DIRECTOR_PROMPT_VERSION_V4 = (
+    "agentgraph.director.minimal-neutral-scalar.v4"
+)
 LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1 = (
     "agentgraph.director.minimal-neutral-scalar.v1"
 )
@@ -505,6 +534,8 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
     by_version = {
         DIRECTOR_PROMPT_VERSION: DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
+        SCALAR_DIRECTOR_PROMPT_VERSION_V3: SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
+        SCALAR_DIRECTOR_PROMPT_VERSION_V4: SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
         LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1: (
             LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1
         ),
@@ -572,6 +603,8 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
     {
         DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
+        SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
+        SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
         LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
@@ -765,7 +798,7 @@ DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3 = (
     "agentgraph.model-admissible-action-mask.v3"
 )
 DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION = (
-    "agentgraph.live-action-target-domains.v10"
+    "agentgraph.live-action-target-domains.v12"
 )
 DIRECTOR_ACTION_JSON_SCHEMA_TEXT = json.dumps(
     DIRECTOR_ACTION_JSON_SCHEMA,
@@ -1255,12 +1288,21 @@ _SCALAR_CONTRACT_REQUIREMENTS = (
     "inputs_consumed",
     "expected_artifact",
 )
+_SCALAR_SCOPE_PRESERVING_CONTRACT_REQUIREMENTS = (
+    *_SCALAR_CONTRACT_REQUIREMENTS,
+    "preserve_original_task_scope_and_output_form",
+)
 
 
 def _live_scalar_add_agent_domain(
     domain: Mapping[str, Any],
-) -> tuple[tuple[str, ...], tuple[str, ...], int]:
-    """Validate the generic scalar ADD domain without inventing a role."""
+) -> tuple[
+    tuple[str, ...],
+    tuple[str, ...],
+    int,
+    tuple[tuple[str, tuple[str, ...]], ...],
+]:
+    """Validate the role-neutral scalar ADD domain and Runtime profiles."""
 
     raw_existing_ids = domain.get("existing_agent_ids")
     if (
@@ -1272,9 +1314,39 @@ def _live_scalar_add_agent_domain(
         or len(raw_existing_ids) != len(set(raw_existing_ids))
     ):
         raise ValueError("add_agent existing Agent ID domain is invalid")
+    agent_ids = _live_string_domain(
+        domain.get("agent_ids"),
+        label="add_agent.agent_ids",
+    )
+    if set(agent_ids).intersection(raw_existing_ids):
+        raise ValueError("add_agent live Agent IDs already exist")
+    if agent_ids != _live_new_agent_ids(raw_existing_ids, len(agent_ids)):
+        raise ValueError(
+            "add_agent live Agent IDs must use the current neutral node_N domain"
+        )
     model_ids = _live_string_domain(
         domain.get("model_ids"),
         label="add_agent.model_ids",
+    )
+    required_fields = domain.get("required_agent_fields")
+    expected_required = {
+        "agent_id",
+        "model_id",
+        "contract",
+        "execution_mode",
+        "allowed_tools",
+    }
+    if (
+        not isinstance(required_fields, (list, tuple))
+        or set(required_fields) != expected_required
+        or len(required_fields) != len(set(required_fields))
+    ):
+        raise ValueError("add_agent required Agent fields are invalid")
+    if domain.get("contract_semantics") != "free_text":
+        raise ValueError("add_agent contract must remain free text")
+    profiles = _live_execution_profiles(
+        domain.get("registered_execution_profiles"),
+        label="add_agent.registered_execution_profiles",
     )
     contract_min_length = domain.get("contract_min_length")
     if type(contract_min_length) is not int or contract_min_length < 1:
@@ -1283,12 +1355,13 @@ def _live_scalar_add_agent_domain(
         domain.get("contract_requirements"),
         label="add_agent.contract_requirements",
     )
-    if (
-        len(contract_requirements) != len(_SCALAR_CONTRACT_REQUIREMENTS)
-        or set(contract_requirements) != set(_SCALAR_CONTRACT_REQUIREMENTS)
-    ):
+    requirement_set = frozenset(contract_requirements)
+    if requirement_set not in {
+        frozenset(_SCALAR_CONTRACT_REQUIREMENTS),
+        frozenset(_SCALAR_SCOPE_PRESERVING_CONTRACT_REQUIREMENTS),
+    } or len(contract_requirements) != len(requirement_set):
         raise ValueError("add_agent contract requirements are invalid")
-    return tuple(raw_existing_ids), model_ids, contract_min_length
+    return agent_ids, model_ids, contract_min_length, profiles
 
 
 def _live_existing_agent_roles(
@@ -2249,11 +2322,77 @@ def _live_modify_agent_candidates(
             raise ValueError("modify_agent discrete value domain has an invalid field")
         for discrete_field in raw_discrete:
             _live_discrete_values(candidate, discrete_field)
+        coupled_fields = {"execution_mode", "allowed_tools"}.intersection(fields)
+        if coupled_fields:
+            for coupled_field in coupled_fields:
+                _live_modify_execution_profiles(candidate, coupled_field)
+        elif "execution_profiles" in candidate:
+            raise ValueError(
+                "modify_agent execution profiles require a mutable profile field"
+            )
         if field_name in fields:
             admitted.append(candidate)
     if not admitted:
         raise ValueError("modify_agent field has no live Agent target")
     return tuple(admitted)
+
+
+def _live_modify_execution_profiles(
+    candidate: Mapping[str, Any],
+    field_name: str,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Return exact non-no-op profiles that change one selected component.
+
+    FlowSteer's Canvas commits a MODIFY transaction only after the complete
+    candidate declaration is valid.  Treat execution mode and Tool capability
+    as one Runtime-owned profile so constrained decoding cannot construct the
+    invalid intermediate state ``reasoning + allowed_tools``.
+    """
+
+    if field_name not in {"execution_mode", "allowed_tools"}:
+        raise ValueError("modify_agent execution profile field is invalid")
+    current_values = candidate.get("current_values")
+    if not isinstance(current_values, Mapping):
+        raise ValueError("modify_agent execution profile current values are missing")
+    current_mode = current_values.get("execution_mode")
+    current_tools = current_values.get("allowed_tools")
+    if (
+        current_mode not in {"reasoning", "react", "coding"}
+        or not isinstance(current_tools, (list, tuple))
+        or any(
+            not isinstance(tool_id, str) or not tool_id
+            for tool_id in current_tools
+        )
+        or len(current_tools) != len(set(current_tools))
+    ):
+        raise ValueError("modify_agent current execution profile is invalid")
+    current_profile = (str(current_mode), tuple(current_tools))
+    profiles = _live_execution_profiles(
+        candidate.get("execution_profiles"),
+        label="modify_agent.execution_profiles",
+    )
+    if any(mode == "reasoning" and tool_ids for mode, tool_ids in profiles):
+        raise ValueError(
+            "modify_agent reasoning execution profile cannot declare Tools"
+        )
+    if current_profile in profiles:
+        raise ValueError(
+            "modify_agent execution profile domain contains the current no-op profile"
+        )
+    changed = tuple(
+        profile
+        for profile in profiles
+        if (
+            profile[0] != current_profile[0]
+            if field_name == "execution_mode"
+            else profile[1] != current_profile[1]
+        )
+    )
+    if not changed:
+        raise ValueError(
+            f"modify_agent {field_name} has no executable profile transition"
+        )
+    return changed
 
 
 def director_live_modify_agent_selector_json_schema_text(
@@ -2304,20 +2443,47 @@ def director_live_action_parameter_json_schema_text(
         raise ValueError(f"missing live target domain for {action}")
 
     if action == "add_agent":
-        existing_agent_ids, model_ids, contract_min_length = (
+        agent_ids, model_ids, contract_min_length, execution_profiles = (
             _live_scalar_add_agent_domain(domain)
         )
-        schema = json.loads(
+        base_schema = json.loads(
             director_state_conditioned_sampling_json_schema_text("add_agent")
         )
-        schema["properties"]["agent_id"] = {
-            "const": _live_new_agent_ids(existing_agent_ids, 1)[0]
-        }
-        schema["properties"]["model_id"] = {"enum": list(model_ids)}
-        schema["properties"]["contract"] = {
-            "type": "string",
-            "minLength": contract_min_length,
-        }
+        branches: list[dict[str, Any]] = []
+        for execution_mode, allowed_tools in execution_profiles:
+            branch = json.loads(json.dumps(base_schema))
+            for field_name in (
+                "role_family",
+                "artifact_type",
+                "completion_condition",
+            ):
+                branch["properties"].pop(field_name, None)
+            branch["required"] = [
+                "action",
+                "agent_id",
+                "model_id",
+                "contract",
+                "execution_mode",
+                "allowed_tools",
+            ]
+            branch["properties"]["agent_id"] = {"enum": list(agent_ids)}
+            branch["properties"]["model_id"] = {"enum": list(model_ids)}
+            branch["properties"]["contract"] = {
+                "type": "string",
+                "minLength": contract_min_length,
+            }
+            branch["properties"]["execution_mode"] = {
+                "const": execution_mode
+            }
+            branch["properties"]["allowed_tools"] = {
+                "const": list(allowed_tools)
+            }
+            branches.append(branch)
+        schema = (
+            branches[0]
+            if len(branches) == 1
+            else {"type": "object", "oneOf": branches}
+        )
     elif action == "add_subgraph":
         if add_agents is None:
             raise ValueError(
@@ -2438,16 +2604,49 @@ def director_live_action_parameter_json_schema_text(
             raise ValueError(
                 "modify_agent v3 parameter phase requires a live Agent target"
             )
-        schema = json.loads(
-            director_modify_agent_field_sampling_json_schema_text(modify_field)
-        )
-        schema["properties"]["agent_id"] = {"const": modify_agent_id}
-        discrete_values = _live_discrete_values(
-            by_id[modify_agent_id],
-            modify_field,
-        )
-        if discrete_values is not None:
-            schema["properties"][modify_field] = {"enum": list(discrete_values)}
+        candidate = by_id[modify_agent_id]
+        if modify_field in {"execution_mode", "allowed_tools"}:
+            profiles = _live_modify_execution_profiles(
+                candidate,
+                modify_field,
+            )
+            profile_branches = [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "action",
+                        "agent_id",
+                        "execution_mode",
+                        "allowed_tools",
+                    ],
+                    "properties": {
+                        "action": {"const": "modify_agent"},
+                        "agent_id": {"const": modify_agent_id},
+                        "execution_mode": {"const": execution_mode},
+                        "allowed_tools": {"const": list(allowed_tools)},
+                    },
+                }
+                for execution_mode, allowed_tools in profiles
+            ]
+            schema = (
+                profile_branches[0]
+                if len(profile_branches) == 1
+                else {"oneOf": profile_branches}
+            )
+        else:
+            schema = json.loads(
+                director_modify_agent_field_sampling_json_schema_text(modify_field)
+            )
+            schema["properties"]["agent_id"] = {"const": modify_agent_id}
+            discrete_values = _live_discrete_values(
+                candidate,
+                modify_field,
+            )
+            if discrete_values is not None:
+                schema["properties"][modify_field] = {
+                    "enum": list(discrete_values)
+                }
     elif action in {"delete_agent", "set_output"}:
         agent_ids = _live_string_domain(
             domain.get("agent_ids"),
@@ -3279,6 +3478,7 @@ class AgentGraphOrchestrator:
             require_complete=False,
         )
         snapshot = env.snapshot()
+        remaining_rounds = max(self.max_rounds - env.turn_count, 0)
         directed_edges = [
             {"from": source_id, "to": target_id}
             for relation in env.graph.relations
@@ -3308,7 +3508,11 @@ class AgentGraphOrchestrator:
                 "require_format_agent": env.require_format_agent,
                 "required_tool_id": env.required_tool_id,
             },
+            "remaining_rounds": remaining_rounds,
         }
+        current_artifact_receipts = env.current_artifact_receipts()
+        if current_artifact_receipts:
+            payload["current_artifact_receipts"] = current_artifact_receipts
         if self._exposes_live_action_domains():
             payload["action_target_domains"] = (
                 env.model_admissible_action_targets()
@@ -3406,7 +3610,10 @@ class AgentGraphOrchestrator:
         # revision-local gate and its first measured failure stage so the
         # Director repairs the responsible semantic node instead of probing
         # FINISH or repeatedly modifying the Formatter.
-        if verified_qa_semantic_protocol(self.semantic_protocol):
+        if (
+            verified_qa_semantic_protocol(self.semantic_protocol)
+            or self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION_V4
+        ):
             payload["finish_admissibility"] = _director_neutral_state_projection(
                 env.finish_admissibility()
             )
@@ -3484,6 +3691,11 @@ class AgentGraphOrchestrator:
                 if key in finish_admissibility
             }
         for key, value in payload.items():
+            # The latest Canvas observation already contains every revision-
+            # live Artifact. Replaying historical previews would duplicate
+            # content without adding an Action--Observation transition.
+            if key == "current_artifact_receipts":
+                continue
             normalized_key = key.casefold()
             if any(
                 marker in normalized_key
@@ -3525,6 +3737,7 @@ class AgentGraphOrchestrator:
         if self.prompt_version not in {
             LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
             QA_DIRECTOR_PROMPT_VERSION,
+            SCALAR_DIRECTOR_PROMPT_VERSION_V4,
         }:
             return copied
         return self._compact_qa_historical_messages(copied)
@@ -3727,6 +3940,10 @@ __all__ = [
     "DIRECTOR_PROMPT_VERSION",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT",
     "SCALAR_DIRECTOR_PROMPT_VERSION",
+    "SCALAR_DIRECTOR_SYSTEM_PROMPT_V3",
+    "SCALAR_DIRECTOR_PROMPT_VERSION_V3",
+    "SCALAR_DIRECTOR_SYSTEM_PROMPT_V4",
+    "SCALAR_DIRECTOR_PROMPT_VERSION_V4",
     "LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1",
     "LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1",
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",

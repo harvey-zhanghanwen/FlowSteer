@@ -50,7 +50,11 @@ from src.interactive.director import (
     LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1,
     LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1,
     SCALAR_DIRECTOR_PROMPT_VERSION,
+    SCALAR_DIRECTOR_PROMPT_VERSION_V3,
+    SCALAR_DIRECTOR_PROMPT_VERSION_V4,
     SCALAR_DIRECTOR_SYSTEM_PROMPT,
+    SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
+    SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
@@ -177,6 +181,98 @@ def observation_payload(message: dict[str, str]) -> dict[str, object]:
 
 
 class DirectorTests(unittest.IsolatedAsyncioTestCase):
+    def test_scalar_v3_add_agent_uses_live_role_neutral_exact_profiles(
+        self,
+    ) -> None:
+        model_registry = registry()
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            problem="HealthBench Professional conversation",
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            max_rounds=20,
+            prompt_version=SCALAR_DIRECTOR_PROMPT_VERSION_V3,
+            system_prompt=SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
+            sampling_action_profile=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            ),
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+        )
+
+        request = orchestrator.action_schema_request(env)
+        domains = json.loads(request["action_target_domains_json"])
+        add_domain = domains["add_agent"]
+        self.assertEqual(["node_1"], add_domain["agent_ids"])
+        self.assertEqual(
+            [
+                "agent_id",
+                "model_id",
+                "contract",
+                "execution_mode",
+                "allowed_tools",
+            ],
+            add_domain["required_agent_fields"],
+        )
+        self.assertEqual("free_text", add_domain["contract_semantics"])
+        self.assertEqual(
+            [
+                {
+                    "execution_mode": execution_mode,
+                    "allowed_tools": list(allowed_tools),
+                }
+                for execution_mode, allowed_tools in (
+                    env.runtime.registered_execution_profiles()
+                )
+            ],
+            add_domain["registered_execution_profiles"],
+        )
+        self.assertNotIn("role_constraints", add_domain)
+        parameter_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_agent",
+                domains,
+            )
+        )
+        schema_branches = parameter_schema.get(
+            "oneOf", [parameter_schema]
+        )
+        self.assertEqual(
+            {
+                (
+                    branch["properties"]["execution_mode"]["const"],
+                    tuple(branch["properties"]["allowed_tools"]["const"]),
+                )
+                for branch in schema_branches
+            },
+            set(env.runtime.registered_execution_profiles()),
+        )
+        for branch in schema_branches:
+            self.assertEqual(
+                {
+                    "action",
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "execution_mode",
+                    "allowed_tools",
+                },
+                set(branch["required"]),
+            )
+            self.assertNotIn("role_family", branch["properties"])
+
     async def test_legacy_canonical_transcript_remains_decodable(self) -> None:
         legacy = encode_director_transcript(
             (
@@ -224,6 +320,14 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             director_system_prompt_for_version(SCALAR_DIRECTOR_PROMPT_VERSION),
         )
         self.assertIs(
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
+            director_system_prompt_for_version(SCALAR_DIRECTOR_PROMPT_VERSION_V3),
+        )
+        self.assertIs(
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
+            director_system_prompt_for_version(SCALAR_DIRECTOR_PROMPT_VERSION_V4),
+        )
+        self.assertIs(
             LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1,
             director_system_prompt_for_version(
                 LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1
@@ -267,6 +371,23 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                 "agentgraph.director.qa-semantic-recovery.v1"
             ),
         )
+
+    async def test_scalar_prompt_v3_is_supported_by_transcript_receipts(self) -> None:
+        prompt = director_system_prompt_for_version(
+            SCALAR_DIRECTOR_PROMPT_VERSION_V3
+        )
+        encoded = encode_director_transcript(
+            (
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": "Task: preserve this request."},
+            )
+        )
+
+        decoded = decode_director_transcript(encoded)
+
+        self.assertIsNotNone(decoded)
+        assert decoded is not None
+        self.assertEqual(prompt, decoded[0]["content"])
         self.assertIs(
             HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V21,
             director_system_prompt_for_version(
@@ -323,6 +444,52 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ValueError):
             director_system_prompt_for_version(" ")
+
+    async def test_scalar_v4_observes_execution_receipts_and_remaining_rounds(
+        self,
+    ) -> None:
+        model_registry = registry()
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            problem="preserve and answer the complete task",
+            execute_on_edit=True,
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=SCALAR_DIRECTOR_PROMPT_VERSION_V4,
+            max_rounds=5,
+        )
+        initial_prompt = orchestrator.build_prompt(env, 0, ())
+        initial_state = observation_payload(
+            transcript_messages(initial_prompt)[-1]
+        )
+        self.assertEqual(5, initial_state["remaining_rounds"])
+        self.assertFalse(initial_state["finish_admissibility"]["admissible"])
+
+        action = (
+            '{"action":"add_agent","agent_id":"node_1",'
+            '"model_id":"qwen","contract":"produce the complete requested artifact"}'
+        )
+        accepted = await env.step(action)
+        self.assertTrue(accepted.accepted, accepted.feedback)
+        continued = orchestrator.continue_prompt(
+            initial_prompt,
+            action,
+            env,
+            (),
+        )
+        state = observation_payload(transcript_messages(continued)[-1])
+        self.assertEqual(4, state["remaining_rounds"])
+        self.assertEqual("node_1", state["current_artifact_receipts"][0]["agent_id"])
+        self.assertIn("agent_call_receipts", state["canvas_feedback"])
+        self.assertIn(
+            "execution_mode specifies how an Agent executes, not its role",
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
+        )
+        self.assertNotIn("doctor", SCALAR_DIRECTOR_SYSTEM_PROMPT_V4.casefold())
+        self.assertNotIn("verifier", SCALAR_DIRECTOR_SYSTEM_PROMPT_V4.casefold())
 
     async def test_hotpot_v22_prompt_encodes_semantic_and_recovery_policy(self) -> None:
         model_registry = registry()
@@ -1745,6 +1912,13 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("responsibility", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
         self.assertIn("inputs", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
         self.assertIn("expected artifact", SCALAR_DIRECTOR_SYSTEM_PROMPT.casefold())
+        self.assertIn(
+            "must not add, remove, or narrow",
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V3.casefold(),
+        )
+        self.assertNotIn("doctor", SCALAR_DIRECTOR_SYSTEM_PROMPT_V3.casefold())
+        self.assertNotIn("researcher", SCALAR_DIRECTOR_SYSTEM_PROMPT_V3.casefold())
+        self.assertNotIn("verifier", SCALAR_DIRECTOR_SYSTEM_PROMPT_V3.casefold())
 
     async def test_generic_scalar_v3_exposes_live_domains_and_isolates_rejection(
         self,
@@ -1821,8 +1995,24 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
     def test_generic_scalar_v3_binds_neutral_id_model_and_contract(self) -> None:
         domains = {
             "add_agent": {
+                "agent_ids": ["node_2"],
                 "existing_agent_ids": ["node_1", "named_agent"],
                 "model_ids": ["qwen", "other"],
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+                "registered_execution_profiles": [
+                    {"execution_mode": "reasoning", "allowed_tools": []},
+                    {
+                        "execution_mode": "react",
+                        "allowed_tools": ["healthbench-authoritative.search"],
+                    },
+                ],
+                "contract_semantics": "free_text",
                 "contract_min_length": 12,
                 "contract_requirements": [
                     "plain_language_responsibility",
@@ -1838,15 +2028,32 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                 domains,
             )
         )
-        self.assertEqual({"const": "node_2"}, schema["properties"]["agent_id"])
-        self.assertEqual(
-            {"enum": ["qwen", "other"]},
-            schema["properties"]["model_id"],
-        )
-        self.assertEqual(
-            {"type": "string", "minLength": 12},
-            schema["properties"]["contract"],
-        )
+        branches = schema["oneOf"]
+        self.assertEqual(2, len(branches))
+        for branch in branches:
+            self.assertEqual(
+                {"enum": ["node_2"]},
+                branch["properties"]["agent_id"],
+            )
+            self.assertEqual(
+                {"enum": ["qwen", "other"]},
+                branch["properties"]["model_id"],
+            )
+            self.assertEqual(
+                {"type": "string", "minLength": 12},
+                branch["properties"]["contract"],
+            )
+            self.assertEqual(
+                {
+                    "action",
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "execution_mode",
+                    "allowed_tools",
+                },
+                set(branch["required"]),
+            )
         self.assertEqual(
             domains,
             json.loads(
@@ -1865,6 +2072,30 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                         "contract_requirements": ["plain_language_responsibility"],
                     }
                 },
+            )
+
+        scope_preserving_domains = {
+            "add_agent": {
+                **domains["add_agent"],
+                "contract_requirements": [
+                    "plain_language_responsibility",
+                    "inputs_consumed",
+                    "expected_artifact",
+                    "preserve_original_task_scope_and_output_form",
+                ],
+            }
+        }
+        scope_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_agent",
+                scope_preserving_domains,
+            )
+        )
+        self.assertEqual(2, len(scope_schema["oneOf"]))
+        for branch in scope_schema["oneOf"]:
+            self.assertEqual(
+                {"enum": ["node_2"]},
+                branch["properties"]["agent_id"],
             )
 
     def test_model_admissible_schema_branch_round_trip_is_exact(self) -> None:
@@ -2286,7 +2517,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             request["action_target_domain_version"],
         )
         self.assertEqual(
-            "agentgraph.live-action-target-domains.v10",
+            "agentgraph.live-action-target-domains.v12",
             DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
         )
         initial_retriever_domain = env.model_admissible_action_targets()[
@@ -2305,6 +2536,100 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "admissible-v3:add_subgraph",
             request["action_schema_branch"],
         )
+
+    def test_model_admissible_v3_samples_tool_transition_as_atomic_profile(
+        self,
+    ) -> None:
+        domains = {
+            "modify_agent": {
+                "mutable_fields": ["allowed_tools", "execution_mode"],
+                "per_agent_candidates": [
+                    {
+                        "agent_id": "answerer",
+                        "mutable_fields": [
+                            "allowed_tools",
+                            "execution_mode",
+                        ],
+                        "current_values": {
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        },
+                        "discrete_value_domains": {},
+                        "execution_profiles": [
+                            {
+                                "execution_mode": "react",
+                                "allowed_tools": [],
+                            },
+                            {
+                                "execution_mode": "react",
+                                "allowed_tools": ["medical-search"],
+                            },
+                        ],
+                    }
+                ],
+            }
+        }
+
+        director_live_action_target_domains_json(("modify_agent",), domains)
+        tool_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "modify_agent",
+                domains,
+                modify_field="allowed_tools",
+                modify_agent_id="answerer",
+            )
+        )
+        self.assertEqual(
+            {
+                "action",
+                "agent_id",
+                "execution_mode",
+                "allowed_tools",
+            },
+            set(tool_schema["required"]),
+        )
+        self.assertEqual(
+            {"const": "react"},
+            tool_schema["properties"]["execution_mode"],
+        )
+        self.assertEqual(
+            {"const": ["medical-search"]},
+            tool_schema["properties"]["allowed_tools"],
+        )
+
+        mode_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "modify_agent",
+                domains,
+                modify_field="execution_mode",
+                modify_agent_id="answerer",
+            )
+        )
+        self.assertEqual(2, len(mode_schema["oneOf"]))
+        self.assertTrue(
+            all(
+                {
+                    "action",
+                    "agent_id",
+                    "execution_mode",
+                    "allowed_tools",
+                }
+                == set(branch["required"])
+                for branch in mode_schema["oneOf"]
+            )
+        )
+
+        invalid = json.loads(json.dumps(domains))
+        invalid["modify_agent"]["per_agent_candidates"][0][
+            "execution_profiles"
+        ] = [
+            {
+                "execution_mode": "reasoning",
+                "allowed_tools": ["medical-search"],
+            }
+        ]
+        with self.assertRaisesRegex(ValueError, "reasoning.*cannot declare Tools"):
+            director_live_action_target_domains_json(("modify_agent",), invalid)
 
     def test_role_conditional_qa_schema_preserves_execution_profile_pairs(
         self,
