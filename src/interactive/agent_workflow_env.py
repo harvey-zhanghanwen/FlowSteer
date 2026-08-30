@@ -30,6 +30,7 @@ from .agent_runtime import (
     AgentRuntimeError,
     AgentRuntimeResult,
 )
+from .environment_execution import _alfworld_task_facts
 from .model_registry import ModelRegistry
 from .task_dataset import (
     hotpotqa_answer_cardinality_constraint,
@@ -376,6 +377,8 @@ class AgentWorkflowEnv:
         semantic_protocol: str = "none",
         recovery_policy: str = "default",
         required_evidence_tool_id: Optional[str] = None,
+        require_multi_agent_for_complex_tasks: bool = False,
+        minimum_agents_for_complex_tasks: int = 2,
         artifact_candidate_extractor: Optional[
             Callable[[str], tuple[Optional[str], bool, Optional[str]]]
         ] = None,
@@ -428,6 +431,20 @@ class AgentWorkflowEnv:
         ):
             raise AgentWorkflowStateError(
                 "required_evidence_tool_id must be non-empty text or None"
+            )
+        if type(require_multi_agent_for_complex_tasks) is not bool:
+            raise AgentWorkflowStateError(
+                "require_multi_agent_for_complex_tasks must be bool"
+            )
+        if (
+            isinstance(minimum_agents_for_complex_tasks, bool)
+            or not isinstance(minimum_agents_for_complex_tasks, int)
+            or minimum_agents_for_complex_tasks < 2
+            or minimum_agents_for_complex_tasks > max_agents_per_subgraph
+        ):
+            raise AgentWorkflowStateError(
+                "minimum_agents_for_complex_tasks must be between 2 and "
+                "max_agents_per_subgraph"
             )
         if semantic_protocol in _SEMANTIC_LINEAGE_PROTOCOLS:
             if recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
@@ -508,6 +525,10 @@ class AgentWorkflowEnv:
             if required_evidence_tool_id is None
             else required_evidence_tool_id.strip()
         )
+        self.require_multi_agent_for_complex_tasks = (
+            require_multi_agent_for_complex_tasks
+        )
+        self.minimum_agents_for_complex_tasks = minimum_agents_for_complex_tasks
         self.artifact_candidate_extractor = artifact_candidate_extractor
         self.allowed_action_types = resolved_allowed_actions
         self._allowed_action_type_set = frozenset(resolved_allowed_actions)
@@ -798,6 +819,17 @@ class AgentWorkflowEnv:
     ) -> Optional[str]:
         """Enforce the single-writer environment invariant before execution."""
 
+        invalid_role_ids = tuple(
+            node.id
+            for node in graph.nodes
+            if (node.role_family or "").strip().casefold() == "react"
+        )
+        if invalid_role_ids:
+            return (
+                "ReAct is an execution mode, not an Agent role; "
+                "role_family='react' is invalid for Agents "
+                f"{list(invalid_role_ids)!r}"
+            )
         owners = self._required_tool_actor_ids_for_graph(graph)
         if len(owners) > 1:
             return (
@@ -826,6 +858,151 @@ class AgentWorkflowEnv:
                         "a reciprocal Agent block"
                     )
         return None
+
+    def _complex_environment_collaboration_required(self) -> bool:
+        """Return whether the public ALFWorld task requires collaboration.
+
+        ALFWorld exposes the object count and requested state transformation in
+        the task instruction.  The predicate consumes only that public text;
+        simulator state, terminal reward, evaluator information, and the
+        reference solution are outside this boundary.
+        """
+
+        dataset_id = self.runtime.dataset_id
+        if (
+            not self.require_multi_agent_for_complex_tasks
+            or self.required_tool_id is None
+            or not isinstance(dataset_id, str)
+            or dataset_id.casefold() != "alfworld"
+            or not self._problem
+        ):
+            return False
+        facts = _alfworld_task_facts(self._problem)
+        count = facts.get("count")
+        required_transform = facts.get("required_transform")
+        return bool(
+            (type(count) is int and count > 1)
+            or (
+                isinstance(required_transform, str)
+                and required_transform
+                in {"clean", "cool", "heat", "examine_with_desklamp"}
+            )
+        )
+
+    def _complex_environment_collaboration_issue_for(
+        self,
+        graph: AgentGraph,
+    ) -> Optional[str]:
+        """Validate the minimal multi-Agent dataflow for a complex episode.
+
+        Contracts, semantic responsibilities, model choices, additional edges,
+        and Output ownership remain Director-selected.  This gate enforces only
+        the user-required collaboration boundary and the stateful Tool's
+        single-writer data dependency.
+        """
+
+        if not self._complex_environment_collaboration_required() or not graph.nodes:
+            return None
+        if len(graph.nodes) < self.minimum_agents_for_complex_tasks:
+            return (
+                "the complex ALFWorld task requires a multi-Agent functional "
+                "subgraph with at least "
+                f"{self.minimum_agents_for_complex_tasks} Agents"
+            )
+        owners = self._required_tool_actor_ids_for_graph(graph)
+        if len(owners) != 1:
+            return (
+                "the complex ALFWorld functional subgraph requires exactly one "
+                "environment Tool owner; found "
+                f"{len(owners)}"
+            )
+        owner_id = owners[0]
+        collaborator_ids = tuple(
+            agent_id
+            for agent_id in graph.directed_predecessors(owner_id)
+            if agent_id != owner_id
+            and graph.has_node(agent_id)
+            and self.required_tool_id
+            not in graph.get_node(agent_id).allowed_tools
+        )
+        if not collaborator_ids:
+            return (
+                "the complex ALFWorld functional subgraph must route at least "
+                "one stateless collaborator artifact into the environment Tool "
+                f"owner {owner_id!r}"
+            )
+        return None
+
+    def _environment_owner_has_collaborator_artifact(self) -> bool:
+        """Return whether the Tool owner consumed a current collaborator artifact."""
+
+        if not self._complex_environment_collaboration_required():
+            return True
+        owners = self._required_tool_actor_ids()
+        if len(owners) != 1:
+            return False
+        owner_id = owners[0]
+        collaborator_ids = set(self._graph.directed_predecessors(owner_id)) - {
+            owner_id
+        }
+        metadata = self._progressive_output_metadata.get(owner_id)
+        provenance = (
+            metadata.get("input_artifact_provenance")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        if not isinstance(provenance, (list, tuple)):
+            return False
+
+        environment_state = self.public_environment_state()
+        environment_closed = bool(
+            isinstance(environment_state, Mapping)
+            and (
+                environment_state.get("environment_terminal") is True
+                or environment_state.get("environment_truncated") is True
+            )
+        )
+
+        def revision_is_compatible(item: Mapping[str, object]) -> bool:
+            receipt_revision = item.get("graph_revision")
+            if receipt_revision == self._graph.revision:
+                return True
+            if (
+                not environment_closed
+                or isinstance(receipt_revision, bool)
+                or not isinstance(receipt_revision, int)
+                or receipt_revision >= self._graph.revision
+            ):
+                return False
+            # FlowSteer SET_OUTPUT changes only the terminal artifact pointer;
+            # it does not dirty or re-execute an Agent. Preserve the original
+            # receipt revision and accept it after environment closure only
+            # when every accepted intervening Canvas mutation was SET_OUTPUT.
+            # Any Agent or relation edit still invalidates the provenance.
+            intervening = tuple(
+                entry
+                for entry in self._history
+                if entry.accepted and entry.revision > receipt_revision
+            )
+            return bool(intervening) and all(
+                entry.action is not None
+                and entry.action.action_type is AgentActionType.SET_OUTPUT
+                for entry in intervening
+            )
+
+        return any(
+            isinstance(item, Mapping)
+            and item.get("source_agent_id") in collaborator_ids
+            and item.get("target_agent_id") == owner_id
+            and revision_is_compatible(item)
+            and item.get("source_agent_id") not in self._unresolved_dirty_agents
+            and owner_id not in self._unresolved_dirty_agents
+            and isinstance(item.get("artifact_id"), str)
+            and bool(str(item.get("artifact_id")).strip())
+            and isinstance(item.get("artifact_body"), str)
+            and bool(str(item.get("artifact_body")).strip())
+            for item in provenance
+        )
 
     def _required_tool_auxiliary_profile_issue(
         self,
@@ -879,6 +1056,7 @@ class AgentWorkflowEnv:
             "current_observation",
             "admissible_actions",
             "public_state",
+            "task_facts",
             "latest_action_observation",
             "action_observation_history",
             "public_scene_memory",
@@ -948,6 +1126,42 @@ class AgentWorkflowEnv:
         )
         return result
 
+    def _runtime_problem(self) -> str:
+        """Attach only the latest public environment state to Agent requests."""
+
+        problem = self._problem
+        if (
+            isinstance(self.runtime.dataset_id, str)
+            and self.runtime.dataset_id.casefold() == "alfworld"
+            and self.required_tool_id == "alfworld.environment"
+        ):
+            # SkillFlow models ALFWorld as an EmbodiedTextEnvironment. Make
+            # that public protocol explicit so stateless collaborators produce
+            # useful AgentGraph artifacts instead of treating the instruction
+            # as an unsupported physical-world request. No simulator state,
+            # reward, evaluator information, or reference plan is introduced.
+            problem += (
+                "\n\n[PUBLIC ENVIRONMENT PROTOCOL]\n"
+                "This is a task-scoped ALFWorld text-simulator episode. "
+                "An Agent without the stateful environment Tool analyzes the "
+                "task or supplied public state and emits a task-relevant "
+                "artifact for connected downstream Agents; only the single "
+                "Tool owner may submit a native environment action."
+            )
+        state = self.public_environment_state()
+        if state is None:
+            return problem
+        return (
+            problem
+            + "\n\n[PUBLIC ENVIRONMENT STATE]\n"
+            + json.dumps(
+                state,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+
     def _continue_issue(self) -> Optional[str]:
         """Return why another stateful environment transition is unavailable."""
 
@@ -976,6 +1190,17 @@ class AgentWorkflowEnv:
             return (
                 "the same non-admissible environment action was repeated; "
                 "repair the existing environment Agent contract before continuing"
+            )
+        collaboration_issue = self._complex_environment_collaboration_issue_for(
+            self._graph
+        )
+        if collaboration_issue is not None:
+            return collaboration_issue
+        if not self._environment_owner_has_collaborator_artifact():
+            return (
+                "the environment Tool owner has not consumed a current "
+                "collaborator artifact; repair the Agent communication relation "
+                "before continuing"
             )
         stall_diagnostic = state.get("stall_diagnostic")
         if (
@@ -1253,34 +1478,22 @@ class AgentWorkflowEnv:
                 # reopen the environment owner or another native action.
                 return (AgentActionType.MODIFY_AGENT.value,)
             # A real terminal receipt or a measured fixed-budget exhaustion
-            # closes the mutable environment.  Do not reopen execution or grow
-            # the graph after that boundary.  If the Canvas still lacks a
-            # structurally reachable Output, expose only the existing relation
-            # and Output edits needed to reach explicit FINISH.
+            # closes the mutable environment. Do not reopen execution, grow
+            # the graph, or alternate Output ownership after that boundary.
             if (
                 finish_admitted
                 and AgentActionType.FINISH.value
                 in self._allowed_action_type_set
             ):
                 return (AgentActionType.FINISH.value,)
-            closure_actions: list[str] = []
-            for action_type in self.allowed_action_types:
-                if (
-                    action_type == AgentActionType.SET_RELATION.value
-                    and self._model_admissible_relation_candidates()
-                ):
-                    closure_actions.append(action_type)
-                elif (
-                    action_type == AgentActionType.SET_OUTPUT.value
-                    and self._model_admissible_output_agent_ids()
-                ):
-                    closure_actions.append(action_type)
-                elif (
-                    action_type == AgentActionType.FINISH.value
-                    and finish_admitted
-                ):
-                    closure_actions.append(action_type)
-            return tuple(closure_actions)
+            if (
+                self._graph.output_agent_id is None
+                and AgentActionType.SET_OUTPUT.value
+                in self._allowed_action_type_set
+                and self._model_admissible_output_agent_ids()
+            ):
+                return (AgentActionType.SET_OUTPUT.value,)
+            return ()
 
         capability_repairs = self._required_tool_capability_repair_domains()
         if self.required_tool_issue() is not None:
@@ -1288,6 +1501,11 @@ class AgentWorkflowEnv:
             # topology or Output edits. Agent identity, model and free-text
             # contract remain Director-selected.
             if not self._graph.nodes:
+                if (
+                    AgentActionType.ADD_SUBGRAPH.value
+                    in self._allowed_action_type_set
+                ):
+                    return (AgentActionType.ADD_SUBGRAPH.value,)
                 if AgentActionType.ADD_AGENT.value in self._allowed_action_type_set:
                     return (AgentActionType.ADD_AGENT.value,)
                 return ()
@@ -1692,6 +1910,22 @@ class AgentWorkflowEnv:
                         # Exclude reciprocal owner relations from the live
                         # domain instead of advertising an edit that the
                         # authoritative admission gate must reject.
+                        continue
+                    if (
+                        self._required_tool_auxiliary_profile_issue(candidate)
+                        is not None
+                    ):
+                        continue
+                    if (
+                        self._complex_environment_collaboration_issue_for(
+                            candidate
+                        )
+                        is not None
+                    ):
+                        # Keep the relation target domain identical to the
+                        # authoritative ALFWorld collaboration admission gate.
+                        # Never advertise an edge reversal that removes the
+                        # collaborator artifact ingress to the Tool owner.
                         continue
                     if self._preserved_input_change_issue_for(candidate) is not None:
                         continue
@@ -2434,6 +2668,28 @@ class AgentWorkflowEnv:
     def _model_admissible_output_agent_ids(self) -> Tuple[str, ...]:
         """Return Output targets accepted by the same prospective Canvas gate."""
 
+        environment_state = self.public_environment_state()
+        environment_closed = bool(
+            isinstance(environment_state, Mapping)
+            and (
+                environment_state.get("environment_terminal") is True
+                or environment_state.get("environment_truncated") is True
+            )
+        )
+        if environment_closed and self._graph.output_agent_id is not None:
+            # At the immutable environment boundary the Director may select an
+            # Output Agent once, but cannot alternate the pointer afterward.
+            # Agent identity remains Director-selected; the next action is
+            # explicit FINISH over the already materialized execution result.
+            return ()
+
+        environment_profile_domain = bool(
+            self.required_tool_id is not None
+            and isinstance(self.runtime.dataset_id, str)
+            and self.runtime.dataset_id.casefold() == "alfworld"
+            and not self._uses_semantic_lineage_protocol()
+        )
+
         active_lineage = set(self._active_semantic_lineage_ids())
         if self._graph.output_agent_id in active_lineage:
             return ()
@@ -2457,7 +2713,13 @@ class AgentWorkflowEnv:
                 continue
             validation = candidate.validate(
                 self.model_registry,
-                require_complete=False,
+                # Once the environment is immutable, every advertised target
+                # must make explicit FINISH structurally reachable. This does
+                # not prescribe an Output role: the Director still selects
+                # among all prospectively terminal-valid AgentGraph sinks.
+                require_complete=(
+                    environment_closed or environment_profile_domain
+                ),
             )
             if not validation.valid:
                 continue
@@ -3836,6 +4098,18 @@ class AgentWorkflowEnv:
                     max(self.max_agents - len(node_ids), 0),
                 )
             )
+            minimum = 1
+            environment_profile_domain = bool(
+                self.required_tool_id is not None
+                and not self._uses_semantic_lineage_protocol()
+            )
+            existing_tool_owners = self._required_tool_actor_ids()
+            if (
+                environment_profile_domain
+                and not existing_tool_owners
+                and self._complex_environment_collaboration_required()
+            ):
+                minimum = self.minimum_agents_for_complex_tasks
             if replacement_domains or isolated_reasoner_augmentation:
                 # One same-role/same-artifact auxiliary replacement is one
                 # executable Canvas unit. Keep constrained decoding equal to
@@ -3852,7 +4126,7 @@ class AgentWorkflowEnv:
                 # schema on the same one-Agent boundary enforced by admission.
                 remaining = min(remaining, 1)
             targets[AgentActionType.ADD_SUBGRAPH.value] = {
-                "min_new_agents": 1,
+                "min_new_agents": minimum,
                 "max_new_agents": remaining,
                 "existing_agent_ids": node_ids,
                 **(
@@ -4067,6 +4341,94 @@ class AgentWorkflowEnv:
                     else {}
                 ),
             }
+            if environment_profile_domain:
+                owner_profile = {
+                    "execution_mode": "react",
+                    "allowed_tools": [self.required_tool_id],
+                }
+                auxiliary_profile = {
+                    "execution_mode": "reasoning",
+                    "allowed_tools": [],
+                }
+                owner_added_in_transaction = not existing_tool_owners
+                require_owner_ingress = bool(
+                    self._complex_environment_collaboration_required()
+                    and (
+                        not self._graph.nodes
+                        or self._complex_environment_collaboration_issue_for(
+                            self._graph
+                        )
+                        is not None
+                    )
+                )
+                profile_counts = (
+                    [
+                        {
+                            **owner_profile,
+                            "min_count": 1,
+                            "max_count": 1,
+                        },
+                        {
+                            **auxiliary_profile,
+                            "min_count": max(minimum - 1, 0),
+                            "max_count": max(remaining - 1, 0),
+                        },
+                    ]
+                    if owner_added_in_transaction
+                    else [
+                        {
+                            **auxiliary_profile,
+                            "min_count": minimum,
+                            "max_count": remaining,
+                        }
+                    ]
+                )
+                targets[AgentActionType.ADD_SUBGRAPH.value].update(
+                    {
+                        "declaration_mode": (
+                            "free_contract_execution_profile"
+                        ),
+                        "contract_type": "free_text",
+                        "required_agent_fields": [
+                            "agent_id",
+                            "model_id",
+                            "contract",
+                            "execution_mode",
+                            "allowed_tools",
+                        ],
+                        "model_ids": list(self._available_model_ids()),
+                        "execution_profiles": (
+                            [owner_profile, auxiliary_profile]
+                            if owner_added_in_transaction
+                            else [auxiliary_profile]
+                        ),
+                        "required_execution_profile_counts": profile_counts,
+                        "existing_agents": [
+                            {
+                                "agent_id": node.id,
+                                "execution_mode": node.execution_mode.value,
+                                "allowed_tools": list(node.allowed_tools),
+                            }
+                            for node in self._graph.nodes
+                        ],
+                        "required_tool_id": self.required_tool_id,
+                        "require_environment_owner_inbound_relation": (
+                            require_owner_ingress
+                        ),
+                        "min_relations": 1 if require_owner_ingress else 0,
+                        "max_relations": 1,
+                        "endpoint_scope": {
+                            "relation_endpoint_sources": [
+                                "existing_agent_ids",
+                                "same_action_agent_ids",
+                            ],
+                            "output_agent_id_sources": [
+                                "existing_agent_ids",
+                                "same_action_agent_ids",
+                            ],
+                        },
+                    }
+                )
         if AgentActionType.MODIFY_AGENT.value in admitted:
             environment_parse_repair_id = (
                 self._environment_action_parse_repair_agent_id()
@@ -4399,6 +4761,16 @@ class AgentWorkflowEnv:
         )
         if required_tool_candidate_issue is not None:
             raise AgentWorkflowStateError(required_tool_candidate_issue)
+        auxiliary_profile_issue = self._required_tool_auxiliary_profile_issue(
+            candidate
+        )
+        if auxiliary_profile_issue is not None:
+            raise AgentWorkflowStateError(auxiliary_profile_issue)
+        collaboration_issue = self._complex_environment_collaboration_issue_for(
+            candidate
+        )
+        if collaboration_issue is not None:
+            raise AgentWorkflowStateError(collaboration_issue)
         self._problem = problem.strip()
         self._graph = candidate
         self._turn_count = 0
@@ -4438,6 +4810,14 @@ class AgentWorkflowEnv:
         required_tool_candidate_issue = self._required_tool_candidate_issue(graph)
         if required_tool_candidate_issue is not None:
             raise AgentWorkflowStateError(required_tool_candidate_issue)
+        auxiliary_profile_issue = self._required_tool_auxiliary_profile_issue(graph)
+        if auxiliary_profile_issue is not None:
+            raise AgentWorkflowStateError(auxiliary_profile_issue)
+        collaboration_issue = self._complex_environment_collaboration_issue_for(
+            graph
+        )
+        if collaboration_issue is not None:
+            raise AgentWorkflowStateError(collaboration_issue)
         self._problem = snapshot.problem
         self._graph = graph
         self._turn_count = snapshot.turn_count
@@ -4468,6 +4848,12 @@ class AgentWorkflowEnv:
             semantic_protocol=self.semantic_protocol,
             recovery_policy=self.recovery_policy,
             required_evidence_tool_id=self.required_evidence_tool_id,
+            require_multi_agent_for_complex_tasks=(
+                self.require_multi_agent_for_complex_tasks
+            ),
+            minimum_agents_for_complex_tasks=(
+                self.minimum_agents_for_complex_tasks
+            ),
             artifact_candidate_extractor=self.artifact_candidate_extractor,
         )
         result._turn_count = state.turn_count
@@ -4505,6 +4891,51 @@ class AgentWorkflowEnv:
                 action,
                 "action rejected: action type is outside the configured Canvas "
                 f"action set {list(self.allowed_action_types)!r}",
+            )
+        environment_state = self.public_environment_state()
+        if (
+            isinstance(environment_state, Mapping)
+            and (
+                environment_state.get("environment_terminal") is True
+                or environment_state.get("environment_truncated") is True
+            )
+        ):
+            terminal_action_types = self.model_admissible_action_types()
+            if action.action_type.value not in terminal_action_types:
+                return self._reject_after_count(
+                    action,
+                    "action rejected: action type is not currently admissible "
+                    "after the task-scoped environment closed; admissible="
+                    f"{list(terminal_action_types)!r}",
+                    feedback_code="environment_terminal_action_unavailable",
+                )
+            if (
+                action.action_type is AgentActionType.SET_OUTPUT
+                and action.agent_id
+                not in self._model_admissible_output_agent_ids()
+            ):
+                return self._reject_after_count(
+                    action,
+                    "action rejected: Output Agent is outside the terminal "
+                    "Canvas target domain; admissible_output_agent_ids="
+                    f"{list(self._model_admissible_output_agent_ids())!r}",
+                    feedback_code="environment_terminal_output_unavailable",
+                )
+        if (
+            action.action_type is AgentActionType.SET_OUTPUT
+            and self.required_tool_id is not None
+            and isinstance(self.runtime.dataset_id, str)
+            and self.runtime.dataset_id.casefold() == "alfworld"
+            and not self._uses_semantic_lineage_protocol()
+            and action.agent_id not in self._model_admissible_output_agent_ids()
+        ):
+            return self._reject_after_count(
+                action,
+                "action rejected: Output Agent is outside the prospectively "
+                "terminal-valid AgentGraph target domain; "
+                "admissible_output_agent_ids="
+                f"{list(self._model_admissible_output_agent_ids())!r}",
+                feedback_code="environment_output_target_unavailable",
             )
         # Capability/profile recovery is the narrowest Runtime boundary.  Apply
         # its exact live MODIFY domain before generic provider/semantic repair
@@ -4550,7 +4981,15 @@ class AgentWorkflowEnv:
                 )
             actor_id = self._required_tool_actor_ids()[0]
             current_agent_ids = {node.id for node in self._graph.nodes}
-            dirty_agents = self._graph.dirty_closure({actor_id})
+            # Each ALFWorld action is still submitted only by the unique Tool
+            # owner.  Re-execute all stateless collaborators first so their
+            # latest public-state analysis is routed through the Director-chosen
+            # relations before that single native action.
+            dirty_agents = (
+                set(current_agent_ids)
+                if self._complex_environment_collaboration_required()
+                else self._graph.dirty_closure({actor_id})
+            )
             self._progressive_execution = None
             self._progressive_execution_revision = None
             self._unresolved_dirty_agents.update(dirty_agents)
@@ -4560,7 +4999,7 @@ class AgentWorkflowEnv:
             try:
                 execution = await self.runtime.execute(
                     self._graph,
-                    self._problem,
+                    self._runtime_problem(),
                     require_complete=False,
                     prior_outputs=self._progressive_outputs,
                     prior_output_metadata=self._progressive_output_metadata,
@@ -4657,6 +5096,20 @@ class AgentWorkflowEnv:
                     action,
                     "cannot finish: " + required_tool_issue,
                 )
+            collaboration_issue = (
+                self._complex_environment_collaboration_issue_for(self._graph)
+            )
+            if collaboration_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: " + collaboration_issue,
+                )
+            if not self._environment_owner_has_collaborator_artifact():
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: the environment Tool owner has no current "
+                    "collaborator artifact receipt",
+                )
             execution = cached_execution
             execution_reused = execution is not None
             if execution is None and self.execute_on_edit:
@@ -4671,7 +5124,7 @@ class AgentWorkflowEnv:
                 try:
                     execution = await self.runtime.execute(
                         self._graph,
-                        self._problem,
+                        self._runtime_problem(),
                         prior_outputs=self._progressive_outputs,
                         prior_output_metadata=self._progressive_output_metadata,
                         prior_failure_metadata=self._failure_continuations,
@@ -4824,6 +5277,14 @@ class AgentWorkflowEnv:
                 action,
                 "edit rejected: " + auxiliary_profile_issue,
             )
+        collaboration_issue = self._complex_environment_collaboration_issue_for(
+            candidate
+        )
+        if collaboration_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + collaboration_issue,
+            )
         if (
             len(self._required_tool_actor_ids()) == 1
             and not self._required_tool_actor_ids_for_graph(candidate)
@@ -4970,7 +5431,7 @@ class AgentWorkflowEnv:
                     )
                     execution = await self.runtime.execute(
                         execution_graph,
-                        self._problem,
+                        self._runtime_problem(),
                         require_complete=False,
                         prior_outputs=prior_outputs,
                         prior_output_metadata=prior_output_metadata,
@@ -5490,6 +5951,24 @@ class AgentWorkflowEnv:
                 "admissible": False,
                 "stage": "required_tool",
                 "reason": required_tool_issue,
+            }
+        collaboration_issue = self._complex_environment_collaboration_issue_for(
+            self._graph
+        )
+        if collaboration_issue is not None:
+            return {
+                "admissible": False,
+                "stage": "agent_communication",
+                "reason": collaboration_issue,
+            }
+        if not self._environment_owner_has_collaborator_artifact():
+            return {
+                "admissible": False,
+                "stage": "agent_communication",
+                "reason": (
+                    "the environment Tool owner has no current collaborator "
+                    "artifact receipt"
+                ),
             }
         if execution is None or execution.final_answer is None:
             result = {
@@ -6259,7 +6738,7 @@ class AgentWorkflowEnv:
 
         FlowSteer's terminal validation rejects an incomplete Workflow before
         evaluation.  Interactive RAGEN tasks likewise require one stateful
-        environment actor; a prose-only graph cannot produce the native replay
+        environment Tool owner; a prose-only graph cannot produce the native replay
         trace consumed by the terminal evaluator.  This constraint fixes only
         the required capability and leaves model, role, topology, and all other
         Agents to the Director search space.
@@ -6271,8 +6750,8 @@ class AgentWorkflowEnv:
         if len(owners) == 1:
             return None
         return (
-            "AgentGraph must contain exactly one ReAct environment actor, "
-            "meaning an Agent using execution_mode='react' with "
+            "AgentGraph must contain exactly one environment Tool owner using "
+            "execution_mode='react' with "
             f"allowed_tools=['{self.required_tool_id}']; found {len(owners)}. "
             "Add or modify the required executor before retrying FINISH"
         )
@@ -11128,7 +11607,7 @@ class AgentWorkflowEnv:
         validation.raise_if_invalid()
         return await self.runtime.execute(
             self._graph,
-            self._problem,
+            self._runtime_problem(),
             run_id=run_id,
             prior_failure_metadata=self._failure_continuations,
             unavailable_model_ids=self._unavailable_model_ids,

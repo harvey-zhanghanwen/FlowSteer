@@ -192,6 +192,41 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
             raise ConfigurationError(
                 "the continue action requires an enabled stepwise environment runtime"
             )
+    collaboration = graph.get("complex_task_collaboration")
+    if collaboration is not None:
+        if not isinstance(collaboration, Mapping):
+            raise ConfigurationError(
+                "agent_graph.complex_task_collaboration must be a mapping"
+            )
+        enabled = collaboration.get("enabled")
+        if type(enabled) is not bool:
+            raise ConfigurationError(
+                "complex_task_collaboration.enabled must be boolean"
+            )
+        if enabled:
+            if action_profile != stepwise_subgraph_actions:
+                raise ConfigurationError(
+                    "complex task collaboration requires the stepwise "
+                    "FlowSteer add_subgraph action profile"
+                )
+            if collaboration.get("dataset_scope") != ["alfworld"]:
+                raise ConfigurationError(
+                    "complex_task_collaboration.dataset_scope must be ['alfworld']"
+                )
+            minimum_agents = collaboration.get("minimum_agents")
+            if (
+                isinstance(minimum_agents, bool)
+                or not isinstance(minimum_agents, int)
+                or not 2 <= minimum_agents <= 3
+            ):
+                raise ConfigurationError(
+                    "complex_task_collaboration.minimum_agents must be 2 or 3"
+                )
+            if collaboration.get("require_artifact_delivery") is not True:
+                raise ConfigurationError(
+                    "complex task collaboration requires an actual routed "
+                    "artifact receipt"
+                )
     if graph.get("contract_type") != "free_text" or graph.get("relation_encoding") != "two_bit":
         raise ConfigurationError("AgentGraph requires free-text contracts and two-bit relations")
     require_format_agent = graph.get("require_format_agent")
@@ -202,6 +237,14 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
     max_agents = graph.get("max_agents")
     if isinstance(max_agents, bool) or not isinstance(max_agents, int) or max_agents < 1:
         raise ConfigurationError("agent_graph.max_agents must be a positive integer")
+    if (
+        isinstance(collaboration, Mapping)
+        and collaboration.get("enabled") is True
+        and collaboration.get("minimum_agents") > max_agents
+    ):
+        raise ConfigurationError(
+            "complex_task_collaboration.minimum_agents cannot exceed max_agents"
+        )
     if graph.get("executor_selection") not in {
         "seeded_weighted_random",
         "director_catalog_choice",

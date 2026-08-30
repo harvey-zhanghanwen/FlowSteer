@@ -3308,6 +3308,25 @@ class LiveSmokeBackend:
                 # public resource ``alfworld`` while the existing WebShop
                 # compatibility resource remains ``webshop.environment``.
                 environment_required_tool_id = environment_resource_ids[0]
+            raw_collaboration = graph_config.get(
+                "complex_task_collaboration",
+                {},
+            )
+            collaboration_scope = (
+                raw_collaboration.get("dataset_scope", ())
+                if isinstance(raw_collaboration, Mapping)
+                else ()
+            )
+            require_multi_agent_for_complex_tasks = bool(
+                isinstance(raw_collaboration, Mapping)
+                and raw_collaboration.get("enabled") is True
+                and _dataset_key(task) in collaboration_scope
+            )
+            minimum_agents_for_complex_tasks = int(
+                raw_collaboration.get("minimum_agents", 2)
+                if isinstance(raw_collaboration, Mapping)
+                else 2
+            )
             orchestrator = AgentGraphOrchestrator(
                 self.registry,
                 self.director_client,
@@ -3355,6 +3374,12 @@ class LiveSmokeBackend:
                 semantic_protocol=semantic_protocol,
                 recovery_policy=recovery_policy,
                 required_evidence_tool_id=required_evidence_tool_id,
+                require_multi_agent_for_complex_tasks=(
+                    require_multi_agent_for_complex_tasks
+                ),
+                minimum_agents_for_complex_tasks=(
+                    minimum_agents_for_complex_tasks
+                ),
                 artifact_candidate_extractor=(
                     extract_aime2026_candidate
                     if _dataset_key(task) == "aime_2026"

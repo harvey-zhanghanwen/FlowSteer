@@ -1971,6 +1971,11 @@ class EnvironmentExecutionAdapter:
         if episode.session.task_family.lower() == "alfworld":
             facts = _alfworld_task_facts(request.problem)
             alfworld_state = {
+                # SkillFlow derives these fields only from the immutable public
+                # task instruction.  Publishing the same projection lets the
+                # Canvas and stateless collaborators reason about the requested
+                # object count/transform without simulator or evaluator state.
+                "task_facts": dict(facts),
                 "public_scene_memory": _alfworld_public_scene_memory(
                     episode.receipts,
                     target_class=facts.get("target_class"),
