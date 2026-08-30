@@ -3,7 +3,7 @@
 
 schema_version: "flowsteer.agentgraph.best-profile.v1"
 profile_id: "aime2026_agentgraph_best_v1"
-selected_at: "2026-08-26"
+selected_at: "2026-08-29"
 
 comparison_scope:
   dataset_key: "aime_2026"
@@ -17,36 +17,42 @@ comparison_scope:
   retain_operational_failures_in_denominator: true
 
 selected_condition:
-  condition_id: "aime2026_runtime_v2_3_artifact_guard"
-  source_commit: "6731fb1e2577ffa74d005312455cd3f6f7a2e050"
-  source_config: "config/evaluation_aime2026_runtime_v2_3_artifact_guard.yaml"
+  condition_id: "aime2026_runtime_v3_artifact_termination"
+  source_commit: null
+  source_config: "config/evaluation_aime2026_runtime_v3_artifact_termination.yaml"
   completion_status: "completed_with_operational_failures"
   stable_zero_full_panel: false
   agentgraph:
-    correct: 10
+    correct: 14
     denominator: 30
-    accuracy: 0.3333333333333333
-    completed_trajectories: 28
-    evaluator_valid: 26
-    explicit_finish: 26
-    max_rounds: 2
-    collection_timeout: 2
-    parsing_failure: 1
+    accuracy: 0.4666666666666667
+    completed_trajectories: 29
+    evaluator_valid: 29
+    explicit_finish: 29
+    max_rounds: 0
+    collection_timeout: 1
+    parsing_failure: 0
   direct:
     correct: 6
     denominator: 30
     accuracy: 0.2
   agentgraph_minus_direct:
-    correct: 4
-    accuracy: 0.1333333333333333
+    correct: 8
+    accuracy: 0.26666666666666666
   evidence:
-    manifest: "artifacts/aime2026_runtime_v2_3_artifact_guard/evaluation/run_manifest.json"
-    evaluation_report: "reports/aime2026_runtime_v2_3_artifact_guard/evaluation_report.json"
-    paired_results: "artifacts/aime2026_runtime_v2_3_artifact_guard/evaluation/paired_results.jsonl"
-    trajectories: "artifacts/aime2026_runtime_v2_3_artifact_guard/evaluation/agentgraph_trajectories.jsonl"
-    wrong_demos: "artifacts/aime2026_runtime_v2_3_artifact_guard/evaluation/wrong_demos.jsonl"
+    manifest: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation/run_manifest.json"
+    evaluation_report: "reports/aime2026_runtime_v3_artifact_termination/evaluation_report.json"
+    paired_results: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation/paired_results.jsonl"
+    trajectories: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation/agentgraph_trajectories.jsonl"
+    wrong_demos: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation/wrong_demos.jsonl"
 
 comparable_conditions:
+  - condition_id: "aime2026_runtime_v2_3_artifact_guard"
+    agentgraph_correct: 10
+    denominator: 30
+    accuracy: 0.3333333333333333
+    evaluator_version: "skillev.integer.target-blind-extraction.v2.1"
+    selection_result: "not_selected_lower_accuracy"
   - condition_id: "aime2026_runtime_v2_1_rescore"
     agentgraph_correct: 8
     denominator: 30
@@ -55,6 +61,12 @@ comparable_conditions:
     selection_result: "not_selected_lower_accuracy"
 
 excluded_conditions:
+  - condition_id: "aime2026_runtime_v4_9_evidence_recovery"
+    reported_accuracy: 0.13333333333333333
+    reason: "same 30-task protocol but lower strict Accuracy and ten operational failures"
+  - condition_id: "aime2026_runtime_v5_contract_completeness"
+    reported_accuracy: 0.4
+    reason: "same 30-task protocol and full completion, but lower strict Accuracy than v3"
   - condition_id: "aime2026_round_01"
     reported_accuracy: 0.43333333333333335
     reason: "different evaluator protocol, Director policy, adapter, and orchestration prior"
@@ -75,10 +87,10 @@ next_run:
   config: "config/evaluation_aime2026_best_agentgraph_v1_next_run.yaml"
   condition_id: "aime2026_best_agentgraph_v1_next_run"
   artifact_namespace: "artifacts/aime2026_best_agentgraph_v1_next_run/evaluation"
-  architecture_source_condition: "aime2026_runtime_v2_3_artifact_guard"
+  architecture_source_condition: "aime2026_runtime_v3_artifact_termination"
   formally_evaluated: false
-  prepare_only_verified: true
-  prepared_manifest: "artifacts/aime2026_best_agentgraph_v1_next_run/evaluation/run_manifest.json"
+  prepare_only_verified: false
+  prepared_manifest: null
 
 repository_selection_state:
   global_default_mechanism_exists: false

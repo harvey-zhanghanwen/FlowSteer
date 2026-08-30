@@ -407,3 +407,210 @@ empty-artifact guards.
 
 No optimizer step, backward pass, LoRA update, training, Tool, answer lookup,
 GRPO, MACE, Bayesian update, Skill retrieval, or Skill evolution occurred.
+
+## Fan-in artifact visibility correction (v2.4)
+
+The AIME Wrong Demos did not show a general Agent-to-Agent truncation bug.
+Routed fan-in inputs already contain each source's complete immutable
+`raw_output`.  Task 08 was not a multi-source fan-in and therefore cannot be
+used as evidence that fan-in truncation caused its `max_rounds` failure.
+
+The accepted correction addresses the observed information boundaries:
+
+1. `UpstreamMessage` now carries the producing `source_model_id` and
+   `source_contract` in addition to source/target IDs, artifact ID, complete
+   artifact body, revisions, and Tool receipts.
+2. The generic Agent execution protocol remains Output-pointer invariant but
+   explicitly preserves contract-relevant public derivation, evidence,
+   intermediate results, and checks for downstream assessment. It does not
+   request or persist hidden reasoning.
+3. The AIME workflow problem labels the single-integer requirement as a
+   terminal evaluator protocol instead of applying “no explanation” to every
+   intermediate artifact.
+4. Canvas exposes compact `current_artifact_receipts` on every Director turn,
+   including after a rejected edit. Each receipt contains the current
+   artifact ID, model, contract, target-blind candidate, character count,
+   head--tail preview, direct upstream provenance, and per-node
+   `candidate_conflict` without ranking candidates.
+5. Accepted execution feedback now provides the same source-bound fan-in
+   summary for non-Output nodes; full routed artifacts remain in Runtime and
+   trajectory receipts.
+
+This is a runtime/artifact/feedback correction only. No fixed mathematical
+workflow, Agent role, topology prior, automatic candidate adjudication,
+automatic `FINISH`, Tool, training, GRPO, MACE, Bayesian update, or Skill was
+added.
+
+## AIME runtime v3: parameter mask, artifact ordering, and termination lookahead
+
+The same-30 v2.3 Wrong Demos showed that a parseable artifact could coexist
+with unrelated graph growth and that a last-round `SET_OUTPUT` left no action
+for the required explicit `FINISH`.  The correction is confined to live
+Canvas state and constrained decoding:
+
+1. AIME remains on `ADD_AGENT`; a generic v3 live domain now constrains the
+   neutral `node_N`, available `model_id`, and registered execution profile.
+   It does not use QA role selection or introduce Solver/Verifier labels.
+2. `current_artifact_receipts` now exposes target-blind parsing status,
+   freshness, source Agent/artifact identity, model/contract, and direct fan-in
+   provenance. `candidate_state` reports observable agreement/conflict only.
+3. With a fresh parseable candidate, the live mask consumes existing artifacts
+   through a relation that strictly reduces structural terminal distance,
+   selects a fresh candidate-owning Output, and then exposes only explicit
+   `FINISH`. Parsing failure and unresolved candidate conflict cannot be
+   converted into an Output-pointer decision.
+4. The Director receives the existing neutral
+   `AgentGraph.construction_progress()` lower bound and remaining rounds. At a
+   tight horizon, only the next legal atomic edit that preserves the explicit
+   terminal path remains in the v3 domain. No action is synthesized and a
+   trajectory that still lacks legal `FINISH` remains `max_rounds` with a null
+   formal answer.
+5. `FINISH` now reuses the same target-blind AIME extractor as the public
+   artifact state. A non-empty but unparseable Output is a typed
+   `output_parsing_failure`, not an evaluator-eligible terminal artifact.
+6. If the exact model-admissible action domain is empty, the generic Canvas
+   records `canvas_action_domain_exhausted` with public recovery/model/
+   terminal state before any schema request; it does not sample outside the
+   domain or synthesize `FINISH`.
+7. The new prompt version is a short policy/environment contract. It names the
+   public artifact and horizon fields but contains no fixed Agent number,
+   mathematical role, chain/parallel/debate/voting pattern, Tool requirement,
+   or Skill.
+
+Directed regression tests cover scalar v3 domain/schema validation, neutral
+IDs and live model/profile constraints, single-artifact `SET_OUTPUT -> FINISH`
+ordering without re-execution, fan-in provenance and strict-progress relation
+targets, target-blind conflict, parsing-failure exclusion from Output targets,
+termination lookahead, unparseable-sink and terminal-parsing counterexamples,
+generic empty-domain termination, and compatibility with existing
+QA/runtime/collector paths. The complete unit suite reports 1064 passing tests
+and 197 passing subtests. The evaluation configuration freezes a new condition and output
+namespace; Direct remains the same frozen 30-response comparator.
+
+## AIME runtime v3 fixed-30 outcome
+
+The v3 canary completed both frozen tasks through explicit `FINISH` with valid
+evaluator and full-turn receipts. The full run reused those two trajectories
+and the frozen Direct predictions, then checkpointed every completed task.
+Three first-pass collection timeouts were resumed without resampling the 27
+successful tasks; tasks 03 and 24 completed on resume. Task 28 reached the
+unchanged 600-second task boundary on two further isolated resume attempts and
+therefore remains an operational failure rather than a recovered answer.
+
+- Direct: `6/30 = 20.00%` strict Accuracy.
+- AgentGraph v3: `14/30 = 46.67%` strict Accuracy; 29 evaluator-valid
+  trajectories and one operational failure. Completed-only Accuracy is
+  `14/29 = 48.28%` and is not used as the primary score.
+- AgentGraph v2.3: `10/30 = 33.33%`; v3 changes the strict score by `+4/30`
+  or `+13.33` percentage points.
+- No answer lookup, Tool, training, optimizer step, LoRA update, GRPO, MACE,
+  Bayesian update, Skill retrieval, or Skill evolution ran.
+
+The local SGLang preflight additionally exposed a version-compatible runtime
+receipt case: an auto-sized request pool reports configured
+`max_running_requests=null` while the scheduler reports the actual positive
+`effective_max_running_requests_per_dp`. The receipt now consumes that real
+upstream field only when all DP states agree; it does not guess a value or
+change scheduling.
+## AIME runtime v4 implementation status
+
+This pass applies only the approved runtime/artifact/output/Canvas/recovery/
+termination corrections on top of the same-30 v3 condition.
+
+Implemented:
+
+1. AgentGraphSnapshot, Canvas history, Runtime results, failure records, and
+   progressive execution state have JSON restoration paths.
+2. EvidenceStore owns an append-only rollout_checkpoints stream. The collector
+   persists each completed turn before the next Director request and writes a
+   terminal-pending marker before evaluation plus a completed marker after the
+   final trajectory.
+3. Resume validates the exact task, condition, policy versions, Director
+   sampling coordinate, problem, Skill condition, contiguous turn sequence,
+   graph snapshot IDs, and next-round boundary. It restores the cached artifact
+   and transcript instead of repeating successful model/API calls.
+4. The AIME adapter parses a target-blind artifact_assessments JSON block with
+   exact provenance binding and fail-closed status/counterexample rules.
+5. Canvas exposes fresh candidate agreement/conflict, provenance, assessment
+   status, and terminal lower bound. SET_OUTPUT/FINISH require a supported fresh
+   artifact; negative assessment restricts the next parameter domain to
+   lineage-local repair under the existing recovery policy.
+6. The generic Agent execution protocol asks an Agent with routed AIME
+   artifacts to assess every public upstream candidate while retaining a free
+   contract. It explicitly supplies no role, count, relation, topology, target,
+   evaluator result, or benchmark solution.
+7. The v4 config keeps the v3 Director prompt and frozen model/catalog/seed/
+   evaluator condition, disables all Tools, training, GRPO, MACE, Bayesian,
+   Skill retrieval/evolution, backward, optimizer, and LoRA paths, and selects
+   GPU0 for inference.
+
+Directed validation completed before the paid run:
+
+- 18 AIME adapter/runtime tests passed, including supported, insufficient,
+  refuted, pointer/FINISH no-resampling, checkpoint restoration, target-blind
+  parsing, legacy v3 ordering, fan-in provenance, parsing failure, and
+  termination lookahead.
+- The normal collector test and a forced completed-turn interruption/resume
+  test passed; the latter restored all three turns while making exactly one
+  Agent call total, proving that resume did not replay the first fresh artifact.
+- The v4 YAML loaded through validate_agent_graph_config with the fixed
+  sample_count: 30 and provenance_bound_candidate_assessment_v1 protocol.
+
+The same-30 AgentGraph v4 evaluation result is intentionally not recorded here
+until the complete fixed-denominator run has finished.
+
+
+## AIME runtime v5 frozen candidate: contract grounding and artifact completeness
+
+Status: **formal same-30 evaluation completed; candidate not selected**.
+
+The v5 candidate is frozen in
+`config/evaluation_aime2026_runtime_v5_contract_completeness.yaml`. It is
+derived mechanically from v4.9 and preserves the same official 30 AIME 2026
+tasks, sequential selection, seed `20260825`, catalog namespace/order, base
+Qwen3.5-9B policy identity, Direct prediction source, target-blind extraction
+and evaluator protocol, concurrency, and 20-round environment limit. All
+artifact, evidence, manifest and report paths use a distinct v5 namespace.
+
+The configuration enables only the approved architecture/runtime boundaries:
+
+1. `task_specification_contract_guard=true` applies a target-blind semantic
+   admission check to free-text contracts at FlowSteer's existing
+   validate-before-commit Canvas transaction. It does not read ground truth or
+   introduce a role enum, topology template, solving plan or Agent-count prior.
+2. `artifact_completeness_gate=true` prevents a length-truncated artifact from
+   entering candidate agreement, Output admission or explicit `FINISH`.
+3. `max_length_continuations=1` and
+   `length_continuation_max_tokens=512` reuse SkillFlow's bounded same-model
+   continuation schedule. The project adaptation continues the exact Agent
+   artifact rather than SkillFlow's Supervisor Tool-call request; model,
+   contract, task, upstream inbox, Tool configuration and protocol stay fixed.
+4. `artifact_assessment_terminal_policy=reject_negative` permits a complete,
+   fresh, parseable, unassessed artifact to be consumed while preserving the
+   existing blocks for conflict, `insufficient_evidence` and `refuted`.
+5. Existing v3 artifact-consumption ordering and termination lookahead plus v4
+   provenance-bound assessment remain enabled.
+
+Static validation used the repository's
+`config_loader.validate_agent_graph_config` and passed, including explicit
+checks for the frozen 30-task count and seed, the five v5 flags above, and
+disabled Tool/training/Skill paths. This check started no model service, API
+request, rollout, training or evaluator.
+
+The complete official-test evaluation used the same 30 tasks, Direct records,
+target-blind extraction, evaluator version, seed and frozen catalog condition:
+
+- Direct: 6/30 = 20.00%.
+- AgentGraph v5: 12/30 = 40.00%; 30/30 evaluator-valid trajectories,
+  30 explicit FINISH, zero max-rounds, parsing, terminal or operational failure.
+- AgentGraph v3: 14/30 = 46.67%; v5 is lower by 2/30, or 6.67 percentage points.
+- v3 to v5 paired transfer: 4 correct-to-wrong, 2 wrong-to-correct, 10
+  both-correct and 14 both-wrong.
+
+The v3 best-profile therefore remains authoritative. v5 is retained as a
+completed, reproducible but unselected architecture candidate. A post-run
+target-blind notation fix for public \sqrt2 versus contract sqrt(2) removes
+one observed contract-admission false positive; no Accuracy claim is attached
+to that unrerun code correction.
+GRPO, backward, optimizer updates, LoRA, MACE, Bayesian inference, Skill
+retrieval/evolution, retrieval, Web search and answer lookup remain disabled.

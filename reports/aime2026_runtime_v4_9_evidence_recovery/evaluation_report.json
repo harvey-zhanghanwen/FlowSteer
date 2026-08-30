@@ -1,0 +1,1266 @@
+{
+  "agent_count_distribution": {
+    "2": 13,
+    "3": 4,
+    "4": 2,
+    "7": 1
+  },
+  "agentgraph": {
+    "completed": 20,
+    "completed_only_accuracy": 0.23529411764705882,
+    "correct": 4,
+    "denominator": 30,
+    "evaluator_valid": 17,
+    "strict_accuracy": 0.13333333333333333
+  },
+  "agentgraph_minus_direct": {
+    "accuracy": -0.06666666666666668
+  },
+  "below_full_score_demo_count": 26,
+  "benchmark_slice": "official_aime_2026",
+  "comparison_interpretation": "paired_architecture_comparison",
+  "completed_at": "2026-08-29T21:10:30.044501+00:00",
+  "dataset": "AIME 2026",
+  "dataset_key": "aime_2026",
+  "direct_local_baseline": {
+    "completed": 30,
+    "completed_only_accuracy": 0.2,
+    "correct": 6,
+    "denominator": 30,
+    "evaluator_valid": 30,
+    "strict_accuracy": 0.2
+  },
+  "direct_parsing_failure_count": 22,
+  "execution_receipts": {
+    "agentgraph": {
+      "director_attempt_count": 266,
+      "director_latency_ms": 2594878.7866216153,
+      "execution_error_type_distribution": {},
+      "executor_call_count": 163,
+      "executor_model_distribution": {
+        "MiniMax-M3": 7,
+        "deepseek-v4-flash": 12,
+        "glm-4.5-flash": 1,
+        "gpt-4o-mini": 131,
+        "qwen3.5-9b-local": 3,
+        "qwen3.5-flash": 9
+      },
+      "provider_attempt_count": 163,
+      "provider_id_distribution": {
+        "local-director": 3,
+        "vectorengine": 160
+      },
+      "provider_model_distribution": {
+        "MiniMax-M3": 7,
+        "deepseek-v4-flash": 12,
+        "glm-4.5-flash": 1,
+        "gpt-4o-mini": 13,
+        "gpt-4o-mini-2024-07-18": 118,
+        "qwen3.5-flash": 9,
+        "supervisor_theta": 3
+      },
+      "reported_graph_node_model_distribution": {
+        "MiniMax-M3": 1,
+        "deepseek-v4-flash": 1,
+        "glm-4.5-flash": 1,
+        "gpt-4o-mini": 44,
+        "qwen3.5-9b-local": 2,
+        "qwen3.5-flash": 4
+      },
+      "reported_graph_scope": "evaluated_graph_for_explicit_finish_else_terminal_canvas_graph",
+      "runtime_failed_turn_count": 13,
+      "runtime_failed_without_structured_failure_record_count": 0,
+      "runtime_failure_type_distribution": {
+        "EmptyAgentResponse": 13
+      }
+    },
+    "collection_failures": [
+      {
+        "condition": "agentgraph",
+        "error": "TimeoutError: ",
+        "recorded_at": "2026-08-29T20:23:08.925197+00:00",
+        "stage": "collect",
+        "task_id": "aime-2026/07"
+      },
+      {
+        "condition": "agentgraph",
+        "error": "TimeoutError: ",
+        "recorded_at": "2026-08-29T20:28:30.631854+00:00",
+        "stage": "collect",
+        "task_id": "aime-2026/08"
+      },
+      {
+        "condition": "agentgraph",
+        "error": "TimeoutError: ",
+        "recorded_at": "2026-08-29T20:31:26.582151+00:00",
+        "stage": "collect",
+        "task_id": "aime-2026/12"
+      },
+      {
+        "condition": "agentgraph",
+        "error": "TimeoutError: ",
+        "recorded_at": "2026-08-29T20:34:11.734653+00:00",
+        "stage": "collect",
+        "task_id": "aime-2026/13"
+      },
+      {
+        "condition": "agentgraph",
+        "error": "TimeoutError: ",
+        "recorded_at": "2026-08-29T20:42:20.673567+00:00",
+        "stage": "collect",
+        "task_id": "aime-2026/15"
+      },
+      {
+        "condition": "agentgraph",
+        "error": "TimeoutError: ",
+        "recorded_at": "2026-08-29T20:49:12.103728+00:00",
+        "stage": "collect",
+        "task_id": "aime-2026/18"
+      },
+      {
+        "condition": "agentgraph",
+        "error": "TimeoutError: ",
+        "recorded_at": "2026-08-29T20:58:35.430097+00:00",
+        "stage": "collect",
+        "task_id": "aime-2026/22"
+      },
+      {
+        "condition": "agentgraph",
+        "error": "TimeoutError: ",
+        "recorded_at": "2026-08-29T21:03:13.892436+00:00",
+        "stage": "collect",
+        "task_id": "aime-2026/24"
+      },
+      {
+        "condition": "agentgraph",
+        "error": "TimeoutError: ",
+        "recorded_at": "2026-08-29T21:03:42.887229+00:00",
+        "stage": "collect",
+        "task_id": "aime-2026/25"
+      },
+      {
+        "condition": "agentgraph",
+        "error": "TimeoutError: ",
+        "recorded_at": "2026-08-29T21:10:29.905714+00:00",
+        "stage": "collect",
+        "task_id": "aime-2026/28"
+      }
+    ],
+    "direct": {
+      "call_count": 30,
+      "error_type_distribution": {},
+      "finish_reason_distribution": {
+        "length": 23,
+        "stop": 7
+      },
+      "model_id_distribution": {
+        "qwen3.5-9b-local": 30
+      },
+      "provider_attempt_count": 30,
+      "provider_id_distribution": {
+        "local-director": 30
+      },
+      "provider_model_distribution": {
+        "supervisor_theta": 30
+      },
+      "terminal_output_parsing_failure_count": 22
+    }
+  },
+  "explicit_finished_count": 17,
+  "failure_types": {
+    "agentgraph_accuracy_gain": 2,
+    "agentgraph_operational_or_evaluator_failure": 10,
+    "agentgraph_terminal_failure": 3,
+    "both_correct": 2,
+    "both_incorrect": 13
+  },
+  "graph_search_diagnostics": {
+    "action_counts": {
+      "add_agent": 100,
+      "finish": 17,
+      "modify_agent": 25,
+      "set_output": 17,
+      "set_relation": 34
+    },
+    "action_sequence_counts": {
+      "add_agent -> add_agent -> add_agent -> add_agent -> add_agent -> set_relation -> add_agent -> add_agent -> add_agent -> set_relation -> add_agent -> add_agent -> add_agent -> add_agent -> set_relation -> set_relation -> add_agent": 1,
+      "add_agent -> add_agent -> add_agent -> add_agent -> add_agent -> set_relation -> add_agent -> set_relation -> set_output -> finish": 1,
+      "add_agent -> add_agent -> add_agent -> add_agent -> modify_agent -> modify_agent -> set_relation -> set_output -> finish": 1,
+      "add_agent -> add_agent -> add_agent -> add_agent -> set_relation -> add_agent -> add_agent -> add_agent -> add_agent -> add_agent -> add_agent -> add_agent -> add_agent -> add_agent -> add_agent -> set_relation -> add_agent": 1,
+      "add_agent -> add_agent -> add_agent -> add_agent -> set_relation -> set_output -> finish": 1,
+      "add_agent -> add_agent -> add_agent -> set_relation -> add_agent -> set_relation -> add_agent -> set_relation -> add_agent -> add_agent -> add_agent -> set_relation -> add_agent -> set_relation -> add_agent -> add_agent -> set_relation -> add_agent -> add_agent": 1,
+      "add_agent -> add_agent -> add_agent -> set_relation -> add_agent -> set_relation -> set_output -> finish": 2,
+      "add_agent -> add_agent -> add_agent -> set_relation -> modify_agent -> set_output -> finish": 1,
+      "add_agent -> add_agent -> add_agent -> set_relation -> set_output -> finish": 3,
+      "add_agent -> add_agent -> modify_agent -> modify_agent -> modify_agent -> modify_agent -> set_relation -> set_output -> finish": 1,
+      "add_agent -> add_agent -> set_relation -> add_agent -> add_agent -> set_relation -> add_agent -> add_agent -> set_relation -> set_output -> finish": 1,
+      "add_agent -> add_agent -> set_relation -> set_output -> finish": 2,
+      "add_agent -> modify_agent -> add_agent -> add_agent -> set_relation -> set_output -> finish": 1,
+      "add_agent -> modify_agent -> modify_agent -> add_agent -> add_agent -> set_relation -> set_output -> finish": 1,
+      "add_agent -> modify_agent -> modify_agent -> modify_agent -> modify_agent -> add_agent -> add_agent -> add_agent -> add_agent -> set_relation -> set_output -> finish": 1,
+      "add_agent -> modify_agent -> modify_agent -> modify_agent -> modify_agent -> modify_agent -> modify_agent -> modify_agent -> modify_agent -> modify_agent -> modify_agent -> modify_agent -> add_agent -> set_relation -> set_output -> finish": 1
+    },
+    "agent_count_distribution": {
+      "2": 13,
+      "3": 4,
+      "4": 2,
+      "7": 1
+    },
+    "atomic_cost_by_agent_count": {
+      "2": {
+        "mean_edit_overhead": 1.5384615384615385,
+        "mean_minimum_final_construction_actions": 5.0,
+        "mean_observed_turns": 7.923076923076923,
+        "mean_turn_overhead": 2.923076923076923,
+        "tasks": 13
+      },
+      "3": {
+        "mean_edit_overhead": 0.0,
+        "mean_minimum_final_construction_actions": 6.5,
+        "mean_observed_turns": 10.75,
+        "mean_turn_overhead": 4.25,
+        "tasks": 4
+      },
+      "4": {
+        "mean_edit_overhead": 0.5,
+        "mean_minimum_final_construction_actions": 8.0,
+        "mean_observed_turns": 14.0,
+        "mean_turn_overhead": 6.0,
+        "tasks": 2
+      },
+      "7": {
+        "mean_edit_overhead": 0.0,
+        "mean_minimum_final_construction_actions": 13.0,
+        "mean_observed_turns": 19.0,
+        "mean_turn_overhead": 6.0,
+        "tasks": 1
+      }
+    },
+    "depth_three_plus_count": 3,
+    "effective_dependency_depth_distribution": {
+      "1": 17,
+      "2": 2,
+      "4": 1
+    },
+    "effective_dependency_status_distribution": {
+      "unverified": 17,
+      "weak": 3
+    },
+    "execution_turn_count": 107,
+    "executor_call_count": 163,
+    "explicit_finish_count": 17,
+    "full_structural_depth_evidence_status_distribution": {
+      "unverified": 17,
+      "weak": 3
+    },
+    "max_rounds_termination_count": 0,
+    "max_rounds_values_seen": {},
+    "maximum_prompt_characters": 81568,
+    "maximum_turn_count": 19,
+    "maximum_visible_history": 4,
+    "mean_prompt_characters": 28994.723411282775,
+    "mean_turn_count": 9.65,
+    "parse_failure_count": 0,
+    "rejected_turn_count": 52,
+    "rejected_turn_rate": 0.2694300518134715,
+    "role_family_distribution": {
+      "unspecified": 53
+    },
+    "set_output_before_last_relation_count": 0,
+    "structural_depth_distribution": {
+      "2": 17,
+      "3": 2,
+      "4": 1
+    },
+    "task_count": 20,
+    "tasks_with_execution": 20,
+    "three_plus_agent_count": 7,
+    "topology_family_distribution": {
+      "fan_in": 1,
+      "serial_2": 17,
+      "serial_3_plus": 2
+    },
+    "trajectories": [
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 4,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 7,
+        "executor_call_count": 10,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 9,
+        "parse_failure_count": 0,
+        "prompt_character_max": 54804,
+        "prompt_character_mean": 35214.36363636364,
+        "rejected_turn_count": 2,
+        "relation_count": 3,
+        "role_families": [
+          "unspecified",
+          "unspecified",
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "aime-2026/01",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus",
+          "reciprocal"
+        ],
+        "turn_count": 11,
+        "turn_overhead": 2,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 3,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 49303,
+        "prompt_character_mean": 25074.166666666668,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/02",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 3,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 44284,
+        "prompt_character_mean": 26974.6,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/06",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "modify_agent",
+          "modify_agent",
+          "modify_agent",
+          "modify_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 4,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 7,
+        "executor_call_count": 7,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 44928,
+        "prompt_character_mean": 25026.833333333332,
+        "rejected_turn_count": 3,
+        "relation_count": 1,
+        "role_families": [
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/04",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 12,
+        "turn_overhead": 7,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_relation",
+          "add_agent"
+        ],
+        "agent_count": 4,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 8,
+        "executor_call_count": 25,
+        "explicit_finish": false,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 8,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 59633,
+        "prompt_character_mean": 34115.529411764706,
+        "rejected_turn_count": 9,
+        "relation_count": 3,
+        "role_families": [
+          "unspecified",
+          "unspecified",
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/05",
+        "termination_reason": "canvas_action_domain_exhausted",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2",
+          "reciprocal"
+        ],
+        "turn_count": 17,
+        "turn_overhead": 10,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "modify_agent",
+          "modify_agent",
+          "modify_agent",
+          "modify_agent",
+          "modify_agent",
+          "modify_agent",
+          "modify_agent",
+          "modify_agent",
+          "modify_agent",
+          "modify_agent",
+          "modify_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 7,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 10,
+        "executor_call_count": 10,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 11,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 47221,
+        "prompt_character_mean": 28839.4375,
+        "rejected_turn_count": 4,
+        "relation_count": 1,
+        "role_families": [
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/03",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 16,
+        "turn_overhead": 11,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 3,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 43912,
+        "prompt_character_mean": 26846.8,
+        "rejected_turn_count": 0,
+        "relation_count": 1,
+        "role_families": [
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/09",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 5,
+        "turn_overhead": 0,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 3,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 45302,
+        "prompt_character_mean": 25022.666666666668,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/10",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "modify_agent",
+          "modify_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 2,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 5,
+        "executor_call_count": 5,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 42807,
+        "prompt_character_mean": 24830.75,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/11",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 8,
+        "turn_overhead": 3,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "modify_agent",
+          "modify_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 2,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 5,
+        "executor_call_count": 5,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 45941,
+        "prompt_character_mean": 24914.88888888889,
+        "rejected_turn_count": 2,
+        "relation_count": 1,
+        "role_families": [
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/14",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 9,
+        "turn_overhead": 4,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "modify_agent",
+          "modify_agent",
+          "modify_agent",
+          "modify_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 3,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 6,
+        "executor_call_count": 6,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 7,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 41265,
+        "prompt_character_mean": 27143.222222222223,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/17",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 9,
+        "turn_overhead": 4,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "add_agent"
+        ],
+        "agent_count": 7,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 4,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 13,
+        "executor_call_count": 38,
+        "explicit_finish": false,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 13,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 13,
+        "parse_failure_count": 0,
+        "prompt_character_max": 81568,
+        "prompt_character_mean": 51288.57894736842,
+        "rejected_turn_count": 6,
+        "relation_count": 6,
+        "role_families": [
+          "unspecified",
+          "unspecified",
+          "unspecified",
+          "unspecified",
+          "unspecified",
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 4,
+        "task_id": "aime-2026/16",
+        "termination_reason": "canvas_action_domain_exhausted",
+        "topology_family": "fan_in",
+        "topology_motifs": [
+          "parallel",
+          "fan_in",
+          "reciprocal"
+        ],
+        "turn_count": 19,
+        "turn_overhead": 6,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "modify_agent",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 5,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 47013,
+        "prompt_character_mean": 27140.85714285714,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/20",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 7,
+        "turn_overhead": 2,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 5,
+        "executor_call_count": 8,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 54780,
+        "prompt_character_mean": 30806.75,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "unspecified",
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/21",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2",
+          "reciprocal"
+        ],
+        "turn_count": 8,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "modify_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 1,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 4,
+        "executor_call_count": 4,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 5,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 44224,
+        "prompt_character_mean": 24591.285714285714,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/23",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 7,
+        "turn_overhead": 2,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 2,
+        "effective_dependency_status": "weak",
+        "execution_turn_count": 5,
+        "executor_call_count": 8,
+        "explicit_finish": false,
+        "full_structural_depth_evidence_status": "weak",
+        "graph_revision": 5,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 49253,
+        "prompt_character_mean": 32857.0,
+        "rejected_turn_count": 12,
+        "relation_count": 2,
+        "role_families": [
+          "unspecified",
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/19",
+        "termination_reason": "canvas_action_domain_exhausted",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2",
+          "reciprocal"
+        ],
+        "turn_count": 17,
+        "turn_overhead": 12,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 5,
+        "executor_call_count": 9,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 59338,
+        "prompt_character_mean": 29723.0,
+        "rejected_turn_count": 3,
+        "relation_count": 2,
+        "role_families": [
+          "unspecified",
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/26",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2",
+          "reciprocal"
+        ],
+        "turn_count": 10,
+        "turn_overhead": 3,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 3,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 5,
+        "executor_call_count": 6,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 6,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 7,
+        "parse_failure_count": 0,
+        "prompt_character_max": 57196,
+        "prompt_character_mean": 31547.5,
+        "rejected_turn_count": 1,
+        "relation_count": 2,
+        "role_families": [
+          "unspecified",
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 3,
+        "task_id": "aime-2026/27",
+        "termination_reason": "finish",
+        "topology_family": "serial_3_plus",
+        "topology_motifs": [
+          "serial_3_plus"
+        ],
+        "turn_count": 8,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 3,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 43030,
+        "prompt_character_mean": 23285.571428571428,
+        "rejected_turn_count": 2,
+        "relation_count": 1,
+        "role_families": [
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/29",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 7,
+        "turn_overhead": 2,
+        "visible_history_max": 4
+      },
+      {
+        "action_sequence": [
+          "add_agent",
+          "add_agent",
+          "add_agent",
+          "set_relation",
+          "set_output",
+          "finish"
+        ],
+        "agent_count": 2,
+        "edit_overhead": 0,
+        "effective_dependency_depth": 1,
+        "effective_dependency_status": "unverified",
+        "execution_turn_count": 3,
+        "executor_call_count": 3,
+        "explicit_finish": true,
+        "full_structural_depth_evidence_status": "unverified",
+        "graph_revision": 4,
+        "max_rounds_seen": null,
+        "minimum_final_construction_actions": 5,
+        "parse_failure_count": 0,
+        "prompt_character_max": 42485,
+        "prompt_character_mean": 24650.666666666668,
+        "rejected_turn_count": 1,
+        "relation_count": 1,
+        "role_families": [
+          "unspecified",
+          "unspecified"
+        ],
+        "set_output_before_last_relation": false,
+        "structural_depth": 2,
+        "task_id": "aime-2026/30",
+        "termination_reason": "finish",
+        "topology_family": "serial_2",
+        "topology_motifs": [
+          "serial_2"
+        ],
+        "turn_count": 6,
+        "turn_overhead": 1,
+        "visible_history_max": 4
+      }
+    ],
+    "turn_count_distribution": {
+      "10": 1,
+      "11": 1,
+      "12": 1,
+      "16": 1,
+      "17": 2,
+      "19": 1,
+      "5": 2,
+      "6": 3,
+      "7": 3,
+      "8": 3,
+      "9": 2
+    }
+  },
+  "max_rounds_count": 0,
+  "metric_scope": "SkillEval_canonicalized_integer_exact_accuracy",
+  "model_catalog_path": "config/model_catalog_multidataset_tool_v2.yaml",
+  "operational_failure_count": 10,
+  "parsing_failure_count": 0,
+  "policy_adapter": null,
+  "policy_version": "qwen35-9b-base-aime2026-unified-initial-v1",
+  "primary_metric": "accuracy",
+  "project_split": "test",
+  "protocol_equivalent_to_direct": true,
+  "relation_count_distribution": {
+    "1": 13,
+    "2": 4,
+    "3": 2,
+    "6": 1
+  },
+  "sample_count": 30,
+  "schema_version": "flowsteer.completion_benchmark.round_report.v1",
+  "skill_evaluation_mode": "memory_off",
+  "skill_injection_performed": false,
+  "skill_store_path": null,
+  "telemetry_totals": {
+    "agentgraph": {
+      "api_attempts": 429.0,
+      "input_tokens": 1698001.0,
+      "latency_ms": 6095679.408929311,
+      "output_tokens": 286916.0
+    },
+    "direct": {
+      "api_attempts": 30.0,
+      "input_tokens": 17174.0,
+      "latency_ms": 774062.9235105589,
+      "output_tokens": 110134.0
+    }
+  },
+  "terminal_failure_count": 3,
+  "topology_distribution": {
+    "fan_in": 1,
+    "serial_2": 17,
+    "serial_3_plus": 2
+  },
+  "training_performed": false,
+  "typical_below_full_score_task_ids": [
+    "aime-2026/04",
+    "aime-2026/05",
+    "aime-2026/07",
+    "aime-2026/08",
+    "aime-2026/09",
+    "aime-2026/10",
+    "aime-2026/11",
+    "aime-2026/12",
+    "aime-2026/13",
+    "aime-2026/14"
+  ]
+}

@@ -206,3 +206,107 @@ weights, generation seed, and catalog presentation as v1, while assigning a
 new scalar observation protocol version and separate artifact/report paths.
 Tools, training, GRPO, MACE, Bayesian inference, and Skill functionality remain
 disabled.
+
+## Fan-in artifact visibility v2.4 source map
+
+The fixed-30 Wrong Demos separate two boundaries that must not be conflated.
+`AgentRuntime._upstream` and `openai_gateway._format_upstream` already route the
+complete artifact body once per incoming edge; Task 03 confirms that a fan-in
+Agent received both the bare `solver` candidate and the other source's full
+derivation.  Task 08 was a reciprocal block rather than fan-in, and its
+`max_rounds` termination was caused by rejected/no-op edits followed by a
+last-round `SET_OUTPUT`, not by a truncated routed artifact.
+
+| v2.4 boundary | Upstream source | Reuse / adaptation |
+|---|---|---|
+| Complete per-source artifact body | Existing `AgentRuntime._upstream` and `UpstreamMessage`; FlowSteer `Aggregate` keeps candidates in separate indexed blocks | **Existing core reused:** no new truncation or candidate-only projection is applied to Agent-to-Agent communication. Each direct source remains a separate envelope with its immutable full `raw_output`. |
+| Source execution identity | Existing artifact metadata already persists producing model and contract; neither FlowSteer `Aggregate` nor SkillFlow's sequential Tool observations provide peer-Agent provenance | **Project-specific thin adaptation:** optional `source_model_id` and `source_contract` are copied into each direct `UpstreamMessage` and model-visible envelope. Ancestor raw artifacts are not recursively duplicated. |
+| Public intermediate artifact content | FlowSteer operators pass a computed solution to later operators; SkillFlow retains each public Action--Observation message for the next bounded turn | **Necessary execution-protocol adaptation:** the generic, Output-pointer-invariant Agent protocol asks for contract-relevant public derivation, evidence, intermediate results, and checks instead of an unsupported bare candidate. This adds no Agent role, count, relation, or topology template. |
+| AIME terminal-format scope | SkillFlow's target-blind math extraction accepts an explicit final candidate from free text | **AIME adapter correction:** `answer_format` is described as a terminal evaluator boundary. It no longer tells every intermediate Agent to discard its checkable work product. |
+| Director artifact visibility | FlowSteer progressive Canvas feedback plus its input-identity execution cache; FlowSteer `ScEnsemble` uses a head--tail preview with an explicit truncation marker | **Project-specific Canvas adaptation:** every revision-live artifact exposes a target-blind candidate, character count, head--tail preview, and direct fan-in provenance/conflict. This compact receipt persists after rejected edits; the immutable Runtime artifact remains full. No evaluator target or candidate winner is exposed. |
+
+This correction improves information preservation and diagnosis only.  It does
+not auto-select a candidate, auto-finish a trajectory, relax explicit
+`FINISH`, or change the frozen AIME model catalog and search space.
+
+## AIME parameter-level action masking and termination lookahead v3
+
+The v3 condition keeps AIME on the scalar, free-contract action set.  It does
+not import the QA-specific `ADD_SUBGRAPH` role domain or any mathematical
+workflow template.
+
+| v3 boundary | Upstream source | Reuse / adaptation |
+|---|---|---|
+| Scalar `ADD_AGENT` live domain | FlowSteer `WorkflowGraph` neutral `node_N` allocation; existing unified `AgentWorkflowEnv._available_model_ids`; SkillFlow-style Runtime execution-profile registration | **FlowSteer/SkillFlow boundary reused, project thin adaptation:** v3 constrains only the next neutral ID, live model catalog, and registered `(execution_mode, allowed_tools)` pairs. `contract` remains free text; there is no mathematical role enum, Agent-count template, relation template, or topology prior. |
+| Exact parameter schema | Existing `agentgraph.model-admissible-action-mask.v3` hierarchical action discriminator and exact parameter phase | **Existing core reused / compatibility adaptation:** add the missing scalar `ADD_AGENT` parameter branch. The sampled action is still parsed and consumed unchanged by the authoritative Canvas; malformed semantics are not repaired. |
+| Candidate agreement/conflict, freshness, and provenance | Existing immutable Runtime artifacts, direct `UpstreamMessage` provenance, and AIME target-blind extractor | **Existing core reused / projection adaptation:** Canvas groups only fresh parseable public candidates and retains source Agent/artifact IDs, parsing status, and direct upstream provenance. Agreement is observable string equality, not correctness or independence; no target, reward, winner, or adjudication enters the observation. |
+| Artifact-consumption ordering | FlowSteer's progressive execute-after-edit Canvas and input-identity artifact reuse | **Project-specific necessary adaptation:** when a fresh candidate exists, expose strict-progress relation consumption, then a fresh candidate-owning Output target, then explicit `FINISH`. `SET_OUTPUT` is hidden for parsing failure or unresolved conflict. Repair/augmentation remains available only when measured failure/conflict/no terminal artifact prevents this path. |
+| Termination lookahead | Existing `AgentGraph.construction_progress()` over atomic `SET_RELATION`, `SET_OUTPUT`, and explicit `FINISH` edits | **Existing core reused / project-specific policy projection:** expose the state-conditioned structural lower bound and, when the remaining horizon reaches that bound, mask to legal actions that strictly reduce it. The bound does not auto-finish, recover a historical candidate, or predict Runtime/model success. |
+| Output parsing gate | SkillFlow-derived target-blind AIME candidate extraction already used by the evaluator | **Existing adapter reused at the Canvas terminal boundary:** an ordered-artifact condition admits `FINISH` only when the current Output artifact has one deterministic public candidate. Failure is typed `output_parsing_failure`; no target, LLM repair, or candidate synthesis is used. |
+| Empty live domain | FlowSteer's bounded Canvas natural termination and existing verified-QA `canvas_action_domain_exhausted` receipt | **Existing core generalized:** generic model-admissible conditions persist the same typed public terminal diagnosis when no exact action/parameter domain remains, instead of constructing an empty JSON schema. No implicit `FINISH` or historical candidate is created. |
+
+The fixed evaluation condition is
+`config/evaluation_aime2026_runtime_v3_artifact_termination.yaml`.  It preserves
+the official 30-task split, Direct predictions, base Qwen3.5-9B Director
+weights, model catalog presentation, seed, 20-round environment limit, and
+target-blind integer evaluator from v2.3.  Tools, training, GRPO, MACE,
+Bayesian inference, Skill retrieval, and Skill evolution remain disabled.
+
+## SGLang auto-sized request-pool receipt compatibility
+
+The deployed SGLang version preserves an omitted CLI
+`--max-running-requests` as `max_running_requests: null` in `/server_info`.
+Its scheduler publishes the resolved pool size in
+`internal_states[].effective_max_running_requests_per_dp` (see the installed
+SGLang scheduler `get_internal_state` implementation). The unified runtime
+receipt now reuses that upstream effective field only when the configured
+field is null, requires every DP state to expose the same positive integer,
+and records which source supplied the value. It does not infer a limit from
+GPU memory or substitute the evaluation concurrency.
+## AIME runtime v4: durable turns and provenance-bound assessment
+
+The v4 condition keeps the v3 Qwen3.5-9B Director prompt, scalar action set,
+model catalog, seed, fixed 30-task split, and target-blind evaluator. It adds
+no mathematical role, Agent count, relation, topology, Tool, or Skill prior.
+
+| v4 boundary | Upstream source | Reuse / adaptation |
+|---|---|---|
+| Completed-turn persistence | FlowSteer's graph snapshots and input-identity execution cache; SkillFlow's public Action--Observation continuation boundary | **Existing boundaries reused / project-specific necessary adaptation:** neither checked upstream implementation persists a complete multi-Agent episode at every accepted Canvas turn. An append-only checkpoint now binds the exact TurnRecord, GraphSnapshotEvent, public Runtime state, next Director transcript, task/condition/policy/sampling identity, and completion status. Resume starts at the next Director round and does not replay fresh Agent artifacts. |
+| Immutable artifact restoration | Existing unified artifact_id, full raw_output, per-source input_artifact_provenance, graph revision, and dirty-closure cache | **Existing core reused / serialization adaptation:** JSON receipt fields are restored exactly; opaque runtime-only objects are excluded using the existing trajectory receipt filtering semantics. SET_OUTPUT remains pointer-only and FINISH consumes the restored fresh Output artifact without a model call. |
+| Provenance-bound candidate assessment | Existing full UpstreamMessage envelopes and AIME target-blind candidate extractor | **Project-specific thin protocol:** a downstream artifact may emit supported, insufficient_evidence, or refuted only for an exact fresh upstream artifact_id and the exact public candidate. refuted requires a public counterexample. The parser neither recomputes an answer nor receives the evaluator target. |
+| Lineage-local recovery | Existing PRESERVE -> DIAGNOSE -> REPAIR -> AUGMENT admission and parameter-level action domains | **Existing core reused / target-domain adaptation:** a fresh negative assessment attributes MODIFY_AGENT to the assessed source Agent. Stale/unbound assessments cannot block a new artifact, and no fixed Verifier role or workflow is introduced. |
+| Evidence-aware terminal gate | v3 artifact-consumption ordering, construction-progress lower bound, Output-pointer gate, and explicit FINISH semantics | **Existing core reused / lower-bound adaptation:** an unassessed, insufficient, refuted, conflicting, or stale candidate cannot be selected or finished. The public lookahead includes the minimum remaining assessment/selection/FINISH actions; a supported fresh artifact is consumed before unrelated graph growth. |
+
+The evaluation condition is
+config/evaluation_aime2026_runtime_v4_evidence_recovery.yaml. The outer task
+boundary is 900 seconds and the inner Agent execution boundary is 480 seconds,
+so a typed Runtime failure can be persisted before the task collector expires.
+This is a runtime recovery setting, not an MD-defined mathematical horizon.
+The Director remains at the unchanged configurable max_rounds: 20.
+
+
+## AIME runtime v5 contract grounding and artifact completeness source map
+
+The frozen candidate configuration is
+`config/evaluation_aime2026_runtime_v5_contract_completeness.yaml`. It is a
+mechanical derivative of the v4.9 condition: the official 30-task test slice,
+seed, catalog namespace and order, base Qwen3.5-9B policy identity, paired
+Direct predictions, target-blind integer evaluator, 20-round horizon, and
+artifact/report isolation are unchanged. The new condition has its own output
+namespace. The complete same-30 evaluation obtained 12/30 rather than v3's
+14/30, so it did not replace the evidence-selected v3 best-profile pointer.
+
+| v5 boundary | Upstream source | Reuse / adaptation |
+|---|---|---|
+| Transactional contract admission | FlowSteer `src/interactive/workflow_env.py::WorkflowEnv._step_internal` parses and validates a proposed edit before committing Canvas state | **FlowSteer transactional Canvas reused / project thin adaptation:** AIME `ADD_AGENT` and `MODIFY_AGENT` free-text contracts receive a target-blind task-specification guard at the existing admission boundary. It rejects question-external, constraint-bearing numeric assertions or precommitted terminal claims without reading the evaluator target. Agent IDs, models, contracts, relations, Output selection, topology and `FINISH` remain Director decisions. |
+| Bounded length continuation | SkillFlow `training/batch_inference.py::_supervisor_call_unpaused` detects `finish_reason == "length"`, retains the first assistant prefix, makes one bounded continuation call to the same resolved model, and limits that continuation to 512 tokens | **SkillFlow execution schedule reused / necessary Agent-artifact adaptation:** the unified Runtime retains the exact original Agent request and partial assistant artifact, performs at most one same-model continuation with a neutral completion instruction and a 512-token bound, and records both generation segments. Unlike SkillFlow's Supervisor Tool-call retry, this path completes the same free-text Agent artifact and does not require or introduce a Tool call. It never changes model, contract, upstream inbox, Tool configuration, task or answer protocol. |
+| Artifact completeness and terminal admission | FlowSteer progressive execution cache and pointer-only terminal reuse; existing immutable AgentGraph artifacts and provenance receipts | **Existing core reused / project thin adaptation:** `finish_reason=length` is incomplete until the bounded continuation completes. Incomplete artifacts remain diagnostic receipts but are excluded from candidate agreement, Output admission and explicit `FINISH`. A complete, fresh, parseable and unassessed artifact is terminal-admissible under `reject_negative`; conflict, `insufficient_evidence` or `refuted` remains blocking. No candidate is ranked against ground truth and no historical artifact is promoted. |
+| Existing artifact consumption | v3 artifact-consumption ordering and termination lookahead; v4 provenance-bound assessment | **Existing unified core reused:** current candidate agreement/conflict, freshness, artifact provenance, strict-progress relation ordering, Output-pointer selection and explicit `FINISH` remain enabled. v5 changes only contract admission and completeness handling; it adds no fixed role, Agent count, chain, parallel pattern, verifier workflow or mathematical solving template. |
+
+All v5 paths keep AIME Tools disabled. Training, backward, optimizer update,
+LoRA publication, GRPO, MACE, Bayesian posterior/EVSI, Skill retrieval,
+Skill evolution, retrieval databases, Web search and answer lookup are also
+disabled. The completed v5 condition produced 30/30 evaluator-valid explicit
+FINISH trajectories with zero operational, terminal, max-rounds, or parsing
+failure, but strict Accuracy was 12/30 (40.00%), below v3's 14/30 (46.67%).
+It remains a versioned rejected candidate rather than the default profile.
