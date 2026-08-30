@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import re
 import unicodedata
 from typing import Callable, Collection, Mapping, Optional, Sequence, Tuple, Union
@@ -57,6 +58,53 @@ _SUPPORTED_SEMANTIC_PROTOCOLS = frozenset(
 _SUPPORTED_RECOVERY_POLICIES = frozenset(
     {"default", _PRESERVE_REPAIR_RECOVERY_POLICY}
 )
+
+
+def _artifact_head_tail_preview(value: str, *, limit: int = 320) -> str:
+    """Return a compact preview while preserving both ends of an artifact.
+
+    FlowSteer's ensemble prompt keeps the head and tail when a candidate must
+    be shortened.  Canvas feedback uses the same information-preserving shape
+    here; the immutable Runtime artifact and routed Agent input remain full.
+    """
+
+    compact = " ".join(value.split())
+    if len(compact) <= limit:
+        return compact
+    marker = " ...[truncated]... "
+    available = limit - len(marker)
+    head = available // 2
+    tail = available - head
+    return compact[:head] + marker + compact[-tail:]
+
+_CHECKPOINT_UNSAFE = object()
+
+
+def _checkpoint_json_value(value: object) -> object:
+    """Reuse trajectory-receipt JSON filtering for public Canvas state."""
+
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else _CHECKPOINT_UNSAFE
+    if isinstance(value, Mapping):
+        converted: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                continue
+            safe_item = _checkpoint_json_value(item)
+            if safe_item is not _CHECKPOINT_UNSAFE:
+                converted[key] = safe_item
+        return converted
+    if isinstance(value, (list, tuple, set, frozenset)):
+        converted_items: list[object] = []
+        for item in value:
+            safe_item = _checkpoint_json_value(item)
+            if safe_item is not _CHECKPOINT_UNSAFE:
+                converted_items.append(safe_item)
+        return converted_items
+    return _CHECKPOINT_UNSAFE
+
 _TYPED_RETRIEVAL_FAILURE_RETRYABILITY = {
     "knowledge_base_coverage_failure": (
         "repair_retrieval_or_database_coverage"
@@ -282,6 +330,43 @@ class AgentWorkflowHistoryEntry:
         }
 
 
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, object],
+    ) -> "AgentWorkflowHistoryEntry":
+        if not isinstance(value, Mapping):
+            raise ValueError("serialized Canvas history entry must be a mapping")
+        raw_action = value.get("action")
+        action: Optional[AgentAction]
+        if raw_action is None:
+            action = None
+        elif isinstance(raw_action, Mapping):
+            action = AgentActionParser().parse(
+                json.dumps(
+                    dict(raw_action),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        else:
+            raise ValueError("serialized Canvas history action must be a mapping")
+        return cls(
+            turn_count=int(value["turn_count"]),
+            accepted=bool(value["accepted"]),
+            done=bool(value["done"]),
+            action=action,
+            revision=int(value["revision"]),
+            feedback=str(value["feedback"]),
+            feedback_code=(
+                str(value["feedback_code"])
+                if value.get("feedback_code") is not None
+                else None
+            ),
+            execution_reused=bool(value.get("execution_reused", False)),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class AgentWorkflowSnapshot:
     problem: str
@@ -290,6 +375,50 @@ class AgentWorkflowSnapshot:
     finished: bool
     last_feedback: str
     history: Tuple[AgentWorkflowHistoryEntry, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "problem": self.problem,
+            "graph": self.graph.to_dict(),
+            "turn_count": self.turn_count,
+            "finished": self.finished,
+            "last_feedback": self.last_feedback,
+            "history": [entry.to_dict() for entry in self.history],
+            "snapshot_id": self.snapshot_id,
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, object],
+    ) -> "AgentWorkflowSnapshot":
+        if not isinstance(value, Mapping):
+            raise ValueError("serialized Canvas snapshot must be a mapping")
+        raw_graph = value.get("graph")
+        raw_history = value.get("history", ())
+        if not isinstance(raw_graph, Mapping):
+            raise ValueError("serialized Canvas graph must be a mapping")
+        if (
+            isinstance(raw_history, (str, bytes))
+            or not isinstance(raw_history, Sequence)
+        ):
+            raise ValueError("serialized Canvas history must be a sequence")
+        snapshot = cls(
+            problem=str(value["problem"]),
+            graph=AgentGraphSnapshot.from_dict(raw_graph),
+            turn_count=int(value["turn_count"]),
+            finished=bool(value["finished"]),
+            last_feedback=str(value.get("last_feedback", "")),
+            history=tuple(
+                AgentWorkflowHistoryEntry.from_dict(item)
+                for item in raw_history
+                if isinstance(item, Mapping)
+            ),
+        )
+        expected_id = value.get("snapshot_id")
+        if expected_id is not None and expected_id != snapshot.snapshot_id:
+            raise ValueError("serialized Canvas snapshot identity mismatch")
+        return snapshot
 
     @property
     def snapshot_id(self) -> str:
@@ -379,6 +508,14 @@ class AgentWorkflowEnv:
         artifact_candidate_extractor: Optional[
             Callable[[str], tuple[Optional[str], bool, Optional[str]]]
         ] = None,
+        artifact_assessment_extractor: Optional[
+            Callable[[str], tuple[Sequence[Mapping[str, object]], Optional[str]]]
+        ] = None,
+        artifact_consumption_ordering: bool = False,
+        termination_lookahead: bool = False,
+        task_specification_contract_guard: bool = False,
+        artifact_completeness_gate: bool = False,
+        artifact_assessment_terminal_policy: str = "require_supported",
     ) -> None:
         if runtime is None and gateway is None:
             raise AgentWorkflowStateError("gateway or runtime is required")
@@ -462,6 +599,48 @@ class AgentWorkflowEnv:
             raise AgentWorkflowStateError(
                 "artifact_candidate_extractor must be callable or None"
             )
+        if artifact_assessment_extractor is not None and not callable(
+            artifact_assessment_extractor
+        ):
+            raise AgentWorkflowStateError(
+                "artifact_assessment_extractor must be callable or None"
+            )
+        if (
+            artifact_assessment_extractor is not None
+            and artifact_candidate_extractor is None
+        ):
+            raise AgentWorkflowStateError(
+                "artifact assessment requires a candidate extractor"
+            )
+        if type(artifact_consumption_ordering) is not bool:
+            raise AgentWorkflowStateError(
+                "artifact_consumption_ordering must be bool"
+            )
+        if type(termination_lookahead) is not bool:
+            raise AgentWorkflowStateError("termination_lookahead must be bool")
+        if type(task_specification_contract_guard) is not bool:
+            raise AgentWorkflowStateError(
+                "task_specification_contract_guard must be bool"
+            )
+        if type(artifact_completeness_gate) is not bool:
+            raise AgentWorkflowStateError(
+                "artifact_completeness_gate must be bool"
+            )
+        if artifact_assessment_terminal_policy not in {
+            "require_supported",
+            "reject_negative",
+        }:
+            raise AgentWorkflowStateError(
+                "artifact_assessment_terminal_policy must be "
+                "require_supported or reject_negative"
+            )
+        if (
+            artifact_assessment_terminal_policy == "reject_negative"
+            and artifact_assessment_extractor is None
+        ):
+            raise AgentWorkflowStateError(
+                "reject_negative assessment policy requires an assessment extractor"
+            )
         if allowed_actions is None:
             resolved_allowed_actions = tuple(item.value for item in AgentActionType)
         else:
@@ -503,6 +682,18 @@ class AgentWorkflowEnv:
             else required_evidence_tool_id.strip()
         )
         self.artifact_candidate_extractor = artifact_candidate_extractor
+        self.artifact_assessment_extractor = (
+            artifact_assessment_extractor
+        )
+        self.artifact_consumption_ordering = artifact_consumption_ordering
+        self.termination_lookahead = termination_lookahead
+        self.task_specification_contract_guard = (
+            task_specification_contract_guard
+        )
+        self.artifact_completeness_gate = artifact_completeness_gate
+        self.artifact_assessment_terminal_policy = (
+            artifact_assessment_terminal_policy
+        )
         self.allowed_action_types = resolved_allowed_actions
         self._allowed_action_type_set = frozenset(resolved_allowed_actions)
         self.parser = AgentActionParser()
@@ -593,6 +784,13 @@ class AgentWorkflowEnv:
 
         return self._last_valid_evidence_lineage
 
+    @property
+    def current_progressive_execution(self) -> Optional[AgentRuntimeResult]:
+        """Return the revision-local Runtime cache without executing Agents."""
+
+        if self._progressive_execution_revision != self._graph.revision:
+            return None
+        return self._progressive_execution
     def _uses_semantic_lineage_protocol(self) -> bool:
         return self.semantic_protocol in _SEMANTIC_LINEAGE_PROTOCOLS
 
@@ -754,7 +952,135 @@ class AgentWorkflowEnv:
             return 1, 1
         return 2, 2
 
-    def model_admissible_action_types(self) -> Tuple[str, ...]:
+    def model_admissible_action_types(
+        self,
+        *,
+        remaining_rounds: Optional[int] = None,
+    ) -> Tuple[str, ...]:
+        """Return the live action domain after progress and horizon ordering.
+
+        FlowSteer's Canvas validation remains authoritative.  These optional
+        projections only remove actions that cannot make state-dependent
+        progress before constrained decoding; they never select a candidate,
+        read an evaluator target, or synthesize ``FINISH``.
+        """
+
+        if remaining_rounds is not None and (
+            type(remaining_rounds) is not int or remaining_rounds < 0
+        ):
+            raise AgentWorkflowStateError(
+                "remaining_rounds must be a non-negative integer or None"
+            )
+        admitted = self._base_model_admissible_action_types()
+        if not admitted:
+            return admitted
+
+        if self.artifact_consumption_ordering:
+            finish_admitted = (
+                self.finish_admissibility().get("admissible") is True
+            )
+            if finish_admitted and AgentActionType.FINISH.value in admitted:
+                # SET_OUTPUT is an explicit policy commitment.  Once its fresh
+                # artifact passes the formal FINISH gate, further graph edits
+                # would only discard or invalidate that commitment.
+                admitted = (AgentActionType.FINISH.value,)
+            else:
+                candidate_state = self.candidate_state()
+                candidate_count = int(candidate_state["candidate_count"])
+                has_conflict = bool(
+                    candidate_state.get(
+                        "unresolved_candidate_conflict",
+                        candidate_state["candidate_conflict"],
+                    )
+                )
+                strict_relations = self._terminal_progress_relation_candidates()
+                progress_output_agent_ids = (
+                    self._terminal_progress_output_agent_ids()
+                )
+                if (
+                    candidate_count == 0
+                    or has_conflict
+                    or (
+                        not strict_relations
+                        and not progress_output_agent_ids
+                    )
+                ):
+                    # A pointer edit cannot repair an unparsable artifact or
+                    # decide between conflicting unverified candidates.
+                    admitted = tuple(
+                        action
+                        for action in admitted
+                        if action != AgentActionType.SET_OUTPUT.value
+                    )
+                assessment_required = bool(
+                    candidate_state.get(
+                        "artifact_assessment_required", False
+                    )
+                )
+                unassessed_artifacts = candidate_state.get(
+                    "unassessed_artifacts", ()
+                )
+                if (
+                    assessment_required
+                    and candidate_count >= 1
+                    and not strict_relations
+                    and not progress_output_agent_ids
+                    and isinstance(unassessed_artifacts, (list, tuple))
+                    and unassessed_artifacts
+                ):
+                    add_actions = tuple(
+                        action
+                        for action in admitted
+                        if action
+                        in {
+                            AgentActionType.ADD_AGENT.value,
+                            AgentActionType.ADD_SUBGRAPH.value,
+                        }
+                    )
+                    if add_actions:
+                        admitted = add_actions
+                if (
+                    candidate_count >= 1
+                    and strict_relations
+                    and AgentActionType.SET_RELATION.value in admitted
+                ):
+                    # Consume already-materialized independent/fan-in artifacts
+                    # before spending another ADD.  The Director still chooses
+                    # the exact legal direction/topology from the live domain.
+                    admitted = (AgentActionType.SET_RELATION.value,)
+                elif (
+                    candidate_count >= 1
+                    and not has_conflict
+                    and progress_output_agent_ids
+                    and AgentActionType.SET_OUTPUT.value in admitted
+                ):
+                    admitted = (AgentActionType.SET_OUTPUT.value,)
+
+        if self.termination_lookahead and remaining_rounds is not None:
+            progress = self.terminal_progress()
+            minimum = progress.get("minimum_remaining_actions")
+            next_actions = progress.get("next_progress_action_types", ())
+            if type(minimum) is int and remaining_rounds < minimum:
+                # No remaining sequence of atomic Canvas edits can reach the
+                # explicit FINISH boundary. Do not advertise another ADD or
+                # relation edit which is guaranteed to consume budget without
+                # making the trajectory terminal.
+                return ()
+            if (
+                type(minimum) is int
+                and remaining_rounds <= minimum
+                and isinstance(next_actions, (list, tuple))
+            ):
+                required = tuple(
+                    action
+                    for action in next_actions
+                    if isinstance(action, str) and action in admitted
+                )
+                if required:
+                    admitted = required
+        return admitted
+
+    def _base_model_admissible_action_types(self) -> Tuple[str, ...]:
         """Project state-conditioned Canvas actions for the Flow-Director.
 
         FlowSteer's progressive Canvas exposes the next legal editing boundary
@@ -1004,6 +1330,21 @@ class AgentWorkflowEnv:
             # A Formatter is exposed only after the prospective Canvas passes
             # the same Format-lineage checks used by authoritative admission.
             return (AgentActionType.SET_OUTPUT.value,)
+        artifact_output_reachability_candidates = (
+            self._artifact_output_reachability_relation_candidates()
+        )
+        if (
+            artifact_output_reachability_candidates
+            and AgentActionType.SET_RELATION.value
+            in self._allowed_action_type_set
+        ):
+            # A fresh supported artifact exists, but graph reachability still
+            # blocks SET_OUTPUT. Expose only the legal relation edit that makes
+            # that exact artifact a prospective Output instead of unrelated
+            # augmentation or parameter changes.
+            return (AgentActionType.SET_RELATION.value,)
+
+
 
         terminal_reachability_candidates = (
             self._terminal_reachability_relation_candidates()
@@ -1232,6 +1573,14 @@ class AgentWorkflowEnv:
         )
         if required_candidates:
             return required_candidates
+        artifact_output_reachability_candidates = (
+            self._artifact_output_reachability_relation_candidates(
+                all_candidates
+            )
+        )
+        if artifact_output_reachability_candidates:
+            return artifact_output_reachability_candidates
+
         terminal_reachability_candidates = (
             self._terminal_reachability_relation_candidates(all_candidates)
         )
@@ -1878,11 +2227,24 @@ class AgentWorkflowEnv:
         """Return Output targets accepted by the same prospective Canvas gate."""
 
         active_lineage = set(self._active_semantic_lineage_ids())
+        supported_artifact_agents = (
+            None
+            if (
+                self.artifact_assessment_extractor is None
+                and not self.artifact_completeness_gate
+            )
+            else set(self._artifact_admissible_output_agent_ids())
+        )
         if self._graph.output_agent_id in active_lineage:
             return ()
         admitted: list[str] = []
         for node in self._graph.nodes:
             if node.id == self._graph.output_agent_id:
+                continue
+            if (
+                supported_artifact_agents is not None
+                and node.id not in supported_artifact_agents
+            ):
                 continue
             if self._uses_semantic_lineage_protocol():
                 role_family = (node.role_family or "").casefold()
@@ -1913,6 +2275,90 @@ class AgentWorkflowEnv:
                 continue
             admitted.append(node.id)
         return tuple(admitted)
+
+
+    def _artifact_output_reachability_relation_candidates(
+        self,
+        candidates: Optional[Sequence[Mapping[str, object]]] = None,
+    ) -> list[dict[str, object]]:
+        """Return relation edits that make a supported artifact a legal Output.
+
+        This is a parameter-level projection of the existing graph-validation
+        and provenance-bound assessment gates. It does not choose a candidate
+        or prescribe a topology: every returned edit is already Canvas-legal,
+        and at least one currently supported artifact would pass the exact
+        prospective Output validation after that single relation edit.
+        """
+
+        if (
+            not self.artifact_consumption_ordering
+            or self.artifact_assessment_extractor is None
+            or self._graph.output_agent_id is not None
+            or self._terminal_progress_output_agent_ids()
+        ):
+            return []
+        supported_agent_ids = self._artifact_admissible_output_agent_ids()
+        if not supported_agent_ids:
+            return []
+        state = self.candidate_state()
+        supported_assessment_edges = {
+            (
+                str(item["assessed_source_agent_id"]),
+                str(item["assessment_agent_id"]),
+            )
+            for item in state.get("artifact_assessments", ())
+            if isinstance(item, Mapping)
+            and item.get("assessment") == "supported"
+            and isinstance(item.get("assessed_source_agent_id"), str)
+            and isinstance(item.get("assessment_agent_id"), str)
+        }
+
+        source_candidates = (
+            self._all_model_admissible_relation_candidates()
+            if candidates is None
+            else [dict(item) for item in candidates]
+        )
+        result: list[dict[str, object]] = []
+        for item in source_candidates:
+            related = self._graph.fork()
+            related.set_relation(
+                str(item["source_id"]),
+                str(item["target_id"]),
+                bool(item["source_to_target"]),
+                bool(item["target_to_source"]),
+            )
+            if any(
+                target_id
+                not in self._directed_successors(related, source_id)
+                for source_id, target_id in supported_assessment_edges
+            ):
+                continue
+
+            for agent_id in supported_agent_ids:
+                if not related.has_node(agent_id):
+                    continue
+                prospective = related.fork()
+                try:
+                    prospective.set_output(agent_id)
+                except GraphMutationError:
+                    continue
+                validation = prospective.validate(
+                    self.model_registry,
+                    require_complete=False,
+                )
+                if not validation.valid:
+                    continue
+                if self._semantic_edit_issue_for(prospective) is not None:
+                    continue
+                if (
+                    self._uses_format_agent_protocol(prospective)
+                    and self._format_agent_issue_for(prospective) is not None
+                ):
+                    continue
+                result.append(dict(item))
+                break
+        return result
+
 
     def _model_admissible_modify_agent_ids(self) -> Tuple[str, ...]:
         """Exclude an already verified semantic lineage from repair targets."""
@@ -2362,6 +2808,11 @@ class AgentWorkflowEnv:
             return tuple(
                 node_id for node_id in node_ids if node_id in repairable_failed
             )
+        assessment_repair_ids = (
+            self._artifact_assessment_repair_agent_ids()
+        )
+        if assessment_repair_ids:
+            return assessment_repair_ids
         return self._semantic_artifact_repair_agent_ids()
 
     def _agent_has_successful_read_receipt(self, agent_id: str) -> bool:
@@ -3120,14 +3571,19 @@ class AgentWorkflowEnv:
         retryability: str,
         status_code: Optional[int],
     ) -> None:
-        """Quarantine one exact model after a permanent public rejection."""
+        """Quarantine one exact model after an exhausted provider failure."""
 
-        if (
-            category != "provider_request_failure"
-            or retryability != "permanent_configuration"
-            or status_code not in {401, 403, 404}
-            or not self._graph.has_node(record.agent_id)
-        ):
+        permanent_rejection = (
+            retryability == "permanent_configuration"
+            and status_code in {401, 403, 404}
+        )
+        exhausted_timeout = (
+            retryability == "transient_provider"
+            and record.error_type == "TimeoutError"
+        )
+        if category != "provider_request_failure" or not (
+            permanent_rejection or exhausted_timeout
+        ) or not self._graph.has_node(record.agent_id):
             return
         metadata_model_id = record.metadata.get("model_id")
         model_id = (
@@ -3190,14 +3646,22 @@ class AgentWorkflowEnv:
             return current_provider_id
         return None
 
-    def model_admissible_action_targets(self) -> dict[str, object]:
+    def model_admissible_action_targets(
+        self,
+        *,
+        remaining_rounds: Optional[int] = None,
+    ) -> dict[str, object]:
         """Project exact current Canvas target domains for constrained sampling.
 
         This is a read-only FlowSteer legality projection.  It does not select
         the next action, repair an invalid sample, or prescribe a topology.
         """
 
-        admitted = set(self.model_admissible_action_types())
+        admitted = set(
+            self.model_admissible_action_types(
+                remaining_rounds=remaining_rounds,
+            )
+        )
         node_ids = [node.id for node in self._graph.nodes]
         role_conditional_capabilities = bool(
             self._uses_role_conditional_capabilities()
@@ -3214,6 +3678,35 @@ class AgentWorkflowEnv:
             or "evidence_retriever" in replacement_domains
         )
         targets: dict[str, object] = {}
+        if AgentActionType.ADD_AGENT.value in admitted:
+            used_agent_ids = set(node_ids)
+            next_index = 1
+            while f"node_{next_index}" in used_agent_ids:
+                next_index += 1
+            registered_profiles = self.runtime.registered_execution_profiles()
+            targets[AgentActionType.ADD_AGENT.value] = {
+                # FlowSteer's WorkflowGraph allocates neutral node_N IDs.  The
+                # live domain masks duplicate identifiers without adding a
+                # role, Agent-count, relation, or topology prior.
+                "agent_ids": [f"node_{next_index}"],
+                "existing_agent_ids": node_ids,
+                "model_ids": list(self._available_model_ids()),
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+                "registered_execution_profiles": [
+                    {
+                        "execution_mode": execution_mode,
+                        "allowed_tools": list(allowed_tools),
+                    }
+                    for execution_mode, allowed_tools in registered_profiles
+                ],
+                "contract_semantics": "free_text",
+            }
         if AgentActionType.ADD_SUBGRAPH.value in admitted:
             remaining = (
                 self.max_agents_per_subgraph
@@ -3463,11 +3956,13 @@ class AgentWorkflowEnv:
                 "completion_condition",
             ]
             if not self._uses_semantic_lineage_protocol():
-                base_mutable_fields[2:2] = [
-                    "role_family",
+                generic_runtime_fields = [
                     "allowed_tools",
                     "execution_mode",
                 ]
+                if self.runtime.artifact_assessment_protocol == "none":
+                    generic_runtime_fields.insert(0, "role_family")
+                base_mutable_fields[2:2] = generic_runtime_fields
             measured_failed_ids = self._failed_agent_ids.intersection(node_ids)
             provider_failure_agent_ids = {
                 agent_id
@@ -3667,15 +4162,43 @@ class AgentWorkflowEnv:
                 ]
             }
         if AgentActionType.SET_RELATION.value in admitted:
+            relation_candidates = self._model_admissible_relation_candidates()
+            progress_candidates = self._terminal_progress_relation_candidates()
+            if (
+                progress_candidates
+                and (
+                    self.artifact_consumption_ordering
+                    or (
+                        self.termination_lookahead
+                        and remaining_rounds is not None
+                        and remaining_rounds
+                        <= int(self.terminal_progress()["minimum_remaining_actions"])
+                    )
+                )
+            ):
+                relation_candidates = progress_candidates
             targets[AgentActionType.SET_RELATION.value] = {
                 "source_agent_ids": node_ids,
                 "target_agent_ids": node_ids,
                 "endpoints_must_differ": True,
-                "candidates": self._model_admissible_relation_candidates(),
+                "candidates": relation_candidates,
             }
         if AgentActionType.SET_OUTPUT.value in admitted:
+            output_agent_ids = self._model_admissible_output_agent_ids()
+            progress_output_agent_ids = (
+                self._terminal_progress_output_agent_ids()
+            )
+            if self.artifact_consumption_ordering:
+                output_agent_ids = progress_output_agent_ids
+            elif progress_output_agent_ids and (
+                self.termination_lookahead
+                and remaining_rounds is not None
+                and remaining_rounds
+                <= int(self.terminal_progress()["minimum_remaining_actions"])
+            ):
+                output_agent_ids = progress_output_agent_ids
             targets[AgentActionType.SET_OUTPUT.value] = {
-                "agent_ids": list(self._model_admissible_output_agent_ids()),
+                "agent_ids": list(output_agent_ids),
                 "current_output_agent_id": self._graph.output_agent_id,
             }
         if AgentActionType.FINISH.value in admitted:
@@ -3722,6 +4245,1311 @@ class AgentWorkflowEnv:
             history=tuple(self._history),
         )
 
+    def _public_artifact_candidate(self, raw_output: str) -> Optional[str]:
+        """Extract one target-blind public candidate when the task defines it."""
+
+        candidate, _ = self._public_artifact_candidate_result(raw_output)
+        return candidate
+
+    def _public_artifact_candidate_result(
+        self,
+        raw_output: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Return candidate plus the extractor's target-blind failure code."""
+
+        if self.artifact_candidate_extractor is None:
+            return None, "candidate_extractor_not_configured"
+        try:
+            candidate, _, failure_reason = self.artifact_candidate_extractor(
+                raw_output
+            )
+        except (TypeError, ValueError):
+            return None, "candidate_extractor_error"
+        if not isinstance(candidate, str) or not candidate.strip():
+            return (
+                None,
+                failure_reason
+                if isinstance(failure_reason, str) and failure_reason
+                else "candidate_not_found",
+            )
+        return candidate.strip(), None
+
+    def _public_artifact_assessments_result(
+        self,
+        raw_output: str,
+    ) -> tuple[Tuple[dict[str, object], ...], Optional[str]]:
+        """Return deterministic public assessments plus a parsing code."""
+
+        if self.artifact_assessment_extractor is None:
+            return (), "artifact_assessment_extractor_not_configured"
+        try:
+            raw_assessments, failure_reason = (
+                self.artifact_assessment_extractor(raw_output)
+            )
+        except (TypeError, ValueError):
+            return (), "artifact_assessment_extractor_error"
+        if (
+            isinstance(raw_assessments, (str, bytes))
+            or not isinstance(raw_assessments, Sequence)
+        ):
+            return (), "artifact_assessment_result_invalid"
+        assessments: list[dict[str, object]] = []
+        for raw_assessment in raw_assessments:
+            if not isinstance(raw_assessment, Mapping):
+                return (), "artifact_assessment_item_invalid"
+            assessments.append(dict(raw_assessment))
+        if assessments:
+            return tuple(assessments), None
+        return (
+            (),
+            failure_reason
+            if isinstance(failure_reason, str) and failure_reason
+            else "artifact_assessment_not_found",
+        )
+
+    @staticmethod
+    def _artifact_complete_from_metadata(
+        metadata: Mapping[str, object],
+    ) -> bool:
+        declared = metadata.get("artifact_complete")
+        if type(declared) is bool:
+            return declared
+        return metadata.get("finish_reason") != "length"
+
+    def current_artifact_receipts(self) -> list[dict[str, object]]:
+        """Project revision-live artifacts and direct fan-in provenance.
+
+        Runtime retains every full immutable artifact.  This compact Canvas
+        projection persists across a rejected edit so the Director does not
+        lose the current candidates or fan-in provenance when older accepted
+        feedback leaves its bounded transcript window.  It never reads an
+        evaluator target or selects a candidate.
+        """
+
+        receipts: list[dict[str, object]] = []
+        current_agent_ids = {node.id for node in self._graph.nodes}
+        current_artifact_ids = {
+            agent_id: metadata.get(
+                "artifact_id", metadata.get("artifact_version")
+            )
+            for agent_id, metadata in (
+                self._progressive_output_metadata.items()
+            )
+        }
+        for agent_id, raw_output in sorted(self._progressive_outputs.items()):
+            if agent_id not in current_agent_ids:
+                continue
+            metadata = self._progressive_output_metadata.get(agent_id, {})
+            raw_provenance = metadata.get("input_artifact_provenance", ())
+            provenance_items = (
+                tuple(
+                    item for item in raw_provenance if isinstance(item, Mapping)
+                )
+                if isinstance(raw_provenance, (list, tuple))
+                else ()
+            )
+            upstream_artifacts: list[dict[str, object]] = []
+            upstream_candidates: set[str] = set()
+            for item in provenance_items:
+                source_agent_id = item.get("source_agent_id")
+                source_raw_output = item.get(
+                    "raw_output",
+                    item.get(
+                        "artifact_body",
+                        item.get("artifact", item.get("content")),
+                    ),
+                )
+                if not isinstance(source_raw_output, str):
+                    continue
+                source_candidate, source_parsing_failure = (
+                    self._public_artifact_candidate_result(
+                    source_raw_output
+                )
+                )
+                if source_candidate is not None:
+                    upstream_candidates.add(source_candidate)
+                source_metadata = (
+                    self._progressive_output_metadata.get(
+                        str(source_agent_id), {}
+                    )
+                    if isinstance(source_agent_id, str)
+                    else {}
+                )
+                source_complete = self._artifact_complete_from_metadata(
+                    source_metadata
+                )
+                source_node = (
+                    self._graph.get_node(str(source_agent_id))
+                    if isinstance(source_agent_id, str)
+                    and self._graph.has_node(source_agent_id)
+                    else None
+                )
+                upstream_artifacts.append(
+                    {
+                        "source_agent_id": source_agent_id,
+                        "artifact_id": item.get(
+                            "artifact_id", item.get("artifact_version")
+                        ),
+                        "source_model_id": item.get(
+                            "source_model_id",
+                            None if source_node is None else source_node.model_id,
+                        ),
+                        "source_contract": item.get(
+                            "source_contract",
+                            None if source_node is None else source_node.contract,
+                        ),
+                        "finish_reason": source_metadata.get(
+                            "finish_reason"
+                        ),
+                        "artifact_complete": source_complete,
+                        "artifact_status": (
+                            "complete" if source_complete else "incomplete"
+                        ),
+                        "candidate": source_candidate,
+                        "candidate_parsing_status": (
+                            "parsed"
+                            if source_candidate is not None
+                            else "failed"
+                        ),
+                        "candidate_parsing_failure_reason": (
+                            source_parsing_failure
+                        ),
+                        "artifact_character_count": len(source_raw_output),
+                        "artifact_preview": _artifact_head_tail_preview(
+                            source_raw_output
+                        ),
+                        "provenance_status": "unverified_work_product",
+                    }
+                )
+            artifact_id = metadata.get(
+                "artifact_id", metadata.get("artifact_version")
+            )
+            artifact_complete = self._artifact_complete_from_metadata(
+                metadata
+            )
+            candidate, parsing_failure = (
+                self._public_artifact_candidate_result(raw_output)
+            )
+            if (
+                self.artifact_assessment_extractor is None
+                or not upstream_artifacts
+            ):
+                raw_assessments: Tuple[dict[str, object], ...] = ()
+                assessment_parsing_failure = None
+            else:
+                (
+                    raw_assessments,
+                    assessment_parsing_failure,
+                ) = self._public_artifact_assessments_result(raw_output)
+            upstream_by_artifact_id = {
+                str(item["artifact_id"]): item
+                for item in upstream_artifacts
+                if isinstance(item.get("artifact_id"), str)
+                and bool(str(item["artifact_id"]).strip())
+            }
+            candidate_upstream_artifact_ids = {
+                str(item["artifact_id"])
+                for item in upstream_artifacts
+                if isinstance(item.get("candidate"), str)
+                and isinstance(item.get("artifact_id"), str)
+            }
+            bound_assessments: list[dict[str, object]] = []
+            binding_failures: list[dict[str, object]] = []
+            for assessment in raw_assessments:
+                assessed_artifact_id = assessment.get(
+                    "assessed_artifact_id"
+                )
+                assessed_candidate = assessment.get("candidate")
+                upstream = (
+                    upstream_by_artifact_id.get(assessed_artifact_id)
+                    if isinstance(assessed_artifact_id, str)
+                    else None
+                )
+                source_agent_id = (
+                    upstream.get("source_agent_id")
+                    if isinstance(upstream, Mapping)
+                    else None
+                )
+                source_is_fresh = bool(
+                    isinstance(source_agent_id, str)
+                    and source_agent_id
+                    not in self._unresolved_dirty_agents
+                    and current_artifact_ids.get(source_agent_id)
+                    == assessed_artifact_id
+                )
+                if upstream is None:
+                    binding_failures.append(
+                        {
+                            "assessed_artifact_id": assessed_artifact_id,
+                            "reason": "unknown_upstream_artifact",
+                        }
+                    )
+                    continue
+                if upstream.get("candidate") != assessed_candidate:
+                    binding_failures.append(
+                        {
+                            "assessed_artifact_id": assessed_artifact_id,
+                            "reason": "candidate_binding_mismatch",
+                        }
+                    )
+                    continue
+                if not source_is_fresh:
+                    binding_failures.append(
+                        {
+                            "assessed_artifact_id": assessed_artifact_id,
+                            "reason": "stale_upstream_artifact",
+                        }
+                    )
+                    continue
+                bound_assessments.append(
+                    {
+                        **dict(assessment),
+                        "assessment_agent_id": agent_id,
+                        "assessment_artifact_id": artifact_id,
+                        "assessed_source_agent_id": source_agent_id,
+                        "assessed_artifact_fresh": True,
+                        "provenance_bound": True,
+                    }
+                )
+            bound_assessment_artifact_ids = {
+                str(item["assessed_artifact_id"])
+                for item in bound_assessments
+                if isinstance(item.get("assessed_artifact_id"), str)
+            }
+            assessment_coverage_complete = bool(
+                candidate_upstream_artifact_ids
+                and candidate_upstream_artifact_ids
+                == bound_assessment_artifact_ids
+            )
+            receipts.append(
+                {
+                    "agent_id": agent_id,
+                    "artifact_id": artifact_id,
+                    "graph_revision": metadata.get("graph_revision"),
+                    "model_id": metadata.get(
+                        "model_id", self._graph.get_node(agent_id).model_id
+                    ),
+                    "contract": metadata.get(
+                        "contract", self._graph.get_node(agent_id).contract
+                    ),
+                    "finish_reason": metadata.get("finish_reason"),
+                    "artifact_complete": artifact_complete,
+                    "artifact_status": (
+                        "complete" if artifact_complete else "incomplete"
+                    ),
+                    "candidate": candidate,
+                    "candidate_parsing_status": (
+                        "parsed" if candidate is not None else "failed"
+                    ),
+                    "candidate_parsing_failure_reason": parsing_failure,
+                    "artifact_fresh": (
+                        agent_id not in self._unresolved_dirty_agents
+                    ),
+                    "artifact_character_count": len(raw_output),
+                    "artifact_preview": _artifact_head_tail_preview(raw_output),
+                    "upstream_artifacts": upstream_artifacts,
+                    "candidate_conflict": len(upstream_candidates) > 1,
+                    "artifact_assessments": bound_assessments,
+                    "artifact_assessment_parsing_status": (
+                        "disabled"
+                        if self.artifact_assessment_extractor is None
+                        else "not_applicable"
+                        if not upstream_artifacts
+                        else "parsed"
+                        if bound_assessments
+                        else "failed"
+                    ),
+                    "artifact_assessment_parsing_failure_reason": (
+                        assessment_parsing_failure
+                    ),
+                    "artifact_assessment_binding_failures": binding_failures,
+                    "artifact_assessment_coverage_complete": (
+                        assessment_coverage_complete
+                    ),
+                    "artifact_assessment_missing_artifact_ids": sorted(
+                        candidate_upstream_artifact_ids
+                        - bound_assessment_artifact_ids
+                    ),
+                    "provenance_status": "unverified_work_product",
+                }
+            )
+        return receipts
+
+    def candidate_state(self) -> dict[str, object]:
+        """Return candidate agreement and provenance-bound assessment state.
+
+        Agreement is observable grouping rather than correctness or statistical
+        independence. A copied downstream candidate retains its root artifact
+        identity, while supported/refuted labels are accepted only from a fresh
+        artifact whose assessment is bound to an exact upstream artifact ID.
+        """
+
+        groups: dict[str, list[dict[str, object]]] = {}
+        receipts = self.current_artifact_receipts()
+        fresh_receipts = [
+            receipt
+            for receipt in receipts
+            if receipt.get("artifact_fresh") is True
+            and (
+                not self.artifact_completeness_gate
+                or receipt.get("artifact_complete") is True
+            )
+        ]
+        fresh_by_artifact_id = {
+            str(receipt["artifact_id"]): receipt
+            for receipt in fresh_receipts
+            if isinstance(receipt.get("artifact_id"), str)
+            and bool(str(receipt["artifact_id"]).strip())
+        }
+        assessments: list[dict[str, object]] = []
+        assessments_by_target: dict[
+            str, list[dict[str, object]]
+        ] = {}
+        for receipt in fresh_receipts:
+            if receipt.get("artifact_assessment_coverage_complete") is not True:
+                continue
+            raw_assessments = receipt.get("artifact_assessments", ())
+            if not isinstance(raw_assessments, (list, tuple)):
+                continue
+            for raw_assessment in raw_assessments:
+                if not isinstance(raw_assessment, Mapping):
+                    continue
+                assessment = dict(raw_assessment)
+                target_artifact_id = assessment.get(
+                    "assessed_artifact_id"
+                )
+                if (
+                    assessment.get("provenance_bound") is not True
+                    or not isinstance(target_artifact_id, str)
+                    or target_artifact_id not in fresh_by_artifact_id
+                ):
+                    continue
+                assessments.append(assessment)
+                assessments_by_target.setdefault(
+                    target_artifact_id, []
+                ).append(assessment)
+
+        candidate_artifacts: list[dict[str, object]] = []
+        assessment_conflict = False
+        for receipt in fresh_receipts:
+            candidate = receipt.get("candidate")
+            if not isinstance(candidate, str) or not candidate:
+                continue
+            artifact_id = receipt.get("artifact_id")
+            own_assessments = (
+                [
+                    dict(item)
+                    for item in receipt.get("artifact_assessments", ())
+                    if isinstance(item, Mapping)
+                    and item.get("candidate") == candidate
+                ]
+                if receipt.get("artifact_assessment_coverage_complete") is True
+                else []
+            )
+            incoming_assessments = (
+                assessments_by_target.get(str(artifact_id), [])
+                if isinstance(artifact_id, str)
+                else []
+            )
+            relevant = [*own_assessments, *incoming_assessments]
+            statuses = {
+                str(item["assessment"])
+                for item in relevant
+                if item.get("assessment")
+                in {"supported", "insufficient_evidence", "refuted"}
+            }
+            if len(statuses) > 1:
+                assessment_conflict = True
+            if "refuted" in statuses:
+                assessment_status = "refuted"
+            elif statuses == {"supported"}:
+                assessment_status = "supported"
+            elif statuses == {"insufficient_evidence"}:
+                assessment_status = "insufficient_evidence"
+            elif statuses:
+                assessment_status = "conflicting_assessments"
+            else:
+                assessment_status = "unassessed"
+            item = {
+                "agent_id": receipt["agent_id"],
+                "artifact_id": artifact_id,
+                "artifact_complete": receipt.get("artifact_complete") is True,
+                "candidate": candidate,
+                "assessment_status": assessment_status,
+                "assessment_receipts": relevant,
+            }
+            candidate_artifacts.append(item)
+            groups.setdefault(candidate, []).append(receipt)
+
+        agreement = []
+        for candidate, items in sorted(groups.items()):
+            root_artifact_ids: set[str] = set()
+            root_agent_ids: set[str] = set()
+            for item in items:
+                matching_upstream = [
+                    upstream
+                    for upstream in item.get("upstream_artifacts", ())
+                    if isinstance(upstream, Mapping)
+                    and upstream.get("candidate") == candidate
+                    and isinstance(upstream.get("artifact_id"), str)
+                ]
+                if matching_upstream:
+                    root_artifact_ids.update(
+                        str(upstream["artifact_id"])
+                        for upstream in matching_upstream
+                    )
+                    root_agent_ids.update(
+                        str(upstream["source_agent_id"])
+                        for upstream in matching_upstream
+                        if isinstance(
+                            upstream.get("source_agent_id"), str
+                        )
+                    )
+                elif isinstance(item.get("artifact_id"), str):
+                    root_artifact_ids.add(str(item["artifact_id"]))
+                    root_agent_ids.add(str(item["agent_id"]))
+            agreement.append(
+                {
+                    "candidate": candidate,
+                    "support_count": len(items),
+                    "independent_provenance_count": len(root_artifact_ids),
+                    "source_agent_ids": [
+                        str(item["agent_id"]) for item in items
+                    ],
+                    "artifact_ids": [item.get("artifact_id") for item in items],
+                    "root_source_agent_ids": sorted(root_agent_ids),
+                    "root_artifact_ids": sorted(root_artifact_ids),
+                    "provenance_source_agent_ids": sorted(
+                        {
+                            str(upstream["source_agent_id"])
+                            for item in items
+                            for upstream in item.get("upstream_artifacts", [])
+                            if isinstance(upstream, Mapping)
+                            and isinstance(
+                                upstream.get("source_agent_id"), str
+                            )
+                        }
+                    ),
+                }
+            )
+        unresolved_candidate_values = {
+            str(item["candidate"])
+            for item in candidate_artifacts
+            if item["assessment_status"] != "refuted"
+        }
+        observed_candidate_conflict = len(agreement) > 1
+        unresolved_candidate_conflict = len(unresolved_candidate_values) > 1
+        return {
+            "candidate_count": sum(
+                int(item["support_count"]) for item in agreement
+            ),
+            "distinct_candidate_count": len(agreement),
+            "candidate_agreement": agreement,
+            "candidate_conflict": observed_candidate_conflict,
+            "unresolved_candidate_conflict": unresolved_candidate_conflict,
+            "artifact_completeness_required": self.artifact_completeness_gate,
+            "incomplete_artifact_count": sum(
+                1
+                for receipt in receipts
+                if receipt.get("artifact_complete") is not True
+            ),
+            "artifact_assessment_required": (
+                self.artifact_assessment_extractor is not None
+            ),
+            "artifact_assessments": assessments,
+            "candidate_artifacts": candidate_artifacts,
+            "candidate_assessment_conflict": assessment_conflict,
+            "supported_output_agent_ids": sorted(
+                str(item["agent_id"])
+                for item in candidate_artifacts
+                if item["assessment_status"] == "supported"
+            ),
+            "refuted_artifacts": [
+                item
+                for item in candidate_artifacts
+                if item["assessment_status"] == "refuted"
+            ],
+            "insufficient_evidence_artifacts": [
+                item
+                for item in candidate_artifacts
+                if item["assessment_status"] == "insufficient_evidence"
+            ],
+            "unassessed_artifacts": [
+                item
+                for item in candidate_artifacts
+                if item["assessment_status"] == "unassessed"
+            ],
+            "artifact_freshness": [
+                {
+                    "agent_id": receipt["agent_id"],
+                    "artifact_id": receipt.get("artifact_id"),
+                    "fresh": receipt.get("artifact_fresh") is True,
+                    "complete": (
+                        receipt.get("artifact_complete") is True
+                    ),
+                }
+                for receipt in receipts
+            ],
+            "provenance_status": "unverified_work_product",
+        }
+
+    def _artifact_supported_output_agent_ids(self) -> Tuple[str, ...]:
+        if self.artifact_assessment_extractor is None:
+            return tuple(
+                str(item["agent_id"])
+                for item in self.candidate_state()["candidate_artifacts"]
+            )
+        state = self.candidate_state()
+        if (
+            state.get("unresolved_candidate_conflict") is True
+            or state.get("candidate_assessment_conflict") is True
+        ):
+            return ()
+        return tuple(
+            str(agent_id)
+            for agent_id in state.get("supported_output_agent_ids", ())
+            if isinstance(agent_id, str)
+        )
+
+    def _artifact_admissible_output_agent_ids(self) -> Tuple[str, ...]:
+        """Return candidates admitted by the configured target-blind policy."""
+
+        state = self.candidate_state()
+        if (
+            state.get("unresolved_candidate_conflict") is True
+            or state.get("candidate_assessment_conflict") is True
+        ):
+            return ()
+        if (
+            self.artifact_assessment_extractor is None
+            or self.artifact_assessment_terminal_policy
+            == "require_supported"
+        ):
+            return self._artifact_supported_output_agent_ids()
+        return tuple(
+            str(item["agent_id"])
+            for item in state.get("candidate_artifacts", ())
+            if isinstance(item, Mapping)
+            and item.get("assessment_status")
+            in {"supported", "unassessed"}
+        )
+
+    def _artifact_assessment_repair_agent_ids(self) -> Tuple[str, ...]:
+        """Return exact source Agents named by a negative fresh assessment."""
+
+        if self.artifact_assessment_extractor is None:
+            return ()
+        state = self.candidate_state()
+        if (
+            state.get("supported_output_agent_ids")
+            and state.get("unresolved_candidate_conflict") is not True
+            and state.get("candidate_assessment_conflict") is not True
+        ):
+            return ()
+        responsible: set[str] = set()
+        for field_name in (
+            "refuted_artifacts",
+            "insufficient_evidence_artifacts",
+        ):
+            raw_items = state.get(field_name, ())
+            if not isinstance(raw_items, (list, tuple)):
+                continue
+            for item in raw_items:
+                if not isinstance(item, Mapping):
+                    continue
+                receipts = item.get("assessment_receipts", ())
+                if not isinstance(receipts, (list, tuple)):
+                    continue
+                for receipt in receipts:
+                    if not isinstance(receipt, Mapping):
+                        continue
+                    source_agent_id = receipt.get(
+                        "assessed_source_agent_id"
+                    )
+                    if (
+                        isinstance(source_agent_id, str)
+                        and self._graph.has_node(source_agent_id)
+                    ):
+                        responsible.add(source_agent_id)
+        node_order = tuple(node.id for node in self._graph.nodes)
+        return tuple(
+            agent_id
+            for agent_id in node_order
+            if agent_id in responsible
+        )
+
+    def _artifact_completeness_terminal_issue(
+        self,
+    ) -> Optional[dict[str, object]]:
+        """Return a target-blind FINISH blocker for a truncated Output artifact."""
+
+        if not self.artifact_completeness_gate:
+            return None
+        output_agent_id = self._graph.output_agent_id
+        receipt = next(
+            (
+                item
+                for item in self.current_artifact_receipts()
+                if item.get("agent_id") == output_agent_id
+            ),
+            None,
+        )
+        if receipt is None or receipt.get("artifact_complete") is True:
+            return None
+        return {
+            "stage": "artifact_completeness",
+            "reason": "selected Output artifact is incomplete",
+            "output_agent_id": output_agent_id,
+            "output_artifact_id": receipt.get("artifact_id"),
+            "finish_reason": receipt.get("finish_reason"),
+            "ground_truth_used": False,
+        }
+
+    def _artifact_assessment_terminal_issue(
+        self,
+    ) -> Optional[dict[str, object]]:
+        """Return a target-blind FINISH blocker for the selected artifact."""
+
+        if self.artifact_assessment_extractor is None:
+            return None
+        state = self.candidate_state()
+        if state.get("unresolved_candidate_conflict") is True:
+            return {
+                "stage": "candidate_conflict",
+                "reason": (
+                    "fresh artifacts expose conflicting candidate values"
+                ),
+                "candidate_agreement": state.get(
+                    "candidate_agreement", []
+                ),
+                "ground_truth_used": False,
+            }
+        output_agent_id = self._graph.output_agent_id
+        output_item = next(
+            (
+                item
+                for item in state.get("candidate_artifacts", ())
+                if isinstance(item, Mapping)
+                and item.get("agent_id") == output_agent_id
+            ),
+            None,
+        )
+        if output_item is None:
+            return None
+        status = output_item.get("assessment_status")
+        if (
+            (
+                status == "supported"
+                or (
+                    self.artifact_assessment_terminal_policy
+                    == "reject_negative"
+                    and status == "unassessed"
+                )
+            )
+            and state.get("candidate_assessment_conflict") is not True
+        ):
+            return None
+        receipts = output_item.get("assessment_receipts", ())
+        assessment_receipts = [
+            dict(item)
+            for item in receipts
+            if isinstance(item, Mapping)
+        ] if isinstance(receipts, (list, tuple)) else []
+        responsible_agent_ids = sorted(
+            {
+                str(item["assessed_source_agent_id"])
+                for item in assessment_receipts
+                if isinstance(
+                    item.get("assessed_source_agent_id"), str
+                )
+            }
+        )
+        responsible_artifact_ids = sorted(
+            {
+                str(item["assessed_artifact_id"])
+                for item in assessment_receipts
+                if isinstance(item.get("assessed_artifact_id"), str)
+            }
+        )
+        return {
+            "stage": "candidate_assessment",
+            "reason": (
+                "selected Output artifact is rejected by the configured "
+                "provenance-bound assessment terminal policy"
+            ),
+            "assessment_status": status,
+            "output_agent_id": output_agent_id,
+            "output_artifact_id": output_item.get("artifact_id"),
+            "responsible_agent_ids": responsible_agent_ids,
+            "responsible_artifact_ids": responsible_artifact_ids,
+            "assessment_receipts": assessment_receipts,
+            "candidate_assessment_conflict": state.get(
+                "candidate_assessment_conflict", False
+            ),
+            "ground_truth_used": False,
+        }
+
+    def terminal_progress(self) -> dict[str, object]:
+        """Expose the neutral atomic-action lower bound to explicit FINISH."""
+
+        progress = dict(self._graph.construction_progress())
+        breakdown = progress.get("minimum_remaining_breakdown", {})
+        candidate_state = self.candidate_state()
+        progress_relation_candidates = (
+            self._terminal_progress_relation_candidates()
+        )
+        progress_output_agent_ids = self._terminal_progress_output_agent_ids()
+        artifact_output_reachability_candidates = (
+            self._artifact_output_reachability_relation_candidates()
+        )
+
+        finish_admissible = (
+            self.finish_admissibility().get("admissible") is True
+        )
+        assessment_minimum_remaining_actions: Optional[int] = None
+        assessment_next_actions: list[str] = []
+        if (
+            candidate_state.get("artifact_assessment_required") is True
+            and int(candidate_state["candidate_count"]) > 0
+        ):
+            admissible_ids = (
+                self._artifact_admissible_output_agent_ids()
+            )
+            repair_ids = self._artifact_assessment_repair_agent_ids()
+            if repair_ids:
+                assessment_minimum_remaining_actions = 3
+                if (
+                    AgentActionType.MODIFY_AGENT.value
+                    in self._allowed_action_type_set
+                ):
+                    assessment_next_actions.append(
+                        AgentActionType.MODIFY_AGENT.value
+                    )
+            elif (
+                admissible_ids
+                and artifact_output_reachability_candidates
+                and AgentActionType.SET_RELATION.value
+                in self._allowed_action_type_set
+            ):
+                assessment_minimum_remaining_actions = 3
+                assessment_next_actions.append(
+                    AgentActionType.SET_RELATION.value
+                )
+
+            elif (
+                not admissible_ids
+                and progress_relation_candidates
+                and AgentActionType.SET_RELATION.value
+                in self._allowed_action_type_set
+            ):
+                assessment_minimum_remaining_actions = 3
+                assessment_next_actions.append(
+                    AgentActionType.SET_RELATION.value
+                )
+            elif not admissible_ids:
+                can_add = (
+                    self.max_agents is None
+                    or len(self._graph.nodes) < self.max_agents
+                )
+                add_action = (
+                    AgentActionType.ADD_SUBGRAPH.value
+                    if AgentActionType.ADD_SUBGRAPH.value
+                    in self._allowed_action_type_set
+                    else AgentActionType.ADD_AGENT.value
+                )
+                if can_add and add_action in self._allowed_action_type_set:
+                    assessment_minimum_remaining_actions = 4
+                    assessment_next_actions.append(add_action)
+            structural_minimum = progress.get(
+                "minimum_remaining_actions"
+            )
+            if (
+                type(structural_minimum) is int
+                and assessment_minimum_remaining_actions is not None
+            ):
+                progress["minimum_remaining_actions"] = max(
+                    structural_minimum,
+                    assessment_minimum_remaining_actions,
+                )
+        next_actions: list[str] = list(assessment_next_actions)
+        if not next_actions and isinstance(breakdown, Mapping):
+            add_count = breakdown.get("add_agent")
+            relation_count = breakdown.get("set_relation")
+            output_count = breakdown.get("set_output")
+            finish_count = breakdown.get("finish")
+            if type(add_count) is int and add_count > 0:
+                next_actions.append(
+                    AgentActionType.ADD_SUBGRAPH.value
+                    if AgentActionType.ADD_SUBGRAPH.value
+                    in self._allowed_action_type_set
+                    else AgentActionType.ADD_AGENT.value
+                )
+            elif (
+                type(relation_count) is int
+                and relation_count > 0
+                and bool(progress_relation_candidates)
+            ):
+                next_actions.append(AgentActionType.SET_RELATION.value)
+            elif (
+                type(output_count) is int
+                and output_count > 0
+                and bool(progress_output_agent_ids)
+            ):
+                next_actions.append(AgentActionType.SET_OUTPUT.value)
+            elif (
+                type(finish_count) is int
+                and finish_count > 0
+                and finish_admissible
+            ):
+                next_actions.append(AgentActionType.FINISH.value)
+        progress.update(
+            {
+                "next_progress_action_types": next_actions,
+                "fresh_parseable_artifact_count": candidate_state[
+                    "candidate_count"
+                ],
+                "candidate_conflict": candidate_state["candidate_conflict"],
+                "unresolved_candidate_conflict": candidate_state.get(
+                    "unresolved_candidate_conflict", False
+                ),
+                "artifact_assessment_required": candidate_state.get(
+                    "artifact_assessment_required", False
+                ),
+                "artifact_assessment_terminal_policy": (
+                    self.artifact_assessment_terminal_policy
+                ),
+                "artifact_completeness_required": (
+                    self.artifact_completeness_gate
+                ),
+                "incomplete_artifact_count": candidate_state.get(
+                    "incomplete_artifact_count", 0
+                ),
+                "supported_output_agent_ids": candidate_state.get(
+                    "supported_output_agent_ids", []
+                ),
+                "admissible_output_agent_ids": list(
+                    self._artifact_admissible_output_agent_ids()
+                ),
+                "refuted_artifact_count": len(
+                    candidate_state.get("refuted_artifacts", ())
+                ),
+                "insufficient_evidence_artifact_count": len(
+                    candidate_state.get("insufficient_evidence_artifacts", ())
+                ),
+                "unassessed_artifact_count": len(
+                    candidate_state.get("unassessed_artifacts", ())
+                ),
+                "assessment_minimum_remaining_actions": (
+                    assessment_minimum_remaining_actions
+                ),
+                "active_failure_agent_ids": sorted(self._failed_agent_ids),
+                "unresolved_dirty_agent_ids": sorted(
+                    self._unresolved_dirty_agents
+                ),
+                "terminal_semantics": "explicit_finish",
+                "minimum_remaining_actions_scope": (
+                    "structural_and_artifact_assessment_lower_bound"
+                    if candidate_state.get("artifact_assessment_required") is True
+                    else "structural_lower_bound"
+                ),
+            }
+        )
+        return progress
+
+    def _terminal_progress_relation_candidates(
+        self,
+    ) -> list[dict[str, object]]:
+        """Return legal relation edits that reduce the FINISH lower bound."""
+
+        current = self._graph.construction_progress().get(
+            "minimum_remaining_actions"
+        )
+        if type(current) is not int:
+            return []
+        result: list[dict[str, object]] = []
+        for item in self._model_admissible_relation_candidates():
+            candidate = self._graph.fork()
+            candidate.set_relation(
+                str(item["source_id"]),
+                str(item["target_id"]),
+                bool(item["source_to_target"]),
+                bool(item["target_to_source"]),
+            )
+            value = candidate.construction_progress().get(
+                "minimum_remaining_actions"
+            )
+            if type(value) is int and value < current:
+                result.append(dict(item))
+        return result
+
+    def _terminal_progress_output_agent_ids(self) -> Tuple[str, ...]:
+        """Return legal Output selections that reduce the FINISH lower bound."""
+
+        current = self._graph.construction_progress().get(
+            "minimum_remaining_actions"
+        )
+        if type(current) is not int:
+            return ()
+        fresh_candidate_agent_ids = {
+            str(receipt["agent_id"])
+            for receipt in self.current_artifact_receipts()
+            if receipt.get("artifact_fresh") is True
+            and (
+                not self.artifact_completeness_gate
+                or receipt.get("artifact_complete") is True
+            )
+            and isinstance(receipt.get("candidate"), str)
+            and bool(str(receipt["candidate"]).strip())
+        }
+        result: list[str] = []
+        for agent_id in self._model_admissible_output_agent_ids():
+            if agent_id not in fresh_candidate_agent_ids:
+                continue
+            candidate = self._graph.fork()
+            candidate.set_output(agent_id)
+            value = candidate.construction_progress().get(
+                "minimum_remaining_actions"
+            )
+            if type(value) is int and value < current:
+                result.append(agent_id)
+        return tuple(result)
+
+    def export_runtime_checkpoint(self) -> dict[str, object]:
+        """Export one completed Canvas-turn continuation boundary.
+
+        FlowSteer's full graph snapshot and input-identity Runtime cache remain
+        authoritative. This project-specific persistence adapter adds only the
+        public state needed to continue at the next Director turn without
+        sampling an already materialized Agent again.
+        """
+
+        lineage: Optional[dict[str, object]] = None
+        if self._last_valid_evidence_lineage is not None:
+            lineage = {
+                "answer": self._last_valid_evidence_lineage.answer,
+                "runtime": (
+                    self._last_valid_evidence_lineage.runtime.to_checkpoint_dict()
+                ),
+                "graph_revision": (
+                    self._last_valid_evidence_lineage.graph_revision
+                ),
+                "graph_snapshot": (
+                    self._last_valid_evidence_lineage.graph_snapshot.to_dict()
+                ),
+            }
+        return {
+            "schema_version": "agentgraph.canvas-turn-checkpoint.v1",
+            "snapshot": self.snapshot().to_dict(),
+            "progressive_execution": (
+                None
+                if self._progressive_execution is None
+                else self._progressive_execution.to_checkpoint_dict()
+            ),
+            "progressive_execution_revision": (
+                self._progressive_execution_revision
+            ),
+            "progressive_outputs": dict(self._progressive_outputs),
+            "progressive_output_metadata": _checkpoint_json_value(
+                self._progressive_output_metadata
+            ),
+            "previous_revision_outputs": dict(
+                self._previous_revision_outputs
+            ),
+            "previous_revision_output_metadata": _checkpoint_json_value(
+                self._previous_revision_output_metadata
+            ),
+            "unresolved_dirty_agent_ids": sorted(
+                self._unresolved_dirty_agents
+            ),
+            "failed_agent_ids": sorted(self._failed_agent_ids),
+            "diagnosed_unusable_agent_ids": sorted(
+                self._diagnosed_unusable_agent_ids
+            ),
+            "react_exhausted_agent_ids": sorted(
+                self._react_exhausted_agent_ids
+            ),
+            "repair_exhausted_agent_ids": sorted(
+                self._repair_exhausted_agent_ids
+            ),
+            "latest_failure_records": {
+                agent_id: record.to_dict()
+                for agent_id, record in (
+                    self._latest_failure_record_by_agent.items()
+                )
+            },
+            "pending_repair_receipt_count_by_agent": dict(
+                self._pending_repair_receipt_count_by_agent
+            ),
+            "unavailable_model_ids": sorted(self._unavailable_model_ids),
+            "model_availability_receipts": _checkpoint_json_value(
+                self._model_availability_receipts
+            ),
+            "failure_continuations": _checkpoint_json_value(
+                self._failure_continuations
+            ),
+            "last_valid_evidence_lineage": lineage,
+        }
+
+    def restore_runtime_checkpoint(
+        self,
+        value: Mapping[str, object],
+    ) -> AgentWorkflowSnapshot:
+        """Restore one exact completed-turn boundary without Agent replay."""
+
+        if not isinstance(value, Mapping):
+            raise AgentWorkflowStateError(
+                "Canvas Runtime checkpoint must be a mapping"
+            )
+        if (
+            value.get("schema_version")
+            != "agentgraph.canvas-turn-checkpoint.v1"
+        ):
+            raise AgentWorkflowStateError(
+                "unsupported Canvas Runtime checkpoint schema"
+            )
+        raw_snapshot = value.get("snapshot")
+        if not isinstance(raw_snapshot, Mapping):
+            raise AgentWorkflowStateError(
+                "Canvas Runtime checkpoint has no snapshot"
+            )
+        snapshot = AgentWorkflowSnapshot.from_dict(raw_snapshot)
+        self.restore(snapshot)
+        current_agent_ids = {node.id for node in self._graph.nodes}
+
+        def string_mapping(field_name: str) -> dict[str, str]:
+            raw = value.get(field_name, {})
+            if not isinstance(raw, Mapping):
+                raise AgentWorkflowStateError(
+                    f"{field_name} must be a mapping"
+                )
+            if any(
+                not isinstance(key, str) or not isinstance(item, str)
+                for key, item in raw.items()
+            ):
+                raise AgentWorkflowStateError(
+                    f"{field_name} must map text IDs to text artifacts"
+                )
+            return dict(raw)
+
+        def metadata_mapping(
+            field_name: str,
+        ) -> dict[str, dict[str, object]]:
+            raw = value.get(field_name, {})
+            if not isinstance(raw, Mapping):
+                raise AgentWorkflowStateError(
+                    f"{field_name} must be a mapping"
+                )
+            result: dict[str, dict[str, object]] = {}
+            for agent_id, metadata in raw.items():
+                if not isinstance(agent_id, str) or not isinstance(
+                    metadata, Mapping
+                ):
+                    raise AgentWorkflowStateError(
+                        f"{field_name} must contain public metadata mappings"
+                    )
+                result[agent_id] = dict(metadata)
+            return result
+
+        def id_set(field_name: str) -> set[str]:
+            raw = value.get(field_name, ())
+            if (
+                isinstance(raw, (str, bytes))
+                or not isinstance(raw, Sequence)
+                or any(not isinstance(item, str) for item in raw)
+            ):
+                raise AgentWorkflowStateError(
+                    f"{field_name} must be a sequence of IDs"
+                )
+            return set(raw)
+
+        progressive_outputs = string_mapping("progressive_outputs")
+        if not set(progressive_outputs).issubset(current_agent_ids):
+            raise AgentWorkflowStateError(
+                "progressive checkpoint contains an unknown Agent artifact"
+            )
+        progressive_metadata = metadata_mapping(
+            "progressive_output_metadata"
+        )
+        if not set(progressive_metadata).issubset(current_agent_ids):
+            raise AgentWorkflowStateError(
+                "progressive checkpoint metadata contains an unknown Agent"
+            )
+        raw_runtime = value.get("progressive_execution")
+        runtime_result = (
+            None
+            if raw_runtime is None
+            else AgentRuntimeResult.from_checkpoint_dict(raw_runtime)
+            if isinstance(raw_runtime, Mapping)
+            else None
+        )
+        if raw_runtime is not None and runtime_result is None:
+            raise AgentWorkflowStateError(
+                "progressive_execution must be a mapping or None"
+            )
+        raw_runtime_revision = value.get(
+            "progressive_execution_revision"
+        )
+        if raw_runtime_revision is not None and (
+            isinstance(raw_runtime_revision, bool)
+            or not isinstance(raw_runtime_revision, int)
+        ):
+            raise AgentWorkflowStateError(
+                "progressive_execution_revision must be an integer or None"
+            )
+        if runtime_result is not None and (
+            runtime_result.graph_revision != self._graph.revision
+            or raw_runtime_revision != self._graph.revision
+            or dict(runtime_result.outputs) != progressive_outputs
+        ):
+            raise AgentWorkflowStateError(
+                "progressive Runtime cache is not bound to the restored revision"
+            )
+
+        unresolved = id_set("unresolved_dirty_agent_ids")
+        failed = id_set("failed_agent_ids")
+        diagnosed = id_set("diagnosed_unusable_agent_ids")
+        react_exhausted = id_set("react_exhausted_agent_ids")
+        repair_exhausted = id_set("repair_exhausted_agent_ids")
+        for field_name, ids in (
+            ("unresolved_dirty_agent_ids", unresolved),
+            ("failed_agent_ids", failed),
+            ("diagnosed_unusable_agent_ids", diagnosed),
+            ("react_exhausted_agent_ids", react_exhausted),
+            ("repair_exhausted_agent_ids", repair_exhausted),
+        ):
+            if not ids.issubset(current_agent_ids):
+                raise AgentWorkflowStateError(
+                    f"{field_name} contains an unknown Agent"
+                )
+
+        raw_failures = value.get("latest_failure_records", {})
+        if not isinstance(raw_failures, Mapping):
+            raise AgentWorkflowStateError(
+                "latest_failure_records must be a mapping"
+            )
+        failure_records: dict[str, AgentFailureRecord] = {}
+        for agent_id, raw_record in raw_failures.items():
+            if (
+                not isinstance(agent_id, str)
+                or agent_id not in current_agent_ids
+                or not isinstance(raw_record, Mapping)
+            ):
+                raise AgentWorkflowStateError(
+                    "latest_failure_records contains an invalid Agent receipt"
+                )
+            record = AgentFailureRecord.from_dict(raw_record)
+            if record.agent_id != agent_id:
+                raise AgentWorkflowStateError(
+                    "failure receipt Agent identity mismatch"
+                )
+            failure_records[agent_id] = record
+
+        raw_pending = value.get(
+            "pending_repair_receipt_count_by_agent", {}
+        )
+        if not isinstance(raw_pending, Mapping):
+            raise AgentWorkflowStateError(
+                "pending repair receipt counts must be a mapping"
+            )
+        pending: dict[str, int] = {}
+        for agent_id, raw_count in raw_pending.items():
+            if (
+                not isinstance(agent_id, str)
+                or agent_id not in current_agent_ids
+                or isinstance(raw_count, bool)
+                or not isinstance(raw_count, int)
+                or raw_count < 0
+            ):
+                raise AgentWorkflowStateError(
+                    "pending repair receipt count is invalid"
+                )
+            pending[agent_id] = raw_count
+
+        unavailable_models = id_set("unavailable_model_ids")
+        if any(
+            model_id not in self.model_registry
+            for model_id in unavailable_models
+        ):
+            raise AgentWorkflowStateError(
+                "unavailable model overlay contains an unknown model"
+            )
+        raw_availability = value.get("model_availability_receipts", ())
+        if (
+            isinstance(raw_availability, (str, bytes))
+            or not isinstance(raw_availability, Sequence)
+            or any(not isinstance(item, Mapping) for item in raw_availability)
+        ):
+            raise AgentWorkflowStateError(
+                "model availability receipts must be a sequence of mappings"
+            )
+        raw_continuations = value.get("failure_continuations", {})
+        if not isinstance(raw_continuations, Mapping):
+            raise AgentWorkflowStateError(
+                "failure_continuations must be a mapping"
+            )
+        continuations: dict[str, dict[str, object]] = {}
+        for agent_id, continuation in raw_continuations.items():
+            if (
+                not isinstance(agent_id, str)
+                or agent_id not in current_agent_ids
+                or not isinstance(continuation, Mapping)
+            ):
+                raise AgentWorkflowStateError(
+                    "failure continuation contains an invalid Agent receipt"
+                )
+            continuations[agent_id] = dict(continuation)
+
+        self._progressive_execution = runtime_result
+        self._progressive_execution_revision = raw_runtime_revision
+        self._progressive_outputs = progressive_outputs
+        self._progressive_output_metadata = progressive_metadata
+        self._previous_revision_outputs = string_mapping(
+            "previous_revision_outputs"
+        )
+        self._previous_revision_output_metadata = metadata_mapping(
+            "previous_revision_output_metadata"
+        )
+        self._unresolved_dirty_agents = unresolved
+        self._failed_agent_ids = failed
+        self._diagnosed_unusable_agent_ids = diagnosed
+        self._react_exhausted_agent_ids = react_exhausted
+        self._repair_exhausted_agent_ids = repair_exhausted
+        self._latest_failure_record_by_agent = failure_records
+        self._pending_repair_receipt_count_by_agent = pending
+        self._unavailable_model_ids = unavailable_models
+        self._model_availability_receipts = [
+            dict(item) for item in raw_availability
+        ]
+        self._failure_continuations = continuations
+
+        raw_lineage = value.get("last_valid_evidence_lineage")
+        if raw_lineage is not None:
+            if not isinstance(raw_lineage, Mapping):
+                raise AgentWorkflowStateError(
+                    "last_valid_evidence_lineage must be a mapping or None"
+                )
+            raw_lineage_runtime = raw_lineage.get("runtime")
+            raw_lineage_graph = raw_lineage.get("graph_snapshot")
+            if not isinstance(raw_lineage_runtime, Mapping) or not isinstance(
+                raw_lineage_graph, Mapping
+            ):
+                raise AgentWorkflowStateError(
+                    "last valid lineage checkpoint is incomplete"
+                )
+            self._last_valid_evidence_lineage = (
+                AgentWorkflowEvidenceLineageSnapshot(
+                    answer=str(raw_lineage["answer"]),
+                    runtime=AgentRuntimeResult.from_checkpoint_dict(
+                        raw_lineage_runtime
+                    ),
+                    graph_revision=int(raw_lineage["graph_revision"]),
+                    graph_snapshot=AgentGraphSnapshot.from_dict(
+                        raw_lineage_graph
+                    ),
+                )
+            )
+        return self.snapshot()
+
     def restore(self, snapshot: AgentWorkflowSnapshot) -> None:
         graph = AgentGraph.from_snapshot(snapshot.graph)
         self._validate_agent_limit(graph)
@@ -3761,6 +5589,11 @@ class AgentWorkflowEnv:
             recovery_policy=self.recovery_policy,
             required_evidence_tool_id=self.required_evidence_tool_id,
             artifact_candidate_extractor=self.artifact_candidate_extractor,
+            artifact_assessment_extractor=(
+                self.artifact_assessment_extractor
+            ),
+            artifact_consumption_ordering=self.artifact_consumption_ordering,
+            termination_lookahead=self.termination_lookahead,
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
@@ -3821,6 +5654,53 @@ class AgentWorkflowEnv:
                     action,
                     "edit rejected: " + delete_issue,
                 )
+        if (
+            action.action_type is AgentActionType.SET_OUTPUT
+            and (
+                self.artifact_assessment_extractor is not None
+                or self.artifact_completeness_gate
+            )
+            and action.agent_id
+            not in set(self._artifact_admissible_output_agent_ids())
+        ):
+            state = self.candidate_state()
+            selected = next(
+                (
+                    item
+                    for item in state.get("candidate_artifacts", ())
+                    if isinstance(item, Mapping)
+                    and item.get("agent_id") == action.agent_id
+                ),
+                None,
+            )
+            return self._reject_after_count(
+                action,
+                "edit rejected: SET_OUTPUT requires a fresh, complete, "
+                "parseable candidate admitted by the configured "
+                "provenance-bound assessment policy; "
+                + json.dumps(
+                    {
+                        "candidate_conflict": state.get(
+                            "candidate_conflict", False
+                        ),
+                        "unresolved_candidate_conflict": state.get(
+                            "unresolved_candidate_conflict", False
+                        ),
+                        "candidate_assessment_conflict": state.get(
+                            "candidate_assessment_conflict", False
+                        ),
+                        "selected_artifact": selected,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                feedback_code=(
+                    "candidate_assessment_required"
+                    if self.artifact_assessment_terminal_policy
+                    == "require_supported"
+                    else "artifact_not_terminal_admissible"
+                ),
+            )
         if action.action_type is AgentActionType.FINISH:
             validation = self._graph.validate(self.model_registry, require_complete=True)
             cached_execution = self._cached_progressive_execution()
@@ -3933,6 +5813,54 @@ class AgentWorkflowEnv:
                     execution=execution,
                     execution_reused=execution_reused,
                 )
+            completeness_issue = (
+                self._artifact_completeness_terminal_issue()
+            )
+            if completeness_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: "
+                    + str(completeness_issue["reason"])
+                    + "; artifact_state="
+                    + json.dumps(
+                        completeness_issue,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    execution=execution,
+                    execution_reused=execution_reused,
+                    feedback_code="artifact_incomplete",
+                )
+            assessment_issue = (
+                self._artifact_assessment_terminal_issue()
+            )
+            if assessment_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: "
+                    + str(assessment_issue["reason"])
+                    + "; assessment_state="
+                    + json.dumps(
+                        assessment_issue,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    execution=execution,
+                    execution_reused=execution_reused,
+                    feedback_code=str(assessment_issue["stage"]),
+                )
+            candidate_terminal_issue = self._candidate_terminal_issue(
+                execution.final_answer
+            )
+            if candidate_terminal_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: Output artifact parsing failed: "
+                    + candidate_terminal_issue,
+                    execution=execution,
+                    execution_reused=execution_reused,
+                    feedback_code="output_parsing_failure",
+                )
             terminal_issue = self._terminal_validation_error(execution.final_answer)
             if terminal_issue is not None:
                 return self._reject_after_count(
@@ -4015,6 +5943,15 @@ class AgentWorkflowEnv:
                 action,
                 "edit rejected: " + candidate_contract_issue,
                 feedback_code="unverified_candidate_in_contract",
+            )
+        task_specification_issue = self._task_specification_contract_issue(
+            action
+        )
+        if task_specification_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + task_specification_issue,
+                feedback_code="task_specification_drift",
             )
         try:
             # Reuse the Runtime's execution-contract boundary before the
@@ -4328,7 +6265,7 @@ class AgentWorkflowEnv:
         # compact: it is state feedback, not a task-specific Director template.
         answer = execution.final_answer
         if answer is not None and len(answer) > 400:
-            answer = answer[:397] + "..."
+            answer = _artifact_head_tail_preview(answer, limit=400)
         output_calls = [
             call
             for call in execution.calls
@@ -4362,9 +6299,7 @@ class AgentWorkflowEnv:
             )
             if not isinstance(raw_output, str):
                 continue
-            content_preview = " ".join(raw_output.split())
-            if len(content_preview) > 160:
-                content_preview = content_preview[:157] + "..."
+            content_preview = _artifact_head_tail_preview(raw_output)
             raw_tool_receipts = item.get("tool_receipts", ())
             tool_receipts = (
                 [
@@ -4381,6 +6316,8 @@ class AgentWorkflowEnv:
                     "source_agent_id": source_agent_id,
                     "target_agent_id": target_agent_id,
                     "artifact_id": artifact_id,
+                    "source_model_id": item.get("source_model_id"),
+                    "source_contract": item.get("source_contract"),
                     "raw_output": raw_output,
                     "message_type": item.get("message_type"),
                     "artifact_type": item.get("artifact_type"),
@@ -4428,9 +6365,31 @@ class AgentWorkflowEnv:
         agent_artifacts = []
         for agent_id, artifact in sorted(execution.outputs.items()):
             call = calls_by_agent.get(agent_id)
-            preview = " ".join(artifact.split())
-            if len(preview) > 160:
-                preview = preview[:157] + "..."
+            preview = _artifact_head_tail_preview(artifact)
+            artifact_candidate = self._public_artifact_candidate(artifact)
+            upstream_artifacts = []
+            upstream_candidates: set[str] = set()
+            if call is not None:
+                for message in call.request.upstream:
+                    upstream_candidate = self._public_artifact_candidate(
+                        message.content
+                    )
+                    if upstream_candidate is not None:
+                        upstream_candidates.add(upstream_candidate)
+                    upstream_artifacts.append(
+                        {
+                            "source_agent_id": message.source_agent_id,
+                            "artifact_id": message.artifact_id,
+                            "source_model_id": message.source_model_id,
+                            "source_contract": message.source_contract,
+                            "candidate": upstream_candidate,
+                            "artifact_character_count": len(message.content),
+                            "artifact_preview": _artifact_head_tail_preview(
+                                message.content
+                            ),
+                            "provenance_status": "unverified_work_product",
+                        }
+                    )
             agent_artifacts.append(
                 {
                     "agent_id": agent_id,
@@ -4466,7 +6425,11 @@ class AgentWorkflowEnv:
                             "artifact_version"
                         ),
                     ),
+                    "candidate": artifact_candidate,
+                    "artifact_character_count": len(artifact),
                     "artifact_preview": preview,
+                    "upstream_artifacts": upstream_artifacts,
+                    "candidate_conflict": len(upstream_candidates) > 1,
                 }
             )
         result = json.dumps(
@@ -4516,6 +6479,25 @@ class AgentWorkflowEnv:
             f"<answer>...</answer> wrapper; answer_tag_count={tag_count}, "
             f"exact_single_answer_tag={exact_wrapper}, non_empty={non_empty}; "
             "modify the Output Agent contract/model or graph before retrying"
+        )
+
+    def _candidate_terminal_issue(self, answer: str) -> Optional[str]:
+        """Return a target-blind terminal parsing failure for ordered artifacts."""
+
+        if (
+            not self.artifact_consumption_ordering
+            or self.artifact_candidate_extractor is None
+        ):
+            return None
+        candidate, failure_reason = self._public_artifact_candidate_result(
+            answer
+        )
+        if candidate is not None:
+            return None
+        return (
+            failure_reason
+            if isinstance(failure_reason, str) and failure_reason
+            else "candidate_not_found"
         )
 
     def _allows_unconsumed_auxiliary_terminal_reachability(
@@ -4681,6 +6663,29 @@ class AgentWorkflowEnv:
             if repair is not None:
                 result["failure_attribution"] = repair
             return result
+        completeness_issue = self._artifact_completeness_terminal_issue()
+        if completeness_issue is not None:
+            return {
+                "admissible": False,
+                **completeness_issue,
+            }
+        assessment_issue = self._artifact_assessment_terminal_issue()
+        if assessment_issue is not None:
+            return {
+                "admissible": False,
+                **assessment_issue,
+            }
+        candidate_terminal_issue = self._candidate_terminal_issue(
+            execution.final_answer
+        )
+        if candidate_terminal_issue is not None:
+            return {
+                "admissible": False,
+                "stage": "output_parsing",
+                "reason": "Output artifact parsing failed",
+                "parsing_failure_reason": candidate_terminal_issue,
+                "output_agent_id": self._graph.output_agent_id,
+            }
         terminal_issue = self._terminal_validation_error(execution.final_answer)
         if terminal_issue is not None:
             return {
@@ -6709,7 +8714,9 @@ class AgentWorkflowEnv:
 
         candidate_context = re.compile(
             r"\b(?:answer|candidate|result|value|return|emit|output|copy|"
-            r"consolidate|solver|verifier)\b",
+            r"consolidate|solver|verifier|verify|confirm|extract|final|"
+            r"solution|derivation|integrity|error|incorrect|incorrectly|"
+            r"wrong|reject|rejected|refute|refuted|previous|prior)\b",
             flags=re.IGNORECASE,
         )
         copied: list[str] = []
@@ -6717,6 +8724,13 @@ class AgentWorkflowEnv:
             pattern = re.compile(
                 rf"(?<![A-Za-z0-9]){re.escape(candidate)}(?![A-Za-z0-9])"
             )
+            # A literal already present in the immutable public problem is
+            # task input, not new information copied from an unverified
+            # artifact.  Keeping it admissible lets a contract preserve public
+            # constraints such as an AIME digit sum while still rejecting
+            # every artifact-only candidate value below.
+            if pattern.search(self._problem) is not None:
+                continue
             for obligation in obligations:
                 for match in pattern.finditer(obligation):
                     window = obligation[
@@ -6736,6 +8750,168 @@ class AgentWorkflowEnv:
             f"contract: {copied!r}; keep the contract answer-free and route "
             "the source artifact for execution-time checking instead"
         )
+
+    @staticmethod
+    def _canonical_contract_number(value: str) -> str:
+        """Normalize one public numeric literal without consulting a target."""
+
+        normalized = unicodedata.normalize("NFKC", value).strip()
+        if re.fullmatch(r"[+-]?\d+", normalized):
+            return str(int(normalized))
+        if re.fullmatch(r"[+-]?(?:\d+\.\d*|\.\d+)", normalized):
+            sign = "-" if normalized.startswith("-") else ""
+            unsigned = normalized.lstrip("+-")
+            whole, _, fractional = unsigned.partition(".")
+            whole = str(int(whole or "0"))
+            fractional = fractional.rstrip("0")
+            return sign + whole + (("." + fractional) if fractional else "")
+        return normalized
+
+    @classmethod
+    def _contract_numeric_occurrences(
+        cls,
+        value: str,
+    ) -> tuple[tuple[str, int, int], ...]:
+        normalized = unicodedata.normalize("NFKC", value)
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9_.])[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+            r"(?![A-Za-z0-9_.])"
+        )
+        return tuple(
+            (
+                cls._canonical_contract_number(match.group(0)),
+                match.start(),
+                match.end(),
+            )
+            for match in pattern.finditer(normalized)
+        )
+
+    def _task_specification_contract_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Reject target-blind task-specification drift in AIME contracts.
+
+        FlowSteer's Canvas remains transactional and SkillFlow-style typed
+        feedback remains the repair boundary. The project-specific guard is
+        intentionally narrower than mathematical validation: it only rejects
+        a concrete, question-external numeric assertion or terminal claim in a
+        pre-execution free-text obligation. It never reads an evaluator target,
+        repairs an action, or prescribes an Agent role or topology.
+        """
+
+        if (
+            not self.task_specification_contract_guard
+            or "benchmark_id=aime-2026" not in self._problem
+        ):
+            return None
+        if action.action_type is AgentActionType.ADD_SUBGRAPH:
+            obligations = tuple(
+                value
+                for spec in action.agents
+                for value in (spec.contract, spec.completion_condition)
+                if isinstance(value, str) and value.strip()
+            )
+        elif action.action_type in {
+            AgentActionType.ADD_AGENT,
+            AgentActionType.MODIFY_AGENT,
+        }:
+            obligations = tuple(
+                value
+                for value in (action.contract, action.completion_condition)
+                if isinstance(value, str) and value.strip()
+            )
+        else:
+            return None
+        if not obligations:
+            return None
+
+        problem_statement = self._problem.split(
+            "\n\nPublic task metadata:", 1
+        )[0]
+        problem_numbers = {
+            number
+            for number, _, _ in self._contract_numeric_occurrences(
+                problem_statement
+            )
+        }
+        # AIME statements commonly omit braces in a LaTeX radical (for
+        # example \\sqrt2), while a free contract may render the same public
+        # literal as sqrt(2). The generic occurrence scanner deliberately
+        # excludes digits attached to identifiers, so add only this exact
+        # target-blind notation equivalence to the public problem domain.
+        problem_numbers.update(
+            self._canonical_contract_number(match.group("number"))
+            for match in re.finditer(
+                r"\\sqrt\s*\{?(?P<number>[+-]?(?:\d+(?:\.\d*)?|\.\d+))",
+                problem_statement,
+            )
+        )
+        numeric_assertion_templates = (
+            r"(?i:\b(?:answer|candidate|result|return|output|emit|"
+            r"conclude|conclusion|therefore|hence)\b)[^.!?\n]{0,96}"
+            r"{NUMBER}",
+            r"{NUMBER}[^.!?\n]{0,64}(?i:\b(?:as\s+)?(?:the\s+)?"
+            r"(?:answer|candidate|result|output)\b)",
+            r"(?i:(?:\\?[A-Za-z]+|[Α-Ωα-ω]+)[A-Za-z0-9_'′]*\s*"
+            r"(?:=|==|<=|>=|<|>|≤|≥|equals?|is)\s*){NUMBER}",
+            r"(?i:(?:\\?pi|π|\\?[A-Za-z][A-Za-z0-9_'′]*|\))"
+            r"\s*(?:\^|\*\*)\s*){NUMBER}",
+            r"(?i:(?:angle|theta|\\theta|θ|deg(?:ree)?s?|radians?)\b)"
+            r"[^.!?\n]{0,48}{NUMBER}",
+            r"{NUMBER}\s*(?i:(?:°|deg(?:ree)?s?|radians?)\b)",
+        )
+        protocol_range = re.compile(
+            r"(?i:(?:integer[- ]?)?0{1,3}\s*(?:-|to|through)\s*999)"
+        )
+        for obligation in obligations:
+            normalized = unicodedata.normalize("NFKC", obligation)
+            for number, start, end in self._contract_numeric_occurrences(
+                normalized
+            ):
+                if number in problem_numbers:
+                    continue
+                window = normalized[max(0, start - 112) : end + 112]
+                if protocol_range.search(window) is not None:
+                    continue
+                escaped_number = re.escape(normalized[start:end])
+                if any(
+                    re.search(
+                        template.replace("{NUMBER}", escaped_number),
+                        normalized,
+                    )
+                    is not None
+                    for template in numeric_assertion_templates
+                ):
+                    return (
+                        "AIME Agent contract/completion_condition changes the "
+                        "immutable task specification with a question-external "
+                        f"numeric assertion {normalized[start:end]!r}; describe "
+                        "only responsibility, method, required inputs, and output "
+                        "protocol, and derive task values during execution"
+                    )
+
+            terminal_claim = re.search(
+                r"(?i:\b(?:prove|show|demonstrate|establish|conclude)\b)"
+                r"[^.!?\n]{0,128}"
+                r"(?i:\b(?:no\s+(?:integer\s+)?solutions?|impossible|"
+                r"always|never)\b)",
+                normalized,
+            )
+            if (
+                terminal_claim is not None
+                and terminal_claim.group(0).casefold()
+                not in unicodedata.normalize(
+                    "NFKC", problem_statement
+                ).casefold()
+            ):
+                return (
+                    "AIME Agent contract/completion_condition precommits a "
+                    "question-external terminal mathematical claim; describe "
+                    "the responsibility and derive or assess the claim only "
+                    "during execution"
+                )
+        return None
 
     @classmethod
     def _reasoner_candidate(
@@ -9800,6 +11976,12 @@ class AgentWorkflowEnv:
             return (
                 "react_continuation_request_failure",
                 "preserve_public_continuation",
+                status_code,
+            )
+        if "timeouterror" in normalized or "timed out" in normalized:
+            return (
+                "provider_request_failure",
+                "transient_provider",
                 status_code,
             )
         if (

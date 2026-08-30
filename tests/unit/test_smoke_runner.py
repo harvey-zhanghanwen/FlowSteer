@@ -288,6 +288,19 @@ def test_static_workflow_problem_remains_the_immutable_question():
     assert workflow_problem(task, {}) == task.question
 
 
+def test_aime_workflow_problem_keeps_terminal_format_out_of_intermediate_artifacts():
+    task = make_task("aime_2026", 0)
+
+    value = workflow_problem(task, {})
+
+    assert value.startswith(task.question + "\n\nPublic task metadata:")
+    assert "Terminal evaluation" in value
+    assert "selected Output artifact" in value
+    assert "does not require intermediate artifacts to omit" in value
+    assert "contract-relevant derivation" in value
+    assert "Submit exactly one decimal integer and no explanation" not in value
+
+
 def trajectory(task: TaskRecord, rollout_index: int, versions) -> TrajectoryRecord:
     graph = {}
     snapshot_id = stable_id(

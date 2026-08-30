@@ -624,6 +624,76 @@ def test_native_sglang_v3_uses_exact_live_relation_candidate_receipt():
     assert finish_response.metadata["request_count"] == 1
 
 
+def test_scalar_add_agent_v3_receipt_runs_through_collector():
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"add_agent","agent_id":"node_1",'
+            '"model_id":"cheap-model","contract":"solve from the problem",'
+            '"execution_mode":"reasoning","allowed_tools":[]}',
+            '{"action":"set_output","agent_id":"node_1"}',
+            '{"action":"finish"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    environment = AgentWorkflowEnv(
+        registry,
+        gateway=FakeGateway(),
+        execute_on_edit=True,
+        allowed_actions=(
+            "add_agent",
+            "modify_agent",
+            "delete_agent",
+            "set_relation",
+            "set_output",
+            "finish",
+        ),
+        artifact_candidate_extractor=lambda _output: ("1", False, None),
+        artifact_consumption_ordering=True,
+        termination_lookahead=True,
+    )
+    collector = AgentGraphRolloutCollector(
+        _orchestrator(
+            registry,
+            client,
+            max_rounds=3,
+            sampling_action_profile=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            ),
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+        ),
+        environment,
+        _versions(),
+    )
+
+    trajectory = asyncio.run(
+        collector.collect(
+            _task(source="AIME 2026", split="train"),
+            0,
+            lambda *_args: {
+                "evaluator_version": EVALUATOR_VERSION,
+                "valid": True,
+                "reward": 1.0,
+                "metrics": {"accuracy": 1.0},
+            },
+        )
+    )
+
+    assert trajectory.termination_reason == "finish"
+    assert trajectory.explicit_finish is True
+    assert len(client.payloads) == 3
+    add_parameter_schema = client.payloads[0]["sampling_params"]["json_schema"]
+    assert add_parameter_schema == director_live_action_parameter_json_schema_text(
+        "add_agent",
+        trajectory.turns[0].runtime_summary[
+            "director_action_target_domains"
+        ],
+    )
+
+
 def test_native_sglang_v3_regenerates_malformed_relation_candidate_selector_once():
     candidates = [
         {
@@ -2232,6 +2302,115 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     assert len(evidence.trajectories) == 1
 
 
+def test_collector_resumes_exact_completed_turn_without_replaying_agent(
+    tmp_path,
+):
+    registry = _registry()
+
+    class CountingGateway(FakeGateway):
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, request):
+            self.calls += 1
+            return await super().generate(request)
+
+    gateway = CountingGateway()
+    evidence = EvidenceStore(tmp_path)
+    task = _task()
+    workflow_problem = (
+        "What is the answer?\n\nExecution interface: return one admissible action."
+    )
+    interrupted_client = ScriptedSGLangClient(
+        [
+            '{"action":"add_agent","agent_id":"solver",'
+            '"model_id":"cheap-model","contract":"solve directly"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    interrupted_collector = AgentGraphRolloutCollector(
+        _orchestrator(registry, interrupted_client, max_rounds=3),
+        AgentWorkflowEnv(
+            registry,
+            gateway=gateway,
+            execute_on_edit=True,
+        ),
+        _versions(),
+        evidence,
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 1.0,
+            "metrics": {"f1": 1.0},
+        }
+
+    with pytest.raises(IndexError):
+        asyncio.run(
+            interrupted_collector.collect(
+                task,
+                0,
+                evaluator,
+                workflow_problem=workflow_problem,
+            )
+        )
+    assert gateway.calls == 1
+    assert len(evidence.trajectories) == 0
+    checkpoint_payloads = list(evidence.rollout_checkpoints.payloads())
+    assert [item["status"] for item in checkpoint_payloads] == [
+        "in_progress"
+    ]
+    trajectory_id = checkpoint_payloads[0]["trajectory_id"]
+    assert evidence.resolve_rollout_checkpoint(trajectory_id) is not None
+
+    resumed_client = ScriptedSGLangClient(
+        [
+            '{"action":"set_output","agent_id":"solver"}',
+            '{"action":"finish"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    resumed_collector = AgentGraphRolloutCollector(
+        _orchestrator(registry, resumed_client, max_rounds=3),
+        AgentWorkflowEnv(
+            registry,
+            gateway=gateway,
+            execute_on_edit=True,
+        ),
+        _versions(),
+        evidence,
+    )
+    trajectory = asyncio.run(
+        resumed_collector.collect(
+            task,
+            0,
+            evaluator,
+            workflow_problem=workflow_problem,
+        )
+    )
+
+    assert trajectory.explicit_finish is True
+    assert trajectory.final_answer == "final answer"
+    assert len(trajectory.turns) == 3
+    assert gateway.calls == 1
+    assert len(resumed_client.payloads) == 2
+    assert trajectory.turns[1].runtime_summary["rollout_resume"][
+        "exact_completed_turn_boundary"
+    ] is True
+    events = evidence.rollout_checkpoint_events(trajectory.trajectory_id)
+    assert [item["status"] for item in events] == [
+        "in_progress",
+        "in_progress",
+        "terminal_pending_evaluation",
+        "completed",
+    ]
+    assert evidence.resolve_rollout_checkpoint(trajectory.trajectory_id) is None
+
+
 def test_collector_uses_state_conditioned_schema_on_every_progressive_turn():
     registry = _registry()
     client = ScriptedSGLangClient(
@@ -2853,10 +3032,12 @@ def test_collector_preserves_turns_at_verified_qa_empty_canvas_domain(
     )
 
     class DeadEndAfterOneTurnEnv(AgentWorkflowEnv):
-        def model_admissible_action_types(self):
+        def model_admissible_action_types(self, *, remaining_rounds=None):
             if self.history:
                 return ()
-            return super().model_admissible_action_types()
+            return super().model_admissible_action_types(
+                remaining_rounds=remaining_rounds
+            )
 
         async def step(self, action_or_response):
             result = await super().step(action_or_response)

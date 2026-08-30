@@ -10,6 +10,8 @@ from src.interactive.aime2026_adapter import (
     AIME2026_EVALUATOR_VERSION,
     AIME2026_TASK_FAMILY,
     canonical_aime_integer,
+    extract_aime2026_artifact_assessments,
+    extract_aime2026_candidate,
     score_aime2026_integer,
 )
 from src.interactive.task_dataset import iter_task_records
@@ -42,6 +44,191 @@ def test_integer_scorer_uses_target_blind_explicit_math_forms() -> None:
         ).parsing_failure_reason
         == "conflicting_explicit_candidates"
     )
+
+
+def test_provenance_bound_artifact_assessment_parser_is_target_blind() -> None:
+    payload = [
+        {
+            "assessed_artifact_id": "artifact:source:1",
+            "candidate": "0441",
+            "assessment": "supported",
+            "basis": "The public derivation includes the final substitution.",
+            "counterexample": None,
+        }
+    ]
+    prediction = (
+        "Final Answer: 441\n<artifact_assessments>"
+        + json.dumps(payload)
+        + "</artifact_assessments>"
+    )
+    assessments, failure = extract_aime2026_artifact_assessments(prediction)
+    assert failure is None
+    assert assessments == (
+        {
+            "assessed_artifact_id": "artifact:source:1",
+            "candidate": "441",
+            "assessment": "supported",
+            "basis": "The public derivation includes the final substitution.",
+            "counterexample": None,
+        },
+    )
+    assert "ground_truth" not in json.dumps(assessments).casefold()
+
+
+def test_assessment_terminal_projection_is_target_blind_and_fail_closed() -> None:
+    def envelope(items: list[dict[str, object]]) -> str:
+        return (
+            "Public derivation assessment.\n<artifact_assessments>"
+            + json.dumps(items)
+            + "</artifact_assessments>"
+        )
+
+    supported = {
+        "assessed_artifact_id": "artifact:a",
+        "candidate": "441",
+        "assessment": "supported",
+        "basis": "The public derivation and final substitution are complete.",
+        "counterexample": None,
+    }
+    refuted = {
+        "assessed_artifact_id": "artifact:b",
+        "candidate": "442",
+        "assessment": "refuted",
+        "basis": "The public substitution fails.",
+        "counterexample": "Substitution gives a different left-hand side.",
+    }
+    insufficient = {
+        "assessed_artifact_id": "artifact:c",
+        "candidate": "443",
+        "assessment": "insufficient_evidence",
+        "basis": "A required public check is absent.",
+        "counterexample": None,
+    }
+    other_supported = {
+        "assessed_artifact_id": "artifact:d",
+        "candidate": "444",
+        "assessment": "supported",
+        "basis": "A different public derivation is asserted complete.",
+        "counterexample": None,
+    }
+
+    assert extract_aime2026_candidate(envelope([supported])) == (
+        "441",
+        False,
+        None,
+    )
+    assert extract_aime2026_candidate(envelope([supported, refuted])) == (
+        "441",
+        False,
+        None,
+    )
+    candidate, _, failure = extract_aime2026_candidate(
+        envelope([supported, insufficient])
+    )
+    assert candidate is None
+    assert failure == "assessment_terminal_insufficient_evidence"
+    candidate, _, failure = extract_aime2026_candidate(
+        envelope([supported, other_supported])
+    )
+    assert candidate is None
+    assert failure == "assessment_terminal_no_unique_supported_candidate"
+    assert (
+        score_aime2026_integer(envelope([supported]), ["441"]).accuracy
+        == 1.0
+    )
+    assert "ground_truth" not in envelope([supported]).casefold()
+
+
+def test_observed_fenced_assessment_receipt_is_normalized_target_blind() -> None:
+    prediction = (
+        "Reasoning without access to a target.\n"
+        "### Artifact Assessment\n"
+        "```json\n"
+        + json.dumps(
+            {
+                "assessed_artifacts": [
+                    {
+                        "assessed_artifact_id": "artifact:source:2",
+                        "candidate": 367,
+                        "assessment": "sufficient_evidence",
+                        "basis": "The public equations and substitution are complete.",
+                        "counterexample": None,
+                    }
+                ]
+            }
+        )
+        + "\n```"
+    )
+    assessments, failure = extract_aime2026_artifact_assessments(prediction)
+    assert failure is None
+    assert assessments == (
+        {
+            "assessed_artifact_id": "artifact:source:2",
+            "candidate": "367",
+            "assessment": "supported",
+            "basis": "The public equations and substitution are complete.",
+            "counterexample": None,
+        },
+    )
+    assert "ground_truth" not in json.dumps(assessments).casefold()
+
+    malformed_tagged = (
+        "<artifact_assessments>{not-json}</artifact_assessments>\n"
+        "### Artifact Assessment\n```json\n"
+        + json.dumps(
+            {
+                "assessed_artifacts": [
+                    {
+                        "assessed_artifact_id": "artifact:source:2",
+                        "candidate": 367,
+                        "assessment": "sufficient_evidence",
+                        "basis": "Complete.",
+                        "counterexample": None,
+                    }
+                ]
+            }
+        )
+        + "\n```"
+    )
+    _, failure = extract_aime2026_artifact_assessments(malformed_tagged)
+    assert failure == "artifact_assessment_json_invalid"
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        ([], "artifact_assessment_list_invalid"),
+        (
+            [{
+                "assessed_artifact_id": "artifact:1",
+                "candidate": "441",
+                "assessment": "refuted",
+                "basis": "A contradiction exists.",
+                "counterexample": None,
+            }],
+            "refuted_assessment_requires_counterexample",
+        ),
+        (
+            [{
+                "assessed_artifact_id": "artifact:1",
+                "candidate": "441",
+                "assessment": "supported",
+                "basis": "Checked.",
+                "counterexample": "not allowed",
+            }],
+            "supported_assessment_has_counterexample",
+        ),
+    ],
+)
+def test_artifact_assessment_parser_fails_closed(
+    payload: list[dict], reason: str
+) -> None:
+    _, failure = extract_aime2026_artifact_assessments(
+        "<artifact_assessments>"
+        + json.dumps(payload)
+        + "</artifact_assessments>"
+    )
+    assert failure == reason
 
 
 def test_single_terminal_boundary_maps_to_private_integer_submission() -> None:

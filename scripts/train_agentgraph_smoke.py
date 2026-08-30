@@ -24,7 +24,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
 from src.interactive.agent_runtime import AgentRuntime
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
-from src.interactive.aime2026_adapter import extract_aime2026_candidate
+from src.interactive.aime2026_adapter import (
+    extract_aime2026_artifact_assessments,
+    extract_aime2026_candidate,
+)
 from src.interactive.config_loader import (
     ConfigurationError,
     load_model_registry,
@@ -446,8 +449,11 @@ def _workflow_problem(
         return (
             f"{task.question}\n\n"
             "Public task metadata: benchmark_id=aime-2026; "
-            f"answer_format={answer_format}. Submit exactly one decimal integer "
-            "and no explanation."
+            f"answer_format={answer_format}. Terminal evaluation consumes exactly "
+            "one clearly marked decimal candidate from the selected Output artifact. "
+            "This terminal format does not require intermediate artifacts to omit "
+            "the contract-relevant derivation, intermediate results, or checks that "
+            "a routed downstream Agent needs to assess an unverified candidate."
         )
     if source_key not in {"webshop", "alfworld"}:
         return task.question
@@ -2144,6 +2150,15 @@ class LiveSmokeBackend:
                     self.registry,
                     self.runtime.gateway,
                     timeout_seconds=self.runtime.timeout_seconds,
+                    artifact_assessment_protocol=(
+                        self.runtime.artifact_assessment_protocol
+                    ),
+                    max_length_continuations=(
+                        self.runtime.max_length_continuations
+                    ),
+                    length_continuation_max_tokens=(
+                        self.runtime.length_continuation_max_tokens
+                    ),
                     execution_adapters={"coding": adapter},
                     tool_registry=tool_registry,
                     dataset_id=source_key,
@@ -2175,6 +2190,15 @@ class LiveSmokeBackend:
                 self.registry,
                 self.runtime.gateway,
                 timeout_seconds=self.runtime.timeout_seconds,
+                artifact_assessment_protocol=(
+                    self.runtime.artifact_assessment_protocol
+                ),
+                max_length_continuations=(
+                    self.runtime.max_length_continuations
+                ),
+                length_continuation_max_tokens=(
+                    self.runtime.length_continuation_max_tokens
+                ),
                 execution_adapters={"react": adapter},
                 tool_registry=tool_registry,
                 dataset_id=source_key,
@@ -2210,6 +2234,15 @@ class LiveSmokeBackend:
                     self.registry,
                     self.runtime.gateway,
                     timeout_seconds=self.runtime.timeout_seconds,
+                    artifact_assessment_protocol=(
+                        self.runtime.artifact_assessment_protocol
+                    ),
+                    max_length_continuations=(
+                        self.runtime.max_length_continuations
+                    ),
+                    length_continuation_max_tokens=(
+                        self.runtime.length_continuation_max_tokens
+                    ),
                     execution_adapters={"react": adapter},
                     tool_registry=opened.registry,
                     dataset_id=source_key,
@@ -2251,6 +2284,15 @@ class LiveSmokeBackend:
                 self.registry,
                 self.runtime.gateway,
                 timeout_seconds=self.runtime.timeout_seconds,
+                artifact_assessment_protocol=(
+                    self.runtime.artifact_assessment_protocol
+                ),
+                max_length_continuations=(
+                    self.runtime.max_length_continuations
+                ),
+                length_continuation_max_tokens=(
+                    self.runtime.length_continuation_max_tokens
+                ),
                 execution_adapters={"react": resources.execution_adapter},
                 tool_registry=resources.tool_registry,
                 dataset_id=source_key,
@@ -2331,6 +2373,15 @@ class LiveSmokeBackend:
                 self.registry,
                 self.runtime.gateway,
                 timeout_seconds=self.runtime.timeout_seconds,
+                artifact_assessment_protocol=(
+                    self.runtime.artifact_assessment_protocol
+                ),
+                max_length_continuations=(
+                    self.runtime.max_length_continuations
+                ),
+                length_continuation_max_tokens=(
+                    self.runtime.length_continuation_max_tokens
+                ),
                 execution_adapters={"react": adapter},
                 tool_registry=opened.registry,
                 dataset_id=source_key,
@@ -2499,6 +2550,12 @@ class LiveSmokeBackend:
             top_p=float(director["top_p"]),
             top_k=int(director["top_k"]),
             max_tokens=int(director["max_action_tokens"]),
+            timeout_seconds=float(
+                director.get("request_timeout_seconds", 180.0)
+            ),
+            max_retries=int(
+                director.get("max_request_retries", 2)
+            ),
             action_json_schema=(
                 director_sglang_sampling_json_schema_text(
                     tuple(str(value) for value in graph_config["actions"])
@@ -2527,6 +2584,17 @@ class LiveSmokeBackend:
             registry,
             gateway,
             timeout_seconds=execution_timeout_seconds,
+            artifact_assessment_protocol=str(
+                graph_config.get(
+                    "artifact_assessment_protocol", "none"
+                )
+            ),
+            max_length_continuations=int(
+                graph_config.get("max_length_continuations", 0)
+            ),
+            length_continuation_max_tokens=int(
+                graph_config.get("length_continuation_max_tokens", 512)
+            ),
         )
         evidence_store = EvidenceStore(_resolve(root, str(storage["root"])))
         skill_pipeline: Optional[SkillEvidencePipeline] = None
@@ -3323,6 +3391,37 @@ class LiveSmokeBackend:
                     extract_aime2026_candidate
                     if _dataset_key(task) == "aime_2026"
                     else None
+                ),
+                artifact_assessment_extractor=(
+                    extract_aime2026_artifact_assessments
+                    if (
+                        _dataset_key(task) == "aime_2026"
+                        and graph_config.get(
+                            "artifact_assessment_protocol", "none"
+                        )
+                        != "none"
+                    )
+                    else None
+                ),
+                artifact_consumption_ordering=bool(
+                    graph_config.get("artifact_consumption_ordering", False)
+                ),
+                termination_lookahead=bool(
+                    graph_config.get("termination_lookahead", False)
+                ),
+                task_specification_contract_guard=bool(
+                    graph_config.get(
+                        "task_specification_contract_guard", False
+                    )
+                ),
+                artifact_completeness_gate=bool(
+                    graph_config.get("artifact_completeness_gate", False)
+                ),
+                artifact_assessment_terminal_policy=str(
+                    graph_config.get(
+                        "artifact_assessment_terminal_policy",
+                        "require_supported",
+                    )
                 ),
                 allowed_actions=(
                     tuple(str(value) for value in graph_config["actions"])

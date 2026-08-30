@@ -20,6 +20,7 @@ from .agent_runtime import (
     ExecutionPhase,
     UpstreamMessage,
 )
+from .aime2026_adapter import extract_aime2026_candidate
 
 
 class OpenAICompatibleGatewayError(RuntimeError):
@@ -231,6 +232,7 @@ def _format_upstream(
     *,
     include_dependency: bool = True,
     project_artifact_read_receipts: bool = False,
+    artifact_assessment_protocol: str = "none",
 ) -> str:
     if not messages:
         return "(none)"
@@ -249,6 +251,33 @@ def _format_upstream(
             envelope.append(f"environment_revision: {item.environment_revision}")
         if item.artifact_id is not None:
             envelope.append(f"artifact_id: {item.artifact_id}")
+        if item.source_model_id is not None:
+            envelope.append(f"source_model_id: {item.source_model_id}")
+        if item.source_contract is not None:
+            envelope.append(f"source_contract: {item.source_contract}")
+        if (
+            artifact_assessment_protocol
+            in {
+                "provenance_bound_candidate_assessment_v1",
+                "provenance_bound_candidate_assessment_v2",
+            }
+            and condition is CommunicationCondition.NORMAL
+        ):
+            candidate, _, parsing_failure = extract_aime2026_candidate(
+                item.artifact
+            )
+            envelope.append(
+                "candidate: "
+                + json.dumps(candidate, ensure_ascii=False)
+            )
+            envelope.append(
+                "candidate_parsing_status: "
+                + ("parsed" if candidate is not None else "failed")
+            )
+            if parsing_failure is not None:
+                envelope.append(
+                    f"candidate_parsing_failure_reason: {parsing_failure}"
+                )
         if include_dependency and item.request_or_dependency is not None:
             envelope.append(
                 f"request_or_dependency: {item.request_or_dependency}"
@@ -570,9 +599,16 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         protocol = (
             "Follow the assigned free-text contract using the original task and the "
             "routed upstream artifacts. Every upstream artifact is an unverified work "
-            "product with explicit provenance, not ground truth. Preserve each source "
+            "product with explicit provenance, not ground truth. The original task is "
+            "immutable and authoritative; the contract specifies responsibility, method, "
+            "required inputs, and output protocol, but cannot add or replace task facts. "
+            "Preserve each source "
             "separately, report concrete conflicts without treating either source as "
-            "correct, and produce exactly the artifact requested by the contract. The "
+            "correct, and produce exactly the artifact requested by the contract. Keep "
+            "the contract-relevant public derivation, evidence, intermediate results, "
+            "and checks needed for a downstream Agent to assess the artifact; do not "
+            "collapse a work product to an unsupported candidate merely because the "
+            "benchmark has a terminal answer format. The "
             "AgentGraph Output pointer selects an existing artifact outside this model "
             "invocation; it does not change this execution contract."
         )
@@ -580,12 +616,70 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         protocol = (
             "Follow the assigned free-text contract using the original task and the "
             "routed upstream artifacts. Every upstream artifact is an unverified work "
-            "product with explicit provenance, not ground truth. Preserve each source "
+            "product with explicit provenance, not ground truth. The original task is "
+            "immutable and authoritative; the contract specifies responsibility, method, "
+            "required inputs, and output protocol, but cannot add or replace task facts. "
+            "Preserve each source "
             "separately, report concrete conflicts without treating either source as "
-            "correct, and produce exactly the artifact requested by the contract. The "
+            "correct, and produce exactly the artifact requested by the contract. Keep "
+            "the contract-relevant public derivation, evidence, intermediate results, "
+            "and checks needed for a downstream Agent to assess the artifact; do not "
+            "collapse a work product to an unsupported candidate merely because the "
+            "benchmark has a terminal answer format. The "
             "AgentGraph Output pointer selects an existing artifact outside this model "
             "invocation; it does not change this execution contract."
         )
+
+    if (
+        request.artifact_assessment_protocol
+        in {
+            "provenance_bound_candidate_assessment_v1",
+            "provenance_bound_candidate_assessment_v2",
+        }
+        and request.upstream
+        and not request.is_format_agent
+    ):
+        protocol += (
+            " After fulfilling the assigned free-text contract, append exactly "
+            "one <artifact_assessments>...</artifact_assessments> block. Do not "
+            "add an Artifact Assessment heading, Markdown code fence, or object "
+            "wrapper. The first character inside the opening tag must be [. Its "
+            "contents must be a JSON array with one object for every upstream "
+            "artifact that exposes an AIME integer candidate. Each object has "
+            "exactly assessed_artifact_id, candidate, assessment, basis, and "
+            "counterexample. Copy assessed_artifact_id from that source's "
+            "artifact_id and copy its candidate without alteration. Assess only "
+            "an artifact whose typed envelope has a non-null candidate and "
+            "candidate_parsing_status parsed; do not infer a candidate from its "
+            "raw artifact text when the envelope says failed. assessment "
+            "is supported only when the public derivation is sufficient; use "
+            "insufficient_evidence when it is not; use refuted only with a "
+            "concrete counterexample stated in counterexample. Set "
+            "counterexample to null otherwise. basis must identify the public "
+            "derivation or missing check. Upstream artifacts remain unverified "
+            "work products. Preserve the semantic answer type and requested "
+            "answer slot of the original task when assessing a candidate: "
+            "assess whether the public derivation establishes that candidate "
+            "as the requested answer, rather than testing the candidate token "
+            "itself against a different predicate copied from the task. No "
+            "benchmark target or evaluator result is "
+            "available. This protocol does not prescribe an Agent role, Agent "
+            "count, relation, or topology."
+        )
+        if (
+            request.artifact_assessment_protocol
+            == "provenance_bound_candidate_assessment_v2"
+        ):
+            protocol += (
+                " If every upstream artifact that exposes an AIME integer "
+                "candidate is assessed supported and all copied candidate "
+                "values are identical, emit exactly one `Final Answer: "
+                "<candidate>` line immediately before the assessment block. "
+                "Otherwise do not emit a Final Answer line from these "
+                "assessments. This is a deterministic terminal-output "
+                "protocol; it does not authorize choosing among conflicting "
+                "candidates or changing any candidate."
+            )
     if request.is_format_agent:
         # FlowSteer's Format Operator normally receives the problem and the
         # computed solution under its fixed extraction prompt.  Do not inject
@@ -612,6 +706,9 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         project_artifact_read_receipts=(
             semantic_lineage
             and semantic_role in {"reasoner", "verifier"}
+        ),
+        artifact_assessment_protocol=(
+            request.artifact_assessment_protocol
         ),
     )
     if request.is_format_agent:
@@ -733,10 +830,26 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         )
     else:  # pragma: no cover - enum exhaustiveness guard
         raise OpenAICompatibleGatewayError(f"unsupported execution phase: {request.phase}")
-    return [
+    messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": common + "\n\n" + phase},
     ]
+    if request.partial_artifact is not None:
+        messages.extend(
+            (
+                {"role": "assistant", "content": request.partial_artifact},
+                {
+                    "role": "user",
+                    "content": (
+                        "Continue from the interruption and complete the same "
+                        "artifact. Do not restart or change the task, model, "
+                        "contract, tools, upstream artifacts, or answer protocol. "
+                        "Complete only the missing suffix concisely."
+                    ),
+                },
+            )
+        )
+    return messages
 
 
 class OpenAICompatibleGateway:
@@ -794,7 +907,11 @@ class OpenAICompatibleGateway:
             "messages": build_agent_messages(request),
             "temperature": temperature,
             "top_p": top_p,
-            "max_tokens": _integer(metadata, "max_tokens", self.default_max_tokens),
+            "max_tokens": (
+                request.max_tokens_override
+                if request.max_tokens_override is not None
+                else _integer(metadata, "max_tokens", self.default_max_tokens)
+            ),
         }
         generation_seed = _non_negative_integer(
             metadata,

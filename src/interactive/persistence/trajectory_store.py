@@ -187,6 +187,11 @@ class EvidenceStore:
         self.posteriors = AppendOnlyJsonlStore(root_path / "posteriors.jsonl", "posterior")
         self.snapshots = AppendOnlyJsonlStore(root_path / "snapshots.jsonl", "snapshot")
 
+        self.rollout_checkpoints = AppendOnlyJsonlStore(
+            root_path / "rollout_checkpoints.jsonl",
+            "rollout_checkpoint",
+        )
+
     def append_trajectory(self, record: Any) -> str:
         payload = _to_dict(record)
         trajectory_id = payload.get("trajectory_id")
@@ -233,6 +238,78 @@ class EvidenceStore:
         if not isinstance(snapshot_id, str) or not snapshot_id:
             raise ValueError("snapshot record requires a stable snapshot_id")
         return self.snapshots.append(payload, event_id=snapshot_id)
+
+    def append_rollout_checkpoint(self, record: Any) -> str:
+        """Persist one completed Canvas turn or completion marker."""
+
+        payload = _to_dict(record)
+        required = {
+            "checkpoint_id",
+            "trajectory_id",
+            "status",
+            "next_round_index",
+        }
+        missing = required - set(payload)
+        if missing:
+            raise ValueError(
+                "rollout checkpoint is missing fields: "
+                + ", ".join(sorted(missing))
+            )
+        checkpoint_id = payload["checkpoint_id"]
+        trajectory_id = payload["trajectory_id"]
+        status = payload["status"]
+        next_round_index = payload["next_round_index"]
+        if not isinstance(checkpoint_id, str) or not checkpoint_id:
+            raise ValueError("rollout checkpoint requires checkpoint_id")
+        if not isinstance(trajectory_id, str) or not trajectory_id:
+            raise ValueError("rollout checkpoint requires trajectory_id")
+        if status not in {
+            "in_progress",
+            "terminal_pending_evaluation",
+            "completed",
+        }:
+            raise ValueError("unsupported rollout checkpoint status")
+        if (
+            isinstance(next_round_index, bool)
+            or not isinstance(next_round_index, int)
+            or next_round_index < 0
+        ):
+            raise ValueError(
+                "rollout checkpoint next_round_index must be non-negative"
+            )
+        return self.rollout_checkpoints.append(
+            payload,
+            event_id=checkpoint_id,
+        )
+
+    def rollout_checkpoint_events(
+        self,
+        trajectory_id: str,
+    ) -> list[Dict[str, Any]]:
+        if not isinstance(trajectory_id, str) or not trajectory_id:
+            raise ValueError("trajectory_id must be non-empty")
+        return [
+            payload
+            for payload in self.rollout_checkpoints.payloads()
+            if payload.get("trajectory_id") == trajectory_id
+        ]
+
+    def resolve_rollout_checkpoint(
+        self,
+        trajectory_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the latest resumable completed-turn boundary."""
+
+        events = self.rollout_checkpoint_events(trajectory_id)
+        if not events or events[-1].get("status") == "completed":
+            return None
+        resumable = [
+            event
+            for event in events
+            if event.get("status")
+            in {"in_progress", "terminal_pending_evaluation"}
+        ]
+        return dict(resumable[-1]) if resumable else None
 
     def resolve_probe(self, event_id: str) -> Optional[Dict[str, Any]]:
         return self.probes.get(event_id)

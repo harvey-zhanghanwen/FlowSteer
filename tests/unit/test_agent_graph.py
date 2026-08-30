@@ -41,7 +41,10 @@ from src.interactive.agent_workflow_env import (
     _QA_LOCATION_REASONER_RECOVERY_CONTRACT,
     _evidence_span_matches_read,
 )
-from src.interactive.aime2026_adapter import extract_aime2026_candidate
+from src.interactive.aime2026_adapter import (
+    extract_aime2026_artifact_assessments,
+    extract_aime2026_candidate,
+)
 from src.interactive.director import director_validate_live_action_target_domains
 from src.interactive.model_registry import (
     ModelRegistry,
@@ -703,6 +706,62 @@ class _SequenceGateway(_ImmediateGateway):
     async def generate(self, request: AgentRequest) -> str:
         self.requests.append(request)
         return self.responses.pop(0)
+
+
+class _AIMEAssessmentGateway(_ImmediateGateway):
+    """Emit one provenance-bound assessment after a real routed input."""
+
+    def __init__(
+        self,
+        *,
+        source_candidate: str = "441",
+        assessment: str = "supported",
+        downstream_candidate: str | None = None,
+        emit_downstream_candidate: bool = True,
+    ) -> None:
+        super().__init__()
+        self.source_candidate = source_candidate
+        self.assessment = assessment
+        self.downstream_candidate = (
+            source_candidate
+            if downstream_candidate is None
+            else downstream_candidate
+        )
+        self.emit_downstream_candidate = emit_downstream_candidate
+
+    async def generate(self, request: AgentRequest) -> str:
+        self.requests.append(request)
+        if not request.upstream:
+            return f"Final Answer: {self.source_candidate}"
+        upstream = request.upstream[0]
+        candidate, _, failure = extract_aime2026_candidate(upstream.content)
+        if candidate is None or failure is not None:
+            raise AssertionError("test upstream must expose one AIME candidate")
+        counterexample = (
+            "The public substitution contradicts the stated derivation."
+            if self.assessment == "refuted"
+            else None
+        )
+        payload = [
+            {
+                "assessed_artifact_id": upstream.artifact_id,
+                "candidate": candidate,
+                "assessment": self.assessment,
+                "basis": "Checked the complete public derivation and final substitution.",
+                "counterexample": counterexample,
+            }
+        ]
+        prefix = (
+            f"Final Answer: {self.downstream_candidate}\n"
+            if self.emit_downstream_candidate
+            else ""
+        )
+        return (
+            prefix
+            + "<artifact_assessments>"
+            + json.dumps(payload, separators=(",", ":"))
+            + "</artifact_assessments>"
+        )
 
 
 class _CountingRuntime(AgentRuntime):
@@ -1856,14 +1915,24 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_aime_fanin_feedback_preserves_provenance_and_conflict(self) -> None:
         registry = make_registry()
+        left_derivation = (
+            "Left derivation keeps assumptions and intermediate arithmetic. "
+            + "L" * 400
+            + "\nFinal Answer: 41"
+        )
+        right_derivation = (
+            "Right derivation keeps an independent check. "
+            + "R" * 400
+            + "\nFinal Answer: 42"
+        )
 
         class CandidateGateway(_ImmediateGateway):
             async def generate(self, request: AgentRequest) -> str:
                 self.requests.append(request)
                 return {
-                    "left": r"\boxed{41}",
-                    "right": "Final Answer: 42",
-                    "merge": "Final Answer: 42",
+                    "left": left_derivation,
+                    "right": right_derivation,
+                    "merge": "The routed candidates conflict; no candidate selected.",
                 }[request.agent.id]
 
         gateway = CandidateGateway()
@@ -1891,7 +1960,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"candidate_conflict":true', result.feedback)
         self.assertIn('"source_agent":"left"', result.feedback)
         self.assertIn('"source_agent":"right"', result.feedback)
-        self.assertIn('"raw_output":"\\\\boxed{41}"', result.feedback)
+        self.assertIn('"candidate":"41"', result.feedback)
+        self.assertIn('"candidate":"42"', result.feedback)
         merge_request = next(
             request for request in gateway.requests if request.agent.id == "merge"
         )
@@ -1899,6 +1969,45 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             ["left", "right"],
             [item.source_agent_id for item in merge_request.upstream],
+        )
+        by_source = {
+            item.source_agent_id: item for item in merge_request.upstream
+        }
+        self.assertEqual(left_derivation, by_source["left"].content)
+        self.assertEqual(right_derivation, by_source["right"].content)
+        self.assertEqual("cheap", by_source["left"].source_model_id)
+        self.assertEqual("work left", by_source["left"].source_contract)
+        self.assertEqual("fast", by_source["right"].source_model_id)
+        self.assertEqual("work right", by_source["right"].source_contract)
+
+        receipts = {
+            item["agent_id"]: item for item in env.current_artifact_receipts()
+        }
+        merge_receipt = receipts["merge"]
+        self.assertTrue(merge_receipt["candidate_conflict"])
+        self.assertIsNone(merge_receipt["candidate"])
+        self.assertEqual(
+            ["left", "right"],
+            [
+                item["source_agent_id"]
+                for item in merge_receipt["upstream_artifacts"]
+            ],
+        )
+        self.assertIn("Final Answer: 41", receipts["left"]["artifact_preview"])
+        self.assertIn("Final Answer: 42", receipts["right"]["artifact_preview"])
+        serialized_receipts = json.dumps(receipts, sort_keys=True)
+        self.assertNotIn("ground_truth", serialized_receipts)
+        self.assertNotIn("selected_candidate", serialized_receipts)
+
+        rejected = await env.step('{"action":"set_output","agent_id":"merge"}')
+        self.assertFalse(rejected.accepted)
+        self.assertEqual("no_graph_change", rejected.feedback_code)
+        self.assertEqual(
+            receipts,
+            {
+                item["agent_id"]: item
+                for item in env.current_artifact_receipts()
+            },
         )
 
     async def test_aime_recovery_contract_cannot_anchor_unverified_candidate(self) -> None:
@@ -1910,9 +2019,16 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 return "244"
 
         gateway = CandidateGateway()
-        env = AgentWorkflowEnv(
+        runtime = AgentRuntime(
             registry,
             gateway,
+            artifact_assessment_protocol=(
+                "provenance_bound_candidate_assessment_v2"
+            ),
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
             problem="Find the requested AIME integer.",
             execute_on_edit=True,
             artifact_candidate_extractor=extract_aime2026_candidate,
@@ -1921,9 +2037,15 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             '{"action":"add_agent","agent_id":"solver",'
             '"model_id":"cheap","contract":"Solve the public problem."}'
         )
+        modify_domain = env.model_admissible_action_targets()["modify_agent"]
+        self.assertNotIn(
+            "role_family",
+            modify_domain["per_agent_candidates"][0]["mutable_fields"],
+        )
         anchored = await env.step(
             '{"action":"add_agent","agent_id":"next",'
-            '"model_id":"fast","contract":"Check the solver answer 244 and output 244."}'
+            '"model_id":"fast","contract":"Verify the integrity of the solution '
+            'derivation for m+n=244 before producing a terminal artifact."}'
         )
 
         self.assertTrue(first.accepted)
@@ -1934,6 +2056,51 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("keep the contract answer-free", anchored.feedback)
         self.assertEqual(1, len(gateway.requests))
+
+        historical_error = await env.step(
+            '{"action":"add_agent","agent_id":"next",'
+            '"model_id":"fast","contract":"Correct the previous error '
+            'where 244 was incorrectly identified before producing a new '
+            'work product."}'
+        )
+        self.assertFalse(historical_error.accepted)
+        self.assertEqual(
+            "unverified_candidate_in_contract",
+            historical_error.feedback_code,
+        )
+        self.assertEqual(1, len(gateway.requests))
+
+        class PublicConstantGateway(_ImmediateGateway):
+            async def generate(self, request: AgentRequest) -> str:
+                self.requests.append(request)
+                return "13"
+
+        public_gateway = PublicConstantGateway()
+        public_runtime = AgentRuntime(
+            registry,
+            public_gateway,
+            artifact_assessment_protocol=(
+                "provenance_bound_candidate_assessment_v2"
+            ),
+        )
+        public_env = AgentWorkflowEnv(
+            registry,
+            runtime=public_runtime,
+            problem="Count objects whose public digit sum is 13.",
+            execute_on_edit=True,
+            artifact_candidate_extractor=extract_aime2026_candidate,
+        )
+        await public_env.step(
+            '{"action":"add_agent","agent_id":"source",'
+            '"model_id":"cheap","contract":"Solve the public problem."}'
+        )
+        restates_public_input = await public_env.step(
+            '{"action":"add_agent","agent_id":"next",'
+            '"model_id":"fast","contract":"Check the public digit-sum 13 '
+            'constraint without assuming an answer."}'
+        )
+        self.assertTrue(restates_public_input.accepted)
+        self.assertEqual(2, len(public_gateway.requests))
 
     async def test_finish_requires_the_configured_environment_actor(self) -> None:
         registry = make_registry()
@@ -2371,6 +2538,47 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(repaired.accepted)
         self.assertNotIn("reasoner", env.recovery_state()["failed_agent_ids"])
         self.assertNotEqual(("modify_agent",), env.model_admissible_action_types())
+
+    def test_provider_timeout_quarantines_exact_model_for_trajectory(
+        self,
+    ) -> None:
+        registry = make_multi_provider_registry()
+        graph = AgentGraph([AgentNode("worker", "balanced", "answer")])
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=AgentRuntime(registry, _ImmediateGateway()),
+            graph=graph,
+            problem="question",
+            execute_on_edit=False,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        record = AgentFailureRecord(
+            request_id="request-timeout",
+            agent_id="worker",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=graph.revision,
+            error_type="TimeoutError",
+            message="",
+            metadata={
+                "model_id": "balanced",
+                "provider_id": "provider-a",
+                "timeout_seconds": 480.0,
+                "timeout_scope": "agent_invocation",
+            },
+        )
+        env._record_failure_state(
+            (record,),
+            current_agent_ids={"worker"},
+        )
+
+        self.assertEqual(
+            ["balanced"],
+            env.model_availability_receipt()["unavailable_model_ids"],
+        )
+        self.assertEqual(
+            ("alternate", "fast"),
+            env._provider_repair_model_ids("worker"),
+        )
 
     async def test_hotpot_transient_provider_repair_falls_back_within_provider(
         self,
@@ -11936,6 +12144,1123 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             configured.required_evidence_tool_id,
             fork.required_evidence_tool_id,
         )
+
+    async def test_aime_artifact_consumption_orders_output_before_growth(
+        self,
+    ) -> None:
+        gateway = _SequenceGateway(["Final Answer: 441"])
+        env = AgentWorkflowEnv(
+            make_registry(),
+            gateway,
+            problem="AIME problem",
+            execute_on_edit=True,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_consumption_ordering=True,
+            termination_lookahead=True,
+        )
+
+        added = await env.step(
+            '{"action":"add_agent","agent_id":"node_1",'
+            '"model_id":"balanced","contract":"reason from the problem",'
+            '"execution_mode":"reasoning","allowed_tools":[]}'
+        )
+        self.assertTrue(added.accepted)
+        self.assertEqual(
+            ("set_output",),
+            env.model_admissible_action_types(remaining_rounds=2),
+        )
+        self.assertEqual(
+            ["node_1"],
+            env.model_admissible_action_targets(remaining_rounds=2)[
+                "set_output"
+            ]["agent_ids"],
+        )
+        state = env.candidate_state()
+        self.assertFalse(state["candidate_conflict"])
+        self.assertEqual("441", state["candidate_agreement"][0]["candidate"])
+        self.assertTrue(state["artifact_freshness"][0]["fresh"])
+        self.assertNotIn("ground_truth", json.dumps(state).casefold())
+
+        selected = await env.step(
+            '{"action":"set_output","agent_id":"node_1"}'
+        )
+        self.assertTrue(selected.accepted)
+        self.assertEqual(1, len(gateway.requests))
+        self.assertEqual(
+            ("finish",),
+            env.model_admissible_action_types(remaining_rounds=1),
+        )
+
+    async def test_aime_fan_in_exposes_provenance_and_strict_progress_relation(
+        self,
+    ) -> None:
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _SequenceGateway(["441", r"\boxed{441}"]),
+            problem="AIME problem",
+            execute_on_edit=True,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_consumption_ordering=True,
+            termination_lookahead=True,
+        )
+        for index, model_id in ((1, "balanced"), (2, "cheap")):
+            result = await env.step(
+                json.dumps(
+                    {
+                        "action": "add_agent",
+                        "agent_id": f"node_{index}",
+                        "model_id": model_id,
+                        "contract": "derive one answer from the problem",
+                        "execution_mode": "reasoning",
+                        "allowed_tools": [],
+                    }
+                )
+            )
+            self.assertTrue(result.accepted)
+
+        state = env.candidate_state()
+        self.assertEqual(2, state["candidate_count"])
+        self.assertEqual(1, state["distinct_candidate_count"])
+        self.assertEqual(
+            ["node_1", "node_2"],
+            state["candidate_agreement"][0]["source_agent_ids"],
+        )
+        self.assertEqual(
+            ("set_relation",),
+            env.model_admissible_action_types(remaining_rounds=3),
+        )
+        candidates = env.model_admissible_action_targets(
+            remaining_rounds=3
+        )["set_relation"]["candidates"]
+        self.assertTrue(candidates)
+        current_distance = env.terminal_progress()["minimum_remaining_actions"]
+        for candidate in candidates:
+            graph = env.graph.fork()
+            graph.set_relation(
+                candidate["source_id"],
+                candidate["target_id"],
+                candidate["source_to_target"],
+                candidate["target_to_source"],
+            )
+            self.assertLess(
+                graph.construction_progress()["minimum_remaining_actions"],
+                current_distance,
+            )
+
+    async def test_aime_candidate_conflict_is_target_blind_and_reopens_recovery(
+        self,
+    ) -> None:
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _SequenceGateway(["441", "Final Answer: 442"]),
+            problem="AIME problem",
+            execute_on_edit=True,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_consumption_ordering=True,
+            termination_lookahead=True,
+        )
+        for index in (1, 2):
+            result = await env.step(
+                json.dumps(
+                    {
+                        "action": "add_agent",
+                        "agent_id": f"node_{index}",
+                        "model_id": "balanced",
+                        "contract": "derive one answer from the problem",
+                    }
+                )
+            )
+            self.assertTrue(result.accepted)
+        state = env.candidate_state()
+        self.assertTrue(state["candidate_conflict"])
+        self.assertEqual(2, state["distinct_candidate_count"])
+        self.assertNotIn("correct", json.dumps(state).casefold())
+        self.assertNotIn("winner", json.dumps(state).casefold())
+
+    async def test_aime_parsing_failure_is_not_an_output_target(self) -> None:
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _SequenceGateway(["A derivation with no final integer."]),
+            problem="AIME problem",
+            execute_on_edit=True,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_consumption_ordering=True,
+            termination_lookahead=True,
+        )
+        result = await env.step(
+            '{"action":"add_agent","agent_id":"node_1",'
+            '"model_id":"balanced","contract":"reason from the problem"}'
+        )
+        self.assertTrue(result.accepted)
+        receipt = env.current_artifact_receipts()[0]
+        self.assertEqual("failed", receipt["candidate_parsing_status"])
+        self.assertEqual(
+            "aime_integer_not_found",
+            receipt["candidate_parsing_failure_reason"],
+        )
+        self.assertNotIn(
+            "set_output",
+            env.model_admissible_action_types(remaining_rounds=2),
+        )
+
+    async def test_aime_termination_lookahead_masks_to_next_atomic_edit(
+        self,
+    ) -> None:
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _SequenceGateway(["441", "441"]),
+            problem="AIME problem",
+            execute_on_edit=True,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_consumption_ordering=False,
+            termination_lookahead=True,
+        )
+        for index in (1, 2):
+            result = await env.step(
+                json.dumps(
+                    {
+                        "action": "add_agent",
+                        "agent_id": f"node_{index}",
+                        "model_id": "balanced",
+                        "contract": "derive one answer from the problem",
+                    }
+                )
+            )
+            self.assertTrue(result.accepted)
+        progress = env.terminal_progress()
+        self.assertEqual(3, progress["minimum_remaining_actions"])
+        self.assertEqual(
+            ["set_relation"], progress["next_progress_action_types"]
+        )
+        self.assertEqual(
+            ("set_relation",),
+            env.model_admissible_action_types(remaining_rounds=3),
+        )
+
+    async def test_aime_termination_lookahead_closes_infeasible_horizon(
+        self,
+    ) -> None:
+        registry = make_registry()
+        runtime = AgentRuntime(
+            registry,
+            _AIMEAssessmentGateway(),
+            artifact_assessment_protocol=(
+                "provenance_bound_candidate_assessment_v2"
+            ),
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="AIME problem",
+            execute_on_edit=True,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_assessment_extractor=(
+                extract_aime2026_artifact_assessments
+            ),
+            artifact_consumption_ordering=True,
+            termination_lookahead=True,
+        )
+        added = await env.step(
+            '{"action":"add_agent","agent_id":"source",'
+            '"model_id":"balanced","contract":"derive one answer"}'
+        )
+        self.assertTrue(added.accepted)
+        self.assertEqual(
+            4, env.terminal_progress()["minimum_remaining_actions"]
+        )
+        self.assertEqual(
+            (), env.model_admissible_action_types(remaining_rounds=3)
+        )
+        self.assertEqual(
+            {}, env.model_admissible_action_targets(remaining_rounds=3)
+        )
+
+    def test_aime_terminal_progress_does_not_target_unparseable_sink(
+        self,
+    ) -> None:
+        graph = AgentGraph(
+            [
+                AgentNode("node_1", "balanced", "derive candidate"),
+                AgentNode("node_2", "cheap", "consume upstream"),
+            ],
+            [AgentRelation("node_1", "node_2", True, False)],
+        )
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            graph=graph,
+            problem="AIME problem",
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_consumption_ordering=True,
+            termination_lookahead=True,
+        )
+        env._progressive_outputs.update(
+            {
+                "node_1": "Final Answer: 441",
+                "node_2": "No parseable final integer.",
+            }
+        )
+        env._progressive_output_metadata.update(
+            {
+                "node_1": {
+                    "artifact_id": "artifact:node_1",
+                    "graph_revision": graph.revision,
+                },
+                "node_2": {
+                    "artifact_id": "artifact:node_2",
+                    "graph_revision": graph.revision,
+                    "input_artifact_provenance": [
+                        {
+                            "source_agent_id": "node_1",
+                            "artifact_id": "artifact:node_1",
+                            "raw_output": "Final Answer: 441",
+                        }
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(
+            [], env.terminal_progress()["next_progress_action_types"]
+        )
+        actions = env.model_admissible_action_types(remaining_rounds=2)
+        self.assertNotIn("set_output", actions)
+        self.assertNotIn(
+            "set_output",
+            env.model_admissible_action_targets(remaining_rounds=2),
+        )
+
+    async def test_aime_finish_rejects_unparseable_output_artifact(self) -> None:
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _SequenceGateway(["No parseable final integer."]),
+            problem="AIME problem",
+            execute_on_edit=True,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_consumption_ordering=True,
+            termination_lookahead=True,
+        )
+        added = await env.step(
+            '{"action":"add_agent","agent_id":"node_1",'
+            '"model_id":"balanced","contract":"derive the answer"}'
+        )
+        self.assertTrue(added.accepted)
+        selected = await env.step(
+            '{"action":"set_output","agent_id":"node_1"}'
+        )
+        self.assertTrue(selected.accepted)
+        admissibility = env.finish_admissibility()
+        self.assertFalse(admissibility["admissible"])
+        self.assertEqual("output_parsing", admissibility["stage"])
+        self.assertEqual(
+            "aime_integer_not_found",
+            admissibility["parsing_failure_reason"],
+        )
+
+        finished = await env.step('{"action":"finish"}')
+        self.assertFalse(finished.accepted)
+        self.assertEqual("output_parsing_failure", finished.feedback_code)
+
+
+    async def test_aime_supported_assessment_allows_pointer_and_finish_without_reexecution(
+        self,
+    ) -> None:
+        registry = make_registry()
+        gateway = _AIMEAssessmentGateway(assessment="supported")
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            artifact_assessment_protocol=(
+                "provenance_bound_candidate_assessment_v1"
+            ),
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="AIME problem",
+            execute_on_edit=True,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_assessment_extractor=(
+                extract_aime2026_artifact_assessments
+            ),
+            artifact_consumption_ordering=True,
+            termination_lookahead=True,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+
+        source = await env.step(
+            '{"action":"add_agent","agent_id":"source",'
+            '"model_id":"balanced","contract":"derive one answer"}'
+        )
+        self.assertTrue(source.accepted)
+        self.assertEqual(
+            ("add_agent",),
+            env.model_admissible_action_types(remaining_rounds=4),
+        )
+        rejected = await env.step(
+            '{"action":"set_output","agent_id":"source"}'
+        )
+        self.assertFalse(rejected.accepted)
+        self.assertEqual(
+            "candidate_assessment_required", rejected.feedback_code
+        )
+
+        assessor = await env.step(
+            '{"action":"add_agent","agent_id":"assessor",'
+            '"model_id":"cheap","contract":"use the problem and routed work"}'
+        )
+        self.assertTrue(assessor.accepted)
+        relation = await env.step(
+            '{"action":"set_relation","source_id":"source",'
+            '"target_id":"assessor","source_to_target":true,'
+            '"target_to_source":false}'
+        )
+        self.assertTrue(relation.accepted)
+        state = env.candidate_state()
+        self.assertFalse(state["candidate_conflict"])
+        self.assertIn("source", state["supported_output_agent_ids"])
+        self.assertIn("assessor", state["supported_output_agent_ids"])
+        self.assertEqual(
+            "structural_and_artifact_assessment_lower_bound",
+            env.terminal_progress()["minimum_remaining_actions_scope"],
+        )
+
+        calls_before_pointer = len(gateway.requests)
+        selected = await env.step(
+            '{"action":"set_output","agent_id":"assessor"}'
+        )
+        self.assertTrue(selected.accepted)
+        self.assertEqual(calls_before_pointer, len(gateway.requests))
+        checkpoint = env.export_runtime_checkpoint()
+
+        restored_runtime = AgentRuntime(
+            registry,
+            gateway,
+            artifact_assessment_protocol=(
+                "provenance_bound_candidate_assessment_v1"
+            ),
+        )
+        restored = AgentWorkflowEnv(
+            registry,
+            runtime=restored_runtime,
+            execute_on_edit=True,
+            allowed_actions=env.allowed_action_types,
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_assessment_extractor=(
+                extract_aime2026_artifact_assessments
+            ),
+            artifact_consumption_ordering=True,
+            termination_lookahead=True,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        restored.restore_runtime_checkpoint(checkpoint)
+        calls_before_finish = len(gateway.requests)
+        finished = await restored.step('{"action":"finish"}')
+        self.assertTrue(finished.accepted)
+        self.assertTrue(finished.done)
+        self.assertEqual(calls_before_finish, len(gateway.requests))
+        self.assertEqual("441", extract_aime2026_candidate(
+            finished.final_answer or ""
+        )[0])
+
+    async def test_aime_assessment_only_downstream_is_supported_terminal_sink(
+        self,
+    ) -> None:
+        registry = make_registry()
+        gateway = _AIMEAssessmentGateway(
+            emit_downstream_candidate=False,
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            artifact_assessment_protocol=(
+                "provenance_bound_candidate_assessment_v2"
+            ),
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="AIME problem",
+            execute_on_edit=True,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_assessment_extractor=(
+                extract_aime2026_artifact_assessments
+            ),
+            artifact_consumption_ordering=True,
+            termination_lookahead=True,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        for agent_id in ("source", "assessor"):
+            added = await env.step(
+                json.dumps(
+                    {
+                        "action": "add_agent",
+                        "agent_id": agent_id,
+                        "model_id": "balanced",
+                        "contract": "derive or assess public work",
+                    }
+                )
+            )
+            self.assertTrue(added.accepted)
+        related = await env.step(
+            '{"action":"set_relation","source_id":"source",'
+            '"target_id":"assessor","source_to_target":true,'
+            '"target_to_source":false}'
+        )
+        self.assertTrue(related.accepted)
+
+        state = env.candidate_state()
+        self.assertEqual(
+            ["assessor", "source"], state["supported_output_agent_ids"]
+        )
+        self.assertFalse(state["unresolved_candidate_conflict"])
+        self.assertEqual(
+            ("set_output",),
+            env.model_admissible_action_types(remaining_rounds=2),
+        )
+        targets = env.model_admissible_action_targets(remaining_rounds=2)
+        self.assertEqual(
+            ["assessor"], targets["set_output"]["agent_ids"]
+        )
+        progress = env.terminal_progress()
+        self.assertEqual(2, progress["minimum_remaining_actions"])
+        self.assertEqual(
+            ["set_output"],
+            progress["next_progress_action_types"],
+        )
+        calls_before_terminal = len(gateway.requests)
+        selected = await env.step(
+            '{"action":"set_output","agent_id":"assessor"}'
+        )
+        self.assertTrue(selected.accepted)
+        finished = await env.step('{"action":"finish"}')
+        self.assertTrue(finished.accepted)
+        self.assertTrue(finished.done)
+        self.assertEqual(calls_before_terminal, len(gateway.requests))
+
+
+
+    def test_aime_refuted_divergence_does_not_block_supported_sink(
+        self,
+    ) -> None:
+        graph = AgentGraph(
+            [
+                AgentNode("source_a", "balanced", "derive public work"),
+                AgentNode("source_b", "cheap", "derive independent public work"),
+                AgentNode("assessor", "balanced", "assess routed public work"),
+            ],
+            [
+                AgentRelation("source_a", "assessor", True, False),
+                AgentRelation("source_b", "assessor", True, False),
+            ],
+        )
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            graph=graph,
+            problem="AIME problem",
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_assessment_extractor=(
+                extract_aime2026_artifact_assessments
+            ),
+            artifact_consumption_ordering=True,
+            termination_lookahead=True,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        source_a = "Final Answer: 441"
+        source_b = "Final Answer: 442"
+        assessment = (
+            "Public assessment.\n<artifact_assessments>"
+            + json.dumps(
+                [
+                    {
+                        "assessed_artifact_id": "artifact:source_a",
+                        "candidate": "441",
+                        "assessment": "supported",
+                        "basis": "The complete public derivation checks out.",
+                        "counterexample": None,
+                    },
+                    {
+                        "assessed_artifact_id": "artifact:source_b",
+                        "candidate": "442",
+                        "assessment": "refuted",
+                        "basis": "The final substitution contradicts the derivation.",
+                        "counterexample": "The displayed substitution yields 441.",
+                    },
+                ],
+                separators=(",", ":"),
+            )
+            + "</artifact_assessments>"
+        )
+        env._progressive_outputs.update(
+            {
+                "source_a": source_a,
+                "source_b": source_b,
+                "assessor": assessment,
+            }
+        )
+        env._progressive_output_metadata.update(
+            {
+                "source_a": {
+                    "artifact_id": "artifact:source_a",
+                    "graph_revision": env.graph.revision,
+                },
+                "source_b": {
+                    "artifact_id": "artifact:source_b",
+                    "graph_revision": env.graph.revision,
+                },
+                "assessor": {
+                    "artifact_id": "artifact:assessor",
+                    "graph_revision": env.graph.revision,
+                    "input_artifact_provenance": [
+                        {
+                            "source_agent_id": "source_a",
+                            "artifact_id": "artifact:source_a",
+                            "raw_output": source_a,
+                        },
+                        {
+                            "source_agent_id": "source_b",
+                            "artifact_id": "artifact:source_b",
+                            "raw_output": source_b,
+                        },
+                    ],
+                },
+            }
+        )
+
+        state = env.candidate_state()
+        self.assertTrue(state["candidate_conflict"])
+        self.assertFalse(state["unresolved_candidate_conflict"])
+        self.assertIn("assessor", state["supported_output_agent_ids"])
+        self.assertEqual(["source_b"], [
+            item["agent_id"] for item in state["refuted_artifacts"]
+        ])
+        self.assertEqual(
+            ("set_output",),
+            env.model_admissible_action_types(remaining_rounds=2),
+        )
+        self.assertEqual(
+            ["assessor"],
+            env.model_admissible_action_targets(
+                remaining_rounds=2
+            )["set_output"]["agent_ids"],
+        )
+
+
+    async def test_aime_negative_assessment_targets_lineage_local_repair(
+        self,
+    ) -> None:
+        for assessment, downstream_candidate, state_key in (
+            ("insufficient_evidence", "441", "insufficient_evidence_artifacts"),
+            ("refuted", "442", "refuted_artifacts"),
+        ):
+            with self.subTest(assessment=assessment):
+                registry = make_registry()
+                gateway = _AIMEAssessmentGateway(
+                    assessment=assessment,
+                    downstream_candidate=downstream_candidate,
+                )
+                runtime = AgentRuntime(
+                    registry,
+                    gateway,
+                    artifact_assessment_protocol=(
+                        "provenance_bound_candidate_assessment_v1"
+                    ),
+                )
+                env = AgentWorkflowEnv(
+                    registry,
+                    runtime=runtime,
+                    problem="AIME problem",
+                    execute_on_edit=True,
+                    allowed_actions=(
+                        "add_agent",
+                        "modify_agent",
+                        "delete_agent",
+                        "set_relation",
+                        "set_output",
+                        "finish",
+                    ),
+                    artifact_candidate_extractor=extract_aime2026_candidate,
+                    artifact_assessment_extractor=(
+                        extract_aime2026_artifact_assessments
+                    ),
+                    artifact_consumption_ordering=True,
+                    termination_lookahead=True,
+                    recovery_policy="preserve_diagnose_repair_augment",
+                )
+                for agent_id in ("source", "assessor"):
+                    added = await env.step(
+                        json.dumps(
+                            {
+                                "action": "add_agent",
+                                "agent_id": agent_id,
+                                "model_id": "balanced",
+                                "contract": "derive or assess public work",
+                            }
+                        )
+                    )
+                    self.assertTrue(added.accepted)
+                related = await env.step(
+                    '{"action":"set_relation","source_id":"source",'
+                    '"target_id":"assessor","source_to_target":true,'
+                    '"target_to_source":false}'
+                )
+                self.assertTrue(related.accepted)
+
+                state = env.candidate_state()
+                self.assertTrue(state[state_key])
+                opposite = (
+                    "refuted_artifacts"
+                    if state_key == "insufficient_evidence_artifacts"
+                    else "insufficient_evidence_artifacts"
+                )
+                self.assertFalse(state[opposite])
+                self.assertEqual(
+                    ("modify_agent",),
+                    env.model_admissible_action_types(remaining_rounds=3),
+                )
+                targets = env.model_admissible_action_targets(
+                    remaining_rounds=3
+                )
+                self.assertEqual(
+                    ["source"], targets["modify_agent"]["agent_ids"]
+                )
+                rejected = await env.step(
+                    '{"action":"set_output","agent_id":"source"}'
+                )
+                self.assertFalse(rejected.accepted)
+                self.assertEqual(
+                    "candidate_assessment_required",
+                    rejected.feedback_code,
+                )
+
+    async def test_aime_task_specification_contract_guard_is_transactional(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "aime-2026/04",
+                "Find the number of integers less than or equal to 100 that "
+                "are equal to a+b+ab for distinct positive integers a and b.",
+                "Prove the equation a+b+ab=k has no integer solutions for "
+                "distinct positive integers a,b, then conclude the count of "
+                "such integers <=100 is 0.",
+            ),
+            (
+                "aime-2026/05",
+                "Points A and B satisfy AB=1. The stated rotations use the "
+                "same acute angle theta and AB'=4/3. Find m+n for cos(theta).",
+                "rotate 90 deg CCW around B to A'; rotate 90 deg CW around "
+                "A' to B'; given AB=1, AB'=4/3, compute cos(theta)",
+            ),
+            (
+                "aime-2026/07",
+                "Find the number of functions pi mapping A={1,2,3,4,5,6} "
+                "onto A for which the six-fold iterate maps every a to a.",
+                "Compute the number of functions pi on A={1,2,3,4,5,6} "
+                "such that pi^7(a)=a for all a in A.",
+            ),
+            (
+                "aime-2026/11",
+                "Place the integers 1 through 64 in an 8 by 8 grid and find "
+                "the remainder modulo 1000 of the maximum adjacency sum M.",
+                "Calculate M=2320 and return the remainder 320.",
+            ),
+            (
+                "aime-2026/13",
+                "For r below 502, define S_r from binomial coefficients of "
+                "10000 whose indices are congruent to r modulo 502; count the "
+                "listed values divisible by 503.",
+                "Show that S_r mod 503 depends on binom(k,r) where k=422, "
+                "and count the indices r>422.",
+            ),
+        )
+        for task_id, problem, contract in cases:
+            with self.subTest(task_id=task_id):
+                gateway = _ImmediateGateway()
+                env = AgentWorkflowEnv(
+                    make_registry(),
+                    gateway,
+                    problem=(
+                        problem
+                        + "\n\nPublic task metadata: benchmark_id=aime-2026"
+                    ),
+                    execute_on_edit=True,
+                    task_specification_contract_guard=True,
+                )
+                revision_before = env.graph.revision
+
+                rejected = await env.step(
+                    json.dumps(
+                        {
+                            "action": "add_agent",
+                            "agent_id": "node_1",
+                            "model_id": "balanced",
+                            "contract": contract,
+                        }
+                    )
+                )
+
+                self.assertFalse(rejected.accepted)
+                self.assertEqual(
+                    "task_specification_drift", rejected.feedback_code
+                )
+                self.assertEqual(revision_before, env.graph.revision)
+                self.assertEqual((), env.graph.nodes)
+                self.assertEqual([], gateway.requests)
+
+        neutral_gateway = _ImmediateGateway()
+        neutral_env = AgentWorkflowEnv(
+            make_registry(),
+            neutral_gateway,
+            problem=(
+                cases[0][1]
+                + "\n\nPublic task metadata: benchmark_id=aime-2026"
+            ),
+            execute_on_edit=True,
+            task_specification_contract_guard=True,
+        )
+        accepted = await neutral_env.step(
+            json.dumps(
+                {
+                    "action": "add_agent",
+                    "agent_id": "node_1",
+                    "model_id": "balanced",
+                    "contract": (
+                        "Derive a candidate from the original problem and "
+                        "return one integer in the benchmark output protocol."
+                    ),
+                }
+            )
+        )
+        self.assertTrue(accepted.accepted)
+        self.assertEqual(1, neutral_env.graph.revision)
+        self.assertEqual(1, len(neutral_gateway.requests))
+
+        radical_gateway = _ImmediateGateway()
+        radical_env = AgentWorkflowEnv(
+            make_registry(),
+            radical_gateway,
+            problem=(
+                "Let ABCDE be a nonconvex pentagon with angles 90 and 45. "
+                "Suppose AE=20, BC=14\\sqrt2, AB<2026, and its area is an "
+                "integer multiple of 16."
+                "\n\nPublic task metadata: benchmark_id=aime-2026"
+            ),
+            execute_on_edit=True,
+            task_specification_contract_guard=True,
+        )
+        radical_contract = (
+            "Determine the number of integer values for AB where AB < 2026 "
+            "and the area is an integer multiple of 16, preserving AE=20 "
+            "and BC=14*sqrt(2) from the original problem."
+        )
+        radical_accepted = await radical_env.step(
+            json.dumps(
+                {
+                    "action": "add_agent",
+                    "agent_id": "node_1",
+                    "model_id": "balanced",
+                    "contract": radical_contract,
+                }
+            )
+        )
+        self.assertTrue(
+            radical_accepted.accepted,
+            msg=(
+                "public \\\\sqrt2 and sqrt(2) notations must not be treated "
+                "as task-specification drift"
+            ),
+        )
+        self.assertEqual(1, radical_env.graph.revision)
+        self.assertEqual(1, len(radical_gateway.requests))
+
+    async def test_aime_incomplete_artifact_is_not_terminal_admissible(
+        self,
+    ) -> None:
+        class IncompleteGateway(_ImmediateGateway):
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(
+                    "Final Answer: 441",
+                    {"finish_reason": "length", "artifact_complete": False},
+                )
+
+        def make_env(gateway: IncompleteGateway) -> AgentWorkflowEnv:
+            return AgentWorkflowEnv(
+                make_registry(),
+                gateway,
+                problem="AIME problem",
+                execute_on_edit=True,
+                artifact_candidate_extractor=extract_aime2026_candidate,
+                artifact_assessment_extractor=(
+                    extract_aime2026_artifact_assessments
+                ),
+                artifact_completeness_gate=True,
+                artifact_assessment_terminal_policy="reject_negative",
+            )
+
+        pointer_gateway = IncompleteGateway()
+        pointer_env = make_env(pointer_gateway)
+        added = await pointer_env.step(
+            '{"action":"add_agent","agent_id":"node_1",'
+            '"model_id":"balanced","contract":"derive public work"}'
+        )
+        self.assertTrue(added.accepted)
+        state = pointer_env.candidate_state()
+        self.assertEqual(0, state["candidate_count"])
+        self.assertEqual(1, state["incomplete_artifact_count"])
+        self.assertEqual([], state["candidate_artifacts"])
+        revision_before = pointer_env.graph.revision
+        selected = await pointer_env.step(
+            '{"action":"set_output","agent_id":"node_1"}'
+        )
+        self.assertFalse(selected.accepted)
+        self.assertEqual(
+            "artifact_not_terminal_admissible", selected.feedback_code
+        )
+        self.assertEqual(revision_before, pointer_env.graph.revision)
+        self.assertEqual(1, len(pointer_gateway.requests))
+
+        finish_gateway = IncompleteGateway()
+        finish_env = make_env(finish_gateway)
+        built = await finish_env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"node_1","model_id":"balanced",'
+            '"contract":"derive public work"}],"relations":[],'
+            '"output_agent_id":"node_1"}'
+        )
+        self.assertTrue(built.accepted)
+        finished = await finish_env.step('{"action":"finish"}')
+        self.assertFalse(finished.accepted)
+        self.assertEqual("artifact_incomplete", finished.feedback_code)
+        self.assertIn('"finish_reason":"length"', finished.feedback)
+        self.assertEqual(1, len(finish_gateway.requests))
+
+    async def test_aime_reject_negative_admits_complete_unassessed_artifact(
+        self,
+    ) -> None:
+        class CompleteGateway(_ImmediateGateway):
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(
+                    "Final Answer: 441",
+                    {"finish_reason": "stop", "artifact_complete": True},
+                )
+
+        gateway = CompleteGateway()
+        env = AgentWorkflowEnv(
+            make_registry(),
+            gateway,
+            problem="AIME problem",
+            execute_on_edit=True,
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_assessment_extractor=(
+                extract_aime2026_artifact_assessments
+            ),
+            artifact_completeness_gate=True,
+            artifact_assessment_terminal_policy="reject_negative",
+        )
+        added = await env.step(
+            '{"action":"add_agent","agent_id":"node_1",'
+            '"model_id":"balanced","contract":"derive public work"}'
+        )
+        self.assertTrue(added.accepted)
+        state = env.candidate_state()
+        self.assertEqual(1, state["candidate_count"])
+        self.assertEqual(1, len(state["unassessed_artifacts"]))
+        calls_before_terminal = len(gateway.requests)
+
+        selected = await env.step(
+            '{"action":"set_output","agent_id":"node_1"}'
+        )
+        self.assertTrue(selected.accepted)
+        finished = await env.step('{"action":"finish"}')
+
+        self.assertTrue(finished.accepted)
+        self.assertTrue(finished.done)
+        self.assertEqual(
+            "441",
+            extract_aime2026_candidate(finished.final_answer or "")[0],
+        )
+        self.assertEqual(calls_before_terminal, len(gateway.requests))
+
+    async def test_aime_reject_negative_still_blocks_refutation_and_conflict(
+        self,
+    ) -> None:
+        registry = make_registry()
+        refuted_gateway = _AIMEAssessmentGateway(assessment="refuted")
+        refuted_env = AgentWorkflowEnv(
+            registry,
+            runtime=AgentRuntime(
+                registry,
+                refuted_gateway,
+                artifact_assessment_protocol=(
+                    "provenance_bound_candidate_assessment_v2"
+                ),
+            ),
+            problem="AIME problem",
+            execute_on_edit=True,
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_assessment_extractor=(
+                extract_aime2026_artifact_assessments
+            ),
+            artifact_completeness_gate=True,
+            artifact_assessment_terminal_policy="reject_negative",
+        )
+        built = await refuted_env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"source","model_id":"balanced",'
+            '"contract":"derive public work"},'
+            '{"agent_id":"assessor","model_id":"cheap",'
+            '"contract":"assess routed public work"}],"relations":['
+            '{"source_id":"source","target_id":"assessor",'
+            '"source_to_target":true,"target_to_source":false}],'
+            '"output_agent_id":"assessor"}'
+        )
+        self.assertTrue(built.accepted)
+        self.assertTrue(refuted_env.candidate_state()["refuted_artifacts"])
+        refuted_finish = await refuted_env.step('{"action":"finish"}')
+        self.assertFalse(refuted_finish.accepted)
+        self.assertEqual(
+            "candidate_assessment", refuted_finish.feedback_code
+        )
+
+        class ConflictGateway(_ImmediateGateway):
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                answer = {
+                    "left": "Final Answer: 441",
+                    "right": "Final Answer: 442",
+                    "sink": "Final Answer: 441",
+                }[request.agent.id]
+                return AgentResponse(
+                    answer,
+                    {"finish_reason": "stop", "artifact_complete": True},
+                )
+
+        conflict_gateway = ConflictGateway()
+        conflict_env = AgentWorkflowEnv(
+            make_registry(),
+            conflict_gateway,
+            problem="AIME problem",
+            execute_on_edit=True,
+            artifact_candidate_extractor=extract_aime2026_candidate,
+            artifact_assessment_extractor=(
+                extract_aime2026_artifact_assessments
+            ),
+            artifact_completeness_gate=True,
+            artifact_assessment_terminal_policy="reject_negative",
+        )
+        built = await conflict_env.step(
+            '{"action":"add_subgraph","agents":['
+            '{"agent_id":"left","model_id":"balanced",'
+            '"contract":"derive public work"},'
+            '{"agent_id":"right","model_id":"cheap",'
+            '"contract":"derive independent public work"},'
+            '{"agent_id":"sink","model_id":"fast",'
+            '"contract":"consume routed public work"}],"relations":['
+            '{"source_id":"left","target_id":"sink",'
+            '"source_to_target":true,"target_to_source":false},'
+            '{"source_id":"right","target_id":"sink",'
+            '"source_to_target":true,"target_to_source":false}],'
+            '"output_agent_id":"sink"}'
+        )
+        self.assertTrue(built.accepted)
+        state = conflict_env.candidate_state()
+        self.assertTrue(state["candidate_conflict"])
+        self.assertTrue(state["unresolved_candidate_conflict"])
+        conflict_finish = await conflict_env.step('{"action":"finish"}')
+        self.assertFalse(conflict_finish.accepted)
+        self.assertEqual("candidate_conflict", conflict_finish.feedback_code)
 
 
 if __name__ == "__main__":

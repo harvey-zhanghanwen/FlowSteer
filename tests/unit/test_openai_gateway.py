@@ -95,6 +95,68 @@ def request(
 
 
 class MessageTests(unittest.TestCase):
+    def test_aime_assessment_v2_exposes_only_unanimous_supported_candidate(
+        self,
+    ) -> None:
+        agent_request = replace(
+            request(is_output_agent=False),
+            artifact_assessment_protocol=(
+                "provenance_bound_candidate_assessment_v2"
+            ),
+            upstream=(
+                replace(
+                    request(is_output_agent=False).upstream[0],
+                    content="62",
+                    artifact_version="artifact:source",
+                ),
+            ),
+        )
+
+        messages = build_agent_messages(agent_request)
+        system = messages[0]["content"]
+        visible = "\n".join(item["content"] for item in messages)
+
+        self.assertIn("one <artifact_assessments>", system)
+        self.assertIn("every upstream artifact", system)
+        self.assertIn("all copied candidate values are identical", system)
+        self.assertIn("Final Answer: <candidate>", system)
+        self.assertIn("do not emit a Final Answer line", system)
+        self.assertIn(
+            "does not authorize choosing among conflicting", system
+        )
+        self.assertIn("Preserve the semantic answer type", system)
+        self.assertIn(
+            "rather than testing the candidate token itself", system
+        )
+        self.assertIn("typed envelope has a non-null candidate", system)
+        self.assertIn("candidate: \"62\"", visible)
+        self.assertIn("candidate_parsing_status: parsed", visible)
+
+    def test_aime_assessment_does_not_infer_candidate_from_raw_artifact(
+        self,
+    ) -> None:
+        agent_request = replace(
+            request(is_output_agent=False),
+            artifact_assessment_protocol=(
+                "provenance_bound_candidate_assessment_v2"
+            ),
+            upstream=(
+                replace(
+                    request(is_output_agent=False).upstream[0],
+                    content="A public derivation mentions 62 but has no final marker.",
+                    artifact_version="artifact:source",
+                ),
+            ),
+        )
+
+        visible = "\n".join(
+            item["content"] for item in build_agent_messages(agent_request)
+        )
+
+        self.assertIn("candidate: null", visible)
+        self.assertIn("candidate_parsing_status: failed", visible)
+        self.assertIn("candidate_parsing_failure_reason:", visible)
+
     def test_semantic_lineage_projects_only_artifact_referenced_read_receipts(
         self,
     ) -> None:
@@ -195,16 +257,90 @@ class MessageTests(unittest.TestCase):
         self.assertIn("does not change this execution contract", messages[0]["content"])
         self.assertNotIn("<answer>", messages[0]["content"])
 
+    def test_generic_fanin_renders_separate_complete_artifact_envelopes(
+        self,
+    ) -> None:
+        left_derivation = (
+            "Candidate: 41\nDerivation:\n"
+            + "left public calculation step; " * 12
+            + "\nCheck: UNIQUE_LEFT_TAIL"
+        )
+        right_derivation = (
+            "Candidate: 42\nDerivation:\n"
+            + "right independent calculation step; " * 12
+            + "\nCheck: UNIQUE_RIGHT_TAIL"
+        )
+        agent_request = replace(
+            request(is_output_agent=False),
+            upstream=(
+                UpstreamMessage(
+                    "left",
+                    "agent",
+                    left_derivation,
+                    graph_revision=3,
+                    artifact_version="left:v1",
+                    source_model_id="left-model",
+                    source_contract="derive the first public calculation",
+                    request_or_dependency="assess both complete artifacts",
+                ),
+                UpstreamMessage(
+                    "right",
+                    "agent",
+                    right_derivation,
+                    graph_revision=3,
+                    artifact_version="right:v1",
+                    source_model_id="right-model",
+                    source_contract="derive an independent public calculation",
+                    request_or_dependency="assess both complete artifacts",
+                ),
+            ),
+        )
+
+        messages = build_agent_messages(agent_request)
+        visible = messages[1]["content"]
+        blocks = visible.split("[Upstream artifact]")[1:]
+
+        self.assertEqual(2, len(blocks))
+        left_block, right_block = blocks
+        self.assertIn("source_agent: left", left_block)
+        self.assertIn("artifact_id: left:v1", left_block)
+        self.assertIn("source_model_id: left-model", left_block)
+        self.assertIn(
+            "source_contract: derive the first public calculation",
+            left_block,
+        )
+        self.assertIn(left_derivation, left_block)
+        self.assertIn("UNIQUE_LEFT_TAIL", left_block)
+        self.assertNotIn("source_agent: right", left_block)
+        self.assertNotIn(right_derivation, left_block)
+
+        self.assertIn("source_agent: right", right_block)
+        self.assertIn("artifact_id: right:v1", right_block)
+        self.assertIn("source_model_id: right-model", right_block)
+        self.assertIn(
+            "source_contract: derive an independent public calculation",
+            right_block,
+        )
+        self.assertIn(right_derivation, right_block)
+        self.assertIn("UNIQUE_RIGHT_TAIL", right_block)
+        self.assertEqual(
+            2,
+            visible.count("provenance_status: unverified_work_product"),
+        )
+
     def test_generic_contract_is_output_pointer_invariant(self) -> None:
         messages = build_agent_messages(request(is_output_agent=False))
+        output_messages = build_agent_messages(request(is_output_agent=True))
         system = messages[0]["content"]
-        output_system = build_agent_messages(request(is_output_agent=True))[0][
-            "content"
-        ]
-        self.assertEqual(system, output_system)
+        self.assertEqual(messages, output_messages)
         self.assertIn("unverified work product", system)
+        self.assertIn("contract-relevant public derivation", system)
         self.assertNotIn("direct semantic predecessor", system)
         self.assertNotIn("unique Output Agent", system)
+        rendered = "\n".join(item["content"] for item in messages)
+        self.assertNotIn("terminal FlowSteer Format Operator", rendered)
+        self.assertNotIn("OUTPUT ANSWER VALUE ONLY", rendered)
+        self.assertNotIn("<answer>", rendered)
 
     def test_format_predecessor_has_explicit_semantic_handoff_contract(self) -> None:
         messages = build_agent_messages(
@@ -517,6 +653,50 @@ class MessageTests(unittest.TestCase):
 
 
 class GatewayTests(unittest.IsolatedAsyncioTestCase):
+    def test_continuation_payload_preserves_context_and_uses_token_override(
+        self,
+    ) -> None:
+        initial = request(
+            problem="Compute the requested value from the original problem.",
+            upstream_artifact="public upstream derivation",
+        )
+        initial = replace(
+            initial,
+            model=replace(
+                initial.model,
+                metadata={
+                    **dict(initial.model.metadata),
+                    "max_tokens": "4096",
+                },
+            ),
+        )
+        continuation = replace(
+            initial,
+            request_id=f"{initial.request_id}:length-continuation:1",
+            partial_artifact="partial public derivation",
+            continuation_segment_index=1,
+            max_tokens_override=512,
+        )
+
+        initial_messages = build_agent_messages(initial)
+        payload = OpenAICompatibleGateway().request_payload(continuation)
+        messages = payload["messages"]
+
+        self.assertEqual(initial_messages, messages[:2])
+        self.assertEqual(
+            {"role": "assistant", "content": "partial public derivation"},
+            messages[2],
+        )
+        self.assertEqual("user", messages[3]["role"])
+        self.assertIn("Continue from the interruption", messages[3]["content"])
+        self.assertIn("Do not restart or change the task", messages[3]["content"])
+        self.assertIn("Complete only the missing suffix", messages[3]["content"])
+        self.assertIn(initial.problem, messages[1]["content"])
+        self.assertIn(initial.agent.contract, messages[0]["content"])
+        self.assertIn("public upstream derivation", messages[1]["content"])
+        self.assertEqual("remote-model-id", payload["model"])
+        self.assertEqual(512, payload["max_tokens"])
+
     def test_request_generation_seed_overrides_gateway_default(self) -> None:
         item = request()
         item = replace(

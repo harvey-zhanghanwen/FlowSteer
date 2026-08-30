@@ -7,7 +7,7 @@ from enum import Enum
 import hashlib
 import json
 from collections import deque
-from typing import Collection, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Collection, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from .model_registry import ModelRegistry
 
@@ -275,6 +275,71 @@ class AgentGraphSnapshot:
             "output_agent_id": self.output_agent_id,
             "revision": self.revision,
         }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "AgentGraphSnapshot":
+        """Restore one exact public graph snapshot.
+
+        FlowSteer's Canvas persists full graph snapshots rather than edit
+        patches. Mid-trajectory continuation uses that same boundary and
+        therefore restores every free Agent declaration field instead of
+        reconstructing a reduced benchmark-specific graph.
+        """
+
+        if not isinstance(value, Mapping):
+            raise ValueError("serialized AgentGraph snapshot must be a mapping")
+        raw_nodes = value.get("nodes", ())
+        raw_relations = value.get("relations", ())
+        if (
+            isinstance(raw_nodes, (str, bytes))
+            or not isinstance(raw_nodes, Sequence)
+        ):
+            raise ValueError("serialized AgentGraph nodes must be a sequence")
+        if (
+            isinstance(raw_relations, (str, bytes))
+            or not isinstance(raw_relations, Sequence)
+        ):
+            raise ValueError("serialized AgentGraph relations must be a sequence")
+        nodes: list[AgentNode] = []
+        for raw_node in raw_nodes:
+            if not isinstance(raw_node, Mapping):
+                raise ValueError("serialized AgentGraph node must be a mapping")
+            nodes.append(
+                AgentNode(
+                    id=raw_node["id"],
+                    model_id=raw_node["model_id"],
+                    contract=raw_node["contract"],
+                    role_family=raw_node.get("role_family"),
+                    allowed_tools=raw_node.get("allowed_tools", ()),
+                    execution_mode=raw_node.get("execution_mode", "reasoning"),
+                    artifact_type=raw_node.get("artifact_type", "text"),
+                    completion_condition=raw_node.get("completion_condition"),
+                )
+            )
+        relations: list[AgentRelation] = []
+        for raw_relation in raw_relations:
+            if not isinstance(raw_relation, Mapping):
+                raise ValueError("serialized AgentGraph relation must be a mapping")
+            relations.append(
+                AgentRelation(
+                    source_id=raw_relation["source_id"],
+                    target_id=raw_relation["target_id"],
+                    source_to_target=raw_relation["source_to_target"],
+                    target_to_source=raw_relation["target_to_source"],
+                )
+            )
+        revision = value.get("revision")
+        if isinstance(revision, bool) or not isinstance(revision, int):
+            raise ValueError("serialized AgentGraph revision must be an integer")
+        output_agent_id = value.get("output_agent_id")
+        if output_agent_id is not None and not isinstance(output_agent_id, str):
+            raise ValueError("serialized output_agent_id must be text or None")
+        return cls(
+            nodes=tuple(nodes),
+            relations=tuple(relations),
+            output_agent_id=output_agent_id,
+            revision=revision,
+        )
 
     @property
     def snapshot_id(self) -> str:

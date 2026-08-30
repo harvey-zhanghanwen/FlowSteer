@@ -15,6 +15,7 @@ from src.interactive.agent_workflow_env import (
     _QA_EVIDENCE_RETRIEVER_RECOVERY_COMPLETION,
     _QA_EVIDENCE_RETRIEVER_RECOVERY_CONTRACT,
 )
+from src.interactive.aime2026_adapter import extract_aime2026_candidate
 from src.interactive.director import (
     AgentGraphOrchestrator,
     DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
@@ -48,7 +49,13 @@ from src.interactive.director import (
     QA_DIRECTOR_SYSTEM_PROMPT_V6,
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     SCALAR_DIRECTOR_PROMPT_VERSION,
+    SCALAR_DIRECTOR_PROMPT_VERSION_V3,
+    SCALAR_DIRECTOR_PROMPT_VERSION_V4,
+    SCALAR_DIRECTOR_PROMPT_VERSION_V5,
     SCALAR_DIRECTOR_SYSTEM_PROMPT,
+    SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
+    SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
+    SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
@@ -175,6 +182,120 @@ def observation_payload(message: dict[str, str]) -> dict[str, object]:
 
 
 class DirectorTests(unittest.IsolatedAsyncioTestCase):
+    def test_scalar_v3_add_agent_uses_live_role_neutral_domain(self) -> None:
+        model_registry = registry()
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            problem="AIME problem",
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            artifact_consumption_ordering=True,
+            termination_lookahead=True,
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            max_rounds=20,
+            prompt_version=SCALAR_DIRECTOR_PROMPT_VERSION_V3,
+            system_prompt=SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
+            sampling_action_profile=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            ),
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+        )
+
+        request = orchestrator.action_schema_request(env)
+        domains = json.loads(request["action_target_domains_json"])
+        self.assertEqual(["node_1"], domains["add_agent"]["agent_ids"])
+        self.assertEqual(
+            list(model_registry.model_ids), domains["add_agent"]["model_ids"]
+        )
+        self.assertNotIn("role_constraints", domains["add_agent"])
+        parameter_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_agent",
+                domains,
+            )
+        )
+        self.assertEqual(
+            {"enum": ["node_1"]},
+            parameter_schema["properties"]["agent_id"],
+        )
+        self.assertEqual(
+            {"enum": list(model_registry.model_ids)},
+            parameter_schema["properties"]["model_id"],
+        )
+        self.assertNotIn("solver", json.dumps(parameter_schema).casefold())
+        for field_name in (
+            "role_family",
+            "artifact_type",
+            "completion_condition",
+        ):
+            self.assertNotIn(field_name, parameter_schema["properties"])
+        state = orchestrator._canvas_observation(
+            env,
+            include_task_context=True,
+            skills=(),
+        )
+        self.assertEqual(3, state["terminal_progress"]["minimum_remaining_actions"])
+        self.assertEqual(20, state["terminal_progress"]["remaining_rounds"])
+        self.assertTrue(state["terminal_progress"]["horizon_feasible"])
+        self.assertEqual(domains, state["action_target_domains"])
+
+    async def test_generic_v3_empty_canvas_domain_is_typed_terminal(self) -> None:
+        model_registry = registry()
+
+        class ExhaustedScalarEnv(AgentWorkflowEnv):
+            def model_admissible_action_types(self, *, remaining_rounds=None):
+                del remaining_rounds
+                return ()
+
+        client = ScriptedDirector([])
+        env = ExhaustedScalarEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            termination_lookahead=True,
+        )
+        result = await AgentGraphOrchestrator(
+            model_registry,
+            client,
+            max_rounds=3,
+            prompt_version=SCALAR_DIRECTOR_PROMPT_VERSION_V3,
+            system_prompt=SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
+            sampling_action_profile=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            ),
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+        ).run(env, "AIME problem")
+
+        self.assertEqual([], client.prompts)
+        self.assertFalse(result.explicit_finish)
+        self.assertIsNone(result.final_answer)
+        self.assertEqual(
+            "canvas_action_domain_exhausted",
+            result.terminal_canvas_diagnosis["public_error_code"],
+        )
+        self.assertIn("model_availability", result.terminal_canvas_diagnosis)
+
     async def test_legacy_canonical_transcript_remains_decodable(self) -> None:
         legacy = encode_director_transcript(
             (
@@ -694,6 +815,127 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             state["recent_rejected_actions"][0]["reason"],
         )
 
+    async def test_rejected_aime_candidate_contract_is_not_replayed(
+        self,
+    ) -> None:
+        model_registry = registry()
+
+        class CandidateGateway(FakeGateway):
+            async def generate(self, request):
+                self.requests.append(request)
+                return AgentResponse("Final Answer: 244")
+
+        gateway = CandidateGateway()
+        runtime = AgentRuntime(
+            model_registry,
+            gateway,
+            artifact_assessment_protocol=(
+                "provenance_bound_candidate_assessment_v2"
+            ),
+        )
+        env = AgentWorkflowEnv(
+            model_registry,
+            runtime=runtime,
+            problem="Find the requested AIME integer.",
+            execute_on_edit=True,
+            artifact_candidate_extractor=extract_aime2026_candidate,
+        )
+        first = await env.step(
+            '{"action":"add_agent","agent_id":"node_1",'
+            '"model_id":"qwen","contract":"Solve the public problem."}'
+        )
+        self.assertTrue(first.accepted)
+
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=SCALAR_DIRECTOR_PROMPT_VERSION_V5,
+            system_prompt=SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
+        )
+        initial_prompt = orchestrator.build_prompt(env, 0, ())
+        sampled_action = (
+            '{"action":"add_agent","agent_id":"node_2",'
+            '"model_id":"other","contract":"Verify the solution derivation '
+            'for m+n=244 before producing a terminal artifact."}'
+        )
+        rejected = await env.step(sampled_action)
+        self.assertFalse(rejected.accepted)
+        continued = orchestrator.continue_prompt(
+            initial_prompt,
+            sampled_action,
+            env,
+            (),
+        )
+
+        self.assertNotIn("m+n=244", continued)
+        messages = transcript_messages(continued)
+        self.assertEqual(2, len(messages))
+        state = observation_payload(messages[-1])
+        self.assertEqual(1, len(state["recent_rejected_actions"]))
+        self.assertIn(
+            "keep the contract answer-free",
+            state["recent_rejected_actions"][0]["reason"],
+        )
+
+    async def test_rejected_aime_task_specification_drift_is_not_replayed(
+        self,
+    ) -> None:
+        model_registry = registry()
+        gateway = FakeGateway()
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=gateway,
+            problem=(
+                "Find the number of integers less than or equal to 100 that "
+                "are equal to a+b+ab for distinct positive integers a and b."
+                "\n\nPublic task metadata: benchmark_id=aime-2026"
+            ),
+            execute_on_edit=True,
+            task_specification_contract_guard=True,
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=SCALAR_DIRECTOR_PROMPT_VERSION_V5,
+            system_prompt=SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
+        )
+        initial_prompt = orchestrator.build_prompt(env, 0, ())
+        drift_phrase = "for every admissible pair, then conclude no solutions"
+        sampled_action = json.dumps(
+            {
+                "action": "add_agent",
+                "agent_id": "node_1",
+                "model_id": "qwen",
+                "contract": (
+                    "Prove the equation has no integer solutions "
+                    + drift_phrase
+                    + "."
+                ),
+            }
+        )
+
+        rejected = await env.step(sampled_action)
+        self.assertFalse(rejected.accepted)
+        self.assertEqual("task_specification_drift", rejected.feedback_code)
+        continued = orchestrator.continue_prompt(
+            initial_prompt,
+            sampled_action,
+            env,
+            (),
+        )
+
+        self.assertNotIn(drift_phrase, continued)
+        messages = transcript_messages(continued)
+        self.assertEqual(2, len(messages))
+        state = observation_payload(messages[-1])
+        recent = state["recent_rejected_actions"]
+        self.assertEqual(1, len(recent))
+        self.assertEqual("task_specification_drift", recent[0]["feedback_code"])
+        self.assertEqual("add_agent", recent[0]["action"])
+        self.assertEqual("node_1", recent[0]["target"])
+        self.assertIn("question-external terminal", recent[0]["reason"])
+        self.assertEqual([], gateway.requests)
+
     async def test_orchestrator_rejects_prompt_and_version_mismatch(self) -> None:
         with self.assertRaisesRegex(ValueError, "does not match"):
             AgentGraphOrchestrator(
@@ -839,6 +1081,23 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("task", complete_state)
         self.assertNotIn("model_catalog", complete_state)
         self.assertIn("execution_result=", complete_state["canvas_feedback"])
+        self.assertEqual(
+            ["solver"],
+            [
+                item["agent_id"]
+                for item in complete_state["current_artifact_receipts"]
+            ],
+        )
+        self.assertEqual(
+            "answer from solver",
+            complete_state["current_artifact_receipts"][0]["artifact_preview"],
+        )
+        self.assertEqual(
+            "unverified_work_product",
+            complete_state["current_artifact_receipts"][0][
+                "provenance_status"
+            ],
+        )
         self.assertEqual("empty", initial_state["topology_statistics"]["topology_family"])
         self.assertEqual("single", complete_state["topology_statistics"]["topology_family"])
         for state in (initial_state, complete_state):
@@ -1074,6 +1333,92 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "singleton",
         ):
             self.assertNotIn(prohibited.casefold(), DIRECTOR_SYSTEM_PROMPT.casefold())
+
+    def test_scalar_v5_adds_only_candidate_free_contract_boundary(self) -> None:
+        self.assertEqual(
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
+            director_system_prompt_for_version(
+                SCALAR_DIRECTOR_PROMPT_VERSION_V5
+            ),
+        )
+        self.assertTrue(
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V5.startswith(
+                SCALAR_DIRECTOR_SYSTEM_PROMPT_V4
+            )
+        )
+        suffix = SCALAR_DIRECTOR_SYSTEM_PROMPT_V5[
+            len(SCALAR_DIRECTOR_SYSTEM_PROMPT_V4) :
+        ]
+        self.assertIn("Do not copy a current candidate value", suffix)
+        self.assertIn("route the source artifact through a relation", suffix)
+        self.assertNotIn("solver", suffix.casefold())
+        self.assertNotIn("verifier", suffix.casefold())
+        self.assertNotIn("parallel", suffix.casefold())
+
+    def test_scalar_v4_compacts_prior_live_state_and_keeps_latest_exact(
+        self,
+    ) -> None:
+        model_registry = registry()
+        v4 = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=SCALAR_DIRECTOR_PROMPT_VERSION_V4,
+            system_prompt=SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
+        )
+        v3 = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=SCALAR_DIRECTOR_PROMPT_VERSION_V3,
+            system_prompt=SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
+        )
+        historical_payload = {
+            "current_graph": {"large_stale_state": "x" * 4000},
+            "candidate_state": {"stale_candidate": "367"},
+            "current_artifact_receipts": [
+                {"artifact_preview": "stale" * 4000}
+            ],
+            "canvas_feedback": "accepted set_relation at revision 6",
+            "provider_failure_receipt": {"retryable": True},
+        }
+        latest_payload = {
+            "current_graph": {"revision": 7},
+            "candidate_state": {"current_candidate": "367"},
+            "admissible_action_types": ["set_output"],
+        }
+        messages = [
+            {"role": "system", "content": SCALAR_DIRECTOR_SYSTEM_PROMPT_V4},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": '{"action":"set_relation"}'},
+            {
+                "role": "user",
+                "content": v4._observation_message(historical_payload),
+            },
+            {"role": "assistant", "content": '{"action":"set_output"}'},
+            {
+                "role": "user",
+                "content": v4._observation_message(latest_payload),
+            },
+        ]
+
+        replay = v4._compact_historical_messages(messages)
+        historical = observation_payload(replay[3])
+        current = observation_payload(replay[-1])
+
+        self.assertEqual(
+            historical_payload["canvas_feedback"],
+            historical["canvas_feedback"],
+        )
+        self.assertEqual(
+            historical_payload["provider_failure_receipt"],
+            historical["provider_failure_receipt"],
+        )
+        self.assertNotIn("current_graph", historical)
+        self.assertNotIn("candidate_state", historical)
+        self.assertNotIn("current_artifact_receipts", historical)
+        self.assertEqual(latest_payload, current)
+        self.assertEqual(messages, v3._compact_historical_messages(messages))
+
+
 
     async def test_history_window_keeps_actions_and_full_prior_observations_for_neutral_v10(
         self,
@@ -1525,10 +1870,12 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         class DeadEndAfterOneTurnEnv(AgentWorkflowEnv):
-            def model_admissible_action_types(self):
+            def model_admissible_action_types(self, *, remaining_rounds=None):
                 if self.history:
                     return ()
-                return super().model_admissible_action_types()
+                return super().model_admissible_action_types(
+                    remaining_rounds=remaining_rounds
+                )
 
         env = DeadEndAfterOneTurnEnv(model_registry, gateway=FakeGateway())
         result = await AgentGraphOrchestrator(

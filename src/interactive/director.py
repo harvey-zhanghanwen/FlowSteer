@@ -60,8 +60,35 @@ Use only action types listed in admissible_action_types, model_id values from mo
 
 Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
 
+SCALAR_DIRECTOR_SYSTEM_PROMPT_V3 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types and parameters in admissible_action_types and action_target_domains, model_id values from model_catalog, and exact tool_id values from tool_catalog. add_agent adds one Agent with a free-text contract. A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange.
+
+Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Treat current artifacts as unverified work products. Inspect candidate_state, artifact freshness and provenance, and terminal_progress before choosing the next action. Consume a fresh parseable artifact before unrelated graph growth; repair or augment only after an observed failure, candidate conflict, or absence of a terminal artifact. Preserve enough remaining actions for an explicit finish, and use finish only when finish_admissibility is admissible. Do not assume a fixed workflow topology, Agent role inventory, or unlisted Skill."""
+
+# v4 keeps the neutral v3 policy text byte-for-byte and versions only the
+# already-established compact historical Canvas observation policy. The
+# latest observation remains exact; prior observations retain typed public
+# feedback/receipts without repeatedly carrying stale live graph state.
+SCALAR_DIRECTOR_SYSTEM_PROMPT_V4 = SCALAR_DIRECTOR_SYSTEM_PROMPT_V3
+
+# v5 adds only an existing Canvas parameter-admission boundary observed in
+# typed rejection feedback. It does not add a role, topology, or workflow.
+SCALAR_DIRECTOR_SYSTEM_PROMPT_V5 = SCALAR_DIRECTOR_SYSTEM_PROMPT_V4 + """
+
+An Agent contract describes only its responsibility. Do not copy a current candidate value, intermediate artifact value, or artifact ID into a contract; route the source artifact through a relation for execution-time assessment."""
+
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
+SCALAR_DIRECTOR_PROMPT_VERSION_V3 = (
+    "agentgraph.director.minimal-neutral-scalar.v3"
+)
+SCALAR_DIRECTOR_PROMPT_VERSION_V4 = (
+    "agentgraph.director.minimal-neutral-scalar.v4"
+)
+SCALAR_DIRECTOR_PROMPT_VERSION_V5 = (
+    "agentgraph.director.minimal-neutral-scalar.v5"
+)
 LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1 = (
     "agentgraph.director.minimal-neutral-scalar.v1"
 )
@@ -496,6 +523,9 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
     by_version = {
         DIRECTOR_PROMPT_VERSION: DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
+        SCALAR_DIRECTOR_PROMPT_VERSION_V3: SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
+        SCALAR_DIRECTOR_PROMPT_VERSION_V4: SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
+        SCALAR_DIRECTOR_PROMPT_VERSION_V5: SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
         LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_PROMPT_VERSION_V8: LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
@@ -561,6 +591,9 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
     {
         DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
+        SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
+        SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
+        SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
@@ -1236,6 +1269,69 @@ def _live_new_agent_ids(
         used.add(candidate)
         result.append(candidate)
     return tuple(result)
+
+
+def _live_add_agent_domain(
+    action_target_domains: Mapping[str, Any],
+) -> tuple[
+    Mapping[str, Any],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[tuple[str, tuple[str, ...]], ...],
+]:
+    """Validate the role-neutral scalar ADD_AGENT live domain.
+
+    FlowSteer's neutral ``node_N`` allocation masks duplicate identifiers;
+    SkillFlow's registered execution-profile boundary masks unavailable
+    execution modes and Tools.  The contract remains unconstrained free text.
+    """
+
+    domain = action_target_domains.get("add_agent")
+    if not isinstance(domain, Mapping):
+        raise ValueError("add_agent live target domain is missing")
+    agent_ids = _live_string_domain(
+        domain.get("agent_ids"),
+        label="add_agent.agent_ids",
+    )
+    existing_agent_ids = domain.get("existing_agent_ids")
+    if not isinstance(existing_agent_ids, (list, tuple)) or any(
+        not isinstance(agent_id, str) or not agent_id
+        for agent_id in existing_agent_ids
+    ):
+        raise ValueError("add_agent existing Agent IDs are invalid")
+    if len(existing_agent_ids) != len(set(existing_agent_ids)):
+        raise ValueError("add_agent existing Agent IDs contain duplicates")
+    if set(agent_ids).intersection(existing_agent_ids):
+        raise ValueError("add_agent live Agent IDs already exist")
+    if agent_ids != _live_new_agent_ids(existing_agent_ids, len(agent_ids)):
+        raise ValueError(
+            "add_agent live Agent IDs must use the current neutral node_N domain"
+        )
+    model_ids = _live_string_domain(
+        domain.get("model_ids"),
+        label="add_agent.model_ids",
+    )
+    required_fields = domain.get("required_agent_fields")
+    expected_required = {
+        "agent_id",
+        "model_id",
+        "contract",
+        "execution_mode",
+        "allowed_tools",
+    }
+    if (
+        not isinstance(required_fields, (list, tuple))
+        or set(required_fields) != expected_required
+        or len(required_fields) != len(set(required_fields))
+    ):
+        raise ValueError("add_agent required Agent fields are invalid")
+    if domain.get("contract_semantics") != "free_text":
+        raise ValueError("add_agent contract must remain free text")
+    profiles = _live_execution_profiles(
+        domain.get("registered_execution_profiles"),
+        label="add_agent.registered_execution_profiles",
+    )
+    return domain, agent_ids, model_ids, profiles
 
 
 def _live_existing_agent_roles(
@@ -2250,7 +2346,45 @@ def director_live_action_parameter_json_schema_text(
     if not isinstance(domain, Mapping):
         raise ValueError(f"missing live target domain for {action}")
 
-    if action == "add_subgraph":
+    if action == "add_agent":
+        _, agent_ids, model_ids, execution_profiles = _live_add_agent_domain(
+            action_target_domains
+        )
+        base_schema = json.loads(
+            director_state_conditioned_sampling_json_schema_text("add_agent")
+        )
+        branches: list[dict[str, Any]] = []
+        for execution_mode, allowed_tools in execution_profiles:
+            branch = json.loads(json.dumps(base_schema))
+            for field_name in (
+                "role_family",
+                "artifact_type",
+                "completion_condition",
+            ):
+                branch["properties"].pop(field_name, None)
+            branch["required"] = [
+                "action",
+                "agent_id",
+                "model_id",
+                "contract",
+                "execution_mode",
+                "allowed_tools",
+            ]
+            branch["properties"]["agent_id"] = {"enum": list(agent_ids)}
+            branch["properties"]["model_id"] = {"enum": list(model_ids)}
+            branch["properties"]["execution_mode"] = {
+                "const": execution_mode
+            }
+            branch["properties"]["allowed_tools"] = {
+                "const": list(allowed_tools)
+            }
+            branches.append(branch)
+        schema = (
+            branches[0]
+            if len(branches) == 1
+            else {"type": "object", "oneOf": branches}
+        )
+    elif action == "add_subgraph":
         if add_agents is None:
             raise ValueError(
                 "add_subgraph v3 parameter phase requires sampled Agent declarations"
@@ -2490,7 +2624,12 @@ def director_validate_live_action_target_domains(
     if set(action_target_domains) != set(normalized_actions):
         raise ValueError("live action target domains must match admitted actions")
     for action in normalized_actions:
-        if action == "add_subgraph":
+        if action == "add_agent":
+            director_live_action_parameter_json_schema_text(
+                action,
+                action_target_domains,
+            )
+        elif action == "add_subgraph":
             director_live_add_subgraph_agent_declarations_json_schema_text(
                 action_target_domains
             )
@@ -3022,7 +3161,10 @@ class AgentGraphOrchestrator:
             self.sampling_action_profile
             == DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
         ):
-            actions = env.model_admissible_action_types()
+            remaining_rounds = max(self.max_rounds - env.turn_count, 0)
+            actions = env.model_admissible_action_types(
+                remaining_rounds=remaining_rounds,
+            )
             legacy_v1 = (
                 self.sampling_action_schema_version
                 == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1
@@ -3032,7 +3174,9 @@ class AgentGraphOrchestrator:
                 == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
             )
             if live_v3:
-                target_domains = env.model_admissible_action_targets()
+                target_domains = env.model_admissible_action_targets(
+                    remaining_rounds=remaining_rounds,
+                )
                 return {
                     "action_json_schema": (
                         director_model_admissible_sampling_json_schema_text_v3(actions)
@@ -3078,20 +3222,27 @@ class AgentGraphOrchestrator:
         self,
         env: AgentWorkflowEnv,
     ) -> Optional[Mapping[str, Any]]:
-        """Return the typed natural terminal for an exhausted verified-QA Canvas.
+        """Return the typed natural terminal for an exhausted live Canvas.
 
         FlowSteer's bounded Canvas stops when no legal edit remains; it does not
-        ask the policy to sample outside the live action domain.  Preserve that
-        boundary for verified QA without synthesizing a FINISH action or a
-        policy turn.  The projection contains only public environment state and
-        is computed before evaluation.
+        ask the policy to sample outside the live action domain. Preserve that
+        boundary for verified QA and generic model-admissible sampling without
+        synthesizing a FINISH action or a policy turn. The projection contains
+        only public environment state and is computed before evaluation.
         """
 
-        if not verified_qa_semantic_protocol(self.semantic_protocol):
+        if (
+            not verified_qa_semantic_protocol(self.semantic_protocol)
+            and self.sampling_action_profile
+            != DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+        ):
             return None
-        if env.model_admissible_action_types():
+        remaining_rounds = max(self.max_rounds - env.turn_count, 0)
+        if env.model_admissible_action_types(
+            remaining_rounds=remaining_rounds,
+        ):
             return None
-        return {
+        diagnosis: dict[str, Any] = {
             "public_error_code": "canvas_action_domain_exhausted",
             "graph_revision": env.graph.revision,
             "finish_admissibility": _director_neutral_state_projection(
@@ -3100,7 +3251,20 @@ class AgentGraphOrchestrator:
             "recovery_state": _director_neutral_state_projection(
                 env.recovery_state()
             ),
+            "model_availability": _director_neutral_state_projection(
+                env.model_availability_receipt()
+            ),
+            "remaining_rounds": remaining_rounds,
         }
+        if env.current_artifact_receipts():
+            diagnosis["candidate_state"] = _director_neutral_state_projection(
+                env.candidate_state()
+            )
+        if env.termination_lookahead:
+            diagnosis["terminal_progress"] = (
+                _director_neutral_state_projection(env.terminal_progress())
+            )
+        return diagnosis
 
     def generation_seed(self, round_index: int) -> int:
         """Return the exact Director action seed for one zero-based Canvas round."""
@@ -3193,6 +3357,7 @@ class AgentGraphOrchestrator:
             require_complete=False,
         )
         snapshot = env.snapshot()
+        remaining_rounds = max(self.max_rounds - env.turn_count, 0)
         directed_edges = [
             {"from": source_id, "to": target_id}
             for relation in env.graph.relations
@@ -3205,7 +3370,9 @@ class AgentGraphOrchestrator:
                 snapshot.last_feedback
             ),
             "admissible_action_types": list(
-                env.model_admissible_action_types()
+                env.model_admissible_action_types(
+                    remaining_rounds=remaining_rounds,
+                )
                 if (
                     verified_qa_semantic_protocol(self.semantic_protocol)
                     or self.sampling_action_profile
@@ -3223,7 +3390,16 @@ class AgentGraphOrchestrator:
                 "required_tool_id": env.required_tool_id,
             },
         }
-        if self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION:
+        current_artifact_receipts = env.current_artifact_receipts()
+        if current_artifact_receipts:
+            payload["current_artifact_receipts"] = current_artifact_receipts
+            payload["candidate_state"] = env.candidate_state()
+        if self.prompt_version in {
+            SCALAR_DIRECTOR_PROMPT_VERSION,
+            SCALAR_DIRECTOR_PROMPT_VERSION_V3,
+            SCALAR_DIRECTOR_PROMPT_VERSION_V4,
+            SCALAR_DIRECTOR_PROMPT_VERSION_V5,
+        }:
             # FlowSteer exposes the current Canvas identifiers and bounded
             # horizon to the editor.  The v2 scalar observation adds only
             # live legality state; it does not prescribe a topology or role.
@@ -3236,18 +3412,38 @@ class AgentGraphOrchestrator:
                     "current_relations": [
                         relation.to_dict() for relation in env.graph.relations
                     ],
-                    "remaining_rounds": max(
-                        self.max_rounds - env.turn_count,
-                        0,
-                    ),
+                    "remaining_rounds": remaining_rounds,
                 }
             )
-        if verified_qa_semantic_protocol(self.semantic_protocol):
+        if env.termination_lookahead:
+            terminal_progress = env.terminal_progress()
+            minimum_remaining_actions = terminal_progress.get(
+                "minimum_remaining_actions"
+            )
+            terminal_progress["remaining_rounds"] = remaining_rounds
+            terminal_progress["horizon_feasible"] = bool(
+                type(minimum_remaining_actions) is int
+                and remaining_rounds >= minimum_remaining_actions
+            )
+            payload["terminal_progress"] = terminal_progress
+        if (
+            verified_qa_semantic_protocol(self.semantic_protocol)
+            or self.sampling_action_schema_version
+            == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ):
             payload["action_target_domains"] = (
-                env.model_admissible_action_targets()
+                env.model_admissible_action_targets(
+                    remaining_rounds=remaining_rounds,
+                )
             )
         if (
-            self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION
+            self.prompt_version
+            in {
+                SCALAR_DIRECTOR_PROMPT_VERSION,
+                SCALAR_DIRECTOR_PROMPT_VERSION_V3,
+                SCALAR_DIRECTOR_PROMPT_VERSION_V4,
+                SCALAR_DIRECTOR_PROMPT_VERSION_V5,
+            }
             or verified_qa_semantic_protocol(self.semantic_protocol)
         ):
             recent_rejections: list[dict[str, Any]] = []
@@ -3344,7 +3540,11 @@ class AgentGraphOrchestrator:
         # revision-local gate and its first measured failure stage so the
         # Director repairs the responsible semantic node instead of probing
         # FINISH or repeatedly modifying the Formatter.
-        if verified_qa_semantic_protocol(self.semantic_protocol):
+        if (
+            verified_qa_semantic_protocol(self.semantic_protocol)
+            or env.artifact_consumption_ordering
+            or env.termination_lookahead
+        ):
             payload["finish_admissibility"] = _director_neutral_state_projection(
                 env.finish_admissibility()
             )
@@ -3422,6 +3622,13 @@ class AgentGraphOrchestrator:
                 if key in finish_admissibility
             }
         for key, value in payload.items():
+            # Revision-live artifacts are already present, with complete
+            # freshness and provenance, in the final Canvas observation.
+            # Replaying every prior artifact preview defeats the compact
+            # SkillFlow Action--Observation history boundary and can exceed
+            # the Director context before the explicit FINISH horizon.
+            if key == "current_artifact_receipts":
+                continue
             normalized_key = key.casefold()
             if any(
                 marker in normalized_key
@@ -3463,6 +3670,8 @@ class AgentGraphOrchestrator:
         if self.prompt_version not in {
             LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
             QA_DIRECTOR_PROMPT_VERSION,
+            SCALAR_DIRECTOR_PROMPT_VERSION_V4,
+            SCALAR_DIRECTOR_PROMPT_VERSION_V5,
         }:
             return copied
         return self._compact_qa_historical_messages(copied)
@@ -3527,9 +3736,16 @@ class AgentGraphOrchestrator:
             skills=skills,
         )
         if (
-            verified_qa_semantic_protocol(self.semantic_protocol)
-            and env.history
+            env.history
             and env.history[-1].accepted is False
+            and (
+                verified_qa_semantic_protocol(self.semantic_protocol)
+                or env.history[-1].feedback_code
+                in {
+                    "unverified_candidate_in_contract",
+                    "task_specification_drift",
+                }
+            )
         ):
             # SkillFlow keeps the sampled invalid Action in the trajectory but
             # presents only its canonical failure Observation to the next
@@ -3663,6 +3879,14 @@ __all__ = [
     "DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION",
     "DIRECTOR_SYSTEM_PROMPT",
     "DIRECTOR_PROMPT_VERSION",
+    "SCALAR_DIRECTOR_PROMPT_VERSION",
+    "SCALAR_DIRECTOR_PROMPT_VERSION_V3",
+    "SCALAR_DIRECTOR_PROMPT_VERSION_V4",
+    "SCALAR_DIRECTOR_PROMPT_VERSION_V5",
+    "SCALAR_DIRECTOR_SYSTEM_PROMPT",
+    "SCALAR_DIRECTOR_SYSTEM_PROMPT_V3",
+    "SCALAR_DIRECTOR_SYSTEM_PROMPT_V4",
+    "SCALAR_DIRECTOR_SYSTEM_PROMPT_V5",
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15",

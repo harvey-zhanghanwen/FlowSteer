@@ -158,6 +158,74 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         raise ConfigurationError(
             "agent_graph.require_format_agent must be boolean when configured"
         )
+    for field_name in (
+        "artifact_consumption_ordering",
+        "termination_lookahead",
+        "task_specification_contract_guard",
+        "artifact_completeness_gate",
+    ):
+        configured = graph.get(field_name)
+        if configured is not None and type(configured) is not bool:
+            raise ConfigurationError(
+                f"agent_graph.{field_name} must be boolean when configured"
+            )
+    assessment_protocol = graph.get(
+        "artifact_assessment_protocol", "none"
+    )
+    if assessment_protocol not in {
+        "none",
+        "provenance_bound_candidate_assessment_v1",
+        "provenance_bound_candidate_assessment_v2",
+    }:
+        raise ConfigurationError(
+            "agent_graph.artifact_assessment_protocol is unsupported"
+        )
+    if (
+        assessment_protocol != "none"
+        and graph.get("artifact_consumption_ordering") is not True
+    ):
+        raise ConfigurationError(
+            "artifact assessment requires artifact_consumption_ordering=true"
+        )
+    assessment_terminal_policy = graph.get(
+        "artifact_assessment_terminal_policy", "require_supported"
+    )
+    if assessment_terminal_policy not in {
+        "require_supported",
+        "reject_negative",
+    }:
+        raise ConfigurationError(
+            "agent_graph.artifact_assessment_terminal_policy is unsupported"
+        )
+    if (
+        assessment_terminal_policy == "reject_negative"
+        and assessment_protocol == "none"
+    ):
+        raise ConfigurationError(
+            "reject_negative assessment policy requires artifact assessment"
+        )
+    max_length_continuations = graph.get("max_length_continuations", 0)
+    if (
+        type(max_length_continuations) is not int
+        or max_length_continuations < 0
+    ):
+        raise ConfigurationError(
+            "agent_graph.max_length_continuations must be non-negative"
+        )
+    continuation_tokens = graph.get(
+        "length_continuation_max_tokens", 512
+    )
+    if type(continuation_tokens) is not int or continuation_tokens < 1:
+        raise ConfigurationError(
+            "agent_graph.length_continuation_max_tokens must be positive"
+        )
+    if (
+        max_length_continuations > 0
+        and graph.get("artifact_completeness_gate") is not True
+    ):
+        raise ConfigurationError(
+            "length continuation requires artifact_completeness_gate=true"
+        )
     max_agents = graph.get("max_agents")
     if isinstance(max_agents, bool) or not isinstance(max_agents, int) or max_agents < 1:
         raise ConfigurationError("agent_graph.max_agents must be a positive integer")

@@ -2596,14 +2596,85 @@ def _validate_v3_hierarchical_action_receipt(
         expected_parameter_branch = f"set_relation:{selected_index}"
     else:
         try:
-            director_live_action_parameter_json_schema_text(
+            parameter_schema = json.loads(
+                director_live_action_parameter_json_schema_text(
                 selected_action,
                 domains,
+            )
             )
         except ValueError as exc:
             raise ReceiptValidationError(
                 "v3 final action violates its live target domain"
             ) from exc
+        if selected_action == "add_agent" and action_value is not None:
+            add_domain = domains.get("add_agent")
+            if not isinstance(add_domain, Mapping):
+                raise ReceiptValidationError(
+                    "v3 ADD_AGENT receipt has no live target domain"
+                )
+            registered_profiles = {
+                (
+                    item.get("execution_mode"),
+                    tuple(item.get("allowed_tools", ())),
+                )
+                for item in add_domain.get(
+                    "registered_execution_profiles", ()
+                )
+                if isinstance(item, Mapping)
+                and isinstance(item.get("allowed_tools"), (list, tuple))
+            }
+            required_fields = {
+                "action",
+                "agent_id",
+                "model_id",
+                "contract",
+                "execution_mode",
+                "allowed_tools",
+            }
+            observed_profile = (
+                action_value.get("execution_mode"),
+                tuple(action_value.get("allowed_tools", ())),
+            )
+            if (
+                set(action_value) != required_fields
+                or action_value.get("agent_id")
+                not in add_domain.get("agent_ids", ())
+                or action_value.get("model_id")
+                not in add_domain.get("model_ids", ())
+                or observed_profile not in registered_profiles
+            ):
+                raise ReceiptValidationError(
+                    "v3 final ADD_AGENT parameters are outside the exact live domain"
+                )
+            if metadata.get("selected_add_agent_ids") is not None:
+                raise ReceiptValidationError(
+                    "v3 scalar ADD_AGENT receipt carries subgraph declarations"
+                )
+            if metadata.get("selected_add_agent_roles") is not None:
+                raise ReceiptValidationError(
+                    "v3 scalar ADD_AGENT receipt carries role-first declarations"
+                )
+            # The exact schema is deliberately role neutral; this assertion
+            # binds receipt validation to the same request-local ID/model
+            # constraints used for constrained decoding.
+            schema_branches = parameter_schema.get(
+                "oneOf", (parameter_schema,)
+            )
+            if not any(
+                action_value.get("agent_id")
+                in branch.get("properties", {})
+                .get("agent_id", {})
+                .get("enum", ())
+                and action_value.get("model_id")
+                in branch.get("properties", {})
+                .get("model_id", {})
+                .get("enum", ())
+                for branch in schema_branches
+                if isinstance(branch, Mapping)
+            ):
+                raise ReceiptValidationError(
+                    "v3 scalar ADD_AGENT receipt differs from its parameter schema"
+                )
         if (
             action_value is not None
             and selected_action in {"delete_agent", "set_output"}
@@ -3001,6 +3072,9 @@ def _request_record(call: AgentCallRecord) -> Mapping[str, Any]:
         "is_format_agent": request.is_format_agent,
         "is_format_predecessor": request.is_format_predecessor,
         "semantic_protocol": request.semantic_protocol,
+        "artifact_assessment_protocol": (
+            request.artifact_assessment_protocol
+        ),
         "continuation_source_agent_id": request.continuation_source_agent_id,
         "communication_condition": request.communication_condition.value,
         "upstream": [item.to_dict() for item in request.upstream],
@@ -3395,7 +3469,8 @@ class AgentGraphRolloutCollector:
         # context presented to an orchestrator.  Keep the original TaskRecord
         # in the trajectory/evaluator receipt while allowing a thin benchmark
         # adapter to expose a required runtime interface to Flow-Director.
-        env.reset(workflow_problem or task.question)
+        resolved_problem = workflow_problem or task.question
+        env.reset(resolved_problem)
         turns: list[TurnRecord] = []
         snapshots: list[GraphSnapshotEvent] = []
         previous_snapshot_id: Optional[str] = None
@@ -3448,8 +3523,180 @@ class AgentGraphRolloutCollector:
             raise ReceiptValidationError(
                 "retrieved Skills are absent from the version-compatible ACTIVE library"
             )
-        prompt = self.orchestrator.build_prompt(env, 0, current_skills)
-        for round_index in range(self.orchestrator.max_rounds):
+        start_round_index = 0
+        resume_checkpoint_id: Optional[str] = None
+        checkpoint = (
+            None
+            if self.evidence_store is None
+            else self.evidence_store.resolve_rollout_checkpoint(
+                trajectory_id
+            )
+        )
+        if checkpoint is None:
+            prompt = self.orchestrator.build_prompt(env, 0, current_skills)
+        else:
+            expected_identity = {
+                "task_id": task.task_id,
+                "group_id": group_id,
+                "rollout_id": rollout_id,
+                "condition_id": self.condition_id,
+                "versions": self.versions.to_dict(),
+                "director_sampling": dict(
+                    self.orchestrator.sampling_receipt
+                ),
+                "workflow_problem": resolved_problem,
+                "active_skill_ids": list(active_skill_ids),
+            }
+            for field_name, expected_value in expected_identity.items():
+                if checkpoint.get(field_name) != expected_value:
+                    raise ReceiptValidationError(
+                        "rollout checkpoint identity mismatch: "
+                        + field_name
+                    )
+            start_round_index = int(checkpoint["next_round_index"])
+            if not 0 < start_round_index <= self.orchestrator.max_rounds:
+                raise ReceiptValidationError(
+                    "rollout checkpoint next round is outside the horizon"
+                )
+            checkpoint_events = [
+                item
+                for item in self.evidence_store.rollout_checkpoint_events(
+                    trajectory_id
+                )
+                if item.get("status")
+                in {"in_progress", "terminal_pending_evaluation"}
+                and isinstance(item.get("next_round_index"), int)
+                and int(item["next_round_index"]) <= start_round_index
+            ]
+            expected_rounds = list(range(1, start_round_index + 1))
+            observed_rounds = [
+                int(item["next_round_index"])
+                for item in checkpoint_events
+            ]
+            if observed_rounds != expected_rounds:
+                raise ReceiptValidationError(
+                    "rollout checkpoint turn sequence is not contiguous"
+                )
+            for item in checkpoint_events:
+                raw_turn = item.get("turn")
+                raw_snapshot = item.get("graph_snapshot_event")
+                if not isinstance(raw_turn, Mapping) or not isinstance(
+                    raw_snapshot, Mapping
+                ):
+                    raise ReceiptValidationError(
+                        "rollout checkpoint is missing a completed turn"
+                    )
+                raw_graph = raw_snapshot.get("graph")
+                if not isinstance(raw_graph, Mapping):
+                    raise ReceiptValidationError(
+                        "rollout checkpoint graph snapshot is malformed"
+                    )
+                turn = TurnRecord.from_dict(raw_turn)
+                snapshot_event = GraphSnapshotEvent(
+                    revision=int(raw_snapshot["revision"]),
+                    graph=dict(raw_graph),
+                    snapshot_id=str(raw_snapshot["snapshot_id"]),
+                    previous_snapshot_id=raw_snapshot.get(
+                        "previous_snapshot_id"
+                    ),
+                )
+                if (
+                    turn.round_index + 1 != item["next_round_index"]
+                    or turn.graph_snapshot_id != snapshot_event.snapshot_id
+                    or turn.previous_graph_snapshot_id
+                    != snapshot_event.previous_snapshot_id
+                ):
+                    raise ReceiptValidationError(
+                        "rollout checkpoint turn/snapshot binding mismatch"
+                    )
+                turns.append(turn)
+                snapshots.append(snapshot_event)
+            previous_snapshot_id = snapshots[-1].snapshot_id
+            raw_environment = checkpoint.get("environment")
+            if not isinstance(raw_environment, Mapping):
+                raise ReceiptValidationError(
+                    "rollout checkpoint has no Canvas Runtime state"
+                )
+            env.restore_runtime_checkpoint(raw_environment)
+            resume_checkpoint_id = str(checkpoint["checkpoint_id"])
+            if env.finished:
+                final_runtime = env.current_progressive_execution
+                if final_runtime is None or final_runtime.final_answer is None:
+                    raise ReceiptValidationError(
+                        "terminal checkpoint has no fresh Output artifact"
+                    )
+                explicit_finish = True
+                final_answer = final_runtime.final_answer
+                final_graph = env.graph.to_dict()
+                prompt = ""
+            else:
+                next_prompt = checkpoint.get("next_prompt")
+                if not isinstance(next_prompt, str) or not next_prompt:
+                    raise ReceiptValidationError(
+                        "resumable checkpoint has no next Director prompt"
+                    )
+                prompt = next_prompt
+                resumed_skills = visible_skills()
+                resumed_skill_ids = _retrieved_skill_ids(resumed_skills)
+                if resumed_skill_ids != current_retrieved_skill_ids:
+                    raise ReceiptValidationError(
+                        "rollout checkpoint Skill condition changed"
+                    )
+
+        def persist_completed_turn(
+            turn: TurnRecord,
+            snapshot_event: GraphSnapshotEvent,
+            *,
+            next_prompt: Optional[str],
+            status: str,
+        ) -> None:
+            if self.evidence_store is None:
+                return
+            self.evidence_store.append_snapshot(snapshot_event)
+            next_round_index = turn.round_index + 1
+            checkpoint_id = stable_id(
+                "rollout_checkpoint",
+                {
+                    "trajectory_id": trajectory_id,
+                    "next_round_index": next_round_index,
+                    "turn_id": turn.turn_id,
+                    "status": status,
+                },
+            )
+            self.evidence_store.append_rollout_checkpoint(
+                {
+                    "schema_version": (
+                        "agentgraph.rollout-turn-checkpoint.v1"
+                    ),
+                    "checkpoint_id": checkpoint_id,
+                    "trajectory_id": trajectory_id,
+                    "task_id": task.task_id,
+                    "group_id": group_id,
+                    "rollout_id": rollout_id,
+                    "condition_id": self.condition_id,
+                    "versions": self.versions.to_dict(),
+                    "director_sampling": dict(
+                        self.orchestrator.sampling_receipt
+                    ),
+                    "workflow_problem": resolved_problem,
+                    "active_skill_ids": list(active_skill_ids),
+                    "status": status,
+                    "round_index": turn.round_index,
+                    "next_round_index": next_round_index,
+                    "next_prompt": next_prompt,
+                    "turn": turn.to_dict(),
+                    "graph_snapshot_event": snapshot_event.to_dict(),
+                    "environment": env.export_runtime_checkpoint(),
+                    "resumed_from_checkpoint_id": resume_checkpoint_id,
+                }
+            )
+
+        round_indices: Iterable[int] = (
+            ()
+            if env.finished
+            else range(start_round_index, self.orchestrator.max_rounds)
+        )
+        for round_index in round_indices:
             terminal_diagnosis = self.orchestrator.terminal_canvas_diagnosis(env)
             if terminal_diagnosis is not None:
                 natural_terminal_reason = str(
@@ -3759,6 +4006,15 @@ class AgentGraphRolloutCollector:
             runtime_summary["director_backend_sampling_seed"] = (
                 metadata.get("backend_sampling_seed")
             )
+            if (
+                resume_checkpoint_id is not None
+                and round_index == start_round_index
+            ):
+                runtime_summary["rollout_resume"] = {
+                    "checkpoint_id": resume_checkpoint_id,
+                    "next_round_index": start_round_index,
+                    "exact_completed_turn_boundary": True,
+                }
             availability_receipt = env.model_availability_receipt()
             if availability_receipt["failure_receipts"]:
                 runtime_summary["model_availability"] = {
@@ -3909,6 +4165,12 @@ class AgentGraphRolloutCollector:
                 final_answer = canvas.final_answer
                 final_runtime = canvas.execution
                 final_graph = env.graph.to_dict()
+                persist_completed_turn(
+                    turns[-1],
+                    snapshot,
+                    next_prompt=None,
+                    status="terminal_pending_evaluation",
+                )
                 break
             terminal_diagnosis = self.orchestrator.terminal_canvas_diagnosis(env)
             if terminal_diagnosis is not None:
@@ -3925,6 +4187,12 @@ class AgentGraphRolloutCollector:
                 turns[-1] = replace(
                     turns[-1],
                     runtime_summary=runtime_summary,
+                )
+                persist_completed_turn(
+                    turns[-1],
+                    snapshot,
+                    next_prompt=prompt,
+                    status="in_progress",
                 )
                 break
             current_skills = visible_skills()
@@ -3943,6 +4211,13 @@ class AgentGraphRolloutCollector:
                 env,
                 current_skills,
             )
+            persist_completed_turn(
+                turns[-1],
+                snapshot,
+                next_prompt=prompt,
+                status="in_progress",
+            )
+
 
         termination_reason = (
             "finish"
@@ -4010,6 +4285,25 @@ class AgentGraphRolloutCollector:
             for snapshot in snapshots:
                 self.evidence_store.append_snapshot(snapshot)
             self.evidence_store.append_trajectory(trajectory)
+            completion_checkpoint_id = stable_id(
+                "rollout_checkpoint",
+                {
+                    "trajectory_id": trajectory_id,
+                    "status": "completed",
+                },
+            )
+            self.evidence_store.append_rollout_checkpoint(
+                {
+                    "schema_version": (
+                        "agentgraph.rollout-turn-checkpoint.v1"
+                    ),
+                    "checkpoint_id": completion_checkpoint_id,
+                    "trajectory_id": trajectory_id,
+                    "status": "completed",
+                    "next_round_index": len(turns),
+                    "completed_trajectory_id": trajectory.trajectory_id,
+                }
+            )
         return trajectory
 
 

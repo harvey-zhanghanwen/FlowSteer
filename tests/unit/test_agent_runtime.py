@@ -583,6 +583,100 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["a", "b"], [message.source_agent_id for message in request_c.upstream])
         self.assertEqual("c[a:a[],b:b[]]", result.final_answer)
 
+    async def test_fanin_preserves_complete_source_bound_derivations(self) -> None:
+        catalog = registry()
+        left_derivation = (
+            "Candidate: 41\nDerivation:\n"
+            + "left public calculation step; " * 12
+            + "\nCheck: UNIQUE_LEFT_TAIL"
+        )
+        right_derivation = (
+            "Candidate: 42\nDerivation:\n"
+            + "right independent calculation step; " * 12
+            + "\nCheck: UNIQUE_RIGHT_TAIL"
+        )
+
+        class DerivationGateway(RecordingGateway):
+            async def generate(self, request: AgentRequest) -> str:
+                self.requests.append(request)
+                return {
+                    "left": left_derivation,
+                    "right": right_derivation,
+                    "merge": "Candidate conflict remains unresolved.",
+                }[request.agent.id]
+
+        gateway = DerivationGateway()
+        graph = AgentGraph(
+            [
+                AgentNode("left", "m1", "derive the first public calculation"),
+                AgentNode("right", "m2", "derive an independent public calculation"),
+                AgentNode("merge", "m1", "assess both complete artifacts"),
+            ],
+            [
+                AgentRelation("left", "merge", True, False),
+                AgentRelation("right", "merge", True, False),
+            ],
+            output_agent_id="merge",
+        )
+
+        result = await AgentRuntime(catalog, gateway).execute(
+            graph,
+            "question",
+            run_id="fanin-full-derivation",
+        )
+
+        merge_request = next(
+            request for request in gateway.requests if request.agent.id == "merge"
+        )
+        self.assertEqual(
+            ["left", "right"],
+            [message.source_agent_id for message in merge_request.upstream],
+        )
+        messages_by_source = {
+            message.source_agent_id: message for message in merge_request.upstream
+        }
+        self.assertEqual(left_derivation, messages_by_source["left"].content)
+        self.assertEqual(right_derivation, messages_by_source["right"].content)
+        self.assertIn("UNIQUE_LEFT_TAIL", messages_by_source["left"].content)
+        self.assertIn("UNIQUE_RIGHT_TAIL", messages_by_source["right"].content)
+        self.assertEqual("m1", messages_by_source["left"].source_model_id)
+        self.assertEqual("m2", messages_by_source["right"].source_model_id)
+        self.assertEqual(
+            "derive the first public calculation",
+            messages_by_source["left"].source_contract,
+        )
+        self.assertEqual(
+            "derive an independent public calculation",
+            messages_by_source["right"].source_contract,
+        )
+        for source_id in ("left", "right"):
+            self.assertEqual(
+                result.output_metadata[source_id]["artifact_id"],
+                messages_by_source[source_id].artifact_id,
+            )
+
+        provenance = result.output_metadata["merge"][
+            "input_artifact_provenance"
+        ]
+        provenance_by_source = {
+            item["source_agent_id"]: item for item in provenance
+        }
+        self.assertEqual(left_derivation, provenance_by_source["left"]["raw_output"])
+        self.assertEqual(
+            right_derivation,
+            provenance_by_source["right"]["raw_output"],
+        )
+        self.assertEqual("m1", provenance_by_source["left"]["source_model_id"])
+        self.assertEqual("m2", provenance_by_source["right"]["source_model_id"])
+        self.assertEqual(
+            "derive the first public calculation",
+            provenance_by_source["left"]["source_contract"],
+        )
+        self.assertEqual(
+            "derive an independent public calculation",
+            provenance_by_source["right"]["source_contract"],
+        )
+
     async def test_partial_execution_reuses_clean_branch_and_recomputes_dirty_closure(self) -> None:
         catalog = registry()
         gateway = RecordingGateway()
@@ -740,6 +834,172 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(partial.calls))
         self.assertEqual("", partial.calls[0].response.text)
         self.assertEqual("length", partial.calls[0].response.metadata["finish_reason"])
+
+    async def test_length_continuation_uses_same_model_and_combines_output(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class LengthThenStopGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                if request.continuation_segment_index == 0:
+                    return AgentResponse(
+                        "public derivation prefix ",
+                        metadata={
+                            "finish_reason": "length",
+                            "provider_request_id": "segment-0",
+                            "prompt_tokens": 11,
+                            "completion_tokens": 17,
+                            "total_tokens": 28,
+                        },
+                    )
+                return AgentResponse(
+                    "and completed suffix",
+                    metadata={
+                        "finish_reason": "stop",
+                        "provider_request_id": "segment-1",
+                        "prompt_tokens": 29,
+                        "completion_tokens": 7,
+                        "total_tokens": 36,
+                    },
+                )
+
+        gateway = LengthThenStopGateway()
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "produce a complete public derivation")],
+            output_agent_id="a",
+        )
+        result = await AgentRuntime(
+            catalog,
+            gateway,
+            max_length_continuations=1,
+            length_continuation_max_tokens=512,
+        ).execute(graph, "question", run_id="length-then-stop")
+
+        self.assertEqual(
+            "public derivation prefix and completed suffix",
+            result.final_answer,
+        )
+        self.assertEqual(2, len(gateway.requests))
+        initial, continuation = gateway.requests
+        self.assertEqual(initial.agent, continuation.agent)
+        self.assertEqual(initial.model, continuation.model)
+        self.assertEqual(initial.provider, continuation.provider)
+        self.assertEqual(initial.problem, continuation.problem)
+        self.assertEqual(initial.upstream, continuation.upstream)
+        self.assertEqual(0, initial.continuation_segment_index)
+        self.assertIsNone(initial.partial_artifact)
+        self.assertIsNone(initial.max_tokens_override)
+        self.assertEqual(1, continuation.continuation_segment_index)
+        self.assertEqual(
+            "public derivation prefix ",
+            continuation.partial_artifact,
+        )
+        self.assertEqual(512, continuation.max_tokens_override)
+        self.assertEqual(
+            f"{initial.request_id}:length-continuation:1",
+            continuation.request_id,
+        )
+
+        metadata = result.output_metadata["a"]
+        self.assertIs(True, metadata["artifact_complete"])
+        self.assertEqual("complete", metadata["artifact_status"])
+        self.assertEqual(1, metadata["length_continuation_count"])
+        self.assertEqual(40, metadata["prompt_tokens"])
+        self.assertEqual(24, metadata["completion_tokens"])
+        self.assertEqual(64, metadata["total_tokens"])
+        segments = metadata["generation_segments"]
+        self.assertEqual(2, len(segments))
+        self.assertEqual(
+            ["segment-0", "segment-1"],
+            [item["provider_request_id"] for item in segments],
+        )
+        self.assertEqual(
+            ["m1", "m1"],
+            [item["model_id"] for item in segments],
+        )
+        self.assertEqual(2, len(result.calls))
+
+    async def test_length_continuation_exhaustion_preserves_partial_artifact(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class AlwaysLengthGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                segment = request.continuation_segment_index
+                return AgentResponse(
+                    "prefix" if segment == 0 else "-still-incomplete",
+                    metadata={
+                        "finish_reason": "length",
+                        "provider_request_id": f"segment-{segment}",
+                    },
+                )
+
+        gateway = AlwaysLengthGateway()
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "produce a complete public derivation")],
+            output_agent_id="a",
+        )
+        with self.assertRaises(AgentRuntimeError) as raised:
+            await AgentRuntime(
+                catalog,
+                gateway,
+                max_length_continuations=1,
+                length_continuation_max_tokens=512,
+            ).execute(
+                graph,
+                "question",
+                run_id="length-exhausted",
+                require_complete=False,
+            )
+
+        self.assertEqual(2, len(gateway.requests))
+        initial, continuation = gateway.requests
+        self.assertEqual(initial.agent, continuation.agent)
+        self.assertEqual(initial.model, continuation.model)
+        self.assertEqual(initial.provider, continuation.provider)
+        self.assertEqual("prefix", continuation.partial_artifact)
+        self.assertEqual(1, continuation.continuation_segment_index)
+        self.assertEqual(512, continuation.max_tokens_override)
+
+        self.assertEqual(1, len(raised.exception.failure_records))
+        failure = raised.exception.failure_records[0]
+        self.assertEqual("IncompleteAgentArtifact", failure.error_type)
+        self.assertEqual("a", failure.agent_id)
+        self.assertIs(False, failure.metadata["artifact_complete"])
+        self.assertEqual("incomplete", failure.metadata["artifact_status"])
+        self.assertEqual("length", failure.metadata["finish_reason"])
+        self.assertEqual(
+            "prefix-still-incomplete",
+            failure.metadata["partial_artifact"],
+        )
+        segments = failure.metadata["generation_segments"]
+        self.assertEqual(2, len(segments))
+        self.assertEqual(
+            ["prefix", "-still-incomplete"],
+            [item["raw_output"] for item in segments],
+        )
+        self.assertEqual(
+            ["m1", "m1"],
+            [item["model_id"] for item in segments],
+        )
+
+        partial = raised.exception.partial_result
+        self.assertIsNotNone(partial)
+        assert partial is not None
+        self.assertEqual({}, dict(partial.outputs))
+        self.assertIsNone(partial.final_answer)
+        self.assertEqual("FAILURE", partial.agent_statuses["a"])
+        self.assertEqual(2, len(partial.calls))
 
     async def test_empty_downstream_response_preserves_successful_upstream_artifact(
         self,
@@ -1716,6 +1976,39 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(caught.exception.partial_result.final_answer)
         self.assertNotIn("actor", caught.exception.partial_result.outputs)
         self.assertNotIn("output", gateway.called)
+
+    async def test_timeout_failure_receipt_preserves_provider_model_scope(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class SlowGateway:
+            async def generate(self, request: AgentRequest) -> str:
+                await asyncio.Event().wait()
+                return request.agent.id
+
+        graph = AgentGraph([AgentNode("slow", "m1", "answer")])
+        with self.assertRaises(AgentRuntimeError) as caught:
+            await AgentRuntime(
+                catalog,
+                SlowGateway(),
+                timeout_seconds=0.001,
+            ).execute(
+                graph,
+                "question",
+                require_complete=False,
+            )
+
+        failure = caught.exception.failure_records[0]
+        self.assertEqual("TimeoutError", failure.error_type)
+        self.assertEqual("slow", failure.agent_id)
+        self.assertEqual("m1", failure.metadata["model_id"])
+        self.assertEqual("fake", failure.metadata["provider_id"])
+        self.assertEqual(0.001, failure.metadata["timeout_seconds"])
+        self.assertEqual(
+            "agent_invocation",
+            failure.metadata["timeout_scope"],
+        )
 
     async def test_global_concurrency_limit(self) -> None:
         catalog = registry()

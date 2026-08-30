@@ -1,23 +1,21 @@
-# AIME 2026 next-run config for evidence-selected AgentGraph best profile v1.
-# Architecture source: aime2026_runtime_v3_artifact_termination (14/30, 46.67%).
-# This new namespace is not yet a formally evaluated condition.
-# Same 30 tasks, base weights, sampling seed, and catalog presentation as v1.
+# AIME 2026 runtime v3: live parameter domains, artifact consumption, and
+# structural termination lookahead.  Same official 30 tasks, base weights,
+# sampling seed, catalog presentation, and target-blind evaluator as v2.3.
 # No training, Skill, exploration, fixed Agent role, or topology prior is used.
 
 schema_version: "flowsteer.agentgraph.config.v1"
 execution_timeout: 600.0
 experiment:
-  name: "aime2026_best_agentgraph_v1_next_run"
+  name: "aime2026_runtime_v3_artifact_termination"
   phase: "aime2026_evaluation"
   training_enabled: false
   seed: 20260825
-  condition_id: "aime2026_best_agentgraph_v1_next_run"
+  condition_id: "aime2026_runtime_v3_artifact_termination"
   sampling_schedule_purpose: "aime2026_official_fixed_paired_evaluation_v2"
-  # Preserve the v1 catalog order so v1 -> v2 does not change model presentation.
   catalog_order_namespace: "aime2026_unified_initial_v1"
   prompt_version: "agentgraph.director.minimal-neutral-scalar.v3"
   tool_version: "none"
-  output_dir: "artifacts/aime2026_best_agentgraph_v1_next_run/evaluation"
+  output_dir: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation"
 
 data:
   catalog_path: "config/datasets_aime2026_official_v1.yaml"
@@ -48,24 +46,22 @@ aime2026_evaluation:
   direct_contract: "Generate the answer with a step-by-step thinking process and one final answer, following the task's XML response format."
   direct_generation_seed: 20260825
 
-# The production AIME static task exposes no Tools; calculation-only Tools are
-# not added merely to improve Accuracy in this repair condition.
 aime_tool_runtime:
   enabled: false
 
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"
-  root: "artifacts/aime2026_best_agentgraph_v1_next_run/evaluation/evidence"
-  selected_tasks_path: "artifacts/aime2026_best_agentgraph_v1_next_run/evaluation/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/aime2026_best_agentgraph_v1_next_run/evaluation/direct_predictions.jsonl"
-  trajectories_path: "artifacts/aime2026_best_agentgraph_v1_next_run/evaluation/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/aime2026_best_agentgraph_v1_next_run/evaluation/collection_failures.jsonl"
-  paired_results_path: "artifacts/aime2026_best_agentgraph_v1_next_run/evaluation/paired_results.jsonl"
-  wrong_demos_path: "artifacts/aime2026_best_agentgraph_v1_next_run/evaluation/wrong_demos.jsonl"
-  manifest_path: "artifacts/aime2026_best_agentgraph_v1_next_run/evaluation/run_manifest.json"
-  preflight_receipt_path: "artifacts/aime2026_best_agentgraph_v1_next_run/evaluation/preflight_receipt.json"
-  report_json_path: "reports/aime2026_best_agentgraph_v1_next_run/evaluation_report.json"
-  report_markdown_path: "reports/aime2026_best_agentgraph_v1_next_run/evaluation_report.md"
+  root: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation/evidence"
+  selected_tasks_path: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation/direct_predictions.jsonl"
+  trajectories_path: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation/collection_failures.jsonl"
+  paired_results_path: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation/paired_results.jsonl"
+  wrong_demos_path: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation/wrong_demos.jsonl"
+  manifest_path: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation/run_manifest.json"
+  preflight_receipt_path: "artifacts/aime2026_runtime_v3_artifact_termination/evaluation/preflight_receipt.json"
+  report_json_path: "reports/aime2026_runtime_v3_artifact_termination/evaluation_report.json"
+  report_markdown_path: "reports/aime2026_runtime_v3_artifact_termination/evaluation_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
@@ -73,7 +69,6 @@ director:
   backend: "sglang"
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
   served_model_name: "supervisor_theta"
-  # The learner/Director weights are unchanged from v1; only runtime protocol changes.
   behavior_policy_version: "qwen35-9b-base-aime2026-unified-initial-v1"
   behavior_adapter_name: null
   behavior_adapter_checkpoint: null
@@ -146,7 +141,7 @@ grpo:
 policy_sync:
   enabled: false
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
-  adapter_name_prefix: "unused_aime2026_best_agentgraph_v1_next_run_"
+  adapter_name_prefix: "unused_aime2026_runtime_v3_artifact_termination_"
   request_timeout_seconds: 120
   max_retries: 0
   retry_backoff_seconds: 1

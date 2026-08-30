@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from types import MappingProxyType
-from typing import Awaitable, Collection, Dict, List, Mapping, Optional, Protocol, Set, Tuple, Union
+from typing import Any, Awaitable, Collection, Dict, List, Mapping, Optional, Protocol, Sequence, Set, Tuple, Union
 import uuid
 
 from .agent_graph import (
@@ -75,6 +76,8 @@ class UpstreamMessage:
     environment_revision: Optional[int] = None
     tool_receipts: Tuple[Mapping[str, object], ...] = ()
     artifact_version: Optional[str] = None
+    source_model_id: Optional[str] = None
+    source_contract: Optional[str] = None
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -110,6 +113,14 @@ class UpstreamMessage:
             or not self.artifact_version.strip()
         ):
             raise ValueError("artifact_version must be non-empty when supplied")
+        for value, name in (
+            (self.source_model_id, "source_model_id"),
+            (self.source_contract, "source_contract"),
+        ):
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(f"{name} must be non-empty when supplied")
         if not isinstance(self.tool_receipts, tuple) or any(
             not isinstance(item, Mapping) for item in self.tool_receipts
         ):
@@ -152,6 +163,8 @@ class UpstreamMessage:
             "environment_revision": self.environment_revision,
             "artifact_version": self.artifact_version,
             "artifact_id": self.artifact_version,
+            "source_model_id": self.source_model_id,
+            "source_contract": self.source_contract,
             "request_or_dependency": self.request_or_dependency,
             "dependency": self.request_or_dependency,
             "tool_receipts": [dict(item) for item in self.tool_receipts],
@@ -181,6 +194,7 @@ class AgentRequest:
     own_draft: Optional[str] = None
     peer_draft: Optional[UpstreamMessage] = None
     semantic_protocol: str = "none"
+    artifact_assessment_protocol: str = "none"
     # SkillFlow continuation state: a repaired Agent keeps the public
     # Action--Observation history and measured Tool receipts from its failed
     # bounded execution.  These fields never contain hidden reasoning and do
@@ -188,6 +202,9 @@ class AgentRequest:
     action_history: Tuple[Mapping[str, object], ...] = ()
     prior_tool_receipts: Tuple[Mapping[str, object], ...] = ()
     continuation_source_agent_id: Optional[str] = None
+    partial_artifact: Optional[str] = None
+    continuation_segment_index: int = 0
+    max_tokens_override: Optional[int] = None
 
     def __post_init__(self) -> None:
         if type(self.is_output_agent) is not bool:
@@ -204,6 +221,14 @@ class AgentRequest:
             "qa_verified_answer_lineage_v2",
         }:
             raise ValueError("unsupported AgentRequest semantic_protocol")
+        if self.artifact_assessment_protocol not in {
+            "none",
+            "provenance_bound_candidate_assessment_v1",
+            "provenance_bound_candidate_assessment_v2",
+        }:
+            raise ValueError(
+                "unsupported AgentRequest artifact_assessment_protocol"
+            )
         if any(not isinstance(item, Mapping) for item in self.action_history):
             raise TypeError("AgentRequest.action_history must contain mappings")
         if any(not isinstance(item, Mapping) for item in self.prior_tool_receipts):
@@ -216,6 +241,33 @@ class AgentRequest:
         ):
             raise ValueError(
                 "AgentRequest.continuation_source_agent_id must be non-empty text"
+            )
+        if self.partial_artifact is not None and (
+            not isinstance(self.partial_artifact, str)
+            or not self.partial_artifact
+        ):
+            raise ValueError(
+                "AgentRequest.partial_artifact must be non-empty text or None"
+            )
+        if (
+            type(self.continuation_segment_index) is not int
+            or self.continuation_segment_index < 0
+        ):
+            raise ValueError(
+                "AgentRequest.continuation_segment_index must be non-negative"
+            )
+        if (self.partial_artifact is None) != (
+            self.continuation_segment_index == 0
+        ):
+            raise ValueError(
+                "AgentRequest continuation index and partial artifact disagree"
+            )
+        if self.max_tokens_override is not None and (
+            type(self.max_tokens_override) is not int
+            or self.max_tokens_override < 1
+        ):
+            raise ValueError(
+                "AgentRequest.max_tokens_override must be positive or None"
             )
         object.__setattr__(
             self,
@@ -285,6 +337,34 @@ def _tool_receipts_from_metadata(
     return tuple(
         MappingProxyType(dict(item)) for item in raw if isinstance(item, Mapping)
     )
+
+
+_CHECKPOINT_UNSAFE = object()
+
+
+def _checkpoint_value(value: object) -> object:
+    """Reuse trajectory-receipt JSON filtering for public Runtime state."""
+
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else _CHECKPOINT_UNSAFE
+    if isinstance(value, Mapping):
+        converted: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                continue
+            safe_item = _checkpoint_value(item)
+            if safe_item is not _CHECKPOINT_UNSAFE:
+                converted[key] = safe_item
+        return converted
+    if isinstance(value, (list, tuple)):
+        converted_items: list[object] = []
+        for item in value:
+            safe_item = _checkpoint_value(item)
+            if safe_item is not _CHECKPOINT_UNSAFE:
+                converted_items.append(safe_item)
+        return converted_items
 
 
 def _environment_revision_from_metadata(
@@ -359,6 +439,113 @@ class AgentRuntimeResult:
         )
 
 
+    def to_checkpoint_dict(self) -> Dict[str, object]:
+        """Serialize the immutable artifact cache, excluding prior call logs.
+
+        Prior Agent calls are already persisted on the completed TurnRecord.
+        Restoring them into a later turn would duplicate execution receipts;
+        only revision-local artifacts and provenance are required by the
+        existing prior_outputs cache boundary.
+        """
+
+        return {
+            "run_id": self.run_id,
+            "graph_revision": self.graph_revision,
+            "output_agent_id": self.output_agent_id,
+            "final_answer": self.final_answer,
+            "outputs": dict(self.outputs),
+            "block_completion_order": [
+                list(component) for component in self.block_completion_order
+            ],
+            "executed_agent_ids": list(self.executed_agent_ids),
+            "reused_agent_ids": list(self.reused_agent_ids),
+            "deferred_agent_ids": list(self.deferred_agent_ids),
+            "communication_condition": self.communication_condition.value,
+            "output_metadata": _checkpoint_value(self.output_metadata),
+            "agent_statuses": dict(self.agent_statuses),
+        }
+
+    @classmethod
+    def from_checkpoint_dict(
+        cls,
+        value: Mapping[str, Any],
+    ) -> "AgentRuntimeResult":
+        """Restore a revision-local Runtime artifact cache without replay."""
+
+        if not isinstance(value, Mapping):
+            raise ValueError("serialized Runtime checkpoint must be a mapping")
+        outputs = value.get("outputs", {})
+        output_metadata = value.get("output_metadata", {})
+        statuses = value.get("agent_statuses", {})
+        raw_order = value.get("block_completion_order", ())
+        if not isinstance(outputs, Mapping):
+            raise ValueError("Runtime checkpoint outputs must be a mapping")
+        if not isinstance(output_metadata, Mapping):
+            raise ValueError("Runtime checkpoint output_metadata must be a mapping")
+        if not isinstance(statuses, Mapping):
+            raise ValueError("Runtime checkpoint agent_statuses must be a mapping")
+        if (
+            isinstance(raw_order, (str, bytes))
+            or not isinstance(raw_order, Sequence)
+        ):
+            raise ValueError(
+                "Runtime checkpoint block_completion_order must be a sequence"
+            )
+        block_order: list[Tuple[str, ...]] = []
+        for component in raw_order:
+            if (
+                isinstance(component, (str, bytes))
+                or not isinstance(component, Sequence)
+                or any(not isinstance(item, str) for item in component)
+            ):
+                raise ValueError(
+                    "Runtime checkpoint block component must contain Agent IDs"
+                )
+            block_order.append(tuple(component))
+        graph_revision = value.get("graph_revision")
+        if (
+            isinstance(graph_revision, bool)
+            or not isinstance(graph_revision, int)
+            or graph_revision < 0
+        ):
+            raise ValueError(
+                "Runtime checkpoint graph_revision must be non-negative"
+            )
+        run_id = value.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("Runtime checkpoint run_id must be non-empty")
+        output_agent_id = value.get("output_agent_id")
+        final_answer = value.get("final_answer")
+        if output_agent_id is not None and not isinstance(output_agent_id, str):
+            raise ValueError("Runtime checkpoint output_agent_id must be text")
+        if final_answer is not None and not isinstance(final_answer, str):
+            raise ValueError("Runtime checkpoint final_answer must be text")
+        return cls(
+            run_id=run_id,
+            graph_revision=graph_revision,
+            output_agent_id=output_agent_id,
+            final_answer=final_answer,
+            outputs={str(key): str(item) for key, item in outputs.items()},
+            calls=(),
+            block_completion_order=tuple(block_order),
+            executed_agent_ids=tuple(value.get("executed_agent_ids", ())),
+            reused_agent_ids=tuple(value.get("reused_agent_ids", ())),
+            deferred_agent_ids=tuple(value.get("deferred_agent_ids", ())),
+            communication_condition=value.get(
+                "communication_condition",
+                CommunicationCondition.NORMAL.value,
+            ),
+            output_metadata={
+                str(agent_id): dict(metadata)
+                for agent_id, metadata in output_metadata.items()
+                if isinstance(metadata, Mapping)
+            },
+            agent_statuses={
+                str(agent_id): str(status)
+                for agent_id, status in statuses.items()
+            },
+        )
+
 @dataclass(frozen=True, slots=True)
 class AgentFailureRecord:
     """Public execution-failure receipt for one Agent invocation.
@@ -390,6 +577,29 @@ class AgentFailureRecord:
             "message": self.message,
             "metadata": dict(self.metadata),
         }
+
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "AgentFailureRecord":
+        if not isinstance(value, Mapping):
+            raise ValueError("serialized Agent failure must be a mapping")
+        phase = value.get("phase")
+        try:
+            execution_phase = ExecutionPhase(str(phase))
+        except ValueError as exc:
+            raise ValueError("serialized Agent failure has invalid phase") from exc
+        metadata = value.get("metadata", {})
+        if not isinstance(metadata, Mapping):
+            raise ValueError("serialized Agent failure metadata must be a mapping")
+        return cls(
+            request_id=str(value["request_id"]),
+            agent_id=str(value["agent_id"]),
+            phase=execution_phase,
+            graph_revision=int(value["graph_revision"]),
+            error_type=str(value["error_type"]),
+            message=str(value["message"]),
+            metadata=dict(metadata),
+        )
 
 
 class AgentRuntimeError(RuntimeError):
@@ -498,6 +708,9 @@ class AgentRuntime:
         tool_registry: Optional[ToolRegistry] = None,
         dataset_id: Optional[str] = None,
         semantic_protocol: str = "none",
+        artifact_assessment_protocol: str = "none",
+        max_length_continuations: int = 0,
+        length_continuation_max_tokens: int = 512,
     ) -> None:
         if max_concurrency is not None and (
             type(max_concurrency) is not int or max_concurrency <= 0
@@ -515,6 +728,28 @@ class AgentRuntime:
             "qa_verified_answer_lineage_v2",
         }:
             raise ValueError("unsupported AgentRuntime semantic_protocol")
+        if artifact_assessment_protocol not in {
+            "none",
+            "provenance_bound_candidate_assessment_v1",
+            "provenance_bound_candidate_assessment_v2",
+        }:
+            raise ValueError(
+                "unsupported AgentRuntime artifact_assessment_protocol"
+            )
+        if (
+            type(max_length_continuations) is not int
+            or max_length_continuations < 0
+        ):
+            raise ValueError(
+                "max_length_continuations must be a non-negative integer"
+            )
+        if (
+            type(length_continuation_max_tokens) is not int
+            or length_continuation_max_tokens < 1
+        ):
+            raise ValueError(
+                "length_continuation_max_tokens must be a positive integer"
+            )
         self.model_registry = model_registry
         self.gateway = gateway
         adapters: Dict[str, AgentExecutionAdapter] = {
@@ -534,6 +769,13 @@ class AgentRuntime:
         self.tool_registry = tool_registry
         self.dataset_id = None if dataset_id is None else dataset_id.strip()
         self.semantic_protocol = semantic_protocol
+        self.artifact_assessment_protocol = (
+            artifact_assessment_protocol
+        )
+        self.max_length_continuations = max_length_continuations
+        self.length_continuation_max_tokens = (
+            length_continuation_max_tokens
+        )
         self.timeout_seconds = timeout_seconds
         self._global_semaphore = (
             asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
@@ -1801,6 +2043,8 @@ class AgentRuntime:
                             and raw_artifact_id.strip()
                             else None
                         ),
+                        source_model_id=nodes[source_id].model_id,
+                        source_contract=nodes[source_id].contract,
                     )
                 )
         return tuple(
@@ -1929,6 +2173,9 @@ class AgentRuntime:
             own_draft=own_draft,
             peer_draft=peer_draft,
             semantic_protocol=self.semantic_protocol,
+            artifact_assessment_protocol=(
+                self.artifact_assessment_protocol
+            ),
             action_history=action_history,
             prior_tool_receipts=prior_tool_receipts,
             continuation_source_agent_id=continuation_source_agent_id,
@@ -1942,6 +2189,13 @@ class AgentRuntime:
         """Bind one artifact to the exact public inputs consumed to produce it."""
 
         metadata = dict(response.metadata)
+        artifact_complete = metadata.get("finish_reason") != "length"
+        metadata.setdefault("artifact_complete", artifact_complete)
+        metadata.setdefault(
+            "artifact_status",
+            "complete" if artifact_complete else "incomplete",
+        )
+
         # Keep the existing request identity as the immutable artifact identity
         # so old trajectories remain readable.  A provider retry is another
         # receipt for this same logical request, never a new semantic artifact.
@@ -2065,39 +2319,47 @@ class AgentRuntime:
                 else MappingProxyType({})
             )
 
-        async def call_gateway() -> GatewayResponse:
+        async def call_gateway(active_request: AgentRequest) -> GatewayResponse:
             mode_value = getattr(
-                request.agent.execution_mode,
+                active_request.agent.execution_mode,
                 "value",
-                request.agent.execution_mode,
+                active_request.agent.execution_mode,
             )
             adapter = self.execution_adapters.get(mode_value)
             if adapter is None:
                 raise AgentRuntimeError(
                     f"no execution adapter registered for {mode_value!r}"
                 )
-            provider_semaphore = self._provider_semaphores.get(request.provider.provider_id)
+            provider_semaphore = self._provider_semaphores.get(
+                active_request.provider.provider_id
+            )
             if provider_semaphore is None:
-                return await adapter.execute(request)
+                return await adapter.execute(active_request)
             async with provider_semaphore:
-                return await adapter.execute(request)
+                return await adapter.execute(active_request)
 
-        try:
+        async def invoke_gateway(active_request: AgentRequest) -> GatewayResponse:
             if self._global_semaphore is None:
-                invocation = call_gateway()
-                raw_response = (
+                invocation = call_gateway(active_request)
+                return (
                     await invocation
                     if self.timeout_seconds is None
-                    else await asyncio.wait_for(invocation, timeout=self.timeout_seconds)
-                )
-            else:
-                async with self._global_semaphore:
-                    invocation = call_gateway()
-                    raw_response = (
-                        await invocation
-                        if self.timeout_seconds is None
-                        else await asyncio.wait_for(invocation, timeout=self.timeout_seconds)
+                    else await asyncio.wait_for(
+                        invocation, timeout=self.timeout_seconds
                     )
+                )
+            async with self._global_semaphore:
+                invocation = call_gateway(active_request)
+                return (
+                    await invocation
+                    if self.timeout_seconds is None
+                    else await asyncio.wait_for(
+                        invocation, timeout=self.timeout_seconds
+                    )
+                )
+
+        try:
+            raw_response = await invoke_gateway(request)
         except asyncio.CancelledError as exc:
             metadata = MappingProxyType(
                 {
@@ -2133,6 +2395,19 @@ class AgentRuntime:
             raise
         except Exception as exc:
             adapter_cancellation_metadata = cancelled_adapter_metadata()
+            invocation_failure_metadata = {
+                "provider_id": request.provider.provider_id,
+                "model_id": request.agent.model_id,
+                **(
+                    {
+                        "timeout_seconds": self.timeout_seconds,
+                        "timeout_scope": "agent_invocation",
+                    }
+                    if isinstance(exc, TimeoutError)
+                    and self.timeout_seconds is not None
+                    else {}
+                ),
+            }
             nested_records = (
                 exc.failure_records
                 if isinstance(exc, AgentRuntimeError) and exc.failure_records
@@ -2148,6 +2423,7 @@ class AgentRuntime:
                             {
                                 **dict(adapter_cancellation_metadata),
                                 **dict(_public_failure_metadata(exc)),
+                                **invocation_failure_metadata,
                                 **dict(input_artifact_metadata()),
                                 **(
                                     {
@@ -2196,6 +2472,173 @@ class AgentRuntime:
                         message=(
                             "Provider completed without a non-empty Agent "
                             "artifact"
+                        ),
+                        metadata=failure_metadata,
+                    ),
+                ),
+                pending_agent_ids=(request.agent.id,),
+            )
+        execution_mode = getattr(
+            request.agent.execution_mode,
+            "value",
+            request.agent.execution_mode,
+        )
+        if (
+            response.metadata.get("finish_reason") == "length"
+            and execution_mode == "reasoning"
+            and self.max_length_continuations > 0
+        ):
+            combined_text = response.text
+            segment_receipts: list[dict[str, object]] = []
+
+            def append_segment_receipt(
+                segment_index: int,
+                active_request: AgentRequest,
+                active_response: AgentResponse,
+            ) -> None:
+                segment_receipts.append(
+                    {
+                        "segment_index": segment_index,
+                        "request_id": active_request.request_id,
+                        "provider_id": active_request.provider.provider_id,
+                        "model_id": active_request.model.model_id,
+                        "provider_request_id": active_response.metadata.get(
+                            "provider_request_id"
+                        ),
+                        "finish_reason": active_response.metadata.get(
+                            "finish_reason"
+                        ),
+                        "prompt_tokens": active_response.metadata.get(
+                            "prompt_tokens"
+                        ),
+                        "completion_tokens": active_response.metadata.get(
+                            "completion_tokens"
+                        ),
+                        "total_tokens": active_response.metadata.get(
+                            "total_tokens"
+                        ),
+                        "retry_receipts": active_response.metadata.get(
+                            "retry_receipts", ()
+                        ),
+                        "raw_output": active_response.text,
+                    }
+                )
+
+            append_segment_receipt(0, request, response)
+            for segment_index in range(1, self.max_length_continuations + 1):
+                continuation_request = replace(
+                    request,
+                    request_id=(
+                        f"{request.request_id}:length-continuation:"
+                        f"{segment_index}"
+                    ),
+                    partial_artifact=combined_text,
+                    continuation_segment_index=segment_index,
+                    max_tokens_override=self.length_continuation_max_tokens,
+                )
+                try:
+                    raw_continuation = await invoke_gateway(
+                        continuation_request
+                    )
+                except Exception as exc:
+                    failure_metadata = MappingProxyType(
+                        {
+                            **dict(input_artifact_metadata()),
+                            **dict(_public_failure_metadata(exc)),
+                            "artifact_complete": False,
+                            "artifact_status": "incomplete",
+                            "finish_reason": "length",
+                            "partial_artifact": combined_text,
+                            "generation_segments": tuple(segment_receipts),
+                            "continuation_failure_type": type(exc).__name__,
+                        }
+                    )
+                    raise AgentRuntimeError(
+                        "bounded continuation failed for truncated Agent "
+                        f"artifact {request.agent.id!r}",
+                        failure_records=(
+                            AgentFailureRecord(
+                                request_id=continuation_request.request_id,
+                                agent_id=request.agent.id,
+                                phase=request.phase,
+                                graph_revision=request.graph_revision,
+                                error_type="IncompleteAgentArtifact",
+                                message=(
+                                    "Provider continuation did not complete the "
+                                    "truncated Agent artifact"
+                                ),
+                                metadata=failure_metadata,
+                            ),
+                        ),
+                        pending_agent_ids=(request.agent.id,),
+                    ) from exc
+                continuation_response = (
+                    raw_continuation
+                    if isinstance(raw_continuation, AgentResponse)
+                    else AgentResponse(raw_continuation)
+                )
+                calls.append(
+                    AgentCallRecord(
+                        request=continuation_request,
+                        response=continuation_response,
+                    )
+                )
+                append_segment_receipt(
+                    segment_index,
+                    continuation_request,
+                    continuation_response,
+                )
+                if continuation_response.text:
+                    combined_text += continuation_response.text
+                if (
+                    continuation_response.text.strip()
+                    and continuation_response.metadata.get("finish_reason")
+                    != "length"
+                ):
+                    merged_metadata = dict(continuation_response.metadata)
+                    for token_field in (
+                        "prompt_tokens",
+                        "completion_tokens",
+                        "total_tokens",
+                    ):
+                        values = [
+                            item.get(token_field)
+                            for item in segment_receipts
+                        ]
+                        if values and all(type(value) is int for value in values):
+                            merged_metadata[token_field] = sum(values)
+                    merged_metadata.update(
+                        {
+                            "artifact_complete": True,
+                            "artifact_status": "complete",
+                            "length_continuation_count": segment_index,
+                            "generation_segments": tuple(segment_receipts),
+                        }
+                    )
+                    return AgentResponse(combined_text, merged_metadata)
+
+            failure_metadata = MappingProxyType(
+                {
+                    **dict(input_artifact_metadata()),
+                    "artifact_complete": False,
+                    "artifact_status": "incomplete",
+                    "finish_reason": "length",
+                    "partial_artifact": combined_text,
+                    "generation_segments": tuple(segment_receipts),
+                }
+            )
+            raise AgentRuntimeError(
+                f"bounded continuation exhausted for agent {request.agent.id!r}",
+                failure_records=(
+                    AgentFailureRecord(
+                        request_id=request.request_id,
+                        agent_id=request.agent.id,
+                        phase=request.phase,
+                        graph_revision=request.graph_revision,
+                        error_type="IncompleteAgentArtifact",
+                        message=(
+                            "Agent artifact remained truncated after the "
+                            "configured bounded continuation"
                         ),
                         metadata=failure_metadata,
                     ),
