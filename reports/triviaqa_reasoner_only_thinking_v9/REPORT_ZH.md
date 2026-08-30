@@ -22,6 +22,7 @@
 | non-thinking，同 8 题 | 8 | 87.50 | 95.83 | 8/8 | 0 | 已完成对照 |
 | Reasoner-only thinking | 3 | 100.00 | 100.00 | 3/3 | 0 | Stable Zero canary |
 | Direct，同 3 题 | 3 | 33.33 | 33.33 | N/A | N/A | 同题对照 |
+| Reasoner-only thinking，同 19 题 | 19 | 94.74 | 98.25 | 19/19 | 0 | 与 non-thinking 精确持平 |
 
 全语义 Agent thinking 的主要退化不是 Tool failure，而是 semantic execution 的 length truncation 破坏 Canvas 闭环。bounded-thinking 8 题中，29 次 semantic call 有 10 次 `finish_reason=length`；相同 8 题 non-thinking 没有 length truncation。
 
@@ -39,8 +40,10 @@
 
 ## 配置状态
 
-Reasoner-only thinking 已成为 v17 的 next-run profile，但尚未替换既有 fixed128 best result。现有 fixed128 non-thinking 诊断仍为 EM 82.81、F1 84.94；需要在新的 strict fact-memory index 完整发布后，才能对 Reasoner-only thinking 运行同一 fixed128 正式比较。
+Reasoner-only thinking 的固定 19 题结果与 non-thinking 精确持平，没有准确率增益或退化。51 次 Reasoner execution 均有 `thinking=true, budget=512` 的 provider receipt；199 次 ReAct model call、Verifier、Formatter 和 Repair 均为 non-thinking。该批次没有 terminal、operational、evaluator 或 API failure。
 
-Next-run 配置：`config/evaluation_triviaqa_fact_memory_unified_v4_v17_full_native_transductive.yaml`，其 Model Catalog 指向 `config/model_catalog_multidataset_tool_v9_reasoner_thinking.yaml`。
+用户已停止 strict-v2 数据继续构建。fixed128 比较复用完整的 76,523 条 full-native-v1 fact-memory、CPU BGE index 和 development-only 冻结 Top-K；这是 in-database transductive evaluation，不是 held-out benchmark。
+
+当前 fixed128 配置：`config/evaluation_triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_fixed128.yaml`。门控规则：若其 EM 或 F1 任一低于同题 non-thinking 的 EM 82.81、F1 84.94，或出现 terminal failure，则默认 profile 回退至 non-thinking v16.4。
 
 本轮没有 GRPO、LoRA、backward、optimizer step 或权重更新。
