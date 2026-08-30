@@ -69,20 +69,22 @@ qa_embedding_retrieval:
   development_sample_count: 64
   paraphrase_materialization_path: "data/hotpotqa_full_dataset_fact_memory_v1/fact_provenance_sidecar.jsonl"
   paraphrase_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/materialization_manifest.json"
-  index_dir: "data/hotpotqa_full_dataset_fact_memory_v1/index_topk3"
+  index_dir: "data/hotpotqa_full_dataset_fact_memory_v1/index_topk2"
   embedding_model: "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5"
   embedding_model_id: "BAAI/bge-base-en-v1.5"
   embedding_device: "cpu"
   normalize_embeddings: true
   similarity: "cosine"
   # Frozen only after architecture-development source IDs compare k={1,2,3,5}.
-  search_top_k: 3
+  search_top_k: 2
   profile_candidate_top_k: [1, 2, 3, 5]
   max_turns_per_agent_call: 7
   max_tool_calls_per_agent_call: 6
   max_action_tokens: 4096
   tool_timeout_seconds: 30.0
   allow_query_rewriting: true
+  semantic_query_rewrite_required: true
+  raw_question_embedding_query_forbidden: true
   web_search_enabled: false
 
 storage:
@@ -96,7 +98,7 @@ storage:
   wrong_demos_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/wrong_demos.jsonl"
   error_demos_path: "reports/hotpotqa_round01_full_dataset_fact_memory_v21/error_demos.jsonl"
   retrieval_profile_selection_path: "data/hotpotqa_full_dataset_fact_memory_v1/top_k_selection.json"
-  retrieval_index_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/index_topk3/manifest.json"
+  retrieval_index_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/index_topk2/manifest.json"
   retrieval_index_smoke_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/fact_memory_index_smoke_receipt.json"
   paraphrase_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/materialization_manifest.json"
   manifest_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v21/run_manifest.json"

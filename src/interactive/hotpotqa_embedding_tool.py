@@ -73,6 +73,10 @@ def _is_memory_tool_id(tool_id: str) -> bool:
     return tool_id in {HOTPOTQA_QA_MEMORY_TOOL_ID, HOTPOTQA_FACT_MEMORY_TOOL_ID}
 
 
+def _is_fact_memory_tool_id(tool_id: str) -> bool:
+    return tool_id == HOTPOTQA_FACT_MEMORY_TOOL_ID
+
+
 def _normalized_retrieval_query(query: str) -> str:
     """Canonicalize only for duplicate-request admission, not retrieval.
 
@@ -949,6 +953,13 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             + json.dumps(query_scope, ensure_ascii=False)
             + ". Form search queries only from this question scope; the public "
             "passages remain task evidence and are not a static retrieval payload. "
+            + (
+                "Semantically rewrite the question before search. The normalized "
+                "raw question is not an admissible embedding query. Preserve its "
+                "entities, relation, constraints, and answer slot. "
+                if _is_fact_memory_tool_id(tool_id)
+                else ""
+            )
             + "\nHotpotQA retrieval protocol: search arguments must be exactly "
             + json.dumps(
                 {"query": "focused evidence query", "k": frozen_k},
@@ -991,6 +1002,13 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             query = arguments.get("query")
             if isinstance(query, str):
                 normalized = _normalized_retrieval_query(query)
+                if (
+                    _is_fact_memory_tool_id(self._active_retrieval_tool_id())
+                    and self._retrieval_query_scope is not None
+                    and normalized
+                    == _normalized_retrieval_query(self._retrieval_query_scope)
+                ):
+                    return "hotpotqa_raw_question_embedding_query_forbidden"
                 prior = {
                     _normalized_retrieval_query(value)
                     for value in state.search_queries

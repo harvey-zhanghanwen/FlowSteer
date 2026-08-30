@@ -238,6 +238,15 @@ def test_director_has_no_tool_or_fact_payload_and_worker_receipts_route_by_relat
             ),
             _action(
                 "tool",
+                name="search",
+                arguments={
+                    "query": "Identify the person who authored the work.",
+                    "k": 1,
+                },
+                resource_id=HOTPOTQA_FACT_MEMORY_TOOL_ID,
+            ),
+            _action(
+                "tool",
                 name="read",
                 arguments={"memory_id": "fact-1"},
                 resource_id=HOTPOTQA_FACT_MEMORY_TOOL_ID,
@@ -264,7 +273,7 @@ def test_director_has_no_tool_or_fact_payload_and_worker_receipts_route_by_relat
         gateway=gateway,
         tool_registry=tool_registry,
         retrieval_query_scope=question_scope,
-        max_turns=3,
+        max_turns=4,
         max_tool_calls=2,
     )
     runtime = AgentRuntime(
@@ -343,11 +352,15 @@ def test_director_has_no_tool_or_fact_payload_and_worker_receipts_route_by_relat
         "search",
         "read",
     ]
+    assert index.search_calls == [
+        ("Identify the person who authored the work.", 1)
+    ]
     assert all(
         receipt["tool_id"] == HOTPOTQA_FACT_MEMORY_TOOL_ID
         for receipt in worker_receipts
     )
-    assert [request.agent.id for request in gateway.requests[:3]] == [
+    assert [request.agent.id for request in gateway.requests[:4]] == [
+        "worker",
         "worker",
         "worker",
         "worker",
@@ -360,4 +373,3 @@ def test_director_has_no_tool_or_fact_payload_and_worker_receipts_route_by_relat
     assert routed.target_agent_id == "output"
     assert len(routed.tool_receipts) == 2
     assert env.finish_admissibility()["admissible"] is True
-

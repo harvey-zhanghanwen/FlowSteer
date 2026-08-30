@@ -105,6 +105,24 @@ def _first_public_question(path: Path) -> tuple[str, str]:
     raise ValueError(f"{path}: no development task is available")
 
 
+def _semantic_query_rewrite(path: Path, *, task_id: str) -> str:
+    with path.expanduser().resolve().open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                value = _mapping(json.loads(line), "fact provenance")
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{path}:{line_number}: invalid provenance") from exc
+            if value.get("source_train_task_id") != task_id:
+                continue
+            rewrite = value.get("paraphrase_question")
+            if not isinstance(rewrite, str) or not rewrite.strip():
+                raise ValueError("fact provenance has no semantic query rewrite")
+            return rewrite.strip()
+    raise ValueError("fact provenance has no row for the development task")
+
+
 def _action(
     kind: str,
     *,
@@ -195,9 +213,15 @@ async def smoke(config_path: Path) -> Mapping[str, object]:
 
     frozen_top_k = int(section["search_top_k"])
     index_dir = _resolve(root, section["index_dir"])
-    task_id, query = _first_public_question(
+    task_id, raw_query = _first_public_question(
         _resolve(root, section["development_tasks"])
     )
+    query = _semantic_query_rewrite(
+        _resolve(root, section["paraphrase_materialization_path"]),
+        task_id=task_id,
+    )
+    if " ".join(query.split()).casefold() == " ".join(raw_query.split()).casefold():
+        raise ValueError("semantic query rewrite equals the raw development question")
     index = HotpotQAFullDatasetFactMemoryIndex.open(
         index_dir,
         embedding_model_path=str(section["embedding_model"]),
@@ -256,7 +280,7 @@ async def smoke(config_path: Path) -> Mapping[str, object]:
     adapter = HotpotQAEmbeddingReactExecutionAdapter(
         gateway=gateway,
         tool_registry=registry,
-        retrieval_query_scope=query,
+        retrieval_query_scope=raw_query,
         max_turns=max(len(actions), int(section.get("max_turns_per_agent_call", 7))),
         max_tool_calls=max(
             len(ranked_memory_ids) + 1,

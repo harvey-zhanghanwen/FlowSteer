@@ -84,6 +84,8 @@ qa_embedding_retrieval:
   max_action_tokens: 4096
   tool_timeout_seconds: 30.0
   allow_query_rewriting: true
+  semantic_query_rewrite_required: true
+  raw_question_embedding_query_forbidden: true
   web_search_enabled: false
 
 storage:

@@ -93,7 +93,7 @@ class _FakeIndex:
 
     async def search(self, query: str, k: int):
         self.queries.append((query, k))
-        match = re.fullmatch(r"Development question (\d+)\?", query)
+        match = re.fullmatch(r"Rewritten development query (\d+)\?", query)
         assert match is not None
         index = int(match.group(1))
         relevant_memory_id = f"hotpotqa-fact-{index:06d}"
@@ -139,6 +139,20 @@ class HotpotQAFullDatasetFactMemoryTopKSelectorTests(unittest.TestCase):
                 for index in range(128)
             }
         )
+        rewritten_query_by_source = {
+            f"hotpotqa:train-{index:04d}": (
+                f"Rewritten development query {index}?"
+            )
+            for index in range(64)
+        }
+        rewritten_query_by_source.update(
+            {
+                f"hotpotqa:validation-{index:04d}": (
+                    f"Unused validation rewrite {index}?"
+                )
+                for index in range(128)
+            }
+        )
         fake_index = _FakeIndex(memory_to_source)
         return (
             development_path,
@@ -147,6 +161,7 @@ class HotpotQAFullDatasetFactMemoryTopKSelectorTests(unittest.TestCase):
             index_dir,
             output_path,
             memory_to_source,
+            rewritten_query_by_source,
             fake_index,
         )
 
@@ -159,13 +174,14 @@ class HotpotQAFullDatasetFactMemoryTopKSelectorTests(unittest.TestCase):
                 index_dir,
                 output_path,
                 memory_to_source,
+                rewritten_query_by_source,
                 fake_index,
             ) = self._fixture(Path(temporary))
             with (
                 patch.object(
                     _SELECTOR,
                     "_load_provenance_join",
-                    return_value=memory_to_source,
+                    return_value=(memory_to_source, rewritten_query_by_source),
                 ),
                 patch.object(
                     _SELECTOR,
@@ -206,8 +222,14 @@ class HotpotQAFullDatasetFactMemoryTopKSelectorTests(unittest.TestCase):
             )
             self.assertEqual(64, len(fake_index.queries))
             self.assertTrue(all(k == 5 for _, k in fake_index.queries))
-            self.assertEqual("Development question 0?", fake_index.queries[0][0])
-            self.assertEqual("Development question 63?", fake_index.queries[-1][0])
+            self.assertEqual(
+                "Rewritten development query 0?", fake_index.queries[0][0]
+            )
+            self.assertEqual(
+                "Rewritten development query 63?", fake_index.queries[-1][0]
+            )
+            self.assertEqual(0, receipt["raw_question_query_count"])
+            self.assertEqual(64, receipt["semantic_query_rewrite_count"])
             encoded = json.dumps(receipt)
             self.assertNotIn("Development question 64", encoded)
             self.assertNotIn("private-validation-answer", encoded)
@@ -222,6 +244,7 @@ class HotpotQAFullDatasetFactMemoryTopKSelectorTests(unittest.TestCase):
                 provenance_path,
                 index_dir,
                 output_path,
+                _,
                 _,
                 _,
             ) = self._fixture(Path(temporary))
@@ -266,13 +289,20 @@ class HotpotQAFullDatasetFactMemoryTopKSelectorTests(unittest.TestCase):
                 ],
             )
             with patch.object(_SELECTOR, "FULL_DATASET_SOURCE_COUNT", 2):
-                mapping = _SELECTOR._load_provenance_join(path)
+                mapping, rewritten = _SELECTOR._load_provenance_join(path)
             self.assertEqual(
                 {
                     "hotpotqa-fact-000000": "hotpotqa:source-a",
                     "hotpotqa-fact-000001": "hotpotqa:source-b",
                 },
                 mapping,
+            )
+            self.assertEqual(
+                {
+                    "hotpotqa:source-a": "private rewritten question",
+                    "hotpotqa:source-b": "another private rewrite",
+                },
+                rewritten,
             )
             encoded = json.dumps(mapping)
             self.assertNotIn("private rewritten question", encoded)

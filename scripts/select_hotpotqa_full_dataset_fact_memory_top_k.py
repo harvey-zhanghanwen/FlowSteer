@@ -194,13 +194,16 @@ def _load_validation_base_task_ids(path: str | Path) -> frozenset[str]:
     return frozenset(base_task_ids)
 
 
-def _load_provenance_join(path: str | Path) -> dict[str, str]:
-    """Join deterministic memory IDs to source IDs without reading Q-A fields."""
+def _load_provenance_join(
+    path: str | Path,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Load source identity and its mandatory semantic query rewrite."""
 
     source_path = Path(path).expanduser().resolve()
     if not source_path.is_file():
         raise FileNotFoundError("HotpotQA fact-memory provenance is unavailable")
     memory_to_source: dict[str, str] = {}
+    rewritten_query_by_source: dict[str, str] = {}
     source_ids: set[str] = set()
     with source_path.open(encoding="utf-8") as handle:
         for index, line in enumerate(handle):
@@ -226,13 +229,17 @@ def _load_provenance_join(path: str | Path) -> dict[str, str]:
                 )
             memory_id = f"hotpotqa-fact-{len(memory_to_source):06d}"
             memory_to_source[memory_id] = source_task_id
+            rewritten_query_by_source[source_task_id] = _required_text(
+                row.get("paraphrase_question"),
+                field_name="provenance.paraphrase_question",
+            )
             source_ids.add(source_task_id)
     if len(memory_to_source) != FULL_DATASET_SOURCE_COUNT:
         raise ValueError(
             f"expected {FULL_DATASET_SOURCE_COUNT} provenance rows, "
             f"found {len(memory_to_source)}"
         )
-    return memory_to_source
+    return memory_to_source, rewritten_query_by_source
 
 
 def _load_index_memory_ids(path: Path, *, expected_count: int) -> frozenset[str]:
@@ -289,7 +296,9 @@ async def select_hotpotqa_full_dataset_fact_memory_top_k(
             "HotpotQA development and validation base_task_id values overlap: "
             + ", ".join(overlap[:8])
         )
-    memory_to_source = _load_provenance_join(provenance_path)
+    memory_to_source, rewritten_query_by_source = _load_provenance_join(
+        provenance_path
+    )
 
     index_root = Path(index_dir).expanduser().resolve()
     index = HotpotQAFullDatasetFactMemoryIndex.open(index_root)
@@ -319,11 +328,26 @@ async def select_hotpotqa_full_dataset_fact_memory_top_k(
             "fact-memory provenance has no development source for: "
             + ", ".join(missing_development[:8])
         )
+    missing_rewrites = sorted(
+        development_base_ids.difference(rewritten_query_by_source)
+    )
+    if missing_rewrites:
+        raise ValueError(
+            "fact-memory provenance has no semantic query rewrite for: "
+            + ", ".join(missing_rewrites[:8])
+        )
 
     reciprocal_rank_sums = {candidate: 0.0 for candidate in CANDIDATE_TOP_K}
     hit_counts = {candidate: 0 for candidate in CANDIDATE_TOP_K}
     for task in development_tasks:
-        hits = await index.search(task.question, maximum)
+        rewritten_query = rewritten_query_by_source[task.base_task_id]
+        if " ".join(rewritten_query.split()).casefold() == (
+            " ".join(task.question.split()).casefold()
+        ):
+            raise ValueError(
+                "semantic query rewrite is identical to the raw development question"
+            )
+        hits = await index.search(rewritten_query, maximum)
         first_relevant_rank: int | None = None
         for hit in hits:
             if memory_to_source[hit.memory_id] == task.base_task_id:
@@ -373,7 +397,9 @@ async def select_hotpotqa_full_dataset_fact_memory_top_k(
         "validation_answer_or_alias_consulted": False,
         "validation_supporting_facts_consulted": False,
         "validation_evaluator_payload_consulted": False,
-        "provenance_usage": "offline_memory_id_to_source_id_join_only",
+        "provenance_usage": (
+            "offline_memory_id_to_source_id_and_semantic_query_rewrite_join"
+        ),
         "provenance_record_count": len(memory_to_source),
         "provenance_written_to_index": False,
         "provenance_exposed_to_tool": False,
@@ -384,7 +410,9 @@ async def select_hotpotqa_full_dataset_fact_memory_top_k(
         "embedding_dimension": manifest.embedding_dimension,
         "normalize_embeddings": manifest.normalized,
         "similarity": manifest.similarity,
-        "query_encoding": "question_only",
+        "query_encoding": "semantic_preserving_paraphrase_question_only",
+        "raw_question_query_count": 0,
+        "semantic_query_rewrite_count": DEVELOPMENT_COUNT,
         "fact_embedding_input_field": manifest.indexed_text_field,
         "document_format": manifest.document_format,
         "contains_raw_questions": manifest.contains_raw_questions,

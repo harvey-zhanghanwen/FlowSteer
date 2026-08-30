@@ -49,7 +49,7 @@ class _Manifest:
     embedding_dimension: int = 3
     normalized: bool = True
     similarity: str = "cosine"
-    frozen_top_k: int = 3
+    frozen_top_k: int = 2
     source_record_count: int = 97_852
     source_train_count: int = 90_447
     source_validation_count: int = 7_405
@@ -90,10 +90,10 @@ class _Index:
 
     def search(self, query: str, k: int) -> tuple[_Hit, ...]:
         del query
-        assert k == 3
+        assert k == 2
         return tuple(
             _Hit(f"m{rank}", f"Declarative fact {rank}.", 1.0 - rank / 10.0, rank)
-            for rank in range(1, 4)
+            for rank in range(1, 3)
         )
 
     def read(self, memory_id: str) -> _Fact:
@@ -157,6 +157,8 @@ class HotpotQARound01FullDatasetFactMemoryV21ProfileTests(unittest.TestCase):
         self.assertEqual("fact_text", retrieval["indexed_text_field"])
         self.assertFalse(retrieval["official_heldout_eligible"])
         self.assertFalse(retrieval["web_search_enabled"])
+        self.assertTrue(retrieval["semantic_query_rewrite_required"])
+        self.assertTrue(retrieval["raw_question_embedding_query_forbidden"])
         self.assertNotIn("allowed_tools", self.candidate["director"])
         self.assertEqual("control_plane", graph["director_feedback_mode"])
         self.assertEqual(HOTPOTQA_FACT_MEMORY_TOOL_ID, graph["required_evidence_tool_id"])
@@ -242,8 +244,8 @@ class HotpotQARound01FullDatasetFactMemoryV21ProfileTests(unittest.TestCase):
         retrieval = self.candidate["qa_embedding_retrieval"]
         _RUNNER._validate_full_dataset_top_k_freeze(
             retrieval,
-            {"frozen_top_k": 3},
-            {"selected_top_k": 3},
+            {"frozen_top_k": 2},
+            {"selected_top_k": 2},
         )
         with self.assertRaisesRegex(
             _RUNNER.HotpotRoundError,
@@ -251,7 +253,7 @@ class HotpotQARound01FullDatasetFactMemoryV21ProfileTests(unittest.TestCase):
         ):
             _RUNNER._validate_full_dataset_top_k_freeze(
                 retrieval,
-                {"frozen_top_k": 3},
+                {"frozen_top_k": 2},
                 {"selected_top_k": 5},
             )
 
@@ -265,9 +267,9 @@ class HotpotQARound01FullDatasetFactMemoryV21ProfileTests(unittest.TestCase):
                 "retrieval_index_smoke": root / "smoke.json",
                 "paraphrase_manifest": root / "materialization.json",
             }
-            index_manifest = {"index_id": "fact-index-final", "frozen_top_k": 3}
+            index_manifest = {"index_id": "fact-index-final", "frozen_top_k": 2}
             paths["retrieval_profile_selection"].write_text(
-                json.dumps({"selected_top_k": 3}), encoding="utf-8"
+                json.dumps({"selected_top_k": 2}), encoding="utf-8"
             )
             paths["retrieval_index_manifest"].write_text(
                 json.dumps(index_manifest), encoding="utf-8"
@@ -381,7 +383,7 @@ class HotpotQARound01FullDatasetFactMemoryV21ProfileTests(unittest.TestCase):
         search_result, search_receipt = asyncio.run(
             registry.ainvoke_with_receipt(
                 HOTPOTQA_FACT_MEMORY_TOOL_ID,
-                ToolRequest("search", {"query": "Who authored the work", "k": 3}),
+                ToolRequest("search", {"query": "Who authored the work", "k": 2}),
             )
         )
         self.assertIsNone(search_receipt.error_type)

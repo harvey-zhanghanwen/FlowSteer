@@ -122,6 +122,18 @@ def _fixture(root: Path) -> Path:
         + "\n",
         encoding="utf-8",
     )
+    provenance = data_dir / "fact_provenance.jsonl"
+    provenance.write_text(
+        json.dumps(
+            {
+                "source_train_task_id": "hotpotqa:smoke-001",
+                "paraphrase_question": "Identify the person who authored the work.",
+                "fact_statement": "Ada Lovelace authored the work.",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     config = config_dir / "evaluation.yaml"
     config.write_text(
         yaml.safe_dump(
@@ -135,6 +147,7 @@ def _fixture(root: Path) -> Path:
                     "search_top_k": 2,
                     "index_dir": str(data_dir / "index"),
                     "development_tasks": str(tasks),
+                    "paraphrase_materialization_path": str(provenance),
                     "embedding_model": "fixture",
                     "embedding_device": "cpu",
                     "tool_timeout_seconds": 5.0,
@@ -174,9 +187,9 @@ class HotpotQAFullDatasetFactMemoryRetrievalSmokeTests(unittest.TestCase):
         self.assertFalse(value["web_search_used"])
         self.assertEqual(
             [
-                ("Who authored the work?", 2),
-                ("Who authored the work?", 2),
-                ("Who authored the work?", 2),
+                ("Identify the person who authored the work.", 2),
+                ("Identify the person who authored the work.", 2),
+                ("Identify the person who authored the work.", 2),
             ],
             index.search_calls,
         )
