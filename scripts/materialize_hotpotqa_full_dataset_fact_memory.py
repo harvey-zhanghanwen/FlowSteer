@@ -930,8 +930,24 @@ async def _materialize_one(
                             )
                             and terminal_punctuation_repair is None
                         )
+                        clause_source_tokens = (
+                            _clause_replacement_source_tokens(source)
+                            if clause_synonym_repair
+                            else ()
+                        )
+                        if clause_synonym_repair and not clause_source_tokens:
+                            clause_synonym_repair = False
+                        public_context_eligible = (
+                            binding_mode == "answer_slot_binding"
+                            or (
+                                binding_mode == "binary_polarity_binding"
+                                and _FINITE_CLAUSE_VERB.search(source.question)
+                                is None
+                            )
+                        )
                         public_context_reconstruction = (
                             bool(selected_public_context)
+                            and public_context_eligible
                             and fact_candidate_count >= 6
                             and terminal_punctuation_repair is None
                         )
@@ -990,13 +1006,6 @@ async def _materialize_one(
                             }
                             fact_repair_temperature = 0.0
                         elif clause_synonym_repair:
-                            clause_source_tokens = (
-                                _clause_replacement_source_tokens(source)
-                            )
-                            if not clause_source_tokens:
-                                raise ValueError(
-                                    "clause repair has no eligible synonym token"
-                                )
                             required_clause_token = clause_source_tokens[
                                 clause_repair_count % len(clause_source_tokens)
                             ]
@@ -1057,7 +1066,7 @@ async def _materialize_one(
                                 and fact_repair_strategy
                                 != "semantic_surface_reconstruction"
                                 else (
-                                    0.35
+                                    0.5
                                     if fact_repair_strategy
                                     == "semantic_surface_reconstruction"
                                     else 0.1
@@ -1082,6 +1091,11 @@ async def _materialize_one(
                                         "preserves the source entity or canonical "
                                         "surface. Do not mention passages, context, "
                                         "questions, answers, datasets, or provenance. "
+                                        "Do not introduce any name, number, or date "
+                                        "that is absent from original_question and "
+                                        "canonical_training_answer; choose a supported "
+                                        "context proposition that stays within those "
+                                        "immutable fields. "
                                         if fact_repair_strategy
                                         == "public_context_fact_reconstruction"
                                         else (

@@ -420,7 +420,7 @@ def _leading_will_is_source_entity(source_question: str, fact: str) -> bool:
     )
 
 
-def _leading_anaphor_is_source_entity(
+def _leading_source_named_entity(
     source_question: str,
     fact: str,
 ) -> bool:
@@ -434,9 +434,7 @@ def _leading_anaphor_is_source_entity(
     """
 
     tokens = _lexical_tokens(fact)
-    if len(tokens) < 3 or tokens[0].casefold() not in {
-        "it", "this", "that", "these", "those"
-    }:
+    if len(tokens) < 3:
         return False
     for length in range(min(6, len(tokens) - 1), 1, -1):
         candidate = " ".join(tokens[:length])
@@ -451,6 +449,21 @@ def _leading_anaphor_is_source_entity(
         ):
             return True
     return False
+
+
+def _source_question_is_bare_canonical_surface(
+    source_question: str,
+    canonical_answer: str,
+) -> bool:
+    """Identify upstream rows whose 'question' is only the answer entity."""
+
+    question_tokens = tuple(
+        token.casefold() for token in _lexical_tokens(source_question)
+    )
+    answer_tokens = tuple(
+        token.casefold() for token in _lexical_tokens(canonical_answer)
+    )
+    return bool(question_tokens) and question_tokens == answer_tokens
 
 
 def canonical_answer_is_declarative_clause(
@@ -602,12 +615,16 @@ def validate_hotpotqa_fact_statement(
                 source.question,
                 structural_fact,
             )
+            and not _leading_source_named_entity(
+                source.question,
+                structural_fact,
+            )
         )
     ):
         raise ValueError("fact_statement must be declarative")
     if (
         _FACT_ANAPHORIC_SUBJECT.match(structural_fact)
-        and not _leading_anaphor_is_source_entity(
+        and not _leading_source_named_entity(
             source.question,
             structural_fact,
         )
@@ -630,7 +647,13 @@ def validate_hotpotqa_fact_statement(
     # Raw source questions are provenance-only.  A yes/no question can look
     # declarative after changing only its terminal punctuation, so use the
     # same ordered lexical boundary as the canonical-answer shortcut gate.
-    if _contains_contiguous_lexical_surface(fact, source.question):
+    if (
+        _contains_contiguous_lexical_surface(fact, source.question)
+        and not _source_question_is_bare_canonical_surface(
+            source.question,
+            canonical,
+        )
+    ):
         raise ValueError(
             "fact_statement contains the complete source question lexical surface"
         )

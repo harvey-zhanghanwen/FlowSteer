@@ -709,6 +709,30 @@ def test_source_mentioned_anaphor_led_title_is_self_contained(
     assert fact_index.validate_hotpotqa_fact_statement(source, fact) == fact
 
 
+def test_source_mentioned_name_led_entity_is_not_an_instruction() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:name-title",
+        base_task_id="hotpotqa:name-title",
+        cycled=False,
+        question="Which American rock band was called Name Taken?",
+        canonical_answer="Name Taken",
+    )
+    fact = "Name Taken was an American rock band."
+    assert fact_index.validate_hotpotqa_fact_statement(source, fact) == fact
+
+
+def test_bare_entity_source_question_allows_entity_in_new_fact_relation() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:bare-entity-source",
+        base_task_id="hotpotqa:bare-entity-source",
+        cycled=False,
+        question="Juan Manuel Mata García",
+        canonical_answer="Juan Manuel Mata García",
+    )
+    fact = "Juan Manuel Mata García is a Spanish professional footballer."
+    assert fact_index.validate_hotpotqa_fact_statement(source, fact) == fact
+
+
 def test_title_case_internal_is_where_is_not_an_unbound_answer_slot() -> None:
     source = HotpotQATrainQASource(
         source_train_task_id="hotpotqa:title-is-where",
