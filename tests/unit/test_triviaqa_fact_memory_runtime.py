@@ -541,7 +541,7 @@ class TriviaQAFactMemoryRuntimeTests(unittest.IsolatedAsyncioTestCase):
             {
                 "question_scope": question,
                 "answer_slot": {
-                    "answer_type": "entity",
+                    "answer_type": "short_answer",
                     "answer_cardinality": "single",
                     "qualifiers": [],
                     "proposition_index": 0,
@@ -588,6 +588,138 @@ class TriviaQAFactMemoryRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 require_answer_binding=True,
                 original_question=question,
                 qa_memory_relevant_memory_ids=["fact-neary"],
+            )
+        )
+
+    def test_fact_only_binding_normalizes_unique_slot_and_relation_surface(self) -> None:
+        question = "The VS-300 was a type of what?"
+        fact_text = "The classification of the VS-300 is Helicopter."
+        receipt = json.loads(json.dumps(_fact_receipts()[1]))
+        receipt["request"]["arguments"]["memory_id"] = "fact-vs300"
+        receipt["result"]["value"]["memory_id"] = "fact-vs300"
+        receipt["result"]["value"]["memory"] = {
+            "memory_id": "fact-vs300",
+            "fact_text": fact_text,
+        }
+        read_text = AgentWorkflowEnv._successful_read_text(
+            receipt,
+            TRIVIAQA_QA_MEMORY_TOOL_ID,
+        )
+        self.assertIsNotNone(read_text)
+        assert read_text is not None
+        artifact = json.dumps(
+            {
+                "question_scope": question,
+                "answer_slot": {
+                    "answer_type": "short_answer",
+                    "answer_cardinality": "single",
+                    "qualifiers": [],
+                    "proposition_index": 0,
+                    "answer_field": "subject",
+                },
+                "evidence_propositions": [
+                    {
+                        "subject": "The VS-300",
+                        "relation": "is a type of",
+                        "object_or_attribute_value": "Helicopter",
+                        "qualifiers": [],
+                        "evidence_span": fact_text,
+                    }
+                ],
+                "multi_hop_chain": [fact_text],
+                "candidate_answer": "Helicopter",
+                "evidence": [fact_text],
+            }
+        )
+        candidate, issue = AgentWorkflowEnv._reasoner_candidate(
+            artifact,
+            original_question=question,
+            minimum_evidence_propositions=1,
+            minimum_reasoning_steps=1,
+            allow_fact_memory_binding=True,
+        )
+        self.assertIsNone(issue)
+        self.assertEqual("Helicopter", candidate)
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact,
+                [read_text],
+                require_answer_binding=True,
+                original_question=question,
+                qa_memory_relevant_memory_ids=["fact-vs300"],
+            )
+        )
+
+    def test_fact_only_binding_admits_requested_numeric_span(self) -> None:
+        question = (
+            "When did the founder of Jehovah's Witnesses say the world would end?"
+        )
+        fact_text = (
+            "The founder of Jehovah's Witnesses stated that the world would "
+            "come to an end in 1914."
+        )
+        receipt = json.loads(json.dumps(_fact_receipts()[1]))
+        receipt["request"]["arguments"]["memory_id"] = "fact-1914"
+        receipt["result"]["value"]["memory_id"] = "fact-1914"
+        receipt["result"]["value"]["memory"] = {
+            "memory_id": "fact-1914",
+            "fact_text": fact_text,
+        }
+        read_text = AgentWorkflowEnv._successful_read_text(
+            receipt,
+            TRIVIAQA_QA_MEMORY_TOOL_ID,
+        )
+        self.assertIsNotNone(read_text)
+        assert read_text is not None
+        artifact = json.dumps(
+            {
+                "question_scope": question,
+                "answer_slot": {
+                    "answer_type": "date",
+                    "answer_cardinality": "single",
+                    "qualifiers": [],
+                    "proposition_index": 0,
+                    "answer_field": "object_or_attribute_value",
+                },
+                "evidence_propositions": [
+                    {
+                        "subject": "The founder of Jehovah's Witnesses",
+                        "relation": "stated",
+                        "object_or_attribute_value": (
+                            "the world would come to an end in 1914"
+                        ),
+                        "qualifiers": [],
+                        "evidence_span": fact_text,
+                    }
+                ],
+                "multi_hop_chain": [fact_text],
+                "candidate_answer": "1914",
+                "evidence": [fact_text],
+            }
+        )
+        _, strict_issue = AgentWorkflowEnv._reasoner_candidate(
+            artifact,
+            original_question=question,
+            minimum_evidence_propositions=1,
+            minimum_reasoning_steps=1,
+        )
+        self.assertIn("must copy the proposition argument", strict_issue or "")
+        candidate, issue = AgentWorkflowEnv._reasoner_candidate(
+            artifact,
+            original_question=question,
+            minimum_evidence_propositions=1,
+            minimum_reasoning_steps=1,
+            allow_fact_memory_binding=True,
+        )
+        self.assertIsNone(issue)
+        self.assertEqual("1914", candidate)
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact,
+                [read_text],
+                require_answer_binding=True,
+                original_question=question,
+                qa_memory_relevant_memory_ids=["fact-1914"],
             )
         )
 

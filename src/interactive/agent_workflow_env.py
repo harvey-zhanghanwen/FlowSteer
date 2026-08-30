@@ -7238,6 +7238,7 @@ class AgentWorkflowEnv:
         minimum_reasoning_steps: int = 2,
         preserve_question_derived_answer_field: bool = False,
         exact_source_canonical_answer: Optional[str] = None,
+        allow_fact_memory_binding: bool = False,
     ) -> tuple[Optional[str], Optional[str]]:
         if (
             isinstance(minimum_evidence_propositions, bool)
@@ -7542,6 +7543,16 @@ class AgentWorkflowEnv:
             source_value=selected[answer_field],
             candidate_answer=candidate,
         )
+        fact_memory_span_binding = bool(
+            allow_fact_memory_binding
+            and expected_answer_type in {"date", "number"}
+            and re.fullmatch(r"[\d\s.,:/-]+", candidate)
+            and isinstance(selected.get(answer_field), str)
+            and re.search(
+                rf"(?<!\w){re.escape(candidate)}(?!\w)",
+                selected[answer_field],
+            )
+        )
         alternate_temporal_fields = tuple(
             field_name
             for field_name in ("subject", "object_or_attribute_value")
@@ -7586,7 +7597,11 @@ class AgentWorkflowEnv:
                 "evidence_span unless it is a verified year-to-decade temporal "
                 "normalization requested by the question"
             )
-        if candidate != selected[answer_field] and not temporal_normalization:
+        if (
+            candidate != selected[answer_field]
+            and not temporal_normalization
+            and not fact_memory_span_binding
+        ):
             if exact_source_argument_binding:
                 return candidate, None
             matching_fields = tuple(
@@ -7595,7 +7610,13 @@ class AgentWorkflowEnv:
                 if selected.get(field_name) == candidate
             )
             if len(matching_fields) == 1:
-                if (
+                if allow_fact_memory_binding:
+                    # A fact-only read has no hidden answer/provenance fields.
+                    # When the model-authored candidate uniquely identifies one
+                    # proposition argument, resolve the local pointer used by
+                    # validation instead of discarding the grounded artifact.
+                    answer_field = matching_fields[0]
+                elif (
                     preserve_question_derived_answer_field
                     and expected_answer_field is not None
                     and not exact_source_argument_binding
@@ -7612,17 +7633,20 @@ class AgentWorkflowEnv:
                         "subject and object_or_attribute_value as distinct "
                         "receipt-grounded arguments"
                     )
+                else:
+                    return None, (
+                        "Reasoner answer_slot.answer_field selects "
+                        f"{answer_field!r}, but candidate_answer exactly matches the "
+                        f"selected proposition field {matching_fields[0]!r}; set "
+                        "answer_field to the proposition field containing "
+                        "candidate_answer"
+                    )
+            else:
                 return None, (
-                    "Reasoner answer_slot.answer_field selects "
-                    f"{answer_field!r}, but candidate_answer exactly matches the "
-                    f"selected proposition field {matching_fields[0]!r}; set "
-                    "answer_field to the proposition field containing "
-                    "candidate_answer"
+                    "Reasoner candidate_answer must copy the proposition argument "
+                    "identified by answer_slot.proposition_index and answer_field "
+                    "exactly"
                 )
-            return None, (
-                "Reasoner candidate_answer must copy the proposition argument "
-                "identified by answer_slot.proposition_index and answer_field exactly"
-            )
         if who_question:
             possessor_surface_issue = cls._possessor_surface_issue(
                 candidate,
@@ -7654,6 +7678,16 @@ class AgentWorkflowEnv:
             == _TRIVIAQA_QA_MEMORY_TOOL_ID
             else None
         )
+        relevant_memory_ids = frozenset(qa_memory_relevant_memory_ids)
+        allow_fact_memory_binding = any(
+            isinstance(read_text, _ReadReceiptText)
+            and read_text.tool_id == _TRIVIAQA_QA_MEMORY_TOOL_ID
+            and read_text.record_id in relevant_memory_ids
+            and read_text.paraphrase_question is None
+            and read_text.paraphrase_answer_statement is None
+            and read_text.canonical_answer is None
+            for read_text in read_evidence_texts
+        )
         return self._reasoner_candidate(
             artifact,
             original_question=hotpotqa_question_scope(self._problem),
@@ -7663,6 +7697,7 @@ class AgentWorkflowEnv:
                 self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
             ),
             exact_source_canonical_answer=exact_source_canonical_answer,
+            allow_fact_memory_binding=allow_fact_memory_binding,
         )
 
     @staticmethod
@@ -8183,10 +8218,32 @@ class AgentWorkflowEnv:
             assert isinstance(object_value, str)
             if not isinstance(candidate_answer, str) or not candidate_answer.strip():
                 return False
-            if answer_field in {"subject", "object_or_attribute_value"}:
-                if proposition.get(answer_field) != candidate_answer:
+            expected_answer_type = (
+                hotpotqa_answer_type_constraint(original_question)
+                if isinstance(original_question, str) and original_question.strip()
+                else None
+            )
+
+            def candidate_binds_argument(value: object) -> bool:
+                if not isinstance(value, str) or not value.strip():
                     return False
-            elif candidate_answer not in {subject, object_value}:
+                if value == candidate_answer:
+                    return True
+                return bool(
+                    expected_answer_type in {"date", "number"}
+                    and re.fullmatch(r"[\d\s.,:/-]+", candidate_answer)
+                    and re.search(
+                        rf"(?<!\w){re.escape(candidate_answer)}(?!\w)",
+                        value,
+                    )
+                )
+
+            if answer_field in {"subject", "object_or_attribute_value"}:
+                if not candidate_binds_argument(proposition.get(answer_field)):
+                    return False
+            elif not any(
+                candidate_binds_argument(value) for value in (subject, object_value)
+            ):
                 return False
             canonical_span = _canonical_evidence_text(evidence_span)
             if any(
@@ -8291,6 +8348,29 @@ class AgentWorkflowEnv:
                             paired_surface,
                         )
                     )
+                    or (
+                        fact_memory_provenance_valid(proposition)
+                        and isinstance(original_question, str)
+                        and _proposition_preserves_requested_relation(
+                            requested_relation=original_question,
+                            subject=(
+                                proposition["subject"]
+                                if isinstance(proposition.get("subject"), str)
+                                else ""
+                            ),
+                            predicate=relation,
+                            object_or_attribute_value=(
+                                proposition["object_or_attribute_value"]
+                                if isinstance(
+                                    proposition.get("object_or_attribute_value"),
+                                    str,
+                                )
+                                else ""
+                            ),
+                            original_question=original_question,
+                            evidence_span=evidence_span,
+                        )
+                    )
                 )
             ):
                 return (
@@ -8342,6 +8422,14 @@ class AgentWorkflowEnv:
                 f"Reasoner evidence_propositions[{proposition_index}] must be "
                 "an object"
             )
+        if fact_memory_provenance_valid(selected):
+            matching_answer_fields = tuple(
+                field_name
+                for field_name in ("subject", "object_or_attribute_value")
+                if selected.get(field_name) == candidate
+            )
+            if len(matching_answer_fields) == 1:
+                answer_field = matching_answer_fields[0]
         evidence_span = selected.get("evidence_span")
         if not isinstance(evidence_span, str):
             return (
@@ -8372,6 +8460,34 @@ class AgentWorkflowEnv:
                     and _relation_surface_matches_evidence(
                         selected_relation,
                         paired_surface,
+                    )
+                )
+                or (
+                    fact_memory_provenance_valid(
+                        selected,
+                        answer_field=(
+                            answer_field if isinstance(answer_field, str) else None
+                        ),
+                    )
+                    and isinstance(original_question, str)
+                    and _proposition_preserves_requested_relation(
+                        requested_relation=original_question,
+                        subject=(
+                            selected["subject"]
+                            if isinstance(selected.get("subject"), str)
+                            else ""
+                        ),
+                        predicate=selected_relation,
+                        object_or_attribute_value=(
+                            selected["object_or_attribute_value"]
+                            if isinstance(
+                                selected.get("object_or_attribute_value"),
+                                str,
+                            )
+                            else ""
+                        ),
+                        original_question=original_question,
+                        evidence_span=evidence_span,
                     )
                 )
             )
@@ -8696,6 +8812,10 @@ class AgentWorkflowEnv:
             selected.get(answer_field) != candidate
             and not temporal_normalization
             and not exact_source_argument_binding
+            and not fact_memory_provenance_valid(
+                selected,
+                answer_field=answer_field,
+            )
         ):
             return (
                 "Reasoner candidate_answer must copy the selected proposition "
