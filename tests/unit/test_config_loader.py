@@ -128,6 +128,24 @@ class ConfigLoaderTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             validate_agent_graph_config(mixed)
 
+        stepwise_component = load_yaml("config/training_agent_graph.yaml")
+        stepwise_component["agent_graph"]["actions"] = [
+            "add_agent",
+            "add_subgraph",
+            "modify_agent",
+            "delete_agent",
+            "set_relation",
+            "set_output",
+            "continue",
+            "finish",
+        ]
+        stepwise_component["agent_graph"]["max_agents_per_subgraph"] = 3
+        stepwise_component["environment_runtime"] = {
+            "enabled": True,
+            "stepwise_director": True,
+        }
+        validate_agent_graph_config(stepwise_component)
+
     def test_smoke_config_is_strictly_bounded(self) -> None:
         config = load_yaml("config/training_agentgraph_smoke.yaml")
         validate_agent_graph_config(config)

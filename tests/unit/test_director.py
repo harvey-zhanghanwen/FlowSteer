@@ -53,6 +53,8 @@ from src.interactive.director import (
     SCALAR_DIRECTOR_SYSTEM_PROMPT,
     STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2,
     STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2,
+    STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION,
+    STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
@@ -240,6 +242,103 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("evaluator_environment_trace", projected)
         self.assertNotIn("large-observation", projected)
         self.assertLess(len(projected), 2048)
+
+    def test_stateful_feedback_keeps_bounded_agent_artifacts_and_routing(
+        self,
+    ) -> None:
+        feedback = "accepted add_subgraph; execution_result=" + json.dumps(
+            {
+                "output_agent_id": "actor",
+                "executed_agent_ids": ["advisor", "actor"],
+                "reused_agent_ids": [],
+                "deferred_agent_ids": [],
+                "candidate_conflict": False,
+                "agent_artifacts": [
+                    {
+                        "agent_id": "advisor",
+                        "model_id": "local-model",
+                        "role_family": "",
+                        "execution_mode": "reasoning",
+                        "allowed_tools": [],
+                        "artifact_type": "text",
+                        "completion_condition": "publish one bounded artifact",
+                        "is_output_agent": False,
+                        "upstream_source_ids": [],
+                        "artifact_id": "artifact-advisor",
+                        "artifact_preview": "Compare the public candidate constraints.",
+                        "private_full_output": "not Director-visible",
+                    }
+                ],
+                "output_inbox": [
+                    {
+                        "source_agent_id": "advisor",
+                        "target_agent_id": "actor",
+                        "artifact_id": "artifact-advisor",
+                        "message_type": "artifact",
+                        "artifact_type": "text",
+                        "graph_revision": 2,
+                        "environment_revision": 1,
+                        "request_or_dependency": "compare candidates",
+                        "tool_receipt_count": 0,
+                        "tool_ids": [],
+                        "content_preview": "Compare the public candidate constraints.",
+                        "raw_output": "not duplicated into the Director prompt",
+                    }
+                ],
+                "environment_state": {
+                    "current_observation": "large-observation" * 1000,
+                },
+                "evaluator_environment_trace": ["private-trace" * 1000],
+            }
+        )
+
+        projected = _director_stateful_feedback_projection(feedback)
+        payload = json.loads(projected.split("execution_result=", 1)[1])
+
+        self.assertEqual(
+            "Compare the public candidate constraints.",
+            payload["agent_artifacts"][0]["artifact_preview"],
+        )
+        self.assertEqual(
+            "advisor",
+            payload["output_inbox"][0]["source_agent_id"],
+        )
+        self.assertEqual(
+            "actor",
+            payload["output_inbox"][0]["target_agent_id"],
+        )
+        self.assertNotIn("private_full_output", projected)
+        self.assertNotIn("raw_output", projected)
+        self.assertNotIn("evaluator_environment_trace", projected)
+        self.assertNotIn("large-observation", projected)
+
+    def test_stepwise_component_prompt_is_neutral_and_supports_subgraphs(
+        self,
+    ) -> None:
+        self.assertEqual(
+            STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT,
+            director_system_prompt_for_version(
+                STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION
+            ),
+        )
+        self.assertIn(
+            "add_subgraph adds one functional subgraph of one to three Agents",
+            STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT,
+        )
+        self.assertIn(
+            "ReAct is an execution mode, not an Agent role",
+            STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT,
+        )
+        self.assertIn(
+            "latest Action--Observation",
+            STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT,
+        )
+        self.assertIn(
+            "requires distinct artifacts or independent checks",
+            STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT,
+        )
+        for fixed_role in ("Searcher", "Reviewer", "Buyer"):
+            self.assertNotIn(fixed_role, STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT)
 
     async def test_legacy_canonical_transcript_remains_decodable(self) -> None:
         legacy = encode_director_transcript(

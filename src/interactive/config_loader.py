@@ -158,31 +158,36 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         "continue",
         "finish",
     ]
+    stepwise_component_actions = [
+        "add_agent",
+        "add_subgraph",
+        "modify_agent",
+        "delete_agent",
+        "set_relation",
+        "set_output",
+        "continue",
+        "finish",
+    ]
     action_profile = graph.get("actions")
     known_profiles = (
         legacy_actions,
         subgraph_actions,
         stepwise_legacy_actions,
         stepwise_subgraph_actions,
+        stepwise_component_actions,
     )
     if action_profile not in known_profiles:
         raise ConfigurationError(
             "AgentGraph actions must use the legacy scalar profile or the "
-            "FlowSteer-compatible add_subgraph profile, with the optional "
-            "stepwise environment continue boundary"
+            "FlowSteer-compatible add_subgraph/stepwise component profile, "
+            "with the optional stepwise environment continue boundary"
         )
-    if (
-        action_profile == subgraph_actions
-        or action_profile == stepwise_subgraph_actions
-    ):
+    if "add_subgraph" in action_profile:
         if graph.get("max_agents_per_subgraph") != 3:
             raise ConfigurationError(
                 "add_subgraph profile requires max_agents_per_subgraph=3"
             )
-    if (
-        action_profile == stepwise_legacy_actions
-        or action_profile == stepwise_subgraph_actions
-    ):
+    if "continue" in action_profile:
         environment_runtime = value.get("environment_runtime")
         if (
             not isinstance(environment_runtime, Mapping)

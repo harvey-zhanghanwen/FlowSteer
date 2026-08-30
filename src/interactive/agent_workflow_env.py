@@ -1060,6 +1060,44 @@ class AgentWorkflowEnv:
             return "stateful capability repair may modify only its execution profile"
         return None
 
+    def _stateful_candidate_admission_issue(
+        self,
+        graph: AgentGraph,
+    ) -> Optional[str]:
+        """Validate the serialized WebShop owner before committing an edit.
+
+        The Runtime already enforces exclusive ownership at execution time.
+        FlowSteer's Canvas mutation is transactional, so the same invariant
+        must be checked on the candidate graph before it becomes the current
+        revision.  This also covers owners or reciprocal relations declared
+        inside one ``ADD_SUBGRAPH`` action.
+        """
+
+        if not self._uses_atomic_stateful_execution_profile():
+            return None
+        assert self.required_tool_id is not None
+        owner_ids = tuple(
+            node.id
+            for node in graph.nodes
+            if self.required_tool_id in node.allowed_tools
+        )
+        if len(owner_ids) != 1:
+            return (
+                f"stateful Tool {self.required_tool_id!r} requires exactly one "
+                f"Agent owner; candidate graph has {len(owner_ids)}"
+            )
+        owner_id = owner_ids[0]
+        for relation in graph.relations:
+            if (
+                relation.bits.is_bidirectional
+                and owner_id in (relation.source_id, relation.target_id)
+            ):
+                return (
+                    f"stateful Tool {self.required_tool_id!r} owner "
+                    f"{owner_id!r} cannot execute inside a reciprocal Agent block"
+                )
+        return None
+
     def model_admissible_action_types(self) -> Tuple[str, ...]:
         """Project state-conditioned Canvas actions for the Flow-Director.
 
@@ -1184,10 +1222,15 @@ class AgentWorkflowEnv:
                     admitted_no_progress.append(action_type)
                 elif (
                     augmentation_admitted
-                    and action_type == AgentActionType.ADD_AGENT.value
-                    and AgentActionType.ADD_SUBGRAPH.value
-                    not in self._allowed_action_type_set
                     and can_add
+                    and (
+                        action_type == AgentActionType.ADD_SUBGRAPH.value
+                        or (
+                            action_type == AgentActionType.ADD_AGENT.value
+                            and AgentActionType.ADD_SUBGRAPH.value
+                            not in self._allowed_action_type_set
+                        )
+                    )
                 ):
                     admitted_no_progress.append(action_type)
                 elif (
@@ -3729,6 +3772,38 @@ class AgentWorkflowEnv:
                 "min_new_agents": 1,
                 "max_new_agents": remaining,
                 "existing_agent_ids": node_ids,
+                "model_ids": list(self._available_model_ids()),
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                ],
+                "optional_agent_fields": [
+                    "role_family",
+                    "allowed_tools",
+                    "execution_mode",
+                    "artifact_type",
+                    "completion_condition",
+                ],
+                "registered_execution_profiles": [
+                    {
+                        "execution_mode": execution_mode,
+                        "allowed_tools": list(allowed_tools),
+                    }
+                    for execution_mode, allowed_tools in (
+                        self.runtime.registered_execution_profiles()
+                    )
+                ],
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
                 **(
                     {
                         "semantic_protocol": self.semantic_protocol,
@@ -4672,6 +4747,15 @@ class AgentWorkflowEnv:
                 action,
                 f"edit rejected: {self._format_issues(validation)}",
                 validation.issues,
+            )
+        stateful_candidate_issue = self._stateful_candidate_admission_issue(
+            candidate
+        )
+        if stateful_candidate_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + stateful_candidate_issue,
+                feedback_code="stateful_owner_candidate_invalid",
             )
         semantic_edit_issue = self._semantic_edit_issue_for(candidate)
         if semantic_edit_issue is not None:

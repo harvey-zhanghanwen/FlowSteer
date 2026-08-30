@@ -72,6 +72,12 @@ Use only action types, targets and parameters in the current admissible_action_t
 
 Each accepted Canvas edit is executed once. continue leaves the AgentGraph unchanged and executes exactly one Action--Observation transition in the current stateful environment. After every transition, inspect the original task, latest action result, current public episode state and remaining budget before choosing the next Canvas action. Preserve the current Agent and episode when public no-progress feedback requests repair or augmentation. ReAct is an execution mode, not an Agent role. Use finish only when finish_admissibility is admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
 
+STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types, targets and parameters in the current admissible_action_types and action_target_domains, model_id values in model_catalog, and exact tool_id values in tool_catalog. add_agent adds one Agent. add_subgraph adds one functional subgraph of one to three Agents with free-text contracts and model-selected relations as one Canvas edit. When a task requires distinct artifacts or independent checks, use multiple Agents and route only the required artifacts between them. A directed relation routes the source artifact to the target; a bidirectional relation performs one bounded two-Agent exchange.
+
+Each accepted Canvas edit is executed once. continue leaves the AgentGraph unchanged and executes exactly one Action--Observation transition in the current stateful environment. After every execution, inspect the original task, latest Action--Observation, current public state, routed Agent artifacts and remaining budget before choosing the next Canvas action. ReAct is an execution mode, not an Agent role. Use finish only when finish_admissibility is admissible. Do not assume a fixed role sequence, workflow topology or unlisted Skill."""
+
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
 STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION = (
@@ -79,6 +85,9 @@ STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION = (
 )
 STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2 = (
     "agentgraph.director.minimal-neutral-scalar-stepwise.v2"
+)
+STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION = (
+    "agentgraph.director.minimal-neutral-component-stepwise.v1"
 )
 LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1 = (
     "agentgraph.director.minimal-neutral-scalar.v1"
@@ -219,6 +228,32 @@ _STATEFUL_EXECUTION_RESULT_KEYS = (
     "deferred_agent_ids",
     "candidate_conflict",
 )
+_STATEFUL_AGENT_ARTIFACT_KEYS = (
+    "agent_id",
+    "model_id",
+    "role_family",
+    "execution_mode",
+    "allowed_tools",
+    "artifact_type",
+    "completion_condition",
+    "is_output_agent",
+    "upstream_source_ids",
+    "artifact_id",
+    "artifact_preview",
+)
+_STATEFUL_OUTPUT_INBOX_KEYS = (
+    "source_agent_id",
+    "target_agent_id",
+    "artifact_id",
+    "message_type",
+    "artifact_type",
+    "graph_revision",
+    "environment_revision",
+    "request_or_dependency",
+    "tool_receipt_count",
+    "tool_ids",
+    "content_preview",
+)
 _STATEFUL_EXECUTION_ERROR_KEYS = (
     "type",
     "message",
@@ -272,6 +307,58 @@ def _stateful_recovery_feedback_projection(value: object) -> dict[str, Any]:
     return projected
 
 
+def _stateful_execution_result_projection(value: object) -> dict[str, Any]:
+    """Keep bounded public Agent artifacts and routed-message receipts.
+
+    FlowSteer's next Canvas decision is conditioned on the execution feedback
+    produced by the accepted edit.  Stateful environments already expose the
+    latest public Action--Observation through ``environment_state``; this
+    projection additionally preserves the bounded artifact previews and
+    message-routing receipts needed to compose or repair a multi-Agent graph.
+    Full model outputs, cumulative Tool traces and evaluator-only fields stay
+    in the trajectory and are not copied into the Director prompt.
+    """
+
+    if not isinstance(value, Mapping):
+        return {}
+    projected: dict[str, Any] = {
+        key: _director_neutral_state_projection(value[key])
+        for key in _STATEFUL_EXECUTION_RESULT_KEYS
+        if key in value
+    }
+    artifacts = value.get("agent_artifacts")
+    if isinstance(artifacts, Sequence) and not isinstance(
+        artifacts, (str, bytes)
+    ):
+        projected_artifacts = [
+            {
+                key: _director_neutral_state_projection(item[key])
+                for key in _STATEFUL_AGENT_ARTIFACT_KEYS
+                if key in item
+            }
+            for item in artifacts[-8:]
+            if isinstance(item, Mapping)
+        ]
+        if projected_artifacts:
+            projected["agent_artifacts"] = projected_artifacts
+    output_inbox = value.get("output_inbox")
+    if isinstance(output_inbox, Sequence) and not isinstance(
+        output_inbox, (str, bytes)
+    ):
+        projected_inbox = [
+            {
+                key: _director_neutral_state_projection(item[key])
+                for key in _STATEFUL_OUTPUT_INBOX_KEYS
+                if key in item
+            }
+            for item in output_inbox[-8:]
+            if isinstance(item, Mapping)
+        ]
+        if projected_inbox:
+            projected["output_inbox"] = projected_inbox
+    return projected
+
+
 def _director_stateful_feedback_projection(feedback: str) -> str:
     """Project one stateful execution receipt to its Supervisor diagnosis.
 
@@ -293,11 +380,7 @@ def _director_stateful_feedback_projection(feedback: str) -> str:
         if not isinstance(structured, Mapping):
             return feedback[:payload_index] + "{}"
         if marker == "execution_result=":
-            projected: dict[str, Any] = {
-                key: _director_neutral_state_projection(structured[key])
-                for key in _STATEFUL_EXECUTION_RESULT_KEYS
-                if key in structured
-            }
+            projected = _stateful_execution_result_projection(structured)
         elif marker == "execution_error=":
             projected = {
                 key: _director_neutral_state_projection(structured[key])
@@ -632,6 +715,7 @@ def scalar_director_prompt_version(value: object) -> bool:
         SCALAR_DIRECTOR_PROMPT_VERSION,
         STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION,
         STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2,
+        STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION,
     }
 
 
@@ -649,6 +733,9 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         ),
         STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2: (
             STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2
+        ),
+        STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION: (
+            STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT
         ),
         LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
@@ -717,6 +804,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
         STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT,
         STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2,
+        STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
@@ -3761,6 +3849,7 @@ class AgentGraphOrchestrator:
             LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
             QA_DIRECTOR_PROMPT_VERSION,
             STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2,
+            STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION,
         }:
             return copied
         return self._compact_qa_historical_messages(copied)
@@ -3967,6 +4056,8 @@ __all__ = [
     "STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2",
     "STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT",
     "STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2",
+    "STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION",
+    "STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT",
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15",
