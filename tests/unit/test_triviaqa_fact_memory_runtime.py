@@ -409,6 +409,188 @@ class TriviaQAFactMemoryRuntimeTests(unittest.IsolatedAsyncioTestCase):
             build_agent_messages(misrouted)[0]["content"],
         )
 
+    def test_reasoner_repairs_answer_slot_from_model_authored_fact(self) -> None:
+        base = {
+            "candidate_answer": "Ada Lovelace",
+            "answer_slot": {
+                "proposition_index": 0,
+                "answer_field": "object_or_attribute_value",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "Ada Lovelace",
+                    "relation": "wrote",
+                    "object_or_attribute_value": "the first published algorithm",
+                    "evidence_span": (
+                        "Ada Lovelace wrote the first published algorithm."
+                    ),
+                }
+            ],
+        }
+        constraints = (
+            QARetrievalReactExecutionAdapter._reasoner_repair_constraints(
+                base,
+                (
+                    "Reasoner answer_slot.answer_field selects a proposition "
+                    "argument that does not match candidate_answer exactly"
+                ),
+            )
+        )
+        self.assertEqual(0, constraints[("answer_slot", "proposition_index")])
+        self.assertEqual("subject", constraints[("answer_slot", "answer_field")])
+
+        outside = json.loads(json.dumps(base))
+        outside["candidate_answer"] = "the first published algorithm"
+        outside["answer_slot"]["proposition_index"] = 1
+        constraints = (
+            QARetrievalReactExecutionAdapter._reasoner_repair_constraints(
+                outside,
+                "Reasoner answer_slot.proposition_index is outside evidence_propositions",
+            )
+        )
+        self.assertEqual(0, constraints[("answer_slot", "proposition_index")])
+        self.assertEqual(
+            "object_or_attribute_value",
+            constraints[("answer_slot", "answer_field")],
+        )
+
+        subspan = json.loads(json.dumps(base))
+        subspan["candidate_answer"] = "1914"
+        subspan["answer_slot"]["answer_field"] = "object_or_attribute_value"
+        subspan["evidence_propositions"][0]["object_or_attribute_value"] = (
+            "the year 1914"
+        )
+        subspan["evidence_propositions"][0]["evidence_span"] = (
+            "The event began in the year 1914."
+        )
+        constraints = (
+            QARetrievalReactExecutionAdapter._reasoner_repair_constraints(
+                subspan,
+                (
+                    "Reasoner candidate_answer must copy the proposition argument "
+                    "selected by answer_slot exactly"
+                ),
+            )
+        )
+        self.assertEqual(
+            "1914",
+            constraints[
+                (
+                    "evidence_propositions",
+                    "0",
+                    "object_or_attribute_value",
+                )
+            ],
+        )
+
+        duplicate = {
+            "candidate_answer": "Norway",
+            "answer_slot": {
+                "proposition_index": 0,
+                "answer_field": "subject",
+            },
+            "evidence_propositions": [
+                {
+                    "subject": "Norway",
+                    "relation": "was",
+                    "object_or_attribute_value": "Norway",
+                    "evidence_span": (
+                        "Norway was the first European country to abolish "
+                        "capital punishment."
+                    ),
+                }
+            ],
+        }
+        constraints = (
+            QARetrievalReactExecutionAdapter._reasoner_repair_constraints(
+                duplicate,
+                (
+                    "Reasoner evidence_propositions[0] must bind distinct subject "
+                    "and object_or_attribute_value arguments"
+                ),
+            )
+        )
+        self.assertEqual(
+            "the first European country to abolish capital punishment",
+            constraints[
+                (
+                    "evidence_propositions",
+                    "0",
+                    "object_or_attribute_value",
+                )
+            ],
+        )
+
+    def test_fact_only_receipt_binds_synonymous_question_relation(self) -> None:
+        question = "What is Patricia Neary famous in?"
+        fact_text = "Patricia Neary is renowned in Ballet."
+        receipt = json.loads(json.dumps(_fact_receipts()[1]))
+        receipt["request"]["arguments"]["memory_id"] = "fact-neary"
+        receipt["result"]["value"]["memory_id"] = "fact-neary"
+        receipt["result"]["value"]["memory"] = {
+            "memory_id": "fact-neary",
+            "fact_text": fact_text,
+        }
+        read_text = AgentWorkflowEnv._successful_read_text(
+            receipt,
+            TRIVIAQA_QA_MEMORY_TOOL_ID,
+        )
+        self.assertIsNotNone(read_text)
+        assert read_text is not None
+        artifact = json.dumps(
+            {
+                "question_scope": question,
+                "answer_slot": {
+                    "answer_type": "entity",
+                    "answer_cardinality": "single",
+                    "qualifiers": [],
+                    "proposition_index": 0,
+                    "answer_field": "object_or_attribute_value",
+                },
+                "evidence_propositions": [
+                    {
+                        "subject": "Patricia Neary",
+                        "relation": "is renowned in",
+                        "object_or_attribute_value": "Ballet",
+                        "qualifiers": [],
+                        "evidence_span": fact_text,
+                    }
+                ],
+                "multi_hop_chain": [fact_text],
+                "candidate_answer": "Ballet",
+                "evidence": [fact_text],
+            }
+        )
+        self.assertIsNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact,
+                [read_text],
+                require_answer_binding=True,
+                original_question=question,
+                qa_memory_relevant_memory_ids=["fact-neary"],
+            )
+        )
+        self.assertIsNotNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                artifact,
+                [read_text],
+                require_answer_binding=True,
+                original_question=question,
+                qa_memory_relevant_memory_ids=["different-memory"],
+            )
+        )
+        wrong_candidate = json.loads(artifact)
+        wrong_candidate["candidate_answer"] = "Opera"
+        self.assertIsNotNone(
+            AgentWorkflowEnv._reasoner_evidence_provenance_issue(
+                json.dumps(wrong_candidate),
+                [read_text],
+                require_answer_binding=True,
+                original_question=question,
+                qa_memory_relevant_memory_ids=["fact-neary"],
+            )
+        )
+
     def test_fact_artifact_ingress_requires_explicit_direct_relation(self) -> None:
         projected, issue = (
             QARetrievalReactExecutionAdapter._qa_memory_completion_receipt_projection(

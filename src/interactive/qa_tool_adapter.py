@@ -6437,6 +6437,181 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return frozenset({("multi_hop_chain",)})
         return frozenset()
 
+    @staticmethod
+    def _reasoner_repair_constraints(
+        prior_value: Mapping[str, object],
+        public_error_code: str,
+    ) -> dict[tuple[str, ...], object]:
+        """Derive answer-free const constraints from one rejected artifact.
+
+        FlowSteer's continuation preserves the rejected StructuredAction and
+        SkillFlow supplies the typed Observation.  When that Observation names
+        an answer-slot wiring error, the already model-authored candidate and
+        receipt-grounded proposition uniquely determine the corrected field.
+        This projection never reads a benchmark answer or evaluator receipt.
+        """
+
+        candidate = prior_value.get("candidate_answer")
+        propositions = prior_value.get("evidence_propositions")
+        answer_slot = prior_value.get("answer_slot")
+        if (
+            not isinstance(candidate, str)
+            or not candidate.strip()
+            or not isinstance(propositions, (list, tuple))
+            or not propositions
+        ):
+            return {}
+
+        exact_bindings = [
+            (index, field_name)
+            for index, proposition in enumerate(propositions)
+            if isinstance(proposition, Mapping)
+            for field_name in ("subject", "object_or_attribute_value")
+            if proposition.get(field_name) == candidate
+        ]
+        constraints: dict[tuple[str, ...], object] = {}
+
+        if (
+            "answer_slot.proposition_index is outside" in public_error_code
+            or "answer_slot.answer_field selects" in public_error_code
+        ) and len(exact_bindings) == 1:
+            proposition_index, answer_field = exact_bindings[0]
+            constraints[("answer_slot", "proposition_index")] = proposition_index
+            constraints[("answer_slot", "answer_field")] = answer_field
+
+        if (
+            isinstance(answer_slot, Mapping)
+            and "must bind distinct subject and object_or_attribute_value arguments"
+            in public_error_code
+        ):
+            proposition_index = answer_slot.get("proposition_index")
+            answer_field = answer_slot.get("answer_field")
+            if (
+                isinstance(proposition_index, int)
+                and not isinstance(proposition_index, bool)
+                and 0 <= proposition_index < len(propositions)
+                and answer_field in {"subject", "object_or_attribute_value"}
+                and isinstance(propositions[proposition_index], Mapping)
+            ):
+                proposition = propositions[proposition_index]
+                other_field = (
+                    "object_or_attribute_value"
+                    if answer_field == "subject"
+                    else "subject"
+                )
+                evidence_span = proposition.get("evidence_span")
+                if (
+                    proposition.get(answer_field) == candidate
+                    and proposition.get(other_field) == candidate
+                    and isinstance(evidence_span, str)
+                    and evidence_span.strip()
+                ):
+                    declarative = evidence_span.strip().rstrip(".!?").strip()
+                    replacement: str | None = None
+                    if answer_field == "subject" and declarative.startswith(candidate):
+                        remainder = declarative[len(candidate) :].strip()
+                        replacement = re.sub(
+                            r"^(?:is|was|are|were|has|had|became|becomes)\s+",
+                            "",
+                            remainder,
+                            count=1,
+                            flags=re.IGNORECASE,
+                        ).strip()
+                    elif (
+                        answer_field == "object_or_attribute_value"
+                        and declarative.endswith(candidate)
+                    ):
+                        remainder = declarative[: -len(candidate)].strip()
+                        replacement = re.sub(
+                            r"\s+(?:is|was|are|were|has|had|became|becomes)$",
+                            "",
+                            remainder,
+                            count=1,
+                            flags=re.IGNORECASE,
+                        ).strip()
+                    if (
+                        isinstance(replacement, str)
+                        and replacement
+                        and replacement != candidate
+                        and replacement in evidence_span
+                    ):
+                        constraints[
+                            (
+                                "evidence_propositions",
+                                str(proposition_index),
+                                other_field,
+                            )
+                        ] = replacement
+
+        if (
+            "Reasoner candidate_answer must copy the proposition argument"
+            in public_error_code
+            and isinstance(answer_slot, Mapping)
+        ):
+            proposition_index = answer_slot.get("proposition_index")
+            answer_field = answer_slot.get("answer_field")
+            if (
+                isinstance(proposition_index, int)
+                and not isinstance(proposition_index, bool)
+                and 0 <= proposition_index < len(propositions)
+                and answer_field in {"subject", "object_or_attribute_value"}
+                and isinstance(propositions[proposition_index], Mapping)
+            ):
+                selected_value = propositions[proposition_index].get(answer_field)
+                if (
+                    isinstance(selected_value, str)
+                    and candidate in selected_value
+                    and selected_value != candidate
+                ):
+                    constraints[
+                        (
+                            "evidence_propositions",
+                            str(proposition_index),
+                            str(answer_field),
+                        )
+                    ] = candidate
+                elif len(exact_bindings) == 1:
+                    binding_index, binding_field = exact_bindings[0]
+                    constraints[("answer_slot", "proposition_index")] = binding_index
+                    constraints[("answer_slot", "answer_field")] = binding_field
+        return constraints
+
+    @staticmethod
+    def _set_repair_schema_const(
+        schema: dict[str, object],
+        path: tuple[str, ...],
+        value: object,
+    ) -> None:
+        """Set one nested const in the existing constrained-repair schema."""
+
+        current: dict[str, object] = schema
+        for offset, component in enumerate(path):
+            final = offset == len(path) - 1
+            if component.isdigit():
+                prefix_items = current.get("prefixItems")
+                index = int(component)
+                if (
+                    not isinstance(prefix_items, list)
+                    or index >= len(prefix_items)
+                    or not isinstance(prefix_items[index], dict)
+                ):
+                    return
+                if final:
+                    prefix_items[index] = {"const": value}
+                    return
+                current = prefix_items[index]
+                continue
+            properties = current.get("properties")
+            if not isinstance(properties, dict):
+                return
+            field_schema = properties.get(component)
+            if not isinstance(field_schema, dict):
+                return
+            if final:
+                properties[component] = {"const": value}
+                return
+            current = field_schema
+
     @classmethod
     def _constrain_repair_schema_to_prior_value(
         cls,
@@ -8357,6 +8532,15 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         prior_value,
                         mutable_paths,
                     )
+                    for path, const_value in self._reasoner_repair_constraints(
+                        prior_value,
+                        state.semantic_repair_error_code,
+                    ).items():
+                        self._set_repair_schema_const(
+                            value_schema,
+                            path,
+                            const_value,
+                        )
             if (
                 state.location_containment_repair_read_count > 0
                 and isinstance(state.location_containment_repair_anchor, str)

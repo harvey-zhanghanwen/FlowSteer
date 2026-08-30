@@ -8152,6 +8152,62 @@ class AgentWorkflowEnv:
                     return True
             return False
 
+        def fact_memory_provenance_valid(
+            proposition: Mapping[str, object],
+            *,
+            answer_field: Optional[str] = None,
+        ) -> bool:
+            """Validate one proposition against a routed fact-only receipt.
+
+            The strict TriviaQA fact-memory projection exposes only a
+            self-contained declarative ``fact_text`` and its ``memory_id``.
+            Consequently it cannot use the legacy paired-QA provenance path.
+            Admit the proposition only when both arguments and the current
+            model-authored candidate are lexically grounded in the exact
+            worker read selected as relevant. No evaluator or provenance
+            metadata is consulted.
+            """
+
+            if not relevant_memory_ids:
+                return False
+            evidence_span = proposition.get("evidence_span")
+            subject = proposition.get("subject")
+            object_value = proposition.get("object_or_attribute_value")
+            if not all(
+                isinstance(value, str) and bool(value.strip())
+                for value in (evidence_span, subject, object_value)
+            ):
+                return False
+            assert isinstance(evidence_span, str)
+            assert isinstance(subject, str)
+            assert isinstance(object_value, str)
+            if not isinstance(candidate_answer, str) or not candidate_answer.strip():
+                return False
+            if answer_field in {"subject", "object_or_attribute_value"}:
+                if proposition.get(answer_field) != candidate_answer:
+                    return False
+            elif candidate_answer not in {subject, object_value}:
+                return False
+            canonical_span = _canonical_evidence_text(evidence_span)
+            if any(
+                _canonical_evidence_text(argument) not in canonical_span
+                for argument in (subject, object_value)
+            ):
+                return False
+            for read_text in read_evidence_texts:
+                if not isinstance(read_text, _ReadReceiptText):
+                    continue
+                if (
+                    read_text.tool_id == _TRIVIAQA_QA_MEMORY_TOOL_ID
+                    and read_text.record_id in relevant_memory_ids
+                    and read_text.paraphrase_question is None
+                    and read_text.paraphrase_answer_statement is None
+                    and read_text.canonical_answer is None
+                    and _evidence_span_matches_read(evidence_span, read_text)
+                ):
+                    return True
+            return False
+
         def paired_qa_memory_surface(
             proposition: Mapping[str, object],
         ) -> Optional[str]:
@@ -8354,6 +8410,7 @@ class AgentWorkflowEnv:
                     evidence_span=proposition["evidence_span"],
                 )
                 or paired_qa_memory_provenance_valid(proposition)
+                or fact_memory_provenance_valid(proposition)
             )
         ) if original_question else tuple(propositions)
         if not relation_aligned_propositions:
@@ -8532,6 +8589,12 @@ class AgentWorkflowEnv:
             if (
                 not seeded_argument_aliases
                 and not paired_qa_memory_provenance_valid(selected)
+                and not fact_memory_provenance_valid(
+                    selected,
+                    answer_field=(
+                        answer_field if isinstance(answer_field, str) else None
+                    ),
+                )
             ):
                 return (
                     "Reasoner requested-relation proposition has no deterministic "
