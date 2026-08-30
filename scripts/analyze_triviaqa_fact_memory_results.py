@@ -64,7 +64,7 @@ MATERIALIZATION_SCHEMA_VERSION = (
     "flowsteer.triviaqa.fact_memory.materialization.v1"
 )
 FACT_SELF_CONTAINMENT_ADMISSION_VERSION = (
-    "triviaqa.fact_memory.self_containment.v2"
+    "triviaqa.fact_memory.self_containment.v3"
 )
 EXPECTED_FACT_MEMORY_COUNT = 76_523
 ZERO_FALLBACK_COUNT_FIELDS = (

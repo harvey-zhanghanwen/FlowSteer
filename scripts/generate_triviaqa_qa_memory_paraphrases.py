@@ -67,7 +67,7 @@ SUPPORTED_PROMPT_TEMPLATE_VERSIONS = frozenset(
 PARAPHRASE_VERSION = "triviaqa.qa_memory.paraphrase.v12"
 SEMANTIC_ADMISSION_VERSION = "triviaqa.qa_memory.semantic_admission.v15"
 FACT_SELF_CONTAINMENT_ADMISSION_VERSION = (
-    "triviaqa.fact_memory.self_containment.v2"
+    "triviaqa.fact_memory.self_containment.v3"
 )
 PARAPHRASE_METHOD = "semantic-preserving-question-and-answer-paraphrase"
 GENERATOR_PROVIDER = "local-openai-compatible"
@@ -2600,6 +2600,139 @@ def _fact_admission_failure_category(reason: str | None) -> str:
     return "unspecified_fact_admission"
 
 
+def _source_anchor_groups_before_reference(
+    source: TriviaQATrainSource,
+    clause_prefix: str,
+) -> tuple[tuple[int, int, str], ...]:
+    """Return explicit source-anchored noun phrases in one clause prefix.
+
+    This is intentionally narrower than general coreference resolution.  A
+    candidate must be composed entirely of immutable entity tokens already
+    present in the source question.  Relation words, inferred entities, and
+    generic noun phrases never become antecedents at this admission boundary.
+    """
+
+    identity_tokens = _capitalized_identity_tokens(source.original_question)
+    groups: list[tuple[int, int, str]] = []
+    current: list[re.Match[str]] = []
+
+    def flush() -> None:
+        if not current:
+            return
+        groups.append(
+            (
+                current[0].start(),
+                current[-1].end(),
+                clause_prefix[current[0].start() : current[-1].end()],
+            )
+        )
+        current.clear()
+
+    for match in _LEXICAL_TOKEN.finditer(clause_prefix):
+        if match.group(0).casefold() not in identity_tokens:
+            flush()
+            continue
+        if current and re.fullmatch(
+            r"[\s'\u2019-]*",
+            clause_prefix[current[-1].end() : match.start()],
+        ) is None:
+            flush()
+        current.append(match)
+    flush()
+    return tuple(groups)
+
+
+def _anchor_group_is_explicit_plural(surface: str) -> bool:
+    tokens = _LEXICAL_TOKEN.findall(surface)
+    if not tokens:
+        return False
+    final = tokens[-1].casefold().rstrip("'\u2019")
+    return final.endswith("s") and not final.endswith("ss")
+
+
+def _unresolved_fact_reference_tokens(
+    source: TriviaQATrainSource,
+    fact_text: str,
+    canonical_answer: str,
+) -> tuple[str, ...]:
+    """Return reference tokens lacking a conservative same-clause certificate.
+
+    Only local reflexives and possessive determiners controlled by an explicit
+    subject-relative head can be certified.  Demonstratives, ordinary personal
+    or object pronouns, cataphora, cross-clause references, multiple candidate
+    antecedents, and number mismatches remain unresolved and fail closed.
+    """
+
+    reference_surface = _ORDERED_QUOTED_SLOT.sub(
+        " immutable quoted material ", fact_text
+    ).replace(canonical_answer, " canonical fact value ")
+    unresolved: list[str] = []
+    clause_boundary = re.compile(r"[.!?;:\u2014]")
+    relative_marker = re.compile(r"\b(who|which|that)\b", re.IGNORECASE)
+    reflexive_number = {
+        "himself": "singular",
+        "herself": "singular",
+        "itself": "singular",
+        "themselves": "plural",
+    }
+    possessive_relative = {
+        "his": frozenset({"who"}),
+        "its": frozenset({"which", "that"}),
+        "their": frozenset({"who", "which", "that"}),
+    }
+
+    for reference in _FACT_EXTERNAL_REFERENCE.finditer(reference_surface):
+        token = reference.group(0).casefold()
+        prefix_surface = reference_surface[: reference.start()]
+        boundaries = tuple(clause_boundary.finditer(prefix_surface))
+        clause_start = boundaries[-1].end() if boundaries else 0
+        clause_prefix = reference_surface[clause_start : reference.start()]
+        groups = _source_anchor_groups_before_reference(source, clause_prefix)
+        if len(groups) != 1:
+            unresolved.append(token)
+            continue
+        group_start, group_end, group_surface = groups[0]
+        group_is_plural = _anchor_group_is_explicit_plural(group_surface)
+
+        if token in reflexive_number:
+            expected = reflexive_number[token]
+            if (expected == "plural") == group_is_plural:
+                continue
+            unresolved.append(token)
+            continue
+
+        allowed_relative_markers = possessive_relative.get(token)
+        if allowed_relative_markers is None:
+            unresolved.append(token)
+            continue
+        following = reference_surface[reference.end() :]
+        next_token = _LEXICAL_TOKEN.search(following)
+        if next_token is None:
+            unresolved.append(token)
+            continue
+        earlier_boundary = clause_boundary.search(following)
+        if earlier_boundary is not None and earlier_boundary.start() < next_token.start():
+            unresolved.append(token)
+            continue
+        relative_matches = tuple(
+            relative_marker.finditer(clause_prefix[group_end:])
+        )
+        if len(relative_matches) != 1:
+            unresolved.append(token)
+            continue
+        relative = relative_matches[0].group(1).casefold()
+        if relative not in allowed_relative_markers:
+            unresolved.append(token)
+            continue
+        if token == "their":
+            if group_is_plural:
+                continue
+        elif not group_is_plural:
+            continue
+        unresolved.append(token)
+    return tuple(unresolved)
+
+
 def _fact_admission_diagnostics(
     source: TriviaQATrainSource,
     rejected_answer_statement: str,
@@ -2644,14 +2777,8 @@ def _fact_admission_diagnostics(
         if span not in statement_quotes
         and quoted_answer_slot.sub(canonical, span) not in statement_quotes
     )
-    reference_surface = _ORDERED_QUOTED_SLOT.sub(
-        " immutable quoted material ", statement
-    ).replace(canonical, " canonical fact value ")
     external_references = sorted(
-        {
-            match.group(0).casefold()
-            for match in _FACT_EXTERNAL_REFERENCE.finditer(reference_surface)
-        }
+        set(_unresolved_fact_reference_tokens(source, statement, canonical))
     )
     return {
         "missing_entity_tokens": missing_entities,
@@ -3192,11 +3319,7 @@ def validate_self_contained_declarative_fact(
         )
 
     canonical = " ".join(source.canonical_answer.split())
-    reference_surface = _ORDERED_QUOTED_SLOT.sub(
-        " immutable quoted material ",
-        fact,
-    ).replace(canonical, " canonical fact value ")
-    if _FACT_EXTERNAL_REFERENCE.search(reference_surface):
+    if _unresolved_fact_reference_tokens(source, fact, canonical):
         raise FactProjectionAdmissionError(
             "fact_text contains an external anaphoric reference; replace it "
             "with an explicit noun phrase"

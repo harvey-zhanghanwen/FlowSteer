@@ -55,6 +55,7 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _called_relation_substitution_preserved,
     _clausal_canonical_relation_statement,
     _capitalized_identity_tokens,
+    _unresolved_fact_reference_tokens,
     _bounded_subject_wh_pair,
     _latin_translation_analogue_pair,
     _circle_line_name_analogue_pair,
@@ -128,6 +129,111 @@ def _source() -> TriviaQATrainSource:
         canonical_answer="Zambezi",
         native_split="train",
     )
+
+
+def test_fact_reference_gate_certifies_only_local_auditable_bindings() -> None:
+    rotary_source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:rotary_local_reflexive",
+        base_task_id="triviaqa:rotary_local_reflexive",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=(
+            "In which city did Rotary Clubs establish themselves in 1905?"
+        ),
+        canonical_answer="Chicago",
+        native_split="train",
+    )
+    assert _unresolved_fact_reference_tokens(
+        rotary_source,
+        "Chicago is the city where Rotary Clubs established themselves in 1905.",
+        "Chicago",
+    ) == ()
+
+    currency_source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:south_africa_relative_possessive",
+        base_task_id="triviaqa:south_africa_relative_possessive",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="Which currency does South Africa use as its currency?",
+        canonical_answer="rand",
+        native_split="train",
+    )
+    currency_fact = (
+        "South Africa is the nation that uses the rand as its currency."
+    )
+    assert _unresolved_fact_reference_tokens(
+        currency_source,
+        currency_fact,
+        "rand",
+    ) == ()
+    assert validate_self_contained_declarative_fact(
+        currency_source,
+        currency_fact,
+    ) == currency_fact
+
+
+@pytest.mark.parametrize(
+    ("question", "canonical", "fact", "unresolved"),
+    (
+        (
+            "When Birdseye introduced the first frozen food in 1930, what did "
+            "the company call it?",
+            "Frosted food",
+            "The company called it Frosted food.",
+            ("it",),
+        ),
+        (
+            "Who did Barbara Walters interview when discussing Dudley Moore and "
+            "his illness?",
+            "Dudley Moore",
+            "Barbara Walters interviewed Dudley Moore regarding his illness.",
+            ("his",),
+        ),
+        (
+            "Which office did Ronald Reagan hold when he became president?",
+            "Governor",
+            "Ronald Reagan held the office of Governor when he became president.",
+            ("he",),
+        ),
+        (
+            "Which organization did Rotary Clubs establish?",
+            "Chicago chapter",
+            "Rotary Clubs established himself as the Chicago chapter.",
+            ("himself",),
+        ),
+        (
+            "Which prize did Richard Avedon receive?",
+            "Photography Prize",
+            "Richard Avedon received the Photography Prize. They celebrated.",
+            ("they",),
+        ),
+        (
+            "Which fact did Richard Avedon state?",
+            "the result",
+            "Richard Avedon described himself after those events.",
+            ("those",),
+        ),
+    ),
+)
+def test_fact_reference_gate_rejects_unbound_ambiguous_or_mismatched_references(
+    question: str,
+    canonical: str,
+    fact: str,
+    unresolved: tuple[str, ...],
+) -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:reference_negative",
+        base_task_id="triviaqa:reference_negative",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=question,
+        canonical_answer=canonical,
+        native_split="train",
+    )
+    assert _unresolved_fact_reference_tokens(source, fact, canonical) == unresolved
 
 
 @pytest.mark.parametrize(
