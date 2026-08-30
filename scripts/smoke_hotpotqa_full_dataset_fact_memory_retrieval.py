@@ -75,6 +75,10 @@ def _mapping(value: object, name: str) -> Mapping[str, object]:
     return value
 
 
+def _normalized_query(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
 def _resolve(root: Path, value: object) -> Path:
     path = Path(str(value)).expanduser()
     return path if path.is_absolute() else root / path
@@ -360,6 +364,7 @@ async def smoke(config_path: Path) -> Mapping[str, object]:
             no_qa_wire,
             worker_owned,
             all_receipts_succeeded,
+            _normalized_query(query) != _normalized_query(raw_query),
         )
     )
     return {
@@ -369,6 +374,8 @@ async def smoke(config_path: Path) -> Mapping[str, object]:
         "passed": passed,
         "task_id": task_id,
         "query": query,
+        "semantic_query_rewrite_used": True,
+        "raw_question_embedding_query_used": False,
         "index_dir": str(index_dir),
         "index_manifest": index.manifest.to_value(),
         "same_query_top_k_deterministic": same_query_deterministic,

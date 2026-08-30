@@ -917,6 +917,28 @@ class HotpotQAEmbeddingToolTests(unittest.TestCase):
                 for request in gateway.requests
             ],
         )
+        response_schemas = [
+            json.loads(request.model.metadata["response_json_schema"])
+            for request in gateway.requests
+        ]
+        self.assertEqual(
+            ["memory-1", "memory-2"],
+            response_schemas[1]["properties"]["arguments"]["properties"][
+                "memory_id"
+            ]["enum"],
+        )
+        self.assertEqual(
+            ["memory-2"],
+            response_schemas[2]["properties"]["arguments"]["properties"][
+                "memory_id"
+            ]["enum"],
+        )
+        self.assertNotIn(
+            "enum",
+            adapter._tool_registry.require_capability(
+                HOTPOTQA_QA_MEMORY_TOOL_ID
+            ).action_schemas["read"]["properties"]["memory_id"],
+        )
         completion_schema = json.loads(
             gateway.requests[-1].model.metadata["response_json_schema"]
         )["properties"]["arguments"]["properties"]["value"]

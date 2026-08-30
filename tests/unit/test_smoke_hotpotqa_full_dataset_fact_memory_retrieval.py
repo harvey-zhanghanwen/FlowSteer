@@ -185,6 +185,8 @@ class HotpotQAFullDatasetFactMemoryRetrievalSmokeTests(unittest.TestCase):
         self.assertEqual(["search", "read", "read"], value["receipt_actions"])
         self.assertEqual(0, value["model_api_calls"])
         self.assertFalse(value["web_search_used"])
+        self.assertTrue(value["semantic_query_rewrite_used"])
+        self.assertFalse(value["raw_question_embedding_query_used"])
         self.assertEqual(
             [
                 ("Identify the person who authored the work.", 2),

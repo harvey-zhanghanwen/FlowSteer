@@ -800,6 +800,56 @@ class HotpotQAEmbeddingReactExecutionAdapter(ToolReactExecutionAdapter):
             return (self._active_retrieval_tool_id(),)
         return ()
 
+    def _state_conditioned_response_schema(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> dict[str, object] | None:
+        """Bind a read-only turn to the latest unread retrieval candidates.
+
+        THIN_ADAPTATION: FlowSteer's ``QARetrievalReactExecutionAdapter`` narrows
+        the read identifier to the current unread ``passage_id`` enum after the
+        shared SkillFlow-style schema masks the action kind/name.  This adapter
+        preserves that transition for HotpotQA's opaque ``doc_id``/``memory_id``
+        wire.  Without the identifier domain, a model can repeat an already-read
+        identifier until the bounded ReAct loop is exhausted.
+        """
+
+        schema = super()._state_conditioned_response_schema(request, observations)
+        if schema is None:
+            return None
+        properties = schema.get("properties")
+        if not isinstance(properties, Mapping):
+            return schema
+        name_schema = properties.get("name")
+        if (
+            not isinstance(name_schema, Mapping)
+            or name_schema.get("const") != "read"
+        ):
+            return schema
+        state = _public_retrieval_state(
+            observations,
+            tool_id=self._active_retrieval_tool_id(),
+        )
+        unread_ids = list(state.latest_unread_doc_ids)
+        if not unread_ids:
+            return schema
+
+        # Copy each nested mapping before refinement so the registered Tool
+        # capability remains immutable across requests and tasks.
+        refined = dict(schema)
+        refined_properties = dict(properties)
+        refined_arguments = dict(refined_properties["arguments"])
+        refined_argument_properties = dict(refined_arguments["properties"])
+        identifier = self._read_identifier_name()
+        identifier_schema = dict(refined_argument_properties[identifier])
+        identifier_schema["enum"] = unread_ids
+        refined_argument_properties[identifier] = identifier_schema
+        refined_arguments["properties"] = refined_argument_properties
+        refined_properties["arguments"] = refined_arguments
+        refined["properties"] = refined_properties
+        return refined
+
     def _state_conditioned_action_domain(
         self,
         request: AgentRequest,
