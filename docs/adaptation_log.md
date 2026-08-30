@@ -773,3 +773,29 @@ change was made during profile selection.
   Bayesian update, Skill retrieval/injection/evolution, or learned medical
   memory was enabled. Retrieval smoke/evaluation metrics remain evidence-gated
   until an actually completed, receipt-backed run exists.
+- Closed the remaining Runtime admission gap: the current state-conditioned
+  Tool-action set is now enforced again at the dispatch boundary. A different
+  search emitted after non-empty evidence or after Tool-budget exhaustion is
+  rejected without a Tool call or ToolReceipt; an empty result still permits
+  one distinct query pivot. This is the execution-side enforcement of the
+  existing action mask, not a new medical workflow or reward.
+- Wired the HealthBench MedRAG adapter to the same SkillFlow scientific
+  sampling coordinate already used by `LiveSmokeBackend.collect`. The
+  Single-Agent ReAct comparator constructs the matching per-task coordinate,
+  validates every step-derived generation receipt, and persists a versioned
+  generation identity. Resume now fails closed when the catalog/provider,
+  contract, completion condition, Tool version, MedRAG source revision,
+  runtime limits, or sampling receipts differ.
+- Direct responses with an evaluator-invalid receipt remain frozen for
+  evaluator-only retry and are not counted as completed; the runner stops
+  before AgentGraph collection until the paired Direct panel is evaluator
+  complete. AgentGraph resume independently checks the current raw scientific
+  sampling receipt, so a seed, schedule-purpose, task-coordinate, or anchor
+  mismatch cannot reuse an earlier trajectory. The report also refuses the
+  paired-comparison label when a free Graph selected reasoning or mixed
+  executor modes that lack matching per-step ReAct sampling receipts.
+- The retrieval Tool protocol is versioned as
+  `skillflow.medrag-textbooks-bm25-react.state-conditioned.v4`. No completed
+  formal v3 retrieval prediction or AgentGraph trajectory existed, so this
+  version change does not mix or relabel a prior benchmark result. The frozen
+  525-task selection remains unchanged.

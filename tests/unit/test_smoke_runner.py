@@ -1266,6 +1266,39 @@ class HealthBenchMedRAGRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
         close()
         self.assertTrue(owner.closed)
 
+    def test_enabled_condition_wires_skillflow_scientific_sampling(self) -> None:
+        task = self._task()
+        backend = self._backend(self._config())
+        owner = self._registry_owner()
+        base_seed = 17
+        coordinate = ScientificSamplingCoordinate(
+            sampling_schedule_hash=scientific_sampling_schedule_hash(
+                base_seed=base_seed
+            ),
+            schedule_purpose="healthbench_medrag_react_stable_zero",
+            ordered_sequence_hash=stable_hash([task.task_id]),
+            sequence_position=0,
+            task_id=task.task_id,
+            optimizer_step_or_anchor_ordinal=0,
+        )
+
+        with patch.object(
+            _MODULE,
+            "open_healthbench_medrag_tool_registry",
+            return_value=owner,
+        ):
+            runtime, _, close = backend._runtime_for_task(
+                task,
+                condition_id="healthbench_medrag_react_stable_zero",
+                sampling_base_seed=base_seed,
+                sampling_coordinate=coordinate,
+            )
+
+        adapter = runtime.execution_adapters["react"]
+        self.assertEqual(base_seed, adapter._sampling_base_seed)
+        self.assertEqual(coordinate, adapter._sampling_coordinate)
+        close()
+
     def test_mode_scope_condition_and_resource_settings_are_strict(self) -> None:
         task = self._task()
 

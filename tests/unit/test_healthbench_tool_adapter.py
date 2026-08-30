@@ -9,6 +9,12 @@ import re
 import tempfile
 import unittest
 
+from src.interactive.agent_graph import AgentNode
+from src.interactive.agent_runtime import (
+    AgentRequest,
+    AgentResponse,
+    ExecutionPhase,
+)
 from src.interactive.healthbench_tool_adapter import (
     HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
     HEALTHBENCH_PROFESSIONAL_DATASET_SCOPE,
@@ -16,10 +22,64 @@ from src.interactive.healthbench_tool_adapter import (
     MEDRAG_BM25_TOP_K,
     open_healthbench_medrag_tool_registry,
 )
+from src.interactive.model_registry import ModelSpec, ProviderSpec
 from src.interactive.tool_runtime import StructuredAction, ToolRequest
 
 
 FIXTURE_SOURCE_REVISION = "1" * 40
+
+
+def _structured_action(
+    kind: str,
+    *,
+    name: str,
+    arguments: object,
+    resource_id: str | None,
+) -> str:
+    return json.dumps(
+        {
+            "arguments": arguments,
+            "kind": kind,
+            "name": name,
+            "resource_id": resource_id,
+            "skill_id": None,
+        }
+    )
+
+
+class _SequenceGateway:
+    def __init__(self, outputs: list[str]) -> None:
+        self.outputs = list(outputs)
+        self.requests: list[AgentRequest] = []
+
+    async def generate(self, request: AgentRequest) -> AgentResponse:
+        self.requests.append(request)
+        return AgentResponse(
+            self.outputs.pop(0),
+            {"provider_request_id": len(self.requests)},
+        )
+
+
+def _react_request() -> AgentRequest:
+    return AgentRequest(
+        request_id="healthbench-tool-unit:single",
+        run_id="healthbench-tool-unit",
+        graph_revision=1,
+        problem="Synthetic public healthcare conversation.",
+        agent=AgentNode(
+            "tool_agent",
+            "fixture-model",
+            "Use the public conversation and any retrieved textbook evidence "
+            "to produce one complete assistant response.",
+            allowed_tools=(HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,),
+            execution_mode="react",
+            artifact_type="assistant_response",
+            completion_condition="Return one complete assistant response.",
+        ),
+        model=ModelSpec("fixture-model", "fixture-provider"),
+        provider=ProviderSpec("fixture-provider", kind="test"),
+        phase=ExecutionPhase.SINGLE,
+    )
 
 
 def _write_bm25_fixture(root: Path) -> tuple[str, ...]:
@@ -267,6 +327,179 @@ class HealthBenchToolAdapterTests(unittest.IsolatedAsyncioTestCase):
             after_first,
         )
         self.assertEqual((frozenset(), True), at_budget)
+
+    async def test_runtime_rejects_different_query_after_nonempty_evidence(
+        self,
+    ) -> None:
+        gateway = _SequenceGateway(
+            [
+                _structured_action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "aspirin gastrointestinal bleeding"},
+                    resource_id=HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                ),
+                _structured_action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "warfarin anticoagulation"},
+                    resource_id=HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                ),
+                _structured_action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "Evidence-supported response."},
+                    resource_id=None,
+                ),
+            ]
+        )
+        with self._open() as opened:
+            response = await HealthBenchMedRAGReactExecutionAdapter(
+                gateway=gateway,
+                tool_registry=opened.registry,
+                max_turns=3,
+                max_tool_calls=3,
+            ).execute(_react_request())
+
+        self.assertEqual("Evidence-supported response.", response.text)
+        self.assertEqual(1, response.metadata["tool_calls"])
+        self.assertEqual(1, len(response.metadata["tool_receipts"]))
+        rejected = response.metadata["react_trace"][1]
+        self.assertEqual("schema_invalid", rejected["observation_status"])
+        self.assertEqual(
+            "state_action_not_admitted",
+            rejected["public_error_code"],
+        )
+        self.assertNotIn("observation", rejected)
+
+    async def test_runtime_allows_different_query_after_empty_result(self) -> None:
+        gateway = _SequenceGateway(
+            [
+                _structured_action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "no_such_medical_term"},
+                    resource_id=HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                ),
+                _structured_action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "aspirin gastrointestinal bleeding"},
+                    resource_id=HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                ),
+                _structured_action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "Pivoted evidence response."},
+                    resource_id=None,
+                ),
+            ]
+        )
+        with self._open() as opened:
+            response = await HealthBenchMedRAGReactExecutionAdapter(
+                gateway=gateway,
+                tool_registry=opened.registry,
+                max_turns=3,
+                max_tool_calls=2,
+            ).execute(_react_request())
+
+        self.assertEqual("Pivoted evidence response.", response.text)
+        self.assertEqual(2, response.metadata["tool_calls"])
+        self.assertEqual(2, len(response.metadata["tool_receipts"]))
+        first_result = response.metadata["react_trace"][0]["observation"][
+            "result"
+        ]
+        self.assertEqual([], first_result["ranked_chunks"])
+        second_result = response.metadata["react_trace"][1]["observation"][
+            "result"
+        ]
+        self.assertTrue(second_result["ranked_chunks"])
+
+    async def test_runtime_rejects_different_query_after_tool_budget(self) -> None:
+        gateway = _SequenceGateway(
+            [
+                _structured_action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "no_such_medical_term"},
+                    resource_id=HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                ),
+                _structured_action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "aspirin gastrointestinal bleeding"},
+                    resource_id=HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                ),
+                _structured_action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "Budget-bounded response."},
+                    resource_id=None,
+                ),
+            ]
+        )
+        with self._open() as opened:
+            response = await HealthBenchMedRAGReactExecutionAdapter(
+                gateway=gateway,
+                tool_registry=opened.registry,
+                max_turns=3,
+                max_tool_calls=1,
+            ).execute(_react_request())
+
+        self.assertEqual("Budget-bounded response.", response.text)
+        self.assertEqual(1, response.metadata["tool_calls"])
+        self.assertEqual(1, len(response.metadata["tool_receipts"]))
+        self.assertEqual(
+            "state_action_not_admitted",
+            response.metadata["react_trace"][1]["public_error_code"],
+        )
+
+    async def test_runtime_rejects_normalized_repeated_query_without_receipt(
+        self,
+    ) -> None:
+        gateway = _SequenceGateway(
+            [
+                _structured_action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "no_such_medical_term"},
+                    resource_id=HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                ),
+                _structured_action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "  NO_SUCH_MEDICAL_TERM  "},
+                    resource_id=HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                ),
+                _structured_action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "aspirin gastrointestinal bleeding"},
+                    resource_id=HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                ),
+                _structured_action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "Non-repeated response."},
+                    resource_id=None,
+                ),
+            ]
+        )
+        with self._open() as opened:
+            response = await HealthBenchMedRAGReactExecutionAdapter(
+                gateway=gateway,
+                tool_registry=opened.registry,
+                max_turns=4,
+                max_tool_calls=2,
+            ).execute(_react_request())
+
+        self.assertEqual("Non-repeated response.", response.text)
+        self.assertEqual(2, response.metadata["tool_calls"])
+        self.assertEqual(2, len(response.metadata["tool_receipts"]))
+        self.assertEqual(
+            "duplicate_tool_request",
+            response.metadata["react_trace"][1]["public_error_code"],
+        )
 
     async def test_close_is_idempotent_and_fails_closed_on_later_search(self) -> None:
         opened = self._open()

@@ -1982,6 +1982,10 @@ def test_healthbench_direct_react_is_one_agent_with_same_medrag_registry():
         _ROOT / "config" / "model_catalog_hotpotqa_deep_v6.yaml"
     )
     config = _healthbench_react_config()
+    config["experiment"]["seed"] = 29
+    config["healthbench_professional_evaluation"][
+        "direct_generation_seed"
+    ] = 29
     condition_id = config["experiment"]["condition_id"]
     completion_condition = config["healthbench_professional_evaluation"][
         "direct_completion_condition"
@@ -2002,11 +2006,56 @@ def test_healthbench_direct_react_is_one_agent_with_same_medrag_registry():
                 node_count=len(graph.nodes),
                 output_agent_id=graph.output_agent_id,
             )
+            coordinate = observed["sampling_coordinate"]
+            generation_seed = _MODULE.derive_generation_seed(
+                base_seed=29,
+                coordinate=coordinate,
+                step_index=1,
+                phase=_MODULE.GenerationPhase.ACTION,
+            )
+            requested_sampling = {
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "top_k": None,
+                "repetition_penalty": None,
+                "max_tokens": int(config["director"]["max_action_tokens"]),
+                "seed": generation_seed,
+            }
+            scientific_requested_sampling = {
+                key: value
+                for key, value in requested_sampling.items()
+                if key != "repetition_penalty"
+            }
             call = SimpleNamespace(
                 response=SimpleNamespace(
                     metadata={
                         "model_calls": [
-                            {"metadata": {"generation_seed": 29}}
+                            {
+                                "turn": 1,
+                                "request_id": "healthbench-react:1",
+                                "request_status": "completed",
+                                "algorithm": (
+                                    _MODULE.SCIENTIFIC_SAMPLING_ALGORITHM
+                                ),
+                                "scientific_sampling": {
+                                    "algorithm": (
+                                        _MODULE.SCIENTIFIC_SAMPLING_ALGORITHM
+                                    ),
+                                    "base_seed": 29,
+                                    "coordinate": coordinate.to_value(),
+                                    "phase": "action",
+                                    "step_index": 1,
+                                    "generation_seed": generation_seed,
+                                    "requested_sampling": (
+                                        scientific_requested_sampling
+                                    ),
+                                },
+                                "requested_sampling": requested_sampling,
+                                "metadata": {
+                                    "generation_seed": generation_seed,
+                                    "requested_sampling": requested_sampling,
+                                },
+                            }
                         ],
                         "react_trace": [
                             {
@@ -2033,9 +2082,17 @@ def test_healthbench_direct_react_is_one_agent_with_same_medrag_registry():
                 executed_agent_ids=(node.id,),
             )
 
-    def runtime_for_task(runtime_task, *, condition_id):
+    def runtime_for_task(
+        runtime_task,
+        *,
+        condition_id,
+        sampling_base_seed,
+        sampling_coordinate,
+    ):
         observed["runtime_task"] = runtime_task
         observed["runtime_condition_id"] = condition_id
+        observed["sampling_base_seed"] = sampling_base_seed
+        observed["sampling_coordinate"] = sampling_coordinate
         return (
             Runtime(),
             tool_registry,
@@ -2070,34 +2127,19 @@ def test_healthbench_direct_react_is_one_agent_with_same_medrag_registry():
             evaluator_version="healthbench.fake.v1",
         )
 
-    execution = SimpleNamespace(
-        metadata={"response": {"generation_seed": 29}},
-        to_dict=lambda: {
-            "output": "This is the complete assistant response.",
-            "metadata": {
-                "response": {
-                    "generation_seed": 29,
-                    "react_trace": [
-                        {
-                            "turn": 1,
-                            "action_name": "healthbench-medrag.search",
-                            "observation_status": "completed",
-                        }
-                    ],
-                    "tool_receipts": [
-                        {
-                            "resource_id": "healthbench-medrag.search",
-                            "status": "completed",
-                        }
-                    ],
-                }
-            },
-        },
-    )
+    def execution_from_call(call):
+        response_metadata = dict(call.response.metadata)
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "output": "This is the complete assistant response.",
+                "metadata": {"response": response_metadata},
+            }
+        )
+
     with patch.object(
         _MODULE,
         "execution_record_from_call",
-        return_value=execution,
+        side_effect=execution_from_call,
     ), patch.object(_MODULE, "_evaluate_prediction", new=fake_evaluate):
         result = asyncio.run(
             _MODULE._direct_one(
@@ -2120,16 +2162,206 @@ def test_healthbench_direct_react_is_one_agent_with_same_medrag_registry():
     assert observed["output_agent_id"] == node.id
     assert observed["runtime_task"] is task
     assert observed["runtime_condition_id"] == condition_id
+    assert observed["sampling_base_seed"] == 29
+    coordinate = observed["sampling_coordinate"]
+    assert coordinate.task_id == task.task_id
+    assert coordinate.sequence_position == 0
+    assert coordinate.schedule_purpose == condition_id
+    assert coordinate.ordered_sequence_hash == _MODULE.stable_hash([task.task_id])
     assert task.question in observed["problem"]
     assert task.ground_truth not in observed["problem"]
     assert result["simple_baseline_topology"] == "single_react_agent"
     assert result["runtime_condition_id"] == condition_id
     assert result["tool_version"] == config["experiment"]["tool_version"]
     assert result["tool_resource_ids"] == ["healthbench-medrag.search"]
+    assert result["generation_identity_verified"] is True
+    assert result["scientific_sampling_receipt"]["verified"] is True
+    assert result["direct_generation_identity"]["model"]["catalog_id"] == (
+        registry.catalog_id
+    )
+    assert result["direct_generation_identity"]["medrag"]["source_revision"] == (
+        "fixture-revision"
+    )
+    assert _MODULE._persisted_healthbench_direct_identity_matches(
+        result,
+        result["direct_generation_identity"],
+    )
+    tampered = deepcopy(result)
+    tampered["direct_generation_identity"]["contract"] = "changed contract"
+    assert not _MODULE._persisted_healthbench_direct_identity_matches(
+        tampered,
+        result["direct_generation_identity"],
+    )
     assert result["runtime"]["output_agent_id"] == node.id
     assert result["execution"]["metadata"]["response"]["react_trace"]
     assert result["execution"]["metadata"]["response"]["tool_receipts"]
     assert closed == [True]
+
+
+def test_healthbench_retrieval_report_requires_measured_paired_identity():
+    registry = load_model_registry(
+        _ROOT / "config" / "model_catalog_hotpotqa_deep_v6.yaml"
+    )
+    config = _healthbench_react_config()
+    base_seed = int(config["experiment"]["seed"])
+    task = _MODULE.TaskRecord(
+        task_id="healthbench-professional:paired-identity",
+        question="Conversation:\n\n[user] What should I discuss?\n\n[assistant]",
+        ground_truth="evaluator-private",
+        split="validation",
+        metadata={"dataset_key": "healthbench_professional"},
+    )
+    backend = SimpleNamespace(registry=registry, config=config)
+    coordinate = _MODULE._direct_scientific_sampling_coordinate(
+        config,
+        task,
+        base_seed=base_seed,
+    )
+    identity = _MODULE._healthbench_direct_generation_identity(
+        backend,
+        task,
+        model_id="qwen3.5-9b-local",
+        protocol=config["healthbench_professional_evaluation"]["direct_protocol"],
+        contract=config["healthbench_professional_evaluation"]["direct_contract"],
+        seed=base_seed,
+        coordinate=coordinate,
+    )
+    generation_seed = _MODULE.derive_generation_seed(
+        base_seed=base_seed,
+        coordinate=coordinate,
+        step_index=1,
+        phase=_MODULE.GenerationPhase.ACTION,
+    )
+    action_sampling = identity["scientific_sampling"]["requested_sampling"]
+    requested_sampling = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": action_sampling["top_k"],
+        "repetition_penalty": action_sampling["repetition_penalty"],
+        "max_tokens": action_sampling["max_tokens"],
+        "seed": generation_seed,
+    }
+    scientific_requested_sampling = {
+        key: value
+        for key, value in requested_sampling.items()
+        if key != "repetition_penalty"
+    }
+    model_calls = [
+        {
+            "turn": 1,
+            "request_id": "paired-identity:react:1",
+            "request_status": "completed",
+            "algorithm": _MODULE.SCIENTIFIC_SAMPLING_ALGORITHM,
+            "scientific_sampling": {
+                "algorithm": _MODULE.SCIENTIFIC_SAMPLING_ALGORITHM,
+                "base_seed": base_seed,
+                "coordinate": coordinate.to_value(),
+                "phase": "action",
+                "step_index": 1,
+                "generation_seed": generation_seed,
+                "requested_sampling": scientific_requested_sampling,
+            },
+            "requested_sampling": requested_sampling,
+            "metadata": {
+                "generation_seed": generation_seed,
+                "requested_sampling": requested_sampling,
+            },
+        }
+    ]
+    sampling_receipt = _MODULE._react_scientific_sampling_receipt(
+        model_calls,
+        base_seed=base_seed,
+        coordinate=coordinate,
+        max_action_tokens=int(action_sampling["max_tokens"]),
+        expected_top_k=action_sampling["top_k"],
+        expected_repetition_penalty=action_sampling["repetition_penalty"],
+    )
+    execution = {
+        "metadata": {"response": {"model_calls": model_calls}},
+    }
+    row = {
+        "task_id": task.task_id,
+        "failure_type": "none",
+        "direct": {
+            "available": True,
+            "valid": True,
+            "overall_score": 0.5,
+            "overall_score_length_adjusted": 0.5,
+            "evaluation": {"valid": True, "details": {}},
+            "telemetry": {},
+            "execution": execution,
+            "direct_generation_identity": identity,
+            "generation_identity_verified": True,
+            "scientific_sampling_receipt": sampling_receipt,
+        },
+        "agentgraph": {
+            "available": True,
+            "valid": True,
+            "overall_score": 0.6,
+            "overall_score_length_adjusted": 0.6,
+            "evaluation": {"valid": True, "details": {}},
+            "explicit_finish": True,
+            "termination_reason": "finish",
+            "telemetry": {},
+            "graph_diagnostic": None,
+        },
+    }
+    trajectory = {
+        "task": task.to_dict(),
+        "condition_id": identity["condition_id"],
+        "versions": {
+            "model_catalog": registry.catalog_id,
+            "tool": identity["tool"]["tool_version"],
+        },
+        "director_sampling": {
+            "algorithm": _MODULE.SCIENTIFIC_SAMPLING_ALGORITHM,
+            "base_seed": base_seed,
+            "coordinate": coordinate.to_value(),
+            "phase": "action",
+        },
+        "sampling_receipt_verified": True,
+        "turns": [
+            {
+                "round_index": 0,
+                "action": {"action": "finish"},
+                "canvas_feedback": "accepted finish",
+                "graph_snapshot": {
+                    "nodes": [],
+                    "relations": [],
+                    "output_agent_id": None,
+                    "revision": 0,
+                },
+                "executions": [execution],
+            }
+        ],
+        "explicit_finish": True,
+        "termination_reason": "finish",
+    }
+
+    report = _MODULE._report([row], config, [trajectory])
+    assert report["protocol_equivalent_to_direct"] is True
+    assert report["comparison_interpretation"] == "paired_architecture_comparison"
+    assert report["paired_generation_identity"]["verified_task_count"] == 1
+    assert report["paired_generation_identity"]["checks"][0][
+        "agentgraph_executor_react_sampling_status"
+    ] == "verified"
+
+    no_react_trajectory = deepcopy(trajectory)
+    no_react_trajectory["turns"][0]["executions"] = []
+    report = _MODULE._report([row], config, [no_react_trajectory])
+    assert report["protocol_equivalent_to_direct"] is False
+    assert report["paired_generation_identity"]["checks"][0][
+        "agentgraph_executor_react_sampling_status"
+    ] == "missing_react_execution_receipt"
+
+    unverified = deepcopy(row)
+    unverified["direct"]["generation_identity_verified"] = False
+    report = _MODULE._report([unverified], config, [trajectory])
+    assert report["protocol_equivalent_to_direct"] is False
+    assert (
+        report["comparison_interpretation"]
+        == "separate_protocol_descriptive_comparison"
+    )
 
 
 def test_swe_direct_condition_is_one_coding_agent_with_repository_tools():

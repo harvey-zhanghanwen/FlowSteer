@@ -2216,6 +2216,8 @@ class LiveSmokeBackend:
                     max_turns=int(healthbench_settings["max_turns"]),
                     max_tool_calls=int(healthbench_settings["max_tool_calls"]),
                     max_action_tokens=tool_action_tokens,
+                    sampling_base_seed=sampling_base_seed,
+                    sampling_coordinate=sampling_coordinate,
                 )
                 runtime = AgentRuntime(
                     self.registry,

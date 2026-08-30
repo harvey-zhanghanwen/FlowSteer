@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -795,6 +795,9 @@ async def _collect_graph(
     manifest: dict[str, Any],
     manifest_path: Path,
     failure_path: Optional[Path] = None,
+    additional_trajectory_identity_match: Optional[
+        Callable[[Mapping[str, Any], TaskRecord], bool]
+    ] = None,
 ) -> dict[str, dict[str, Any]]:
     bounded = _mapping(config["hotpotqa_evaluation"], "hotpotqa_evaluation")
     experiment = _mapping(config["experiment"], "experiment")
@@ -838,6 +841,11 @@ async def _collect_graph(
             task=selected_task,
             condition_id=condition_id,
             versions=versions[task_id].to_dict(),
+        ):
+            continue
+        if (
+            additional_trajectory_identity_match is not None
+            and not additional_trajectory_identity_match(value, selected_task)
         ):
             continue
         if _trajectory_resume_matches(

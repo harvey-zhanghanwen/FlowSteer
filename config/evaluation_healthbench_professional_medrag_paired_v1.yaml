@@ -16,7 +16,7 @@ experiment:
   sampling_schedule_purpose: "healthbench_professional_public_test_paired_medrag_evaluation"
   catalog_order_namespace: "healthbench_professional_medrag_paired_v1"
   prompt_version: "agentgraph.director.minimal-neutral-scalar.v2"
-  tool_version: "skillflow.medrag-textbooks-bm25-react.state-conditioned.v3"
+  tool_version: "skillflow.medrag-textbooks-bm25-react.state-conditioned.v4"
   output_dir: "artifacts/healthbench_professional_medrag_paired_v1/evaluation"
 
 data:

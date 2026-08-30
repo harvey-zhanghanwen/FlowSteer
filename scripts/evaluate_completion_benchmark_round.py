@@ -22,7 +22,7 @@ import math
 import os
 from pathlib import Path
 import sys
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -67,8 +67,20 @@ from src.interactive.healthbench_professional_grader import (
 from src.interactive.healthbench_tool_adapter import (
     HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
 )
-from src.interactive.records import TaskRecord
+from src.interactive.openai_gateway import (
+    supports_local_sglang_repetition_penalty,
+    supports_local_sglang_top_k,
+)
+from src.interactive.records import TaskRecord, TrajectoryRecord
 from src.interactive.rollout_collector import execution_record_from_call
+from src.interactive.scientific_sampling import (
+    GenerationPhase,
+    SCIENTIFIC_SAMPLING_ALGORITHM,
+    ScientificSamplingCoordinate,
+    derive_generation_seed,
+    scientific_sampling_schedule_hash,
+    stable_hash,
+)
 from src.interactive.swebench_adapter import OfficialSWEbenchHarness
 from src.interactive.task_dataset import TASK_SCHEMA_VERSION, iter_task_records
 from src.interactive.task_evaluator import evaluate_task
@@ -159,6 +171,12 @@ _BENCHMARKS: Mapping[str, Mapping[str, Any]] = {
 
 _INTERACTIVE_BENCHMARKS = frozenset({"webshop", "alfworld"})
 _RUNTIME_DATASET_REGISTRY_SCHEMA = "flowsteer.agentgraph.runtime-datasets.v2"
+_HEALTHBENCH_DIRECT_GENERATION_IDENTITY_SCHEMA = (
+    "flowsteer.healthbench.direct-generation-identity.v1"
+)
+_HEALTHBENCH_REACT_SAMPLING_RECEIPT_SCHEMA = (
+    "flowsteer.healthbench.react-scientific-sampling-receipt.v1"
+)
 
 
 def _utc_now() -> str:
@@ -318,8 +336,24 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
         }
         if direct_execution_mode == "react":
             experiment = _mapping(config.get("experiment"), "experiment")
+            direct_generation_seed = bounded.get(
+                "direct_generation_seed",
+                experiment.get("seed"),
+            )
             checks["healthbench.direct_completion_condition"] = bool(
                 str(bounded.get("direct_completion_condition", "")).strip()
+            )
+            checks["healthbench.direct_generation_seed"] = bool(
+                type(direct_generation_seed) is int
+                and direct_generation_seed == experiment.get("seed")
+            )
+            checks["experiment.sampling_schedule_purpose"] = bool(
+                str(
+                    experiment.get(
+                        "sampling_schedule_purpose",
+                        experiment.get("condition_id", ""),
+                    )
+                ).strip()
             )
             checks["healthbench.protocol_equivalent_to_direct"] = (
                 bounded.get("protocol_equivalent_to_direct") is True
@@ -1261,6 +1295,320 @@ async def _run_evaluator_preflight(
     return _evaluator_preflight_receipt(outcome, dataset_key)
 
 
+def _direct_scientific_sampling_coordinate(
+    config: Mapping[str, Any],
+    task: TaskRecord,
+    *,
+    base_seed: int,
+) -> ScientificSamplingCoordinate:
+    """Build the same per-task rollout coordinate as ``LiveSmokeBackend.collect``."""
+
+    experiment = _mapping(config.get("experiment"), "experiment")
+    schedule_purpose = str(
+        experiment.get(
+            "sampling_schedule_purpose",
+            experiment.get("condition_id", ""),
+        )
+    ).strip()
+    if not schedule_purpose:
+        raise CompletionBenchmarkRoundError(
+            "Direct ReAct scientific sampling purpose is empty"
+        )
+    anchor_ordinal = experiment.get(
+        "sampling_anchor_ordinal",
+        experiment.get("update_step", 0),
+    )
+    if type(anchor_ordinal) is not int or anchor_ordinal < 0:
+        raise CompletionBenchmarkRoundError(
+            "Direct ReAct sampling anchor ordinal must be non-negative"
+        )
+    return ScientificSamplingCoordinate(
+        sampling_schedule_hash=scientific_sampling_schedule_hash(
+            base_seed=base_seed
+        ),
+        schedule_purpose=schedule_purpose,
+        ordered_sequence_hash=stable_hash([task.task_id]),
+        # SkillFlow's sequence position is the rollout ordinal within one
+        # task.  Both evaluation arms collect exactly one rollout per task.
+        sequence_position=0,
+        task_id=task.task_id,
+        optimizer_step_or_anchor_ordinal=anchor_ordinal,
+    )
+
+
+def _healthbench_graph_scientific_resume_matches(
+    value: Mapping[str, Any],
+    task: TaskRecord,
+    config: Mapping[str, Any],
+) -> bool:
+    """Match a persisted Graph rollout to the current sampling condition."""
+
+    experiment = _mapping(config.get("experiment"), "experiment")
+    base_seed = experiment.get("seed")
+    if type(base_seed) is not int:
+        return False
+    try:
+        coordinate = _direct_scientific_sampling_coordinate(
+            config,
+            task,
+            base_seed=base_seed,
+        )
+        record = TrajectoryRecord.from_dict(value)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(
+        record.task.task_id == task.task_id
+        and record.sampling_receipt_verified
+        and dict(record.director_sampling)
+        == {
+            "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
+            "base_seed": base_seed,
+            "coordinate": coordinate.to_value(),
+            "phase": GenerationPhase.ACTION.value,
+        }
+    )
+
+
+def _healthbench_direct_generation_identity(
+    backend: LiveSmokeBackend,
+    task: TaskRecord,
+    *,
+    model_id: str,
+    protocol: str,
+    contract: str,
+    seed: int,
+    coordinate: ScientificSamplingCoordinate,
+) -> Mapping[str, Any]:
+    """Freeze every result-affecting Direct ReAct/MedRAG configuration field."""
+
+    config = backend.config
+    model = backend.registry.require_model(model_id)
+    provider = backend.registry.provider_for(model_id)
+    _, bounded = _evaluation_section(config)
+    experiment = _mapping(config.get("experiment"), "experiment")
+    graph = _mapping(config.get("agent_graph"), "agent_graph")
+    director = _mapping(config.get("director"), "director")
+    tool_runtime = _mapping(
+        config.get("healthbench_tool_runtime"),
+        "healthbench_tool_runtime",
+    )
+    max_action_tokens = int(director.get("max_action_tokens", 512))
+    capability_request = AgentRequest(
+        request_id="healthbench-direct-generation-identity",
+        run_id="healthbench-direct-generation-identity",
+        graph_revision=0,
+        problem=task.question,
+        agent=AgentNode("direct_react_agent", model_id, contract),
+        model=model,
+        provider=provider,
+        phase=ExecutionPhase.SINGLE,
+    )
+    top_k = -1 if supports_local_sglang_top_k(capability_request) else None
+    repetition_penalty: float | None = None
+    if supports_local_sglang_repetition_penalty(capability_request):
+        raw_penalty = model.metadata.get(
+            "repetition_penalty",
+            provider.metadata.get("repetition_penalty"),
+        )
+        if raw_penalty is not None:
+            repetition_penalty = float(raw_penalty)
+    return {
+        "schema_version": _HEALTHBENCH_DIRECT_GENERATION_IDENTITY_SCHEMA,
+        "dataset_key": "healthbench_professional",
+        "task_id": task.task_id,
+        "condition_id": str(experiment["condition_id"]),
+        "execution_mode": "react",
+        "protocol": protocol,
+        "contract": contract,
+        "completion_condition": str(bounded["direct_completion_condition"]),
+        "model": {
+            "catalog_id": backend.registry.catalog_id,
+            "catalog_path": str(graph["model_catalog_path"]),
+            "model_id": model_id,
+            "provider_id": provider.provider_id,
+            "provider_model": model.model_name,
+        },
+        "tool": {
+            "tool_version": str(experiment["tool_version"]),
+            "resource_ids": list(bounded["direct_allowed_tools"]),
+        },
+        "scientific_sampling": {
+            "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
+            "base_seed": seed,
+            "coordinate": coordinate.to_value(),
+            "phase": GenerationPhase.ACTION.value,
+            "requested_sampling": {
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "top_k": top_k,
+                "repetition_penalty": repetition_penalty,
+                "max_tokens": max_action_tokens,
+            },
+        },
+        "medrag": {
+            "mode": str(tool_runtime["mode"]),
+            "source_identity": str(tool_runtime["source_identity"]),
+            "source_revision": str(tool_runtime["source_revision"]),
+            "expected_rows": int(tool_runtime["expected_rows"]),
+            "max_turns_per_agent_call": int(
+                tool_runtime["max_turns_per_agent_call"]
+            ),
+            "max_tool_calls_per_agent_call": int(
+                tool_runtime["max_tool_calls_per_agent_call"]
+            ),
+            "tool_timeout_seconds": float(
+                tool_runtime["tool_timeout_seconds"]
+            ),
+            "max_action_tokens": max_action_tokens,
+        },
+    }
+
+
+def _react_scientific_sampling_receipt(
+    model_calls: Any,
+    *,
+    base_seed: int,
+    coordinate: ScientificSamplingCoordinate,
+    max_action_tokens: int,
+    expected_top_k: int | None,
+    expected_repetition_penalty: float | None,
+) -> Mapping[str, Any]:
+    """Validate and project every SkillFlow-style ReAct generation receipt."""
+
+    if (
+        not isinstance(model_calls, Sequence)
+        or isinstance(model_calls, (str, bytes))
+        or not model_calls
+    ):
+        raise CompletionBenchmarkRoundError(
+            "ReAct execution has no scientific model-call receipts"
+        )
+    projected: list[dict[str, Any]] = []
+    expected_coordinate = coordinate.to_value()
+    for ordinal, raw_call in enumerate(model_calls, start=1):
+        if not isinstance(raw_call, Mapping):
+            raise CompletionBenchmarkRoundError(
+                "ReAct model-call receipt is not a mapping"
+            )
+        turn = raw_call.get("turn")
+        sampling = raw_call.get("scientific_sampling")
+        if type(turn) is not int or turn < 1 or not isinstance(sampling, Mapping):
+            raise CompletionBenchmarkRoundError(
+                "ReAct model-call receipt lacks a scientific step"
+            )
+        expected_seed = derive_generation_seed(
+            base_seed=base_seed,
+            coordinate=coordinate,
+            step_index=turn,
+            phase=GenerationPhase.ACTION,
+        )
+        expected_sampling = {
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": expected_top_k,
+            "max_tokens": max_action_tokens,
+            "seed": expected_seed,
+        }
+        receipt_sampling = sampling.get("requested_sampling")
+        outer_sampling = raw_call.get("requested_sampling")
+        response_metadata = raw_call.get("metadata")
+        response_sampling = (
+            response_metadata.get("requested_sampling")
+            if isinstance(response_metadata, Mapping)
+            else None
+        )
+        receipt_matches = bool(
+            raw_call.get("algorithm") == SCIENTIFIC_SAMPLING_ALGORITHM
+            and raw_call.get("request_status") == "completed"
+            and sampling.get("algorithm") == SCIENTIFIC_SAMPLING_ALGORITHM
+            and sampling.get("base_seed") == base_seed
+            and sampling.get("coordinate") == expected_coordinate
+            and sampling.get("phase") == GenerationPhase.ACTION.value
+            and sampling.get("step_index") == turn
+            and sampling.get("generation_seed") == expected_seed
+            and isinstance(receipt_sampling, Mapping)
+            and all(
+                receipt_sampling.get(key) == value
+                for key, value in expected_sampling.items()
+            )
+            and isinstance(outer_sampling, Mapping)
+            and all(
+                outer_sampling.get(key) == value
+                for key, value in expected_sampling.items()
+            )
+            and isinstance(response_metadata, Mapping)
+            and response_metadata.get("generation_seed") == expected_seed
+            and isinstance(response_sampling, Mapping)
+            and all(
+                response_sampling.get(key) == value
+                for key, value in expected_sampling.items()
+            )
+            and response_sampling.get("repetition_penalty")
+            == expected_repetition_penalty
+        )
+        if not receipt_matches:
+            raise CompletionBenchmarkRoundError(
+                "ReAct scientific sampling receipt differs from the "
+                f"frozen condition at model call {ordinal}"
+            )
+        projected.append(
+            {
+                "turn": turn,
+                "request_id": raw_call.get("request_id"),
+                "request_status": raw_call.get("request_status"),
+                "scientific_sampling": dict(sampling),
+                "requested_sampling": dict(outer_sampling),
+            }
+        )
+    return {
+        "schema_version": _HEALTHBENCH_REACT_SAMPLING_RECEIPT_SCHEMA,
+        "verified": True,
+        "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
+        "base_seed": base_seed,
+        "coordinate": expected_coordinate,
+        "model_call_count": len(projected),
+        "model_calls": projected,
+    }
+
+
+def _persisted_healthbench_direct_identity_matches(
+    value: Mapping[str, Any],
+    expected_identity: Mapping[str, Any],
+) -> bool:
+    """Fail closed on resume unless persisted raw receipts reproduce identity."""
+
+    if (
+        value.get("direct_generation_identity") != expected_identity
+        or value.get("generation_identity_verified") is not True
+    ):
+        return False
+    scientific = expected_identity.get("scientific_sampling")
+    execution = value.get("execution")
+    metadata = execution.get("metadata") if isinstance(execution, Mapping) else None
+    response = metadata.get("response") if isinstance(metadata, Mapping) else None
+    model_calls = response.get("model_calls") if isinstance(response, Mapping) else None
+    requested = (
+        scientific.get("requested_sampling")
+        if isinstance(scientific, Mapping)
+        else None
+    )
+    try:
+        coordinate = ScientificSamplingCoordinate.from_value(
+            scientific.get("coordinate") if isinstance(scientific, Mapping) else None
+        )
+        verified = _react_scientific_sampling_receipt(
+            model_calls,
+            base_seed=scientific["base_seed"],
+            coordinate=coordinate,
+            max_action_tokens=int(requested["max_tokens"]),
+            expected_top_k=requested.get("top_k"),
+            expected_repetition_penalty=requested.get("repetition_penalty"),
+        )
+    except (KeyError, TypeError, ValueError, CompletionBenchmarkRoundError):
+        return False
+    return value.get("scientific_sampling_receipt") == verified
+
+
 async def _direct_one(
     backend: LiveSmokeBackend,
     task: TaskRecord,
@@ -1286,9 +1634,25 @@ async def _direct_one(
         bounded = _evaluation_section(backend.config)[1]
         condition_id = str(backend.config["experiment"]["condition_id"])
         expected_tools = tuple(bounded["direct_allowed_tools"])
+        sampling_coordinate = _direct_scientific_sampling_coordinate(
+            backend.config,
+            task,
+            base_seed=seed,
+        )
+        generation_identity = _healthbench_direct_generation_identity(
+            backend,
+            task,
+            model_id=model_id,
+            protocol=protocol,
+            contract=contract,
+            seed=seed,
+            coordinate=sampling_coordinate,
+        )
         task_runtime, tool_registry, close_runtime = backend._runtime_for_task(
             task,
             condition_id=condition_id,
+            sampling_base_seed=seed,
+            sampling_coordinate=sampling_coordinate,
         )
         try:
             if tool_registry is None:
@@ -1325,18 +1689,19 @@ async def _direct_one(
                     "HealthBench single ReAct Agent produced an invalid outer call count"
                 )
             raw_model_calls = calls[0].response.metadata.get("model_calls", ())
-            model_call_seeds = [
-                item.get("metadata", {}).get("generation_seed")
-                for item in raw_model_calls
-                if isinstance(item, Mapping)
-                and isinstance(item.get("metadata"), Mapping)
+            expected_sampling = generation_identity["scientific_sampling"][
+                "requested_sampling"
             ]
-            if not model_call_seeds or any(
-                actual_seed != seed for actual_seed in model_call_seeds
-            ):
-                raise CompletionBenchmarkRoundError(
-                    "Direct ReAct Agent generation seed receipts differ from config"
-                )
+            scientific_sampling_receipt = _react_scientific_sampling_receipt(
+                raw_model_calls,
+                base_seed=seed,
+                coordinate=sampling_coordinate,
+                max_action_tokens=int(expected_sampling["max_tokens"]),
+                expected_top_k=expected_sampling.get("top_k"),
+                expected_repetition_penalty=expected_sampling.get(
+                    "repetition_penalty"
+                ),
+            )
             executions = [
                 execution_record_from_call(call).to_dict() for call in calls
             ]
@@ -1362,6 +1727,9 @@ async def _direct_one(
                 "provider_id": provider.provider_id,
                 "provider_model": model.model_name,
                 "generation_seed": seed,
+                "direct_generation_identity": generation_identity,
+                "generation_identity_verified": True,
+                "scientific_sampling_receipt": scientific_sampling_receipt,
                 "final_answer": runtime_result.final_answer,
                 "evaluation": asdict(evaluation),
                 "execution": executions[-1],
@@ -1651,6 +2019,49 @@ async def _collect_direct(
     )
     expected_runtime_condition_id = str(experiment.get("condition_id", ""))
     expected_tool_version = str(experiment.get("tool_version", ""))
+
+    def expected_generation_identity(task: TaskRecord) -> Mapping[str, Any] | None:
+        if not retrieval_direct:
+            return None
+        coordinate = _direct_scientific_sampling_coordinate(
+            config,
+            task,
+            base_seed=seed,
+        )
+        return _healthbench_direct_generation_identity(
+            backend,
+            task,
+            model_id=model_id,
+            protocol=protocol,
+            contract=contract,
+            seed=seed,
+            coordinate=coordinate,
+        )
+
+    def retrieval_generation_identity_matches(
+        value: Mapping[str, Any],
+        task: TaskRecord,
+    ) -> bool:
+        return bool(
+            retrieval_direct
+            and _dataset_key(task) == "healthbench_professional"
+            and value.get("task_id") == task.task_id
+            and value.get("model_id") == model_id
+            and value.get("protocol") == protocol
+            and value.get("generation_seed") == seed
+            and value.get("simple_baseline_topology") == "single_react_agent"
+            and value.get("runtime_condition_id")
+            == expected_runtime_condition_id
+            and value.get("tool_version") == expected_tool_version
+            and value.get("tool_resource_ids") == expected_tool_resource_ids
+            and isinstance(value.get("final_answer"), str)
+            and isinstance(value.get("execution"), Mapping)
+            and _persisted_healthbench_direct_identity_matches(
+                value,
+                expected_generation_identity(task),
+            )
+        )
+
     direct_candidates = _read_jsonl(path)
     reuse_source = bounded.get("direct_reused_from")
     reuse_path: Optional[Path] = None
@@ -1691,6 +2102,10 @@ async def _collect_direct(
                     == expected_tool_version
                     and candidate.get("tool_resource_ids")
                     == expected_tool_resource_ids
+                    and _persisted_healthbench_direct_identity_matches(
+                        candidate,
+                        expected_generation_identity(task),
+                    )
                 )
             )
             and (
@@ -1748,27 +2163,46 @@ async def _collect_direct(
                     and value.get("tool_version") == expected_tool_version
                     and value.get("tool_resource_ids")
                     == expected_tool_resource_ids
+                    and _persisted_healthbench_direct_identity_matches(
+                        value,
+                        expected_generation_identity(task),
+                    )
                 )
             )
             and isinstance(value.get("final_answer"), str)
             and isinstance(value.get("execution"), Mapping)
             and isinstance(evaluation, Mapping)
+            and evaluation.get("valid") is True
             and evaluation.get("evaluator_version")
             == evaluator_version_for(task)
         )
 
+    rescored_by_task = _by_task(rescored)
     by_task = {
         task_id: value
-        for task_id, value in _by_task(rescored).items()
+        for task_id, value in rescored_by_task.items()
         for task in selected
         if task.task_id == task_id
         and direct_generation_resume_matches(value, task)
     }
-    hotpot_round._persist_ordered(path, selected, by_task)
+    pending_by_task = {
+        task_id: value
+        for task_id, value in rescored_by_task.items()
+        for task in selected
+        if task.task_id == task_id
+        and task_id not in by_task
+        and retrieval_generation_identity_matches(value, task)
+    }
+    hotpot_round._persist_ordered(
+        path,
+        selected,
+        {**pending_by_task, **by_task},
+    )
 
     def checkpoint() -> None:
         manifest["direct_progress"] = {
             "completed": len(by_task),
+            "pending_evaluator_retries": len(pending_by_task),
             "reused_from": None if reuse_path is None else str(reuse_path),
             "reused_records": sum(
                 value.get("reuse_receipt", {}).get("reused") is True
@@ -1807,7 +2241,7 @@ async def _collect_direct(
     jobs = [
         asyncio.create_task(run(index, task))
         for index, task in enumerate(selected)
-        if task.task_id not in by_task
+        if task.task_id not in by_task and task.task_id not in pending_by_task
     ]
     for completed in asyncio.as_completed(jobs):
         task, result = await completed
@@ -1822,8 +2256,36 @@ async def _collect_direct(
                 }
             )
         else:
-            by_task[task.task_id] = dict(result)
-            hotpot_round._persist_ordered(path, selected, by_task)
+            result_value = dict(result)
+            if direct_generation_resume_matches(result_value, task):
+                by_task[task.task_id] = result_value
+                pending_by_task.pop(task.task_id, None)
+            elif retrieval_generation_identity_matches(result_value, task):
+                pending_by_task[task.task_id] = result_value
+                failures.append(
+                    {
+                        "task_id": task.task_id,
+                        "condition": "direct_local_qwen35_9b",
+                        "stage": "evaluator_invalid",
+                        "error": "Direct response frozen pending a valid evaluator receipt",
+                        "recorded_at": _utc_now(),
+                    }
+                )
+            else:
+                failures.append(
+                    {
+                        "task_id": task.task_id,
+                        "condition": "direct_local_qwen35_9b",
+                        "stage": "generation_identity_invalid",
+                        "error": "Direct result did not match the frozen condition",
+                        "recorded_at": _utc_now(),
+                    }
+                )
+            hotpot_round._persist_ordered(
+                path,
+                selected,
+                {**pending_by_task, **by_task},
+            )
         checkpoint()
     return by_task
 
@@ -2532,6 +2994,21 @@ def _paired_rows(
                     ),
                     "telemetry": _direct_telemetry(direct_value),
                     "execution": direct_execution,
+                    "direct_generation_identity": (
+                        direct_value.get("direct_generation_identity")
+                        if direct_value
+                        else None
+                    ),
+                    "generation_identity_verified": (
+                        direct_value.get("generation_identity_verified") is True
+                        if direct_value
+                        else False
+                    ),
+                    "scientific_sampling_receipt": (
+                        direct_value.get("scientific_sampling_receipt")
+                        if direct_value
+                        else None
+                    ),
                 },
                 "agentgraph": {
                     "available": graph_value is not None,
@@ -2911,6 +3388,217 @@ def _is_reportable_noninteractive_terminal_failure(value: Mapping[str, Any]) -> 
     )
 
 
+def _trajectory_react_model_call_groups(
+    trajectory: Mapping[str, Any],
+) -> tuple[tuple[Sequence[Mapping[str, Any]], ...], int]:
+    """Return persisted ReAct model-call groups without inspecting prompt text."""
+
+    groups: list[Sequence[Mapping[str, Any]]] = []
+    execution_count = 0
+    turns = trajectory.get("turns")
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        return (), 0
+    for turn in turns:
+        if not isinstance(turn, Mapping):
+            continue
+        executions = turn.get("executions")
+        if not isinstance(executions, Sequence) or isinstance(
+            executions,
+            (str, bytes),
+        ):
+            continue
+        for execution in executions:
+            if not isinstance(execution, Mapping):
+                continue
+            execution_count += 1
+            metadata = execution.get("metadata")
+            response = (
+                metadata.get("response") if isinstance(metadata, Mapping) else None
+            )
+            model_calls = (
+                response.get("model_calls")
+                if isinstance(response, Mapping)
+                else None
+            )
+            if (
+                isinstance(model_calls, Sequence)
+                and not isinstance(model_calls, (str, bytes))
+                and model_calls
+                and all(isinstance(item, Mapping) for item in model_calls)
+            ):
+                groups.append(model_calls)
+    return tuple(groups), execution_count
+
+
+def _graph_generation_identity_check(
+    trajectory: Mapping[str, Any],
+    direct_identity: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Verify the Graph arm used the paired catalog, Tool and sampling coordinate."""
+
+    scientific = direct_identity.get("scientific_sampling")
+    requested = (
+        scientific.get("requested_sampling")
+        if isinstance(scientific, Mapping)
+        else None
+    )
+    model = direct_identity.get("model")
+    tool = direct_identity.get("tool")
+    director_sampling = trajectory.get("director_sampling")
+    versions = trajectory.get("versions")
+    director_verified = bool(
+        isinstance(scientific, Mapping)
+        and isinstance(requested, Mapping)
+        and isinstance(model, Mapping)
+        and isinstance(tool, Mapping)
+        and isinstance(director_sampling, Mapping)
+        and isinstance(versions, Mapping)
+        and trajectory.get("sampling_receipt_verified") is True
+        and trajectory.get("condition_id") == direct_identity.get("condition_id")
+        and versions.get("model_catalog") == model.get("catalog_id")
+        and versions.get("tool") == tool.get("tool_version")
+        and director_sampling.get("algorithm")
+        == scientific.get("algorithm")
+        and director_sampling.get("base_seed") == scientific.get("base_seed")
+        and director_sampling.get("coordinate") == scientific.get("coordinate")
+        and director_sampling.get("phase") == scientific.get("phase")
+    )
+    if not director_verified:
+        return {
+            "verified": False,
+            "director_sampling_verified": False,
+            "executor_react_sampling_status": "not_checked",
+            "executor_react_model_call_group_count": 0,
+        }
+    groups, execution_count = _trajectory_react_model_call_groups(trajectory)
+    if not groups or len(groups) != execution_count:
+        return {
+            "verified": False,
+            "director_sampling_verified": True,
+            "executor_react_sampling_status": (
+                "missing_react_execution_receipt"
+                if not groups
+                else "mixed_or_non_react_execution_receipt"
+            ),
+            "executor_react_model_call_group_count": len(groups),
+        }
+    try:
+        coordinate = ScientificSamplingCoordinate.from_value(
+            scientific["coordinate"]
+        )
+        for model_calls in groups:
+            _react_scientific_sampling_receipt(
+                model_calls,
+                base_seed=scientific["base_seed"],
+                coordinate=coordinate,
+                max_action_tokens=int(requested["max_tokens"]),
+                expected_top_k=requested.get("top_k"),
+                expected_repetition_penalty=requested.get(
+                    "repetition_penalty"
+                ),
+            )
+    except (KeyError, TypeError, ValueError, CompletionBenchmarkRoundError):
+        return {
+            "verified": False,
+            "director_sampling_verified": True,
+            "executor_react_sampling_status": "invalid",
+            "executor_react_model_call_group_count": len(groups),
+        }
+    return {
+        "verified": True,
+        "director_sampling_verified": True,
+        "executor_react_sampling_status": "verified",
+        "executor_react_model_call_group_count": len(groups),
+    }
+
+
+def _paired_generation_identity_receipt(
+    rows: Sequence[Mapping[str, Any]],
+    trajectories: Sequence[Mapping[str, Any]],
+    config: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Summarize measured paired-condition identity checks for reporting."""
+
+    _, bounded = _evaluation_section(config)
+    required = bool(
+        bounded.get("dataset_key") == "healthbench_professional"
+        and bounded.get("direct_execution_mode") == "react"
+        and isinstance(config.get("healthbench_tool_runtime"), Mapping)
+        and config["healthbench_tool_runtime"].get("enabled") is True
+    )
+    if not required:
+        return {
+            "schema_version": "flowsteer.completion-benchmark.paired-identity.v1",
+            "required": False,
+            "verified": True,
+            "expected_task_count": len(rows),
+            "verified_task_count": len(rows),
+        }
+    trajectories_by_task = {
+        str(value.get("task", {}).get("task_id")): value
+        for value in trajectories
+        if isinstance(value, Mapping)
+        and isinstance(value.get("task"), Mapping)
+        and isinstance(value["task"].get("task_id"), str)
+    }
+    checks: list[dict[str, Any]] = []
+    for row in rows:
+        task_id = str(row.get("task_id", ""))
+        direct = row.get("direct")
+        identity = (
+            direct.get("direct_generation_identity")
+            if isinstance(direct, Mapping)
+            else None
+        )
+        direct_verified = bool(
+            isinstance(direct, Mapping)
+            and isinstance(identity, Mapping)
+            and identity.get("schema_version")
+            == _HEALTHBENCH_DIRECT_GENERATION_IDENTITY_SCHEMA
+            and _persisted_healthbench_direct_identity_matches(direct, identity)
+        )
+        trajectory = trajectories_by_task.get(task_id)
+        graph_check = (
+            _graph_generation_identity_check(trajectory, identity)
+            if direct_verified and isinstance(trajectory, Mapping)
+            else {
+                "verified": False,
+                "director_sampling_verified": False,
+                "executor_react_sampling_status": "not_checked",
+                "executor_react_model_call_group_count": 0,
+            }
+        )
+        graph_verified = graph_check["verified"] is True
+        checks.append(
+            {
+                "task_id": task_id,
+                "direct_identity_verified": direct_verified,
+                "agentgraph_identity_verified": graph_verified,
+                "paired_identity_verified": direct_verified and graph_verified,
+                "agentgraph_director_sampling_verified": graph_check[
+                    "director_sampling_verified"
+                ],
+                "agentgraph_executor_react_sampling_status": graph_check[
+                    "executor_react_sampling_status"
+                ],
+                "agentgraph_executor_react_model_call_group_count": graph_check[
+                    "executor_react_model_call_group_count"
+                ],
+            }
+        )
+    verified_count = sum(
+        item["paired_identity_verified"] is True for item in checks
+    )
+    return {
+        "schema_version": "flowsteer.completion-benchmark.paired-identity.v1",
+        "required": True,
+        "verified": bool(checks and verified_count == len(checks)),
+        "expected_task_count": len(checks),
+        "verified_task_count": verified_count,
+        "checks": checks,
+    }
+
+
 def _report(
     rows: Sequence[Mapping[str, Any]],
     config: Mapping[str, Any],
@@ -2955,6 +3643,15 @@ def _report(
         is False
         for row in rows
     )
+    paired_generation_identity = _paired_generation_identity_receipt(
+        rows,
+        trajectories,
+        config,
+    )
+    protocol_equivalent_to_direct = bool(
+        bounded.get("protocol_equivalent_to_direct", False)
+        and paired_generation_identity.get("verified") is True
+    )
     return {
         "schema_version": "flowsteer.completion_benchmark.round_report.v1",
         "dataset_key": dataset_key,
@@ -2978,12 +3675,11 @@ def _report(
             and config["healthbench_tool_runtime"].get("enabled") is True
             else "none"
         ),
-        "protocol_equivalent_to_direct": bool(
-            bounded.get("protocol_equivalent_to_direct", False)
-        ),
+        "protocol_equivalent_to_direct": protocol_equivalent_to_direct,
+        "paired_generation_identity": paired_generation_identity,
         "comparison_interpretation": (
             "paired_architecture_comparison"
-            if bounded.get("protocol_equivalent_to_direct") is True
+            if protocol_equivalent_to_direct
             else "separate_protocol_descriptive_comparison"
         ),
         "metric_scope": (
@@ -3464,6 +4160,9 @@ def _existing_trajectory_checkpoint(
     path: Path,
     *,
     condition_id: str,
+    additional_identity_match: Optional[
+        Callable[[Mapping[str, Any], TaskRecord], bool]
+    ] = None,
 ) -> dict[str, dict[str, Any]]:
     """Load only the frozen AgentGraph receipts already admitted by a run.
 
@@ -3474,15 +4173,19 @@ def _existing_trajectory_checkpoint(
     only exact task and condition identities from the current frozen panel.
     """
 
-    selected_ids = {task.task_id for task in selected}
+    selected_by_id = {task.task_id: task for task in selected}
     existing: dict[str, dict[str, Any]] = {}
     for value in _read_jsonl(path):
         embedded = value.get("task")
         task_id = embedded.get("task_id") if isinstance(embedded, Mapping) else None
         if (
             isinstance(task_id, str)
-            and task_id in selected_ids
+            and task_id in selected_by_id
             and value.get("condition_id") == condition_id
+            and (
+                additional_identity_match is None
+                or additional_identity_match(value, selected_by_id[task_id])
+            )
         ):
             existing[task_id] = dict(value)
     return existing
@@ -3681,6 +4384,18 @@ async def run_completion_benchmark_round(
         bounded.get("stable_zero_sample_count", min(2, len(selected)))
     )
     active = selected[:stable_zero_sample_count] if canary_only else selected
+    graph_resume_identity_match: Optional[
+        Callable[[Mapping[str, Any], TaskRecord], bool]
+    ] = None
+    if (
+        dataset_key == "healthbench_professional"
+        and bounded.get("direct_execution_mode") == "react"
+        and isinstance(config.get("healthbench_tool_runtime"), Mapping)
+        and config["healthbench_tool_runtime"].get("enabled") is True
+    ):
+        graph_resume_identity_match = lambda value, task: (
+            _healthbench_graph_scientific_resume_matches(value, task, config)
+        )
     manifest["status"] = "direct_baseline"
     _write_json(paths["manifest"], manifest)
     direct = await _collect_direct(
@@ -3694,6 +4409,23 @@ async def run_completion_benchmark_round(
         paths["manifest"],
     )
     _atomic_jsonl(paths["failures"], failures)
+    if (
+        dataset_key == "healthbench_professional"
+        and bounded.get("direct_execution_mode") == "react"
+        and len(direct) != len(active)
+    ):
+        manifest.update(
+            status="failed_direct_evaluator",
+            error=(
+                "retrieval-enabled Direct comparator lacks valid evaluator "
+                f"receipts for {len(active) - len(direct)} task(s)"
+            ),
+            completed_at=_utc_now(),
+        )
+        _write_json(paths["manifest"], manifest)
+        raise CompletionBenchmarkRoundError(
+            "HealthBench retrieval Direct comparator is not evaluator-complete"
+        )
 
     if direct_only:
         manifest["status"] = "paired_report_from_existing_agentgraph"
@@ -3701,6 +4433,7 @@ async def run_completion_benchmark_round(
             active,
             paths["trajectories"],
             condition_id=str(config["experiment"]["condition_id"]),
+            additional_identity_match=graph_resume_identity_match,
         )
         manifest["agentgraph_progress"] = {
             "completed": len(trajectories),
@@ -3719,6 +4452,7 @@ async def run_completion_benchmark_round(
             manifest,
             paths["manifest"],
             failure_path=paths["failures"],
+            additional_trajectory_identity_match=graph_resume_identity_match,
         )
         _atomic_jsonl(paths["failures"], failures)
 

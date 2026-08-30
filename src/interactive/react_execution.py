@@ -918,6 +918,31 @@ class ToolReactExecutionAdapter:
                 trace.append(entry)
                 observations.append(observation)
                 continue
+            if (
+                admitted_tool_actions is not None
+                and (action.resource_id, action.name)
+                not in admitted_tool_actions
+            ):
+                # FlowSteer's latest public Canvas/Tool state is authoritative
+                # at execution time, not only while constructing the model's
+                # constrained-decoding schema.  A provider that ignores or
+                # bypasses that schema must not dispatch an action masked by a
+                # measured Action--Observation transition.  Preserve the
+                # sampled public action and rejection in the lossless trace,
+                # but do not consume Tool budget or create a ToolReceipt.
+                # Dataset-specific admission diagnostics run first so this
+                # generic guard does not erase their established error codes.
+                observation = MappingProxyType(
+                    {
+                        "observation_status": "schema_invalid",
+                        "public_error_code": "state_action_not_admitted",
+                        "executed_action": action.to_value(),
+                    }
+                )
+                entry.update(observation)
+                trace.append(entry)
+                observations.append(observation)
+                continue
             if tool_calls >= self._max_tool_calls:
                 observation = MappingProxyType(
                     {
