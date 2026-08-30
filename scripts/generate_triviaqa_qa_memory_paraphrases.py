@@ -55,13 +55,14 @@ from scripts.materialize_triviaqa_full_train_qa_memory import (  # noqa: E402
 )
 
 
-PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v16"
+PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v17"
 SUPPORTED_PROMPT_TEMPLATE_VERSIONS = frozenset(
     {
         "triviaqa.qa_memory.qa_paraphrase.v12",
         "triviaqa.qa_memory.qa_paraphrase.v13",
         "triviaqa.qa_memory.qa_paraphrase.v14",
         "triviaqa.qa_memory.qa_paraphrase.v15",
+        "triviaqa.qa_memory.qa_paraphrase.v16",
         PROMPT_TEMPLATE_VERSION,
     }
 )
@@ -1175,13 +1176,45 @@ def _literal_subject_wh_answer_statement(
 
     if not _subject_wh_anchor_requires_literal_binding(source):
         return None
+    subject = source.canonical_answer
+    anchor = _leading_answer_slot_anchor(source)
+    canonical_tokens = {
+        token.casefold() for token in _LEXICAL_TOKEN.findall(subject)
+    }
+    if anchor is not None and anchor.casefold() not in canonical_tokens:
+        # Some native questions bind a proper-name disambiguator in the WH
+        # slot while accepted_answers[0] is only the remaining name span, for
+        # example ``Which Gloria ...?`` with canonical ``Steinem``. Reuse
+        # the already-loaded accepted aliases only as an admission
+        # certificate: the emitted subject must contain both exact source
+        # spans and is still rechecked by the complete parser/fact boundary.
+        admitted_subjects = tuple(
+            " ".join(alias.split())
+            for alias in source.accepted_answers_for_admission
+            if exact_canonical_span_preserved(alias, source.canonical_answer)
+            and anchor.casefold()
+            in {
+                token.casefold()
+                for token in _LEXICAL_TOKEN.findall(alias)
+            }
+        )
+        if not admitted_subjects:
+            return None
+        subject = min(
+            admitted_subjects,
+            key=lambda alias: (
+                len(_LEXICAL_TOKEN.findall(alias)),
+                len(alias),
+                alias,
+            ),
+        )
     match = re.fullmatch(
         r"(?i:what|which)\s+\S+\s+(.+?)\?",
         " ".join(source.original_question.split()),
     )
     if match is None:
         return None
-    return f"{source.canonical_answer} {match.group(1)}."
+    return f"{subject} {match.group(1)}."
 
 
 def _typed_subject_wh_answer_statement_preserved(
@@ -5528,12 +5561,36 @@ def _bounded_listed_choice_pair(
     question: str | None = None
     fact: str | None = None
 
+    cardinal_comparative = re.fullmatch(
+        r"What is farther (?P<direction>north|south|east|west)\s+"
+        r"(?P<left>[^,?]+),?\s+or\s+(?P<right>[^?]+)\?",
+        original,
+        re.IGNORECASE,
+    )
+    if cardinal_comparative is not None:
+        direction = cardinal_comparative.group("direction").casefold()
+        left = " ".join(cardinal_comparative.group("left").split())
+        right = " ".join(cardinal_comparative.group("right").split())
+        canonical_folded = canonical.casefold().replace("’", "'")
+        left_folded = left.casefold().replace("’", "'")
+        right_folded = right.casefold().replace("’", "'")
+        if canonical_folded == left_folded:
+            selected, other = left, right
+        elif canonical_folded == right_folded:
+            selected, other = right, left
+        else:
+            return None
+        question = (
+            f"Which of {left} and {right} is located farther {direction}?"
+        )
+        fact = f"{selected} is farther {direction} than {other}"
+
     weight = re.fullmatch(
         r"Which is the heaviest\?\s+"
         r"(?P<left>[^?]+?)\s+or\s+(?P<right>[^?]+)\?",
         original,
     )
-    if weight is not None:
+    if question is None and weight is not None:
         left, right = weight.group("left"), weight.group("right")
         question = f"Which item has the maximum weight? {left} or {right}?"
         fact = (
@@ -5916,7 +5973,10 @@ def _bounded_typed_subject_relation_pair(
 
 
 _CANONICAL_FACT_SLOT = "{canonical_answer}"
-_CORPUS_BOUND_STRICT_CANDIDATES: dict[str, tuple[str, str]] = {'triviaqa:tc_184': ('How many of the four Grand Slam prizes in tennis are gold; how '
+_CORPUS_BOUND_STRICT_CANDIDATES: dict[str, tuple[str, str]] = {'triviaqa:tc_1889': ('Picasso relocated to Paris in 1901, but where was Picasso born?',
+                       'Picasso moved to Paris in 1901, but Picasso was born in '
+                       '{canonical_answer}.'),
+ 'triviaqa:tc_184': ('How many of the four Grand Slam prizes in tennis are gold; how '
                      'many are silver?',
                      'Among the four Grand Slam trophies in tennis, '
                      '{canonical_answer}.'),

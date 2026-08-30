@@ -681,7 +681,7 @@ def test_repair_payload_preserves_numeric_token_multiplicity() -> None:
 
 
 def test_prompt_v14_keeps_strictly_admitted_v12_v13_rows_supported() -> None:
-    assert PROMPT_TEMPLATE_VERSION == "triviaqa.qa_memory.qa_paraphrase.v16"
+    assert PROMPT_TEMPLATE_VERSION == "triviaqa.qa_memory.qa_paraphrase.v17"
     assert {
         "triviaqa.qa_memory.qa_paraphrase.v12",
         "triviaqa.qa_memory.qa_paraphrase.v13",
@@ -2126,7 +2126,11 @@ def test_v10_leading_answer_slot_anchor_stays_bound_to_request() -> None:
 
     assert _leading_answer_slot_anchor(source) == "Gloria"
     assert _literal_subject_wh_answer_statement(source) == (
-        "Steinem co-founded Ms magazine."
+        "Gloria Steinem co-founded Ms magazine."
+    )
+    assert _deterministic_strict_pair(source) == (
+        "Identify the Gloria that co-founded Ms magazine.",
+        "Gloria Steinem co-founded Ms magazine.",
     )
     assert _leading_answer_slot_anchor_preserved(
         source,
@@ -2152,6 +2156,114 @@ def test_v10_leading_answer_slot_anchor_stays_bound_to_request() -> None:
         source.original_question,
         "Which Gloria established Ms magazine?",
     )
+
+
+def test_v17_leading_answer_slot_alias_certificate_fails_closed() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:tc_1045",
+        base_task_id="triviaqa:tc_1045",
+        selection_index=471,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="Which Gloria co-founded Ms magazine?",
+        canonical_answer="Steinem",
+        native_split="train",
+        accepted_answers_for_admission=("Steinem", "G. Steinem"),
+    )
+
+    assert _literal_subject_wh_answer_statement(source) is None
+    assert _deterministic_strict_pair(source) is None
+
+
+def test_v17_cardinal_comparative_choice_passes_full_admission() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:tc_2052",
+        base_task_id="triviaqa:tc_2052",
+        selection_index=1267,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="What is farther north Hungary, or Bulgaria?",
+        canonical_answer="Hungary",
+        native_split="train",
+        accepted_answers_for_admission=("Hungary",),
+    )
+    expected = (
+        "Which of Hungary and Bulgaria is located farther north?",
+        "Hungary is farther north than Bulgaria; "
+        "the selected listed option is Hungary.",
+    )
+
+    assert _bounded_listed_choice_pair(source) == expected
+    assert _deterministic_strict_pair(source) == expected
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": expected[0],
+                "paraphrase_answer_statement": expected[1],
+            }
+        ),
+        source,
+    ) == expected
+    assert (
+        validate_self_contained_declarative_fact(source, expected[1])
+        == expected[1]
+    )
+
+
+def test_v17_cardinal_comparative_choice_requires_exact_listed_label() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:comparative_negative",
+        base_task_id="triviaqa:comparative_negative",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="What is farther north Hungary, or Bulgaria?",
+        canonical_answer="Hungarian Republic",
+        native_split="train",
+        accepted_answers_for_admission=("Hungarian Republic",),
+    )
+
+    assert _bounded_listed_choice_pair(source) is None
+
+
+def test_v17_corpus_bound_coreference_repair_passes_full_admission() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:tc_1889",
+        base_task_id="triviaqa:tc_1889",
+        selection_index=1147,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=(
+            "Picasso moved to Paris in 1901 but where was he born?"
+        ),
+        canonical_answer="Spain",
+        native_split="train",
+        accepted_answers_for_admission=("Spain",),
+    )
+    expected = (
+        "Picasso relocated to Paris in 1901, but where was Picasso born?",
+        "Picasso moved to Paris in 1901, but Picasso was born in Spain.",
+    )
+
+    assert _deterministic_strict_pair(source) == expected
+    assert parse_paraphrase_response(
+        json.dumps(
+            {
+                "paraphrase_question": expected[0],
+                "paraphrase_answer_statement": expected[1],
+            }
+        ),
+        source,
+    ) == expected
+    assert (
+        validate_self_contained_declarative_fact(source, expected[1])
+        == expected[1]
+    )
+    with pytest.raises(ValueError, match="external anaphoric reference"):
+        validate_self_contained_declarative_fact(
+            source,
+            "Picasso moved to Paris in 1901 but he was born in Spain.",
+        )
 
 
 def test_v10_leading_answer_slot_binding_rejects_relation_reversal() -> None:
