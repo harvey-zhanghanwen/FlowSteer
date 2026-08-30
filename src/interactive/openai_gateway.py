@@ -631,6 +631,20 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         )
 
     if (
+        "benchmark_id=aime-2026" in request.problem
+        and not request.is_format_agent
+        and not request.is_format_predecessor
+    ):
+        protocol += (
+            " If this artifact derives a terminal AIME integer candidate, "
+            "preserve the public derivation and append exactly one `Final "
+            "Answer: <integer>` line. If it does not derive a terminal "
+            "candidate, do not invent one. This is only the target-blind "
+            "output marker supported by the AIME extraction protocol; it "
+            "does not make this Agent the Output Agent."
+        )
+
+    if (
         request.artifact_assessment_protocol
         in {
             "provenance_bound_candidate_assessment_v1",

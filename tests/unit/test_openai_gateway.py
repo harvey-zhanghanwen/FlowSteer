@@ -335,12 +335,33 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(messages, output_messages)
         self.assertIn("unverified work product", system)
         self.assertIn("contract-relevant public derivation", system)
+        self.assertIn("original task is immutable and authoritative", system)
+        self.assertIn("cannot add or replace task facts", system)
         self.assertNotIn("direct semantic predecessor", system)
         self.assertNotIn("unique Output Agent", system)
         rendered = "\n".join(item["content"] for item in messages)
         self.assertNotIn("terminal FlowSteer Format Operator", rendered)
         self.assertNotIn("OUTPUT ANSWER VALUE ONLY", rendered)
         self.assertNotIn("<answer>", rendered)
+
+    def test_aime_free_agent_requests_supported_final_answer_marker(self) -> None:
+        problem = (
+            "Solve the public problem.\n\n"
+            "Public task metadata: benchmark_id=aime-2026"
+        )
+        worker = build_agent_messages(
+            request(problem=problem, is_output_agent=False)
+        )
+        output = build_agent_messages(
+            request(problem=problem, is_output_agent=True)
+        )
+
+        self.assertEqual(worker, output)
+        system = worker[0]["content"]
+        self.assertIn("preserve the public derivation", system)
+        self.assertIn("Final Answer: <integer>", system)
+        self.assertIn("do not invent one", system)
+        self.assertIn("does not make this Agent the Output Agent", system)
 
     def test_format_predecessor_has_explicit_semantic_handoff_contract(self) -> None:
         messages = build_agent_messages(

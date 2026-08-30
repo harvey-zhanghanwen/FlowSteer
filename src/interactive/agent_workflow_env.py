@@ -4311,10 +4311,12 @@ class AgentWorkflowEnv:
     def _artifact_complete_from_metadata(
         metadata: Mapping[str, object],
     ) -> bool:
+        if metadata.get("finish_reason") == "length":
+            return False
         declared = metadata.get("artifact_complete")
         if type(declared) is bool:
             return declared
-        return metadata.get("finish_reason") != "length"
+        return True
 
     def current_artifact_receipts(self) -> list[dict[str, object]]:
         """Project revision-live artifacts and direct fan-in provenance.
@@ -8860,6 +8862,8 @@ class AgentWorkflowEnv:
             r"(?i:(?:angle|theta|\\theta|θ|deg(?:ree)?s?|radians?)\b)"
             r"[^.!?\n]{0,48}{NUMBER}",
             r"{NUMBER}\s*(?i:(?:°|deg(?:ree)?s?|radians?)\b)",
+            r"(?i:\b(?:verify|check|assess|validate|forward|reject)\b)"
+            r"[^.!?\n]{0,96}{NUMBER}",
         )
         protocol_range = re.compile(
             r"(?i:(?:integer[- ]?)?0{1,3}\s*(?:-|to|through)\s*999)"

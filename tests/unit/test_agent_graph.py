@@ -12927,6 +12927,13 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         cases = (
             (
+                "aime-2026/03",
+                "A sphere of radius 42 is placed on a disk of radius 200 "
+                "inside a hemisphere; find the requested reduced area ratio.",
+                "Verify if the integer 18281 is a valid AIME result and "
+                "forward it when it is in range.",
+            ),
+            (
                 "aime-2026/04",
                 "Find the number of integers less than or equal to 100 that "
                 "are equal to a+b+ab for distinct positive integers a and b.",
@@ -12947,6 +12954,13 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 "onto A for which the six-fold iterate maps every a to a.",
                 "Compute the number of functions pi on A={1,2,3,4,5,6} "
                 "such that pi^7(a)=a for all a in A.",
+            ),
+            (
+                "aime-2026/10",
+                "A triangle is rotated about its circumcenter until AC is "
+                "perpendicular to BC; determine the requested hexagon area.",
+                "Rotate the triangle 90 degrees about its circumcenter and "
+                "find the area of the resulting hexagon.",
             ),
             (
                 "aime-2026/11",
@@ -13071,7 +13085,11 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 self.requests.append(request)
                 return AgentResponse(
                     "Final Answer: 441",
-                    {"finish_reason": "length", "artifact_complete": False},
+                    {
+                        "finish_reason": "length",
+                        "artifact_complete": True,
+                        "artifact_status": "complete",
+                    },
                 )
 
         def make_env(gateway: IncompleteGateway) -> AgentWorkflowEnv:

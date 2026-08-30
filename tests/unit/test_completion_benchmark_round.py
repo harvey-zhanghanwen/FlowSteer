@@ -156,6 +156,70 @@ def test_official_aime_initial_config_keeps_learning_tools_and_priors_disabled()
     ]
 
 
+def test_aime_runtime_v6_combines_v3_search_with_v5_reliability_only():
+    config = load_yaml(
+        _ROOT
+        / "config"
+        / "evaluation_aime2026_runtime_v6_v3_v5_reliability.yaml"
+    )
+
+    _MODULE.validate_completion_benchmark_config(config)
+
+    bounded = config["aime2026_evaluation"]
+    graph = config["agent_graph"]
+    assert config["experiment"]["prompt_version"] == (
+        "agentgraph.director.minimal-neutral-scalar.v6"
+    )
+    assert bounded["sample_count"] == 30
+    assert config["execution_timeout"] == 480.0
+    assert bounded["task_timeout_seconds"] == 900.0
+    assert bounded["task_timeout_seconds"] > config["execution_timeout"]
+    assert graph["artifact_consumption_ordering"] is True
+    assert graph["termination_lookahead"] is True
+    assert graph["task_specification_contract_guard"] is True
+    assert graph["artifact_completeness_gate"] is True
+    assert graph["max_length_continuations"] == 1
+    assert graph["length_continuation_max_tokens"] == 512
+    assert graph["artifact_assessment_protocol"] == "none"
+    assert "artifact_assessment_terminal_policy" not in graph
+    assert config["aime_tool_runtime"]["enabled"] is False
+    assert config["experiment"]["training_enabled"] is False
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_aime_runtime_v7_preserves_v3_prompt_with_v5_reliability_only():
+    config = load_yaml(
+        _ROOT
+        / "config"
+        / "evaluation_aime2026_runtime_v7_v3_search_v5_reliability.yaml"
+    )
+
+    _MODULE.validate_completion_benchmark_config(config)
+
+    bounded = config["aime2026_evaluation"]
+    graph = config["agent_graph"]
+    assert config["experiment"]["prompt_version"] == (
+        "agentgraph.director.minimal-neutral-scalar.v3"
+    )
+    assert bounded["sample_count"] == 30
+    assert config["execution_timeout"] == 480.0
+    assert bounded["task_timeout_seconds"] == 900.0
+    assert bounded["task_timeout_seconds"] > config["execution_timeout"]
+    assert graph["artifact_consumption_ordering"] is True
+    assert graph["termination_lookahead"] is True
+    assert graph["task_specification_contract_guard"] is True
+    assert graph["artifact_completeness_gate"] is True
+    assert graph["max_length_continuations"] == 1
+    assert graph["length_continuation_max_tokens"] == 512
+    assert graph["artifact_assessment_protocol"] == "none"
+    assert "artifact_assessment_terminal_policy" not in graph
+    assert config["aime_tool_runtime"]["enabled"] is False
+    assert config["experiment"]["training_enabled"] is False
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
 def test_aime_runtime_v2_config_preserves_the_evaluation_only_search_space():
     config = load_yaml(_ROOT / "config" / "evaluation_aime2026_runtime_v2.yaml")
 

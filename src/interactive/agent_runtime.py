@@ -2189,11 +2189,15 @@ class AgentRuntime:
         """Bind one artifact to the exact public inputs consumed to produce it."""
 
         metadata = dict(response.metadata)
-        artifact_complete = metadata.get("finish_reason") != "length"
-        metadata.setdefault("artifact_complete", artifact_complete)
-        metadata.setdefault(
-            "artifact_status",
-            "complete" if artifact_complete else "incomplete",
+        declared_complete = metadata.get("artifact_complete")
+        artifact_complete = (
+            declared_complete if type(declared_complete) is bool else True
+        )
+        if metadata.get("finish_reason") == "length":
+            artifact_complete = False
+        metadata["artifact_complete"] = artifact_complete
+        metadata["artifact_status"] = (
+            "complete" if artifact_complete else "incomplete"
         )
 
         # Keep the existing request identity as the immutable artifact identity

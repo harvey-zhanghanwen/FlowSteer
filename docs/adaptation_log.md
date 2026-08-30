@@ -614,3 +614,64 @@ one observed contract-admission false positive; no Accuracy claim is attached
 to that unrerun code correction.
 GRPO, backward, optimizer updates, LoRA, MACE, Bayesian inference, Skill
 retrieval/evolution, retrieval, Web search and answer lookup remain disabled.
+
+## AIME runtime v6-v8: v3 search with v5 reliability boundaries
+
+Status: **three formal same-30 evaluations completed; none selected over v3**.
+
+The v6-v8 passes separated the three observed architecture defects from
+mathematical reasoning errors without adding a mathematical workflow prior:
+
+1. `finish_reason=length` now has authoritative precedence over contradictory
+   provider metadata. A truncated response remains an incomplete artifact and
+   cannot enter candidate agreement, Output admission, or explicit `FINISH`.
+2. The inner Agent execution timeout remains 480 seconds while the outer task
+   boundary is 900 seconds. This removed the v3 task-28 timeout race: v7 saved
+   a formal trajectory and issued explicit `FINISH` for task 28.
+3. The AIME contract guard rejects target-blind task-external numeric
+   assertions and pre-execution conclusions while leaving Agent count, model,
+   contract, relation, Output pointer, and topology to the Director. The five
+   historical semantic-drift contracts were absent from the v7 executed
+   contracts.
+4. A non-format AIME Agent that derives a terminal integer is asked to retain
+   its public derivation and append the extractor-supported `Final Answer:
+   <integer>` marker. The extractor remains deterministic and target-blind;
+   it never solves or repairs a candidate.
+
+Formal strict results under the same official 30-task denominator, frozen
+Direct comparator, catalog, and evaluator were:
+
+- Direct: `6/30 = 20.00%`.
+- v3 selected best: `14/30 = 46.67%`; 29 evaluator-valid trajectories and one
+  operational failure.
+- v5 reliability candidate: `12/30 = 40.00%`; 30 evaluator-valid trajectories.
+- v6 combined prompt candidate: `8/30 = 26.67%`; 30 evaluator-valid
+  trajectories.
+- v7 v3-prompt plus v5-reliability candidate: `13/30 = 43.33%`; 29
+  evaluator-valid trajectories and one terminal failure.
+- v8 contract/output candidate: `10/30 = 33.33%`; 28 evaluator-valid
+  trajectories, one operational failure, and one terminal failure.
+
+The target defects were materially isolated in v7: five of five historical
+contract-drift cases no longer executed the drifted contract, both historical
+length-truncated artifacts were prevented from becoming the terminal
+artifact, and task 28 produced a formal trajectory. The eight target tasks
+changed from `0/8` correct in v3 to `3/8` correct in v7. The remaining five
+target errors were complete mathematical reasoning errors rather than the
+original contract, truncation, or timeout failure.
+
+The reliability fixes did not establish a higher-Accuracy policy. v6-v8
+collapsed toward single-node graphs, and v8 routed 20 of 30 final nodes to
+`gpt-4o-mini`. v7 and v8 used the same seed, prompt, catalog, and evaluator,
+but the deployed inference receipt reports nondeterministic generation; their
+paired delta is therefore confounded by Director sampling and model-routing
+variation. In v8, task 25 terminated through a fresh, parseable artifact with
+no resampling but produced the wrong integer 425 instead of 850. Task 03
+retained rounds 0-12 in an append-only checkpoint before repeated HTTP 400
+responses, and task 15 ended in `canvas_action_domain_exhausted` after
+candidate conflict without a legal explicit terminal path.
+
+The evidence-selected v3 best-profile remains authoritative. v6-v8 are kept
+as reproducible rejected candidates; no model weights were changed and no
+training, optimizer step, LoRA, GRPO, MACE, Bayesian update, Skill, Tool,
+retrieval, Web search, or answer lookup ran.

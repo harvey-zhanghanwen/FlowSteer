@@ -835,6 +835,36 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("", partial.calls[0].response.text)
         self.assertEqual("length", partial.calls[0].response.metadata["finish_reason"])
 
+    async def test_length_finish_reason_overrides_declared_complete_metadata(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class ContradictoryGateway:
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                return AgentResponse(
+                    "intermediate derivation ending in 441",
+                    metadata={
+                        "finish_reason": "length",
+                        "artifact_complete": True,
+                        "artifact_status": "complete",
+                    },
+                )
+
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "produce a complete public derivation")],
+            output_agent_id="a",
+        )
+        result = await AgentRuntime(
+            catalog,
+            ContradictoryGateway(),
+        ).execute(graph, "question", run_id="contradictory-length-receipt")
+
+        metadata = result.output_metadata["a"]
+        self.assertIs(False, metadata["artifact_complete"])
+        self.assertEqual("incomplete", metadata["artifact_status"])
+        self.assertEqual("length", metadata["finish_reason"])
+
     async def test_length_continuation_uses_same_model_and_combines_output(
         self,
     ) -> None:

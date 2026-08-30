@@ -61,6 +61,15 @@ comparable_conditions:
     selection_result: "not_selected_lower_accuracy"
 
 excluded_conditions:
+  - condition_id: "aime2026_runtime_v8_contract_output_reliability"
+    reported_accuracy: 0.3333333333333333
+    reason: "same 30-task protocol but lower strict Accuracy; one operational failure and one terminal failure"
+  - condition_id: "aime2026_runtime_v7_v3_search_v5_reliability"
+    reported_accuracy: 0.43333333333333335
+    reason: "same 30-task protocol but lower strict Accuracy; one terminal failure"
+  - condition_id: "aime2026_runtime_v6_v3_v5_reliability"
+    reported_accuracy: 0.26666666666666666
+    reason: "same 30-task protocol and full completion, but lower strict Accuracy than v3"
   - condition_id: "aime2026_runtime_v4_9_evidence_recovery"
     reported_accuracy: 0.13333333333333333
     reason: "same 30-task protocol but lower strict Accuracy and ten operational failures"

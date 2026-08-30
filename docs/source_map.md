@@ -310,3 +310,24 @@ disabled. The completed v5 condition produced 30/30 evaluator-valid explicit
 FINISH trajectories with zero operational, terminal, max-rounds, or parsing
 failure, but strict Accuracy was 12/30 (40.00%), below v3's 14/30 (46.67%).
 It remains a versioned rejected candidate rather than the default profile.
+
+## AIME runtime v6-v8 reliability integration source map
+
+The v6-v8 candidates reuse the v3 scalar free-Agent search condition and the
+v5 runtime boundaries. They do not add an Agent role enum, fixed Agent count,
+chain/parallel template, verifier workflow, mathematical method, Tool, or
+Skill prior.
+
+| Boundary | Upstream source | Reuse / adaptation |
+|---|---|---|
+| Truncated completion authority | SkillFlow `training/batch_inference.py::_supervisor_call_unpaused` treats `finish_reason == "length"` as a bounded continuation condition | **SkillFlow strategy reused / project receipt correction:** `finish_reason=length` overrides contradictory provider claims of completeness. The same-model bounded continuation remains the only completion path; an incomplete artifact cannot become a terminal candidate. |
+| Artifact reuse at termination | FlowSteer progressive Canvas execution cache and pointer-only `SET_OUTPUT` / `FINISH` behavior | **FlowSteer core reused:** Output selection and explicit termination consume the current fresh immutable artifact. Neither action triggers a new Agent execution. |
+| Timeout hierarchy | v4/v5 existing inner Runtime versus outer collection boundary | **Existing project adaptation retained:** Agent execution is bounded at 480 seconds and task collection at 900 seconds so a typed Runtime result can be persisted before the outer boundary. This fixes the equal-600-second race without changing mathematical search. |
+| Contract task grounding | FlowSteer validate-before-commit Canvas transaction | **FlowSteer transaction reused / project target-blind guard:** free-text Agent obligations cannot inject question-external numeric assertions, derived conclusions, assumptions, or solution-method constraints. The guard reads only the public problem and never the evaluator target. |
+| AIME public output marker | SkillFlow target-blind math extraction accepts explicit final-answer markers and boxed integers | **SkillFlow protocol reused / thin execution adaptation:** a non-format Agent that derives a terminal integer retains its public derivation and appends `Final Answer: <integer>`. The marker does not change the Output pointer and cannot invent or repair a candidate. |
+| Partial trajectory persistence | Existing v4 append-only `rollout_checkpoints` stream | **Existing core reused:** completed turns survive later Director/provider failure. A remaining reporting gap is that an unfinished checkpoint is not yet materialized as a formal operational-failure trajectory. |
+
+The same-30 results were v6 `8/30`, v7 `13/30`, and v8 `10/30`, all below
+the v3 selected result `14/30`. Accordingly, the source-aligned reliability
+code is retained while none of these evaluated conditions replaces the v3
+best-profile pointer.

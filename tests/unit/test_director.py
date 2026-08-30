@@ -52,10 +52,12 @@ from src.interactive.director import (
     SCALAR_DIRECTOR_PROMPT_VERSION_V3,
     SCALAR_DIRECTOR_PROMPT_VERSION_V4,
     SCALAR_DIRECTOR_PROMPT_VERSION_V5,
+    SCALAR_DIRECTOR_PROMPT_VERSION_V6,
     SCALAR_DIRECTOR_SYSTEM_PROMPT,
     SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
     SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
     SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
+    SCALAR_DIRECTOR_SYSTEM_PROMPT_V6,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
@@ -1354,6 +1356,38 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("solver", suffix.casefold())
         self.assertNotIn("verifier", suffix.casefold())
         self.assertNotIn("parallel", suffix.casefold())
+
+    def test_scalar_v6_adds_only_target_blind_contract_validity(self) -> None:
+        self.assertEqual(
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V6,
+            director_system_prompt_for_version(
+                SCALAR_DIRECTOR_PROMPT_VERSION_V6
+            ),
+        )
+        self.assertTrue(
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V6.startswith(
+                SCALAR_DIRECTOR_SYSTEM_PROMPT_V5
+            )
+        )
+        suffix = SCALAR_DIRECTOR_SYSTEM_PROMPT_V6[
+            len(SCALAR_DIRECTOR_SYSTEM_PROMPT_V5) :
+        ]
+        for boundary in (
+            "task-external numeric value",
+            "derived conclusion",
+            "assumption",
+            "solution-method constraint",
+            "during Agent execution",
+        ):
+            self.assertIn(boundary, suffix)
+        for topology_prior in (
+            "solver",
+            "verifier",
+            "parallel",
+            "chain",
+            "three agents",
+        ):
+            self.assertNotIn(topology_prior, suffix.casefold())
 
     def test_scalar_v4_compacts_prior_live_state_and_keeps_latest_exact(
         self,

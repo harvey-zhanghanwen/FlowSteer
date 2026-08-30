@@ -77,6 +77,13 @@ SCALAR_DIRECTOR_SYSTEM_PROMPT_V4 = SCALAR_DIRECTOR_SYSTEM_PROMPT_V3
 SCALAR_DIRECTOR_SYSTEM_PROMPT_V5 = SCALAR_DIRECTOR_SYSTEM_PROMPT_V4 + """
 
 An Agent contract describes only its responsibility. Do not copy a current candidate value, intermediate artifact value, or artifact ID into a contract; route the source artifact through a relation for execution-time assessment."""
+# v6 keeps v5's topology-neutral policy and adds only the target-blind
+# task-specification boundary measured in the fixed AIME trajectories. It
+# supplies no mathematical method, role, Agent count, edge, or topology.
+SCALAR_DIRECTOR_SYSTEM_PROMPT_V6 = SCALAR_DIRECTOR_SYSTEM_PROMPT_V5 + """
+
+Do not add a task-external numeric value, derived conclusion, assumption, or solution-method constraint to an Agent contract; derive and assess those only during Agent execution."""
+
 
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
@@ -88,6 +95,9 @@ SCALAR_DIRECTOR_PROMPT_VERSION_V4 = (
 )
 SCALAR_DIRECTOR_PROMPT_VERSION_V5 = (
     "agentgraph.director.minimal-neutral-scalar.v5"
+)
+SCALAR_DIRECTOR_PROMPT_VERSION_V6 = (
+    "agentgraph.director.minimal-neutral-scalar.v6"
 )
 LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1 = (
     "agentgraph.director.minimal-neutral-scalar.v1"
@@ -526,6 +536,7 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         SCALAR_DIRECTOR_PROMPT_VERSION_V3: SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_PROMPT_VERSION_V4: SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
         SCALAR_DIRECTOR_PROMPT_VERSION_V5: SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
+        SCALAR_DIRECTOR_PROMPT_VERSION_V6: SCALAR_DIRECTOR_SYSTEM_PROMPT_V6,
         LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_PROMPT_VERSION_V8: LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
@@ -594,6 +605,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
+        SCALAR_DIRECTOR_SYSTEM_PROMPT_V6,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
@@ -3399,6 +3411,7 @@ class AgentGraphOrchestrator:
             SCALAR_DIRECTOR_PROMPT_VERSION_V3,
             SCALAR_DIRECTOR_PROMPT_VERSION_V4,
             SCALAR_DIRECTOR_PROMPT_VERSION_V5,
+            SCALAR_DIRECTOR_PROMPT_VERSION_V6,
         }:
             # FlowSteer exposes the current Canvas identifiers and bounded
             # horizon to the editor.  The v2 scalar observation adds only
@@ -3672,6 +3685,7 @@ class AgentGraphOrchestrator:
             QA_DIRECTOR_PROMPT_VERSION,
             SCALAR_DIRECTOR_PROMPT_VERSION_V4,
             SCALAR_DIRECTOR_PROMPT_VERSION_V5,
+            SCALAR_DIRECTOR_PROMPT_VERSION_V6,
         }:
             return copied
         return self._compact_qa_historical_messages(copied)
@@ -3883,10 +3897,12 @@ __all__ = [
     "SCALAR_DIRECTOR_PROMPT_VERSION_V3",
     "SCALAR_DIRECTOR_PROMPT_VERSION_V4",
     "SCALAR_DIRECTOR_PROMPT_VERSION_V5",
+    "SCALAR_DIRECTOR_PROMPT_VERSION_V6",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT_V3",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT_V4",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT_V5",
+    "SCALAR_DIRECTOR_SYSTEM_PROMPT_V6",
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15",
