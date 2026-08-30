@@ -70,6 +70,7 @@ def _record(
             f"Question: {question}"
         ),
         "ground_truth": answer,
+        "context": ["[Public title] A public source passage."],
         "metadata": {"evaluator_payload": {"supporting_facts": "private"}},
     }
 
@@ -118,6 +119,10 @@ def test_loader_keeps_raw_qa_only_in_index_external_source(
 
     assert sources.train[0].question == "Who wrote it?"
     assert sources.validation[0].canonical_answer == "Rome"
+    assert sources.public_context_by_source_id == {
+        "hotpotqa:train-1": ("[Public title] A public source passage.",),
+        "hotpotqa:validation-1": ("[Public title] A public source passage.",),
+    }
     assert "private context" not in repr(sources.combined).casefold()
     assert "supporting" not in repr(sources.combined).casefold()
 
@@ -721,6 +726,12 @@ def test_title_case_internal_is_where_is_not_an_unbound_answer_slot() -> None:
     )
     assert fact_index.validate_hotpotqa_fact_statement(source, fact) == fact
 
+    with pytest.raises(ValueError, match="unbound interrogative answer slot"):
+        fact_index.validate_hotpotqa_fact_statement(
+            source,
+            "The actor appeared in Which Place before making 100 films.",
+        )
+
 
 def test_long_answer_with_ordinary_finite_predicate_is_a_clause() -> None:
     assert fact_index.canonical_answer_is_declarative_clause(
@@ -732,6 +743,14 @@ def test_long_answer_with_ordinary_finite_predicate_is_a_clause() -> None:
             "Which was founded first, Stellenbosch University or Wayne State "
             "University?"
         ),
+    )
+    assert fact_index.canonical_answer_is_declarative_clause(
+        "Stanford was educated at the University of Cambridge",
+        question='Where was the writer of "Beati quorum via" educated?',
+    )
+    assert fact_index.canonical_answer_is_declarative_clause(
+        "Modern thinkers associated with classical realism are Carl von Clausewitz",
+        question="Which type of realism is linked to Carl von Clausewitz?",
     )
 
 

@@ -10,7 +10,7 @@ embedded and exposed to worker Agents.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from collections import Counter
 import json
 from pathlib import Path
@@ -117,6 +117,7 @@ _FACT_UNBOUND_ANSWER_SLOT = re.compile(
     r"\b(?:is|are|was|were)\s+(?:which|what)\s+"
     r"(?:person|individual|entity|thing|place|city|country|state|year|date|"
     r"number|film|movie|song|book|work|organization|company|team|one)\b)",
+    re.IGNORECASE,
 )
 _FACT_LEADING_INTERROGATIVE = re.compile(
     r"^(?:who|what|which|where|when|why|how|name|identify|"
@@ -319,11 +320,65 @@ def _contains_ordered_tokens(text: str, required: Sequence[str]) -> bool:
     for required_token in required:
         folded = required_token.casefold().replace("’", "'")
         if not any(
-            token == folded or token.startswith(f"{folded}-")
+            token == folded
+            or token.startswith(f"{folded}-")
+            or token.removesuffix("'s") == folded
+            or (folded.endswith("ʻ") and token.startswith(folded))
             for token in observed
         ):
             return False
     return True
+
+
+def _source_confirmed_named_token_sequences(
+    source_question: str,
+) -> tuple[tuple[str, ...], ...]:
+    """Return title-like source spans that may contain interrogative words."""
+
+    matches = tuple(_LEXICAL_TOKEN.finditer(source_question))
+    sequences: list[tuple[str, ...]] = []
+    run: list[re.Match[str]] = []
+
+    def publish() -> None:
+        if len(run) < 3:
+            return
+        values = tuple(item.group(0) for item in run)
+        uppercase_count = sum(token[:1].isupper() for token in values)
+        if uppercase_count >= 2:
+            sequences.append(tuple(token.casefold() for token in values))
+
+    for match in matches:
+        token = match.group(0)
+        folded = token.casefold()
+        if token[:1].isupper() or folded in _FUNCTION_WORDS:
+            run.append(match)
+        else:
+            publish()
+            run = []
+    publish()
+    return tuple(dict.fromkeys(sequences))
+
+
+def _unbound_slot_is_inside_source_named_surface(
+    source_question: str,
+    fact: str,
+    slot_match: re.Match[str],
+) -> bool:
+    """Allow answer-slot words only when nested in a source-confirmed title."""
+
+    fact_matches = tuple(_LEXICAL_TOKEN.finditer(fact))
+    fact_tokens = tuple(match.group(0).casefold() for match in fact_matches)
+    for sequence in _source_confirmed_named_token_sequences(source_question):
+        if len(sequence) > len(fact_tokens):
+            continue
+        for index in range(len(fact_tokens) - len(sequence) + 1):
+            if fact_tokens[index : index + len(sequence)] != sequence:
+                continue
+            surface_start = fact_matches[index].start()
+            surface_end = fact_matches[index + len(sequence) - 1].end()
+            if surface_start <= slot_match.start() and slot_match.end() <= surface_end:
+                return True
+    return False
 
 
 def _contains_contiguous_lexical_surface(text: str, required_text: str) -> bool:
@@ -456,6 +511,13 @@ def canonical_answer_is_declarative_clause(
         and has_finite_predicate
     ):
         return True
+    finite_match = _FINITE_CLAUSE_VERB.search(normalized)
+    if finite_match is None:
+        finite_match = _COMMON_FINITE_CLAUSE_PREDICATE.search(normalized)
+    if finite_match is not None and len(answer_tokens) >= 5:
+        predicate_token_index = len(_lexical_tokens(normalized[: finite_match.start()]))
+        if 0 < predicate_token_index < len(answer_tokens) - 1:
+            return True
     if question is None or (
         len(answer_tokens) < 3
         or answer_tokens[0].casefold()
@@ -551,7 +613,14 @@ def validate_hotpotqa_fact_statement(
         )
     ):
         raise ValueError("fact_statement begins with an unbound anaphoric subject")
-    if _FACT_UNBOUND_ANSWER_SLOT.search(structural_fact):
+    if any(
+        not _unbound_slot_is_inside_source_named_surface(
+            source.question,
+            structural_fact,
+            match,
+        )
+        for match in _FACT_UNBOUND_ANSWER_SLOT.finditer(structural_fact)
+    ):
         raise ValueError("fact_statement contains an unbound interrogative answer slot")
     if (
         not fact.rstrip('"\'’”)]} ').endswith((".", "!"))
@@ -677,6 +746,12 @@ class HotpotQAFullDatasetQASources:
 
     train: tuple[HotpotQATrainQASource, ...]
     validation: tuple[HotpotQATrainQASource, ...]
+    # Public distractor passages are generation-only recovery evidence for
+    # malformed upstream Q/A rows.  They are never projected into the sidecar,
+    # embedding index, or Agent Tool wire.
+    public_context_by_source_id: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def __post_init__(self) -> None:
         train_ids = {source.source_train_task_id for source in self.train}
@@ -691,6 +766,16 @@ class HotpotQAFullDatasetQASources:
             raise ValueError("native HotpotQA train/validation source IDs overlap")
         if any(source.cycled for source in self.combined):
             raise ValueError("native full-dataset HotpotQA sources cannot be cycled")
+        context_ids = set(self.public_context_by_source_id)
+        if context_ids and context_ids != train_ids | validation_ids:
+            raise ValueError(
+                "public context IDs differ from native HotpotQA source IDs"
+            )
+        if any(
+            not passages or any(not str(passage).strip() for passage in passages)
+            for passages in self.public_context_by_source_id.values()
+        ):
+            raise ValueError("public HotpotQA context contains an empty passage")
 
     @property
     def combined(self) -> tuple[HotpotQATrainQASource, ...]:
@@ -712,6 +797,7 @@ def load_hotpotqa_full_dataset_qa_sources(
         "train": [],
         "validation": [],
     }
+    public_context_by_source_id: dict[str, tuple[str, ...]] = {}
     for record in _hotpot_records(config):
         split = record.get("split")
         if split not in projected:
@@ -732,6 +818,18 @@ def load_hotpotqa_full_dataset_qa_sources(
                 ),
             )
         )
+        public_context = record.get("context")
+        if not isinstance(public_context, Sequence) or isinstance(
+            public_context, (str, bytes)
+        ):
+            raise TypeError("native HotpotQA public context must be a sequence")
+        passages = tuple(
+            _required_text(item, "public_context_passage")
+            for item in public_context
+        )
+        if not passages:
+            raise ValueError("native HotpotQA public context cannot be empty")
+        public_context_by_source_id[task_id] = passages
     if len(projected["train"]) != expected_train_count:
         raise ValueError(
             f"expected {expected_train_count} native train records, got "
@@ -745,6 +843,9 @@ def load_hotpotqa_full_dataset_qa_sources(
     return HotpotQAFullDatasetQASources(
         train=tuple(projected["train"]),
         validation=tuple(projected["validation"]),
+        public_context_by_source_id=MappingProxyType(
+            public_context_by_source_id
+        ),
     )
 
 

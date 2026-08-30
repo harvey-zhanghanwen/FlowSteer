@@ -65,6 +65,15 @@ def _binary_fact_verification(**overrides: bool) -> dict[str, bool]:
     return value
 
 
+def _public_context_fact_verification(**overrides: bool) -> dict[str, bool]:
+    value = {
+        name: True
+        for name in materializer._REQUIRED_PUBLIC_CONTEXT_FACT_VERIFICATION_FIELDS
+    }
+    value.update(overrides)
+    return value
+
+
 def _sidecar(
     source: HotpotQATrainQASource,
     *,
@@ -426,6 +435,84 @@ def test_targeted_repair_uses_triviaqa_immutable_and_answer_slot_payloads(
     )
     assert receipt["attempt_receipts"][1]["fact"]["repair_temperature"] == 0.1
     assert fact_repair["temperature"] == 0.1
+
+
+def test_bounded_tail_recovery_uses_unlabeled_public_context_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(91)
+    calls: list[Mapping[str, object]] = []
+
+    async def fake_generate_json(**kwargs: object):
+        calls.append(dict(kwargs))
+        request_id = str(kwargs["request_id"])
+        if ":generate:" in request_id:
+            return {
+                "paraphrase_question": "Which individual wrote Atlas?",
+                "fact_statement": "Atlas was authored by Ada Lovelace.",
+            }, {"request_id": request_id}
+        if "repair-fact" in request_id:
+            problem = json.loads(str(kwargs["problem"]))
+            if problem["fact_repair_strategy"] == (
+                "public_context_fact_reconstruction"
+            ):
+                return {
+                    "fact_statement": "Ada Lovelace wrote Atlas.",
+                }, {"request_id": request_id}
+            return {
+                "fact_statement": "Atlas was authored by Ada Lovelace.",
+            }, {"request_id": request_id}
+        if "verify-question" in request_id:
+            return _question_verification(), {"request_id": request_id}
+        if "verify-fact" in request_id:
+            if kwargs["schema"] == materializer.PUBLIC_CONTEXT_FACT_VERIFICATION_SCHEMA:
+                return _public_context_fact_verification(), {
+                    "request_id": request_id
+                }
+            return _fact_verification(fact_supported_by_qa=False), {
+                "request_id": request_id
+            }
+        raise AssertionError(f"unexpected request: {request_id}")
+
+    monkeypatch.setattr(materializer, "_generate_json", fake_generate_json)
+    candidate, receipt = asyncio.run(
+        materializer._materialize_one(
+            source,
+            index=0,
+            model=object(),
+            provider=object(),
+            seed=53,
+            max_attempts=7,
+            generation_rounds=1,
+            public_context=(
+                "[Noise] An unrelated passage.",
+                "[Atlas] Ada Lovelace wrote Atlas.",
+            ),
+        )
+    )
+
+    assert candidate["fact_statement"] == "Ada Lovelace wrote Atlas."
+    final_fact = receipt["attempt_receipts"][-1]["fact"]
+    assert final_fact["repair_strategy"] == (
+        "public_context_fact_reconstruction"
+    )
+    assert final_fact["verification_mode"] == "public_context"
+    assert receipt["fact_generation_source"] == "public_context"
+    assert receipt["public_context_generation_only"] is True
+    assert receipt["public_context_indexed_or_tool_exposed"] is False
+    context_call = next(
+        call
+        for call in calls
+        if (
+            "repair-fact" in str(call["request_id"])
+            and json.loads(str(call["problem"]))["fact_repair_strategy"]
+            == "public_context_fact_reconstruction"
+        )
+    )
+    context_problem = json.loads(str(context_call["problem"]))
+    assert context_problem["unlabeled_public_context_passages"][0] == (
+        "[Atlas] Ada Lovelace wrote Atlas."
+    )
 
 
 def test_fact_repair_strategy_reconstructs_semantics_but_preserves_immutable_fix() -> None:
