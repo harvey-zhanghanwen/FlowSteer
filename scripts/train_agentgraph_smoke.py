@@ -26,6 +26,12 @@ from src.interactive.agent_runtime import AgentRuntime
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.aime2026_adapter import extract_aime2026_candidate
 from src.interactive.mbppplus_adapter import validate_mbppplus_public_source
+from src.interactive.mbppplus_execution import (
+    MBPPPLUS_PYTHON_EXEC_TOOL_ID,
+    MBPPPlusReactExecutionAdapter,
+    create_mbppplus_public_test_registry,
+    validate_mbppplus_tested_completion,
+)
 from src.interactive.config_loader import (
     ConfigurationError,
     load_model_registry,
@@ -158,6 +164,7 @@ ENVIRONMENT_RUNTIME_MODE = "model_driven_ragen_react"
 AIME_TOOL_RUNTIME_MODE = "model_driven_computation"
 HEALTHBENCH_TOOL_RUNTIME_MODE = "model_driven_medrag_search"
 SWE_CODING_RUNTIME_MODE = "iterative_repository_coding"
+MBPPPLUS_TOOL_RUNTIME_MODE = "model_driven_public_test_react"
 
 EXPECTED_SOURCE_ORDER = (
     "hotpotqa",
@@ -863,6 +870,90 @@ def _aime_tool_runtime_settings(
             section["calculator_timeout_seconds"]
         ),
         "python_timeout_seconds": float(section["python_timeout_seconds"]),
+    }
+
+
+def _mbppplus_tool_runtime_settings(
+    config: Mapping[str, Any],
+    task: TaskRecord,
+    *,
+    condition_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Return the exact task-scoped MBPP+ public-test ReAct condition."""
+
+    raw = config.get("mbppplus_tool_runtime")
+    if raw is None:
+        return None
+    section = _mapping(raw, "mbppplus_tool_runtime")
+    enabled = section.get("enabled")
+    if enabled is False:
+        return None
+    if enabled is not True:
+        raise ConfigurationError("mbppplus_tool_runtime.enabled must be bool")
+    source_key = _dataset_key(task)
+    if section.get("dataset_scope") != ["mbpp_plus"]:
+        raise ConfigurationError(
+            "mbppplus_tool_runtime.dataset_scope must be exactly ['mbpp_plus']"
+        )
+    if source_key != "mbpp_plus":
+        raise ConfigurationError(
+            "mbppplus_tool_runtime is not configured for dataset "
+            f"{source_key!r}"
+        )
+    if section.get("mode") != MBPPPLUS_TOOL_RUNTIME_MODE:
+        raise ConfigurationError(
+            "mbppplus_tool_runtime.mode must be "
+            f"{MBPPPLUS_TOOL_RUNTIME_MODE}"
+        )
+    experiment = _mapping(config.get("experiment"), "experiment")
+    experiment_condition_id = str(
+        experiment.get("condition_id", "")
+    ).strip()
+    active_condition_id = (
+        experiment_condition_id
+        if condition_id is None
+        else condition_id.strip()
+        if isinstance(condition_id, str)
+        else ""
+    )
+    configured_condition_id = section.get("condition_id")
+    if (
+        not isinstance(configured_condition_id, str)
+        or configured_condition_id.strip() != experiment_condition_id
+        or configured_condition_id.strip() != active_condition_id
+    ):
+        raise ConfigurationError(
+            "mbppplus_tool_runtime.condition_id must exactly match both the "
+            "experiment and active rollout condition_id"
+        )
+    max_turns = section.get("max_turns_per_director_step")
+    if max_turns != 1:
+        raise ConfigurationError(
+            "mbppplus_tool_runtime.max_turns_per_director_step must be 1"
+        )
+    max_tool_calls = section.get("max_tool_calls_per_agent")
+    if (
+        isinstance(max_tool_calls, bool)
+        or not isinstance(max_tool_calls, int)
+        or max_tool_calls < 1
+    ):
+        raise ConfigurationError(
+            "mbppplus_tool_runtime.max_tool_calls_per_agent must be a positive integer"
+        )
+    timeout_seconds = section.get("python_timeout_seconds")
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or float(timeout_seconds) <= 0
+    ):
+        raise ConfigurationError(
+            "mbppplus_tool_runtime.python_timeout_seconds must be positive"
+        )
+    return {
+        "source_key": source_key,
+        "max_turns": 1,
+        "max_tool_calls": int(max_tool_calls),
+        "python_timeout_seconds": float(timeout_seconds),
     }
 
 
@@ -2219,6 +2310,7 @@ class LiveSmokeBackend:
             "healthbench_tool_runtime",
             "environment_runtime",
             "swe_coding_runtime",
+            "mbppplus_tool_runtime",
         )
         explicitly_enabled = tuple(
             section_name
@@ -2257,6 +2349,11 @@ class LiveSmokeBackend:
             task,
             condition_id=condition_id,
         )
+        mbppplus_settings = _mbppplus_tool_runtime_settings(
+            self.config,
+            task,
+            condition_id=condition_id,
+        )
         enabled_runtimes = sum(
             settings is not None
             for settings in (
@@ -2265,6 +2362,7 @@ class LiveSmokeBackend:
                 healthbench_settings,
                 environment_settings,
                 swe_coding_settings,
+                mbppplus_settings,
             )
         )
         if enabled_runtimes > 1:
@@ -2509,6 +2607,34 @@ class LiveSmokeBackend:
                 prepared.cleanup()
                 raise
             return runtime, tool_registry, prepared.cleanup
+
+        if mbppplus_settings is not None:
+            source_key = str(mbppplus_settings["source_key"])
+            tool_registry = create_mbppplus_public_test_registry(
+                task.question,
+                timeout_seconds=float(
+                    mbppplus_settings["python_timeout_seconds"]
+                ),
+            )
+            adapter = MBPPPlusReactExecutionAdapter(
+                gateway=self.runtime.gateway,
+                tool_registry=tool_registry,
+                max_turns=int(mbppplus_settings["max_turns"]),
+                max_tool_calls=int(mbppplus_settings["max_tool_calls"]),
+                max_action_tokens=tool_action_tokens,
+                sampling_base_seed=sampling_base_seed,
+                sampling_coordinate=sampling_coordinate,
+            )
+            runtime = AgentRuntime(
+                self.registry,
+                self.runtime.gateway,
+                timeout_seconds=self.runtime.timeout_seconds,
+                execution_adapters={"react": adapter},
+                tool_registry=tool_registry,
+                dataset_id=source_key,
+                semantic_protocol=semantic_protocol,
+            )
+            return runtime, tool_registry, lambda: None
 
         if aime_settings is not None:
             source_key = str(aime_settings["source_key"])
@@ -3716,6 +3842,12 @@ class LiveSmokeBackend:
                 ),
                 terminal_artifact_validator=(
                     _terminal_artifact_validator_for(task)
+                ),
+                terminal_execution_validator=(
+                    validate_mbppplus_tested_completion
+                    if _dataset_key(task) == "mbpp_plus"
+                    and task_tool_registry is not None
+                    else None
                 ),
                 allowed_actions=(
                     tuple(str(value) for value in graph_config["actions"])

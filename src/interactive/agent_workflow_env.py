@@ -382,6 +382,9 @@ class AgentWorkflowEnv:
         terminal_artifact_validator: Optional[
             Callable[[str], Optional[str]]
         ] = None,
+        terminal_execution_validator: Optional[
+            Callable[[AgentRuntimeResult], Optional[str]]
+        ] = None,
     ) -> None:
         if runtime is None and gateway is None:
             raise AgentWorkflowStateError("gateway or runtime is required")
@@ -471,8 +474,20 @@ class AgentWorkflowEnv:
             raise AgentWorkflowStateError(
                 "terminal_artifact_validator must be callable or None"
             )
+        if terminal_execution_validator is not None and not callable(
+            terminal_execution_validator
+        ):
+            raise AgentWorkflowStateError(
+                "terminal_execution_validator must be callable or None"
+            )
         if allowed_actions is None:
-            resolved_allowed_actions = tuple(item.value for item in AgentActionType)
+            # ``continue`` is opt-in execution control for a stepwise ReAct
+            # adapter.  It is not part of FlowSteer's default Canvas edit set.
+            resolved_allowed_actions = tuple(
+                item.value
+                for item in AgentActionType
+                if item is not AgentActionType.CONTINUE
+            )
         else:
             if isinstance(allowed_actions, (str, bytes)) or not allowed_actions:
                 raise AgentWorkflowStateError(
@@ -513,6 +528,7 @@ class AgentWorkflowEnv:
         )
         self.artifact_candidate_extractor = artifact_candidate_extractor
         self.terminal_artifact_validator = terminal_artifact_validator
+        self.terminal_execution_validator = terminal_execution_validator
         self.allowed_action_types = resolved_allowed_actions
         self._allowed_action_type_set = frozenset(resolved_allowed_actions)
         self.parser = AgentActionParser()
@@ -550,6 +566,14 @@ class AgentWorkflowEnv:
         # receipts so a contract edit does not repeat retrieval or discard
         # evidence already obtained on the current task.
         self._failure_continuations: dict[str, dict[str, object]] = {}
+        # One-step bridge between SkillFlow's inner Action--Observation
+        # boundary and FlowSteer's outer Canvas feedback boundary.  This is an
+        # outbox for events produced by the current ``step`` only; the lossless
+        # trajectory remains authoritative for earlier events.  Keeping it
+        # separate from live continuation state is essential when one parallel
+        # Agent completes while a sibling remains pending.
+        self._react_event_outbox: list[dict[str, object]] = []
+        self._react_event_keys: set[str] = set()
         self._last_valid_evidence_lineage: Optional[
             AgentWorkflowEvidenceLineageSnapshot
         ] = None
@@ -594,6 +618,314 @@ class AgentWorkflowEnv:
         """Return the frozen catalog minus trajectory-scoped failures."""
 
         return self._available_model_ids()
+
+    def _stepwise_react_pending_agent_ids(self) -> Tuple[str, ...]:
+        """Return Agents with a resumable one-turn ReAct continuation.
+
+        The continuation state is the same public Action--Observation prefix
+        already carried by ``AgentRuntime`` after a bounded ReAct turn.  The
+        opt-in adapter marker is copied from the existing WebShop stepwise
+        execution boundary; no Canvas topology is prescribed here.
+        """
+
+        adapter = self.runtime.execution_adapters.get("react")
+        if getattr(adapter, "stepwise_director", False) is not True:
+            return ()
+        pending: list[str] = []
+        for node in self._graph.nodes:
+            if node.execution_mode.value != "react":
+                continue
+            continuation = self._failure_continuations.get(node.id)
+            if not isinstance(continuation, Mapping):
+                continue
+            raw_trace = continuation.get("react_trace", ())
+            if (
+                isinstance(raw_trace, (list, tuple))
+                and any(isinstance(item, Mapping) for item in raw_trace)
+                and continuation.get("tool_plan_exhausted") is not True
+            ):
+                pending.append(node.id)
+        return tuple(pending)
+
+    @staticmethod
+    def _public_react_history(
+        metadata: Mapping[str, object],
+    ) -> list[dict[str, object]]:
+        """Project the complete public Action--Observation prefix."""
+
+        raw_trace = metadata.get("react_trace", ())
+        trace = (
+            tuple(item for item in raw_trace if isinstance(item, Mapping))
+            if isinstance(raw_trace, (list, tuple))
+            else ()
+        )
+        history: list[dict[str, object]] = []
+        for entry in trace:
+            action = entry.get("structured_action")
+            observation = entry.get("observation")
+            if not isinstance(observation, Mapping):
+                observation = {
+                    key: entry[key]
+                    for key in (
+                        "observation_status",
+                        "public_error_code",
+                        "expected_top_level_fields",
+                        "forbidden_wrapper_fields",
+                        "repair_instruction",
+                    )
+                    if key in entry
+                }
+            history.append(
+                {
+                    "turn": entry.get("turn"),
+                    "action": dict(action) if isinstance(action, Mapping) else None,
+                    "action_text": entry.get("action_text"),
+                    "observation": dict(observation),
+                }
+            )
+        return history
+
+    def public_react_state(
+        self,
+        agent_id: Optional[str] = None,
+    ) -> Optional[dict[str, object]]:
+        """Return task goal, current status, and public ReAct receipts.
+
+        Hidden EvalPlus inputs and evaluator outcomes are never read here.
+        """
+
+        pending_ids = self._stepwise_react_pending_agent_ids()
+        events_by_agent = {
+            str(event["agent_id"]): event
+            for event in self._react_event_outbox
+            if isinstance(event.get("agent_id"), str)
+        }
+        if isinstance(agent_id, str) and agent_id:
+            candidates = (agent_id,)
+        else:
+            relevant_ids = set(pending_ids) | set(events_by_agent)
+            relevant_ids.update(
+                node.id
+                for node in self._graph.nodes
+                if node.execution_mode.value == "react"
+                and node.id in self._progressive_output_metadata
+            )
+            candidates = tuple(
+                node.id for node in self._graph.nodes if node.id in relevant_ids
+            )
+        states: list[dict[str, object]] = []
+        adapter = self.runtime.execution_adapters.get("react")
+        max_tool_calls = getattr(adapter, "_max_tool_calls", None)
+        for candidate_id in candidates:
+            if not self._graph.has_node(candidate_id):
+                continue
+            node = self._graph.get_node(candidate_id)
+            current_event = events_by_agent.get(candidate_id)
+            if isinstance(current_event, Mapping):
+                action = current_event.get("action")
+                observation = current_event.get("observation")
+                history = [
+                    {
+                        "turn": current_event.get("react_turn"),
+                        "action": (
+                            dict(action) if isinstance(action, Mapping) else None
+                        ),
+                        "action_text": current_event.get("action_text"),
+                        "observation": (
+                            dict(observation)
+                            if isinstance(observation, Mapping)
+                            else observation
+                        ),
+                    }
+                ]
+                state = {
+                    "agent_id": candidate_id,
+                    "graph_revision": self._graph.revision,
+                    "original_task_objective": self._problem,
+                    "agent_contract": current_event.get(
+                        "agent_contract", node.contract
+                    ),
+                    "final_objective": current_event.get(
+                        "final_objective",
+                        node.completion_condition or self._problem,
+                    ),
+                    "execution_status": current_event.get(
+                        "execution_status", "awaiting_next_action"
+                    ),
+                    "execution_semantics": "one_action_one_observation",
+                    "react_turns_used": current_event.get("react_turn", 1),
+                    "tool_calls_used": current_event.get("tool_calls_used", 0),
+                    "action_observation_history": history,
+                    "latest_action": history[0]["action"],
+                    "latest_action_text": history[0]["action_text"],
+                    "latest_observation": history[0]["observation"],
+                }
+                for field_name in (
+                    "tool_call_budget",
+                    "remaining_tool_calls",
+                ):
+                    if field_name in current_event:
+                        state[field_name] = current_event[field_name]
+                states.append(state)
+                continue
+            continuation = self._failure_continuations.get(candidate_id)
+            metadata: Mapping[str, object]
+            status = "awaiting_next_action"
+            if isinstance(continuation, Mapping):
+                metadata = continuation
+            else:
+                raw_metadata = self._progressive_output_metadata.get(candidate_id)
+                if not isinstance(raw_metadata, Mapping):
+                    continue
+                metadata = raw_metadata
+                status = "completed"
+            history = self._public_react_history(metadata)
+            receipts = metadata.get("tool_receipts", ())
+            tool_call_count = (
+                len(receipts) if isinstance(receipts, (list, tuple)) else 0
+            )
+            state: dict[str, object] = {
+                "agent_id": candidate_id,
+                "graph_revision": self._graph.revision,
+                "original_task_objective": self._problem,
+                "agent_contract": node.contract,
+                "final_objective": node.completion_condition or self._problem,
+                "execution_status": status,
+                "execution_semantics": "one_action_one_observation",
+                "react_turns_used": len(history),
+                "tool_calls_used": tool_call_count,
+                "action_observation_history": history,
+                "latest_action": history[-1]["action"] if history else None,
+                "latest_action_text": (
+                    history[-1]["action_text"] if history else None
+                ),
+                "latest_observation": (
+                    history[-1]["observation"] if history else None
+                ),
+            }
+            if type(max_tool_calls) is int:
+                state["tool_call_budget"] = max_tool_calls
+                state["remaining_tool_calls"] = max(
+                    max_tool_calls - tool_call_count,
+                    0,
+                )
+            states.append(state)
+        if not states:
+            return None
+        return {
+            "task_objective": self._problem,
+            "graph_revision": self._graph.revision,
+            "pending_agent_ids": list(self._stepwise_react_pending_agent_ids()),
+            "agents": states,
+        }
+
+    def _record_react_events_from_metadata(
+        self,
+        *,
+        agent_id: str,
+        metadata: Mapping[str, object],
+        execution_status: str,
+        execution_phase: Optional[str] = None,
+    ) -> None:
+        """Queue this step's new public ReAct Action--Observation events.
+
+        ``ToolReactExecutionAdapter`` marks restored prefix entries with
+        ``continued_from_prior_revision``.  Excluding those entries prevents
+        replay while retaining every action newly produced in this Canvas
+        execution boundary, including parse/schema errors and completion.
+        """
+
+        if not self._graph.has_node(agent_id):
+            return
+        node = self._graph.get_node(agent_id)
+        if node.execution_mode.value != "react":
+            return
+        raw_trace = metadata.get("react_trace", ())
+        if not isinstance(raw_trace, (list, tuple)):
+            return
+        receipts = metadata.get("tool_receipts", ())
+        tool_call_count = (
+            len(receipts) if isinstance(receipts, (list, tuple)) else 0
+        )
+        adapter = self.runtime.execution_adapters.get("react")
+        max_tool_calls = getattr(adapter, "_max_tool_calls", None)
+        phase = execution_phase or metadata.get("execution_phase")
+        for raw_entry in raw_trace:
+            if (
+                not isinstance(raw_entry, Mapping)
+                or raw_entry.get("continued_from_prior_revision") is True
+            ):
+                continue
+            public_history = self._public_react_history(
+                {"react_trace": [raw_entry]}
+            )
+            if not public_history:
+                continue
+            transition = public_history[0]
+            event: dict[str, object] = {
+                "agent_id": agent_id,
+                "graph_revision": self._graph.revision,
+                "original_task_objective": self._problem,
+                "agent_contract": node.contract,
+                "final_objective": node.completion_condition or self._problem,
+                "execution_status": execution_status,
+                "execution_semantics": "one_action_one_observation",
+                "execution_phase": phase,
+                "react_turn": transition.get("turn"),
+                "tool_calls_used": tool_call_count,
+                "action": transition.get("action"),
+                "action_text": transition.get("action_text"),
+                "observation": transition.get("observation"),
+            }
+            if type(max_tool_calls) is int:
+                event["tool_call_budget"] = max_tool_calls
+                event["remaining_tool_calls"] = max(
+                    max_tool_calls - tool_call_count,
+                    0,
+                )
+            event_key = json.dumps(
+                {
+                    "agent_id": agent_id,
+                    "execution_phase": phase,
+                    "react_turn": transition.get("turn"),
+                    "action_text": transition.get("action_text"),
+                    "observation": transition.get("observation"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            if event_key in self._react_event_keys:
+                continue
+            self._react_event_keys.add(event_key)
+            self._react_event_outbox.append(event)
+
+    def _record_react_output_events(
+        self,
+        execution: AgentRuntimeResult,
+    ) -> None:
+        """Queue newly completed ReAct actions from one Runtime result."""
+
+        phases = {
+            call.request.agent.id: call.request.phase.value
+            for call in execution.calls
+        }
+        for agent_id in execution.executed_agent_ids:
+            metadata = execution.output_metadata.get(agent_id)
+            if not isinstance(metadata, Mapping):
+                continue
+            self._record_react_events_from_metadata(
+                agent_id=agent_id,
+                metadata=metadata,
+                execution_status="completed",
+                execution_phase=phases.get(agent_id),
+            )
+
+    def public_react_events(self) -> list[dict[str, object]]:
+        """Return this Canvas step's public Action--Observation outbox."""
+
+        return [dict(event) for event in self._react_event_outbox]
 
     @property
     def last_valid_evidence_lineage(
@@ -786,6 +1118,49 @@ class AgentWorkflowEnv:
             # Director to emit the explicit terminal action; it does not finish
             # automatically.
             return (AgentActionType.FINISH.value,)
+
+        pending_stepwise_agents = self._stepwise_react_pending_agent_ids()
+        if pending_stepwise_agents:
+            # A single public Action--Observation transition has returned to
+            # the Director.  SkillFlow's next legal decision is either to
+            # continue that bounded Agent state or to repair the responsible
+            # Agent declaration.  Publishing every unrelated Canvas schema at
+            # this exact boundary both violates repair-first recovery and can
+            # exceed the local model's context window.  This remains a choice
+            # between two ordinary FlowSteer actions; it does not choose a
+            # role, contract, algorithm, relation, or topology.
+            react_state = self.public_react_state()
+            pending_stepwise_agent_set = set(pending_stepwise_agents)
+            latest_observations = tuple(
+                agent_state.get("latest_observation")
+                for agent_state in (
+                    react_state.get("agents", ())
+                    if isinstance(react_state, Mapping)
+                    else ()
+                )
+                if (
+                    isinstance(agent_state, Mapping)
+                    and agent_state.get("agent_id")
+                    in pending_stepwise_agent_set
+                )
+            )
+            all_latest_actions_succeeded = bool(latest_observations) and all(
+                isinstance(observation, Mapping)
+                and observation.get("observation_status") == "success"
+                for observation in latest_observations
+            )
+            step_actions: list[str] = []
+            if (
+                not all_latest_actions_succeeded
+                and
+                AgentActionType.MODIFY_AGENT.value
+                in self._allowed_action_type_set
+                and self._model_admissible_modify_agent_ids()
+            ):
+                step_actions.append(AgentActionType.MODIFY_AGENT.value)
+            if AgentActionType.CONTINUE.value in self._allowed_action_type_set:
+                step_actions.append(AgentActionType.CONTINUE.value)
+            return tuple(step_actions)
 
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
         if (
@@ -1095,6 +1470,11 @@ class AgentWorkflowEnv:
                 admitted.append(action_type)
             elif action_type == AgentActionType.SET_OUTPUT.value and can_set_output:
                 admitted.append(action_type)
+            elif (
+                action_type == AgentActionType.CONTINUE.value
+                and self._stepwise_react_pending_agent_ids()
+            ):
+                admitted.append(action_type)
             elif action_type == AgentActionType.FINISH.value and finish_admitted:
                 admitted.append(action_type)
         return tuple(admitted)
@@ -1143,6 +1523,10 @@ class AgentWorkflowEnv:
                         require_complete=False,
                     )
                     if not validation.valid:
+                        continue
+                    try:
+                        self.runtime.validate_graph_execution_contracts(candidate)
+                    except AgentRuntimeError:
                         continue
                     if self._semantic_edit_issue_for(candidate) is not None:
                         continue
@@ -2385,6 +2769,7 @@ class AgentWorkflowEnv:
         repairable_failed = (
             self._failed_agent_ids - self._diagnosed_unusable_agent_ids
             - self._repair_exhausted_agent_ids
+            - set(self._stepwise_react_pending_agent_ids())
         ).intersection(node_ids)
         if repairable_failed:
             return tuple(
@@ -3743,6 +4128,13 @@ class AgentWorkflowEnv:
                 "agent_ids": list(self._model_admissible_output_agent_ids()),
                 "current_output_agent_id": self._graph.output_agent_id,
             }
+        if AgentActionType.CONTINUE.value in admitted:
+            targets[AgentActionType.CONTINUE.value] = {
+                "agent_ids": list(self._stepwise_react_pending_agent_ids()),
+                "execution_semantics": "one_action_one_observation",
+                "graph_revision_unchanged": True,
+                "current_state": self.public_react_state(),
+            }
         if AgentActionType.FINISH.value in admitted:
             targets[AgentActionType.FINISH.value] = {
                 "admissible": True,
@@ -3827,6 +4219,7 @@ class AgentWorkflowEnv:
             required_evidence_tool_id=self.required_evidence_tool_id,
             artifact_candidate_extractor=self.artifact_candidate_extractor,
             terminal_artifact_validator=self.terminal_artifact_validator,
+            terminal_execution_validator=self.terminal_execution_validator,
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
@@ -3839,6 +4232,12 @@ class AgentWorkflowEnv:
             return self._reject(None, "workflow already finished")
         if not self._problem:
             return self._reject(None, "environment has no active problem")
+        # The preceding Director decision has consumed the prior Canvas
+        # feedback.  Start a fresh one-step outbox before applying this action;
+        # any Agent transitions produced below are then published exactly in
+        # the resulting feedback and persisted losslessly in the turn record.
+        self._react_event_outbox.clear()
+        self._react_event_keys.clear()
         try:
             action = (
                 self.parser.parse(action_or_response)
@@ -3887,6 +4286,100 @@ class AgentWorkflowEnv:
                     action,
                     "edit rejected: " + delete_issue,
                 )
+        if action.action_type is AgentActionType.CONTINUE:
+            pending_agent_ids = self._stepwise_react_pending_agent_ids()
+            if action.agent_id not in pending_agent_ids:
+                return self._reject_after_count(
+                    action,
+                    "continue rejected: agent_id must identify a pending "
+                    "stepwise ReAct Agent; pending_agent_ids="
+                    f"{list(pending_agent_ids)!r}",
+                    feedback_code="react_continue_unavailable",
+                )
+            assert action.agent_id is not None
+            current_agent_ids = {node.id for node in self._graph.nodes}
+            dirty_agents = self._graph.dirty_closure({action.agent_id})
+            self._progressive_execution = None
+            self._progressive_execution_revision = None
+            self._unresolved_dirty_agents.update(dirty_agents)
+            execution: Optional[AgentRuntimeResult] = None
+            partial_execution: Optional[AgentRuntimeResult] = None
+            execution_error: Optional[AgentRuntimeError] = None
+            try:
+                execution = await self.runtime.execute(
+                    self._graph,
+                    self._problem,
+                    require_complete=False,
+                    prior_outputs=self._progressive_outputs,
+                    prior_output_metadata=self._progressive_output_metadata,
+                    prior_failure_metadata=self._failure_continuations,
+                    unavailable_model_ids=self._unavailable_model_ids,
+                    dirty_agents=dirty_agents,
+                    format_output_agent=self._uses_format_agent_protocol(),
+                )
+            except AgentRuntimeError as exc:
+                execution_error = exc
+                partial_execution = exc.partial_result
+                if partial_execution is not None:
+                    self._progressive_outputs = dict(partial_execution.outputs)
+                    self._progressive_output_metadata = {
+                        agent_id: dict(metadata)
+                        for agent_id, metadata in (
+                            partial_execution.output_metadata.items()
+                        )
+                    }
+                    self._record_react_output_events(partial_execution)
+                    self._unresolved_dirty_agents = (
+                        current_agent_ids - set(partial_execution.outputs)
+                    )
+                    self._mark_agents_recovered(partial_execution.outputs)
+                self._record_failure_state(
+                    exc.failure_records,
+                    current_agent_ids=current_agent_ids,
+                )
+            else:
+                self._progressive_outputs = dict(execution.outputs)
+                self._progressive_output_metadata = {
+                    agent_id: dict(metadata)
+                    for agent_id, metadata in execution.output_metadata.items()
+                }
+                self._record_react_output_events(execution)
+                self._progressive_execution = execution
+                self._progressive_execution_revision = self._graph.revision
+                self._unresolved_dirty_agents = (
+                    current_agent_ids - set(execution.outputs)
+                )
+                self._mark_agents_recovered(execution.outputs)
+                if not self._unresolved_dirty_agents:
+                    self._clear_failure_state()
+            self._last_feedback = self._accepted_feedback(
+                action,
+                execution,
+                execution_error,
+            )
+            self._record_history(
+                accepted=True,
+                done=False,
+                action=action,
+                feedback=self._last_feedback,
+                execution_reused=False,
+            )
+            return AgentWorkflowStepResult(
+                accepted=True,
+                done=False,
+                action=action,
+                revision=self._graph.revision,
+                feedback=self._last_feedback,
+                snapshot=self.snapshot(),
+                execution=execution,
+                execution_reused=False,
+                partial_execution=partial_execution,
+                execution_failure_records=(
+                    ()
+                    if execution_error is None
+                    else execution_error.failure_records
+                ),
+            )
         if action.action_type is AgentActionType.FINISH:
             validation = self._graph.validate(self.model_registry, require_complete=True)
             cached_execution = self._cached_progressive_execution()
@@ -3944,6 +4437,7 @@ class AgentWorkflowEnv:
                                 exc.partial_result.output_metadata.items()
                             )
                         }
+                        self._record_react_output_events(exc.partial_result)
                     current_agent_ids = {node.id for node in self._graph.nodes}
                     completed_agent_ids = (
                         set()
@@ -3974,6 +4468,7 @@ class AgentWorkflowEnv:
                     agent_id: dict(metadata)
                     for agent_id, metadata in execution.output_metadata.items()
                 }
+                self._record_react_output_events(execution)
                 self._progressive_execution = execution
                 self._progressive_execution_revision = self._graph.revision
                 self._unresolved_dirty_agents.clear()
@@ -3983,6 +4478,16 @@ class AgentWorkflowEnv:
                 return self._reject_after_count(
                     action,
                     "cannot finish: " + environment_terminal_issue,
+                    execution=execution,
+                    execution_reused=execution_reused,
+                )
+            execution_protocol_issue = (
+                self._terminal_execution_validation_error(execution)
+            )
+            if execution_protocol_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: " + execution_protocol_issue,
                     execution=execution,
                     execution_reused=execution_reused,
                 )
@@ -4080,7 +4585,7 @@ class AgentWorkflowEnv:
             # candidate Canvas revision is committed.  FlowSteer's edit then
             # remains transactional: an invalid execution declaration is
             # rejected without executing or persisting the candidate graph.
-            self.runtime.validate_execution_contracts(candidate.nodes)
+            self.runtime.validate_graph_execution_contracts(candidate)
         except AgentRuntimeError as exc:
             return self._reject_after_count(
                 action,
@@ -4219,6 +4724,7 @@ class AgentWorkflowEnv:
                                 partial_execution.output_metadata.items()
                             )
                         }
+                        self._record_react_output_events(partial_execution)
                         if isolated_execution_scope:
                             self._progressive_outputs.update(partial_outputs)
                             self._progressive_output_metadata.update(
@@ -4267,6 +4773,7 @@ class AgentWorkflowEnv:
                         agent_id: dict(metadata)
                         for agent_id, metadata in execution.output_metadata.items()
                     }
+                    self._record_react_output_events(execution)
                     if isolated_execution_scope:
                         self._progressive_outputs.update(execution_outputs)
                         self._progressive_output_metadata.update(
@@ -4545,6 +5052,16 @@ class AgentWorkflowEnv:
                 "candidate_observations": candidate_observations,
                 "agent_artifacts": agent_artifacts,
                 **(
+                    {"react_events": react_events}
+                    if (react_events := self.public_react_events())
+                    else {}
+                ),
+                **(
+                    {"react_state": react_state}
+                    if (react_state := self.public_react_state()) is not None
+                    else {}
+                ),
+                **(
                     {"recovery_state": self.recovery_state()}
                     if self.recovery_policy
                     == _PRESERVE_REPAIR_RECOVERY_POLICY
@@ -4584,6 +5101,23 @@ class AgentWorkflowEnv:
                 )
             return issue
         return None
+
+    def _terminal_execution_validation_error(
+        self,
+        execution: AgentRuntimeResult,
+    ) -> Optional[str]:
+        """Apply an optional dataset Tool-receipt terminal contract."""
+
+        if self.terminal_execution_validator is None:
+            return None
+        issue = self.terminal_execution_validator(execution)
+        if issue is not None and (
+            not isinstance(issue, str) or not issue.strip()
+        ):
+            raise AgentWorkflowStateError(
+                "terminal_execution_validator must return non-empty text or None"
+            )
+        return issue
 
     def _allows_unconsumed_auxiliary_terminal_reachability(
         self,
@@ -4736,6 +5270,15 @@ class AgentWorkflowEnv:
                 "admissible": False,
                 "stage": "environment_terminal",
                 "reason": environment_issue,
+            }
+        execution_protocol_issue = self._terminal_execution_validation_error(
+            execution
+        )
+        if execution_protocol_issue is not None:
+            return {
+                "admissible": False,
+                "stage": "tool_receipt_protocol",
+                "reason": execution_protocol_issue,
             }
         semantic_issue = self._semantic_protocol_issue(execution)
         if semantic_issue is not None:
@@ -4995,6 +5538,8 @@ class AgentWorkflowEnv:
         self._previous_revision_outputs.clear()
         self._previous_revision_output_metadata.clear()
         self._unresolved_dirty_agents.clear()
+        self._react_event_outbox.clear()
+        self._react_event_keys.clear()
         self._clear_failure_state()
 
     def _retain_current_failure_state(self, current_agent_ids: set[str]) -> None:
@@ -5222,6 +5767,34 @@ class AgentWorkflowEnv:
             len(trace) if isinstance(trace, (list, tuple)) else 0,
         )
 
+    @classmethod
+    def _replace_active_failure_continuation(
+        cls,
+        current: Mapping[str, object],
+        candidate: Mapping[str, object],
+    ) -> bool:
+        """Return whether candidate is the usable active phase continuation.
+
+        A reciprocal FlowSteer block invokes the same Agent in ``draft`` and
+        ``revision`` phases.  AgentRuntime correctly refuses to replay one
+        phase's action history in the other phase.  Therefore a newly measured
+        phase must replace a heavier stale phase as the active continuation;
+        both remain losslessly recorded in their original trajectory turns.
+        Within one phase, retain the most advanced SkillFlow public prefix.
+        """
+
+        current_phase = current.get("execution_phase")
+        candidate_phase = candidate.get("execution_phase")
+        if (
+            isinstance(current_phase, str)
+            and isinstance(candidate_phase, str)
+            and current_phase != candidate_phase
+        ):
+            return True
+        return cls._failure_continuation_weight(
+            candidate
+        ) >= cls._failure_continuation_weight(current)
+
     def _mark_agents_recovered(self, agent_ids: Collection[str]) -> None:
         """Clear failure-only state after those Agents produced artifacts."""
 
@@ -5265,6 +5838,16 @@ class AgentWorkflowEnv:
                 retryability=retryability,
                 status_code=status_code,
             )
+            self._record_react_events_from_metadata(
+                agent_id=record.agent_id,
+                metadata=record.metadata,
+                execution_status=(
+                    "action_budget_exhausted"
+                    if record.metadata.get("tool_plan_exhausted") is True
+                    else "awaiting_next_action"
+                ),
+                execution_phase=record.phase.value,
+            )
             continuation = self._failure_continuation_candidate(record)
             if continuation is not None and not any(
                 field_name in continuation
@@ -5296,9 +5879,10 @@ class AgentWorkflowEnv:
                 # diagnose the sibling Agent itself as failed or repairable.
                 if continuation is not None:
                     current = self._failure_continuations.get(record.agent_id)
-                    if current is None or self._failure_continuation_weight(
-                        continuation
-                    ) >= self._failure_continuation_weight(current):
+                    if current is None or self._replace_active_failure_continuation(
+                        current,
+                        continuation,
+                    ):
                         self._failure_continuations[record.agent_id] = continuation
                 continue
             recorded_agent_ids.add(record.agent_id)
@@ -5361,9 +5945,10 @@ class AgentWorkflowEnv:
                 self._repair_exhausted_agent_ids.discard(record.agent_id)
             if continuation is not None:
                 current = self._failure_continuations.get(record.agent_id)
-                if current is None or self._failure_continuation_weight(
-                    continuation
-                ) >= self._failure_continuation_weight(current):
+                if current is None or self._replace_active_failure_continuation(
+                    current,
+                    continuation,
+                ):
                     self._failure_continuations[record.agent_id] = continuation
         self._react_exhausted_agent_ids.difference_update(recorded_agent_ids)
         self._react_exhausted_agent_ids.update(react_exhausted_agent_ids)
@@ -10182,6 +10767,16 @@ class AgentWorkflowEnv:
                     []
                     if exc.partial_result is None
                     else sorted(exc.partial_result.outputs)
+                ),
+                **(
+                    {"react_events": react_events}
+                    if (react_events := self.public_react_events())
+                    else {}
+                ),
+                **(
+                    {"react_state": react_state}
+                    if (react_state := self.public_react_state()) is not None
+                    else {}
                 ),
                 **(
                     {"recovery_state": self.recovery_state()}

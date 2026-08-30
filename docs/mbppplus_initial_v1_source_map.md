@@ -113,3 +113,66 @@ terminal failures. Across 348 Director turns, the two corrected relation
 rejection classes were both zero. The first collection attempt timed out on
 one task; the existing checkpoint/resume path reused all completed receipts
 and collected only that missing task, while preserving the timeout receipt.
+
+## Stepwise ReAct Action--Observation feedback (v12)
+
+The MBPP+ ReAct path is a thin bridge between two upstream execution
+boundaries; it does not add a fixed role sequence or topology:
+
+| Boundary | Reused implementation | Local adaptation |
+|---|---|---|
+| Outer progressive edit | FlowSteer `InteractiveWorkflowEnv.step`, `_format_feedback`, `TurnRecord`, and `InteractiveWorkflowBuilder.run_loop` | One accepted Director edit is executed and its execution feedback is appended to the next Director observation. |
+| Inner bounded action | SkillFlow `BoundedAgent.execute_turn`, `_execute_action`, `EnvironmentObservation`, `StructuredAction`, and `materialize_trajectory_step` | One structured Agent action produces one public observation and one committed trajectory step. |
+| Existing local runtime | `ToolReactExecutionAdapter.execute`, `AgentRequest.action_history`, `prior_tool_receipts`, and `ReactExecutionError` | Reuse parsing, Tool dispatch, public receipts, continuation, and failure metadata unchanged. |
+| MBPP+ Tool surface | `MBPPPlusReactExecutionAdapter` and `mbpp-plus.python_exec::run_public_test` | Expose only prompt-visible public assertions; EvalPlus Base/Plus inputs and expected outputs remain evaluator-only. |
+
+The v11 fixed-100 audit found that live `public_react_state` described only
+currently resumable Agents. In a parallel Runtime tick, a ReAct Agent that had
+already completed could therefore be absent while a sibling remained pending.
+The v12 compatibility layer records only the current Canvas step's new
+`react_trace` entries (entries restored from a prior revision are explicitly
+excluded), and publishes them as `react_events` in the same FlowSteer execution
+feedback. Each event carries the original task objective, Agent contract,
+completion objective, execution status, exact structured Action, public
+Observation, and remaining Tool budget. The event outbox is cleared when the
+next Director action begins; the full trajectory continues to retain every
+historical event.
+
+This corrects an execution-feedback transport defect. It does not prescribe an
+Agent count, contract, role, relation, Output Agent, or terminal sequence.
+Stepwise ReAct Agents remain incompatible only with a reciprocal FlowSteer
+block because the latter requires a complete draft/revision response before
+returning control; directed and non-linear AgentGraph topologies remain in the
+search space. Training, GRPO, LoRA, MACE, Bayesian updates, Skill retrieval,
+and Skill evolution remain disabled in v12.
+
+## Lossless current-step feedback and pending-only repair admission (v17)
+
+The current-step compatibility layer keeps a lossless `react_events` outbox in
+the persisted FlowSteer feedback receipt while projecting one compact merged
+`react_state` to the next Director prompt. The merged state includes pending,
+completed, and exhausted parallel ReAct siblings, so every newly produced
+public Action--Observation transition carries the original task objective,
+Agent completion objective, execution status, exact Action, Observation, and
+remaining budget across the Canvas boundary. Full history remains in the
+trajectory and is not replayed into the one-turn Director history window.
+
+The v16 audit exposed one action-mask defect after widening state visibility:
+the pending-boundary success check included already completed siblings, whose
+legal `observation_status=completed` was not equal to `success`. That could
+incorrectly admit `modify_agent`. v17 retains all sibling observations for the
+Director but restricts repair admission to Agents in
+`_stepwise_react_pending_agent_ids()`. A unit test covers a successful pending
+Agent coexisting with a completed sibling.
+
+The fixed-100 v17 run has 100/100 official EvalPlus evaluator coverage. Of 809
+public ReAct events, all 801 events followed by another Director decision were
+present in that decision's prompt with the task objective, final objective,
+status, Action, and Observation; the remaining eight occurred on the last
+allowed round of max-rounds trajectories and remain persisted. Direct obtained
+83/100 Base and 72/100 Plus passes. AgentGraph obtained 81/100 Base and 69/100
+Plus passes, with 91 explicit FINISH trajectories and nine max-rounds
+trajectories. The engineering correction therefore closes the feedback
+transport and repair-admission defects but does not establish an accuracy
+improvement. No evaluator-only field was exposed and no training or Skill path
+was enabled.

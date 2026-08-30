@@ -561,7 +561,11 @@ class AgentRuntime:
         for mode_value in ("reasoning", "react", "coding"):
             if mode_value not in self.execution_adapters:
                 continue
-            if mode_value != "coding":
+            adapter = self.execution_adapters[mode_value]
+            if (
+                mode_value != "coding"
+                and getattr(adapter, "requires_allowed_tools", False) is not True
+            ):
                 profiles.append((mode_value, ()))
             if mode_value == "reasoning" or self.tool_registry is None:
                 continue
@@ -631,7 +635,7 @@ class AgentRuntime:
             ):
                 raise TypeError("unavailable_model_ids must contain strings")
             unavailable_models = set(unavailable_model_ids)
-        self.validate_execution_contracts(tuple(nodes.values()))
+        self.validate_graph_execution_contracts(execution_graph)
         self._validate_stateful_resource_ownership(nodes, plan)
         if format_output_agent and execution_graph.output_agent_id is not None:
             format_node = nodes[execution_graph.output_agent_id]
@@ -1066,6 +1070,18 @@ class AgentRuntime:
                     f"{mode_value!r}"
                 )
             if not node.allowed_tools:
+                if (
+                    getattr(
+                        self.execution_adapters[mode_value],
+                        "requires_allowed_tools",
+                        False,
+                    )
+                    is True
+                ):
+                    raise AgentRuntimeError(
+                        f"agent {node.id!r} execution_mode={mode_value!r} "
+                        "requires a registered allowed_tools capability"
+                    )
                 continue
             if mode_value == "reasoning":
                 raise AgentRuntimeError(
@@ -1099,6 +1115,39 @@ class AgentRuntime:
                         f"agent {node.id!r} tool {tool_id!r} is outside dataset scope "
                         f"{self.dataset_id!r}"
                     )
+
+    def validate_graph_execution_contracts(self, graph: AgentGraph) -> None:
+        """Validate execution-mode compatibility with graph relations.
+
+        A FlowSteer reciprocal block requires each endpoint to materialize a
+        complete draft before the revision exchange.  A stepwise ReAct adapter
+        deliberately yields after one Action--Observation transition so the
+        Director can observe it.  Combining those execution boundaries causes
+        draft/revision phase alternation without a completed block.  Directed
+        DAG edges and reciprocal reasoning blocks remain available.
+        """
+
+        self.validate_execution_contracts(graph.nodes)
+        react_adapter = self.execution_adapters.get("react")
+        if getattr(react_adapter, "stepwise_director", False) is not True:
+            return
+        nodes = {node.id: node for node in graph.nodes}
+        for relation in graph.relations:
+            if not relation.bits.is_bidirectional:
+                continue
+            endpoints = tuple(
+                node_id
+                for node_id in (relation.source_id, relation.target_id)
+                if node_id in nodes
+                and nodes[node_id].execution_mode.value == "react"
+            )
+            if endpoints:
+                raise AgentRuntimeError(
+                    "stepwise ReAct Agent(s) "
+                    + ", ".join(repr(item) for item in endpoints)
+                    + " cannot be endpoints of a bidirectional relation; use "
+                    "a directed relation or non-stepwise execution endpoints"
+                )
 
     def _validate_stateful_resource_ownership(
         self,
@@ -2107,22 +2156,29 @@ class AgentRuntime:
             async with provider_semaphore:
                 return await adapter.execute(request)
 
+        async def call_gateway_with_timeout() -> GatewayResponse:
+            """Run the adapter in this invocation task with a bounded timeout.
+
+            ``asyncio.wait_for(coroutine)`` creates an implicit child Task.  If
+            FlowSteer's fail-fast scheduler cancels a parallel sibling at the
+            same instant that child publishes a ReAct exception, the child
+            exception can escape the outer failure receipt.  Python 3.11's
+            timeout context keeps the adapter in the current invocation Task,
+            so cancellation and its partial Action--Observation metadata are
+            always handled by the ``CancelledError`` boundary below.
+            """
+
+            if self.timeout_seconds is None:
+                return await call_gateway()
+            async with asyncio.timeout(self.timeout_seconds):
+                return await call_gateway()
+
         try:
             if self._global_semaphore is None:
-                invocation = call_gateway()
-                raw_response = (
-                    await invocation
-                    if self.timeout_seconds is None
-                    else await asyncio.wait_for(invocation, timeout=self.timeout_seconds)
-                )
+                raw_response = await call_gateway_with_timeout()
             else:
                 async with self._global_semaphore:
-                    invocation = call_gateway()
-                    raw_response = (
-                        await invocation
-                        if self.timeout_seconds is None
-                        else await asyncio.wait_for(invocation, timeout=self.timeout_seconds)
-                    )
+                    raw_response = await call_gateway_with_timeout()
         except asyncio.CancelledError as exc:
             metadata = MappingProxyType(
                 {

@@ -311,26 +311,75 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                 None,
                 "complete_source_live_targets_v2",
                 "complete_source_live_targets_v3",
+                "complete_source_stepwise_react_feedback_v4",
+                "complete_source_stepwise_react_feedback_v5",
+                "complete_source_stepwise_react_feedback_v6",
+                "complete_source_stepwise_react_feedback_v7",
+                "complete_source_stepwise_react_feedback_v8",
+                "complete_source_stepwise_react_feedback_v9",
+                "complete_source_stepwise_react_feedback_v10",
+                "complete_source_stepwise_react_feedback_v11",
+                "complete_source_stepwise_react_feedback_v12",
+                "complete_source_stepwise_react_feedback_v13",
+                "complete_source_stepwise_react_feedback_v14",
+                "complete_source_stepwise_react_feedback_v15",
+                "complete_source_stepwise_react_feedback_v16",
+                "complete_source_stepwise_react_feedback_v17",
             }
         )
         if runtime_contract_profile in {
             "complete_source_live_targets_v2",
             "complete_source_live_targets_v3",
+            "complete_source_stepwise_react_feedback_v4",
+            "complete_source_stepwise_react_feedback_v5",
+            "complete_source_stepwise_react_feedback_v6",
+            "complete_source_stepwise_react_feedback_v7",
+            "complete_source_stepwise_react_feedback_v8",
+            "complete_source_stepwise_react_feedback_v9",
+            "complete_source_stepwise_react_feedback_v10",
+            "complete_source_stepwise_react_feedback_v11",
+            "complete_source_stepwise_react_feedback_v12",
+            "complete_source_stepwise_react_feedback_v13",
+            "complete_source_stepwise_react_feedback_v14",
+            "complete_source_stepwise_react_feedback_v15",
+            "complete_source_stepwise_react_feedback_v16",
+            "complete_source_stepwise_react_feedback_v17",
         }:
             checks["mbpp_plus.live_action_target_schema"] = (
                 director.get("sampling_schema_version")
                 == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
             )
+            expected_actions = [
+                "add_subgraph",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                *( 
+                    ["continue"]
+                    if runtime_contract_profile
+                    in {
+                        "complete_source_stepwise_react_feedback_v4",
+                        "complete_source_stepwise_react_feedback_v5",
+                        "complete_source_stepwise_react_feedback_v6",
+                        "complete_source_stepwise_react_feedback_v7",
+                        "complete_source_stepwise_react_feedback_v8",
+                        "complete_source_stepwise_react_feedback_v9",
+                        "complete_source_stepwise_react_feedback_v10",
+                        "complete_source_stepwise_react_feedback_v11",
+                        "complete_source_stepwise_react_feedback_v12",
+                        "complete_source_stepwise_react_feedback_v13",
+                        "complete_source_stepwise_react_feedback_v14",
+                        "complete_source_stepwise_react_feedback_v15",
+                        "complete_source_stepwise_react_feedback_v16",
+                        "complete_source_stepwise_react_feedback_v17",
+                    }
+                    else []
+                ),
+                "finish",
+            ]
             checks["mbpp_plus.functional_unit_canvas_edits"] = (
-                agent_graph.get("actions")
-                == [
-                    "add_subgraph",
-                    "modify_agent",
-                    "delete_agent",
-                    "set_relation",
-                    "set_output",
-                    "finish",
-                ]
+                agent_graph.get("actions") == expected_actions
             )
         for field_name in (
             "evalplus_runtime_path",

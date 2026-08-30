@@ -60,8 +60,17 @@ Use only action types listed in admissible_action_types, model_id values from mo
 
 Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
 
+STEPWISE_REACT_DIRECTOR_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types in current admissible_action_types, model_id values in model_catalog, exact tool_id values in tool_catalog, and the parameter values admitted by constrained decoding. add_subgraph adds one functional unit of one to three Agents with free-text contracts. A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange.
+
+Each accepted Canvas edit is executed once. continue leaves the AgentGraph unchanged and advances the selected Agent by exactly one ReAct Action--Observation turn. Inspect the original task objective, latest Agent action, Tool observation, current execution status and remaining budget before the next action. ReAct is an execution mode, not an Agent role. A stepwise ReAct Agent cannot be an endpoint of a bidirectional relation; use a directed relation or non-stepwise endpoints. Use finish only when finish_admissibility is admissible. Do not assume a fixed workflow topology, role sequence, or unlisted Skill."""
+
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
+STEPWISE_REACT_DIRECTOR_PROMPT_VERSION = (
+    "agentgraph.director.minimal-neutral-stepwise-react.v1"
+)
 LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1 = (
     "agentgraph.director.minimal-neutral-scalar.v1"
 )
@@ -160,6 +169,79 @@ def _director_neutral_state_projection(value: Any) -> Any:
     can bias the policy toward one terminal spine or repair sequence.
     """
 
+    if isinstance(value, Mapping) and isinstance(
+        value.get("react_events"), (list, tuple)
+    ):
+        # The Env has already merged every event from this Canvas step into
+        # ``react_state``, including completed/exhausted parallel siblings.
+        # Retain v11's measured state representation for the Director and keep
+        # the lossless outbox only in the trajectory feedback receipt.
+        return {
+            key: _director_neutral_state_projection(item)
+            for key, item in value.items()
+            if key != "react_events"
+            and key not in _DIRECTOR_OBSERVATION_PATTERN_KEYS
+        }
+    if (
+        isinstance(value, Mapping)
+        and isinstance(value.get("task_objective"), str)
+        and isinstance(value.get("agents"), (list, tuple))
+        and "pending_agent_ids" in value
+    ):
+        # A stepwise ReAct receipt is returned immediately after every Agent
+        # action.  The lossless trajectory retains the complete growing
+        # action_observation_history; the next Director decision needs the
+        # current task, latest Action--Observation, execution status and
+        # remaining budget.  Avoid replaying the same full source and prior
+        # history several times inside one observation.
+        agents: list[dict[str, object]] = []
+        for raw_agent in value.get("agents", ()):
+            if not isinstance(raw_agent, Mapping):
+                continue
+            latest_action = raw_agent.get("latest_action")
+            latest_observation = raw_agent.get("latest_observation")
+            observation = (
+                dict(latest_observation)
+                if isinstance(latest_observation, Mapping)
+                else latest_observation
+            )
+            if isinstance(observation, dict):
+                observation.pop("executed_action", None)
+            projected_agent = {
+                key: _director_neutral_state_projection(raw_agent[key])
+                for key in (
+                    "agent_id",
+                    "graph_revision",
+                    "agent_contract",
+                    "final_objective",
+                    "execution_status",
+                    "execution_semantics",
+                    "react_turns_used",
+                    "tool_calls_used",
+                    "tool_call_budget",
+                    "remaining_tool_calls",
+                )
+                if key in raw_agent
+            }
+            projected_agent["latest_action"] = (
+                _director_neutral_state_projection(latest_action)
+            )
+            projected_agent["latest_observation"] = (
+                _director_neutral_state_projection(observation)
+            )
+            if latest_action is None and isinstance(
+                raw_agent.get("latest_action_text"), str
+            ):
+                projected_agent["latest_action_text"] = raw_agent[
+                    "latest_action_text"
+                ]
+            agents.append(projected_agent)
+        return {
+            "task_objective": value["task_objective"],
+            "graph_revision": value.get("graph_revision"),
+            "pending_agent_ids": list(value.get("pending_agent_ids", ())),
+            "agents": agents,
+        }
     if isinstance(value, Mapping):
         return {
             key: _director_neutral_state_projection(item)
@@ -487,6 +569,14 @@ def role_conditional_qa_protocol(value: object) -> bool:
     return value == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
 
 
+def scalar_director_prompt_version(value: object) -> bool:
+    """Return whether a prompt consumes live scalar Canvas domains."""
+
+    return value in {
+        SCALAR_DIRECTOR_PROMPT_VERSION,
+    }
+
+
 def director_system_prompt_for_version(prompt_version: str) -> str:
     """Resolve one explicitly versioned Director policy without changing v10."""
 
@@ -496,6 +586,9 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
     by_version = {
         DIRECTOR_PROMPT_VERSION: DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
+        STEPWISE_REACT_DIRECTOR_PROMPT_VERSION: (
+            STEPWISE_REACT_DIRECTOR_SYSTEM_PROMPT
+        ),
         LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
         LEGACY_DIRECTOR_PROMPT_VERSION_V8: LEGACY_DIRECTOR_SYSTEM_PROMPT_V8,
@@ -561,6 +654,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
     {
         DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
+        STEPWISE_REACT_DIRECTOR_SYSTEM_PROMPT,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
@@ -720,6 +814,14 @@ DIRECTOR_ACTION_JSON_SCHEMA = {
             "required": ["action", "agent_id"],
             "properties": {
                 "action": {"const": "set_output"},
+                "agent_id": _NON_EMPTY_STRING_SCHEMA,
+            },
+        },
+        {
+            "additionalProperties": False,
+            "required": ["action", "agent_id"],
+            "properties": {
+                "action": {"const": "continue"},
                 "agent_id": _NON_EMPTY_STRING_SCHEMA,
             },
         },
@@ -2628,13 +2730,18 @@ def director_live_action_parameter_json_schema_text(
         )
         if discrete_values is not None:
             schema["properties"][modify_field] = {"enum": list(discrete_values)}
-    elif action in {"delete_agent", "set_output"}:
+    elif action in {"delete_agent", "set_output", "continue"}:
         agent_ids = _live_string_domain(
             domain.get("agent_ids"),
             label=f"{action}.agent_ids",
         )
         schema = json.loads(director_state_conditioned_sampling_json_schema_text(action))
         schema["properties"]["agent_id"] = {"enum": list(agent_ids)}
+        if action == "continue":
+            if domain.get("execution_semantics") != "one_action_one_observation":
+                raise ValueError("continue has an incompatible execution boundary")
+            if domain.get("graph_revision_unchanged") is not True:
+                raise ValueError("continue must preserve the Canvas revision")
     elif action == "set_relation":
         candidates = domain.get("candidates")
         if not isinstance(candidates, (list, tuple)) or not candidates:
@@ -3471,7 +3578,7 @@ class AgentGraphOrchestrator:
                 "required_tool_id": env.required_tool_id,
             },
         }
-        if self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION:
+        if scalar_director_prompt_version(self.prompt_version):
             # FlowSteer exposes the current Canvas identifiers and bounded
             # horizon to the editor.  The v2 scalar observation adds only
             # live legality state; it does not prescribe a topology or role.
@@ -3490,12 +3597,15 @@ class AgentGraphOrchestrator:
                     ),
                 }
             )
-        if verified_qa_semantic_protocol(self.semantic_protocol):
+        if (
+            scalar_director_prompt_version(self.prompt_version)
+            or verified_qa_semantic_protocol(self.semantic_protocol)
+        ):
             payload["action_target_domains"] = (
                 env.model_admissible_action_targets()
             )
         if (
-            self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION
+            scalar_director_prompt_version(self.prompt_version)
             or verified_qa_semantic_protocol(self.semantic_protocol)
         ):
             recent_rejections: list[dict[str, Any]] = []
@@ -3914,6 +4024,10 @@ __all__ = [
     "DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION",
     "DIRECTOR_SYSTEM_PROMPT",
     "DIRECTOR_PROMPT_VERSION",
+    "SCALAR_DIRECTOR_PROMPT_VERSION",
+    "SCALAR_DIRECTOR_SYSTEM_PROMPT",
+    "STEPWISE_REACT_DIRECTOR_PROMPT_VERSION",
+    "STEPWISE_REACT_DIRECTOR_SYSTEM_PROMPT",
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15",
@@ -3976,6 +4090,7 @@ __all__ = [
     "director_system_prompt_for_version",
     "director_sglang_sampling_json_schema_text",
     "director_state_conditioned_sampling_json_schema_text",
+    "scalar_director_prompt_version",
     "verified_qa_semantic_protocol",
     "encode_director_transcript",
 ]

@@ -916,6 +916,7 @@ class SGLangReceiptDirectorClient:
         """Submit one exact SGLang generation phase with transport retries."""
 
         last_error: BaseException | None = None
+        last_http_detail: str | None = None
         started_at = time.monotonic()
         for attempt in range(self.max_retries + 1):
             try:
@@ -927,6 +928,12 @@ class SGLangReceiptDirectorClient:
                 )
             except HTTPError as exc:
                 last_error = exc
+                try:
+                    raw_detail = exc.read()
+                    decoded_detail = raw_detail.decode("utf-8", errors="replace")
+                    last_http_detail = " ".join(decoded_detail.split())[:1000]
+                except Exception:
+                    last_http_detail = None
                 if not (exc.code in {408, 409, 425, 429} or exc.code >= 500):
                     break
             except (URLError, TimeoutError, socket.timeout) as exc:
@@ -935,6 +942,11 @@ class SGLangReceiptDirectorClient:
                 await asyncio.sleep(min(2.0**attempt, 4.0))
         detail = (
             f"HTTP {last_error.code}"
+            + (
+                f": {last_http_detail}"
+                if last_http_detail
+                else ""
+            )
             if isinstance(last_error, HTTPError)
             else type(last_error).__name__
         )
@@ -2813,7 +2825,7 @@ def _validate_v3_hierarchical_action_receipt(
             ) from exc
         if (
             action_value is not None
-            and selected_action in {"delete_agent", "set_output"}
+            and selected_action in {"delete_agent", "set_output", "continue"}
         ):
             admitted_ids = domains[selected_action]["agent_ids"]
             if action_value.get("agent_id") not in admitted_ids:

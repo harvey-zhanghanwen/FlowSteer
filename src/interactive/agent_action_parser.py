@@ -18,6 +18,10 @@ class AgentActionType(str, Enum):
     DELETE_AGENT = "delete_agent"
     SET_RELATION = "set_relation"
     SET_OUTPUT = "set_output"
+    # PROJECT_NECESSARY_ADAPTATION: execution control copied from the
+    # stateful WebShop Canvas boundary.  It advances one bounded ReAct turn
+    # for an existing Agent and never mutates the AgentGraph.
+    CONTINUE = "continue"
     FINISH = "finish"
 
 
@@ -473,6 +477,10 @@ class AgentActionParser:
             )
 
         if action_type is AgentActionType.SET_OUTPUT:
+            _check_keys(data, {"action", "agent_id"})
+            return AgentAction(agent_id=_required_string(data, "agent_id"), **common)
+
+        if action_type is AgentActionType.CONTINUE:
             _check_keys(data, {"action", "agent_id"})
             return AgentAction(agent_id=_required_string(data, "agent_id"), **common)
 
