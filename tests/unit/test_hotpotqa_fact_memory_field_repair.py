@@ -562,6 +562,17 @@ def test_source_qa_semantics_defined_detects_bare_and_numeric_mismatch() -> None
             answer="September 13, 1996",
         )
     )
+    assert not materializer._source_qa_semantics_are_defined(
+        _source(
+            96,
+            question="What actress born in 1967 starred in the film?",
+            answer="Liev Schreiber",
+        ),
+        (
+            "Liev Schreiber is an American actor, director, screenwriter, "
+            "and producer.",
+        ),
+    )
 
 
 def test_tail_repairs_preserve_source_relations_without_qa_wire_format() -> None:
@@ -593,6 +604,16 @@ def test_tail_repairs_preserve_source_relations_without_qa_wire_format() -> None
     assert materializer._bare_entity_question_rewrite(bare_entity) == (
         "Provide an identification for Juan Manuel Mata García."
     )
+
+    titled_name = _source(
+        102,
+        question="Who serves on Nordstrom's Board of Directors?",
+        answer="B. Kevin Turner",
+    )
+    assert materializer._restore_complete_canonical_surface(
+        titled_name,
+        "Kevin Turner is a member of Nordstrom's Board of Directors.",
+    ) == "B. Kevin Turner is a member of Nordstrom's Board of Directors."
 
 
 @pytest.mark.parametrize(

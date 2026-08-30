@@ -626,6 +626,7 @@ def _select_public_context_passages(
 
 def _source_qa_semantics_are_defined(
     source: HotpotQATrainQASource,
+    public_context: Sequence[str] = (),
 ) -> bool:
     """Classify whether the upstream Q/A strings define a bindable relation."""
 
@@ -644,6 +645,35 @@ def _source_qa_semantics_are_defined(
         return False
     if _NUMERIC_ANSWER_SLOT.search(source.question) and not (
         _immutable_number_or_date_surfaces(source.canonical_answer)
+    ):
+        return False
+    # Native HotpotQA contains a small number of source-shape conflicts where
+    # a gendered answer type contradicts the public biography of the supplied
+    # canonical entity.  This is a category-level integrity check, not a
+    # task-specific correction: the malformed answer slot must not be encoded
+    # as a retrieval fact.
+    question_words = {
+        token.casefold() for token in _lexical_tokens(source.question)
+    }
+    context_text = " ".join(public_context).casefold()
+    canonical_words = tuple(
+        token.casefold() for token in _lexical_tokens(source.canonical_answer)
+    )
+    context_mentions_canonical = (
+        bool(canonical_words)
+        and all(token in context_text for token in canonical_words)
+    )
+    gendered_role_conflicts = (
+        ("actress", " actor"),
+        ("actor", " actress"),
+        ("woman", " man"),
+        ("man", " woman"),
+        ("female", " male"),
+        ("male", " female"),
+    )
+    if context_mentions_canonical and any(
+        requested in question_words and observed in context_text
+        for requested, observed in gendered_role_conflicts
     ):
         return False
     return True
@@ -722,6 +752,26 @@ def _forbidden_fact_number_or_date_surfaces(
         for value in _immutable_number_or_date_surfaces(fact)
         if key(value) not in allowed
     )
+
+
+def _restore_complete_canonical_surface(
+    source: HotpotQATrainQASource,
+    fact: str,
+) -> str | None:
+    """Restore a dropped prefix/title when the remaining answer suffix exists."""
+
+    canonical = " ".join(source.canonical_answer.split()).rstrip(" .!?")
+    words = canonical.split()
+    if len(words) < 3 or canonical.casefold() in fact.casefold():
+        return None
+    for suffix_start in range(1, len(words) - 1):
+        suffix = " ".join(words[suffix_start:])
+        if len(tuple(_lexical_tokens(suffix))) < 2:
+            continue
+        pattern = re.compile(rf"(?<!\w){re.escape(suffix)}(?!\w)", re.IGNORECASE)
+        if pattern.search(fact) is not None:
+            return pattern.sub(canonical, fact, count=1)
+    return None
 
 
 def _binary_answer_label(answer: str) -> str | None:
@@ -1083,6 +1133,15 @@ async def _materialize_one(
                             in fact_rejection.casefold()
                             else None
                         )
+                        canonical_surface_repair = (
+                            _restore_complete_canonical_surface(
+                                source,
+                                fact or "",
+                            )
+                            if "removed immutable answer tokens"
+                            in fact_rejection.casefold()
+                            else None
+                        )
                         clause_synonym_repair = (
                             binding_mode == "declarative_clause_paraphrase"
                             and _clause_requires_synonym_repair(
@@ -1133,21 +1192,25 @@ async def _materialize_one(
                                         "nominal_role_relation_paraphrase"
                                         if nominal_role_repair is not None
                                         else (
-                                            "public_context_fact_repair"
-                                            if fact_from_public_context
+                                            "restore_complete_canonical_surface"
+                                            if canonical_surface_repair is not None
                                             else (
-                                                "public_context_fact_reconstruction"
-                                                if public_context_reconstruction
+                                                "public_context_fact_repair"
+                                                if fact_from_public_context
                                                 else (
-                                                    "binary_polarity_reconstruction"
-                                                    if binding_mode == "binary_polarity_binding"
+                                                    "public_context_fact_reconstruction"
+                                                    if public_context_reconstruction
                                                     else (
-                                                        "clause_synonym_only"
-                                                        if clause_synonym_repair
+                                                        "binary_polarity_reconstruction"
+                                                        if binding_mode == "binary_polarity_binding"
                                                         else (
-                                                            "authoritative_answer_slot_reconstruction"
-                                                            if force_fact_reconstruction
-                                                            else _fact_repair_strategy(fact_rejection)
+                                                            "clause_synonym_only"
+                                                            if clause_synonym_repair
+                                                            else (
+                                                                "authoritative_answer_slot_reconstruction"
+                                                                if force_fact_reconstruction
+                                                                else _fact_repair_strategy(fact_rejection)
+                                                            )
                                                         )
                                                     )
                                                 )
@@ -1209,6 +1272,14 @@ async def _materialize_one(
                             response = {
                                 "local_semantic_surface_repair": (
                                     "nominal_role_relation_paraphrase"
+                                )
+                            }
+                            fact_repair_temperature = 0.0
+                        elif canonical_surface_repair is not None:
+                            fact = canonical_surface_repair
+                            response = {
+                                "local_semantic_surface_repair": (
+                                    "restore_complete_canonical_surface"
                                 )
                             }
                             fact_repair_temperature = 0.0
@@ -1415,6 +1486,26 @@ async def _materialize_one(
                                         "Preserve correct material while repairing only "
                                         "the reported immutable-field failure. "
                                     )
+                                    + (
+                                        "The source Q/A strings do not define a coherent "
+                                        "answer-slot relation. Do not encode that malformed "
+                                        "relation. Select one simple type, location, role, "
+                                        "membership, or relation proposition explicitly "
+                                        "supported by the supplied public context and retain "
+                                        "the source entity or canonical surface. Prefer a "
+                                        "proposition with no number or date. "
+                                        if (
+                                            fact_repair_strategy in {
+                                                "public_context_fact_reconstruction",
+                                                "public_context_fact_repair",
+                                            }
+                                            and not _source_qa_semantics_are_defined(
+                                                source,
+                                                selected_public_context,
+                                            )
+                                        )
+                                        else ""
+                                    )
                                     + "Return only JSON."
                                 ),
                                 problem=_problem_payload(
@@ -1439,7 +1530,8 @@ async def _materialize_one(
                                                 ),
                                                 "source_qa_semantics_are_defined": (
                                                     _source_qa_semantics_are_defined(
-                                                        source
+                                                        source,
+                                                        selected_public_context,
                                                     )
                                                 ),
                                                 "forbidden_fact_number_or_date_tokens": list(
@@ -1626,7 +1718,11 @@ async def _materialize_one(
                         "fact; do not invent the missing answer-slot value. Treat "
                         "malformed source strings as metadata, "
                         "not permission to invent a missing value. Do not use world "
-                        "knowledge. Evaluate every boolean independently and return "
+                        "knowledge. When source_qa_semantics_are_defined is false, "
+                        "do not fail syntactic, support, canonical-surface, or "
+                        "no-new-fact fields merely because the malformed source "
+                        "question cannot be answered by the canonical string. "
+                        "Evaluate every boolean independently and return "
                         "only JSON."
                         if public_context_verification
                         else (
@@ -1689,7 +1785,8 @@ async def _materialize_one(
                                         ),
                                         "source_qa_semantics_are_defined": (
                                             _source_qa_semantics_are_defined(
-                                                source
+                                                source,
+                                                selected_public_context,
                                             )
                                         ),
                                     }
