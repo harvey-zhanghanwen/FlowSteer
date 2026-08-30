@@ -22,6 +22,38 @@ sys.modules[_SPEC.name] = analysis
 _SPEC.loader.exec_module(analysis)
 
 
+def _director_prompt(
+    *,
+    allowed_tools: list[str] | None = None,
+    tool_calls_enabled: bool = False,
+    extra_observation: dict[str, object] | None = None,
+) -> str:
+    observation = {
+        "director_execution_profile": {
+            "allowed_tools": [] if allowed_tools is None else allowed_tools,
+            "tool_calls_enabled": tool_calls_enabled,
+        },
+        **({} if extra_observation is None else extra_observation),
+    }
+    transcript = {
+        "schema_version": analysis.qa.DIRECTOR_TRANSCRIPT_SCHEMA,
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "Canvas observation\n\n"
+                    + json.dumps(observation, sort_keys=True)
+                ),
+            }
+        ],
+    }
+    return (
+        analysis.qa.DIRECTOR_TRANSCRIPT_HEADER
+        + "\n\n"
+        + json.dumps(transcript, sort_keys=True)
+    )
+
+
 def _fact_receipts(
     *, top_k: int = 2
 ) -> tuple[dict[str, object], list[dict[str, object]], dict[str, object]]:
@@ -176,7 +208,7 @@ def _trajectory(
             {
                 "round_index": 0,
                 "director_request_id": f"director-{task_id}",
-                "prompt": "public control-plane state only",
+                "prompt": _director_prompt(),
                 "policy_response": '{"action":"add_subgraph"}',
                 "action": {
                     "action": "add_subgraph",
@@ -364,14 +396,39 @@ def _fixture(
                 "strict_semantic_paraphrase_count": (
                     analysis.EXPECTED_FACT_MEMORY_COUNT
                 ),
+                "semantic_question_rewrite_count": (
+                    analysis.EXPECTED_FACT_MEMORY_COUNT
+                ),
                 "lexical_or_phrase_replacement_count": (
                     analysis.EXPECTED_FACT_MEMORY_COUNT
                 ),
+                "semantic_admission_checked_count": (
+                    analysis.EXPECTED_FACT_MEMORY_COUNT
+                ),
+                "fact_self_containment_admission_version": (
+                    analysis.FACT_SELF_CONTAINMENT_ADMISSION_VERSION
+                ),
+                "fact_self_containment_checked_count": (
+                    analysis.EXPECTED_FACT_MEMORY_COUNT
+                ),
+                "fact_self_containment_pass_count": (
+                    analysis.EXPECTED_FACT_MEMORY_COUNT
+                ),
                 "fact_text_count": analysis.EXPECTED_FACT_MEMORY_COUNT,
+                "embedding_text_field": "fact_text",
+                "fact_projection_fields": analysis.FACT_PROJECTION_FIELDS,
+                "original_question_indexed": False,
+                "canonical_answer_indexed": False,
+                "accepted_answers_indexed": False,
+                "paraphrase_question_indexed": False,
+                "original_question_fallback_count": 0,
                 "dataset_pair_fallback_count": 0,
                 "bounded_failure_fallback_count": 0,
                 "pending_gap_fallback_count": 0,
                 "legacy_fallback_regeneration_count": 0,
+                "fact_external_reference_count": 0,
+                "fact_missing_source_anchor_count": 0,
+                "fact_question_answer_wrapper_count": 0,
                 "exact_original_question_substring_count": 0,
             }
         ),
@@ -419,16 +476,24 @@ def test_complete_snapshot_reports_formal_metrics_and_protocol(tmp_path: Path) -
     assert report["terminal"]["strict_failure_count"] == 0
     assertions = report["protocol_assertions"]
     assert assertions["director_tool_calls"] == 0
+    assert assertions["director_request_allowed_tools"] == []
+    assert assertions["director_requests_toolless"] is True
+    assert assertions["director_retrieval_payload_exposure_count"] == 0
+    assert assertions["director_data_plane_isolated"] is True
     assert assertions["retrieval_tool_calls_by_worker_gt_0"] is True
+    assert assertions["worker_ownership_violation_count"] == 0
     assert assertions["first_data_plane_action_is_search"] is True
     assert assertions["complete_top_k_read_by_rank"] is True
     assert assertions["fact_artifact_routed_via_explicit_relation"] is True
+    assert assertions["retrieval_artifact_routed_via_relation"] is True
+    assert assertions["output_inbox_receipt_lineage"] is True
     assert assertions["output_lineage"] is True
     assert assertions["web_search_count"] == 0
     assert assertions["agent_facing_data_plane_violation_count"] == 0
     assert assertions["materialization_manifest_valid"] is True
     assert all(assertions["materialization_count_checks"].values())
     assert all(assertions["materialization_fallback_checks"].values())
+    assert all(assertions["materialization_fact_only_index_checks"].values())
     assert assertions["exact_original_question_substring_count_eq_0"] is True
     assert assertions["final_index_memory_count_valid"] is True
     assert assertions["top_k_selection_receipt_valid"] is True
@@ -440,6 +505,82 @@ def test_complete_snapshot_reports_formal_metrics_and_protocol(tmp_path: Path) -
     assert report["wrong_demo_selection"]["shortfall"] == 0
     assert len({demo["task_id"] for demo in report["wrong_demos"]}) == 3
     assert all(demo["actual_execution_chain"] for demo in report["wrong_demos"])
+
+
+def test_director_tool_enabled_request_fails_closed(tmp_path: Path) -> None:
+    args, trajectories = _fixture(tmp_path)
+    broken = copy.deepcopy(trajectories)
+    broken[0]["turns"][0]["prompt"] = _director_prompt(  # type: ignore[index]
+        allowed_tools=[analysis.FACT_MEMORY_TOOL_ID],
+        tool_calls_enabled=True,
+    )
+    _write_jsonl(Path(args.trajectories), broken)
+
+    report = analysis.build_report(args)
+
+    assertions = report["protocol_assertions"]
+    assert assertions["director_request_allowed_tools"] == [
+        analysis.FACT_MEMORY_TOOL_ID
+    ]
+    assert assertions["director_requests_toolless"] is False
+    assert assertions["director_data_plane_isolated"] is False
+    assert assertions["protocol_valid"] is False
+    assert report["metrics"]["formal"] is None
+
+
+def test_director_retrieval_payload_exposure_fails_closed(tmp_path: Path) -> None:
+    args, trajectories = _fixture(tmp_path)
+    broken = copy.deepcopy(trajectories)
+    broken[0]["turns"][0]["prompt"] = _director_prompt(  # type: ignore[index]
+        extra_observation={"leaked_memory_id": "fact-1"},
+    )
+    _write_jsonl(Path(args.trajectories), broken)
+
+    report = analysis.build_report(args)
+
+    assertions = report["protocol_assertions"]
+    assert assertions["director_requests_toolless"] is True
+    assert assertions["director_retrieval_payload_exposure_count"] == 1
+    assert assertions["director_data_plane_isolated"] is False
+    assert assertions["protocol_valid"] is False
+    assert report["metrics"]["formal"] is None
+
+
+def test_non_worker_fact_tool_ownership_fails_closed(tmp_path: Path) -> None:
+    args, trajectories = _fixture(tmp_path)
+    broken = copy.deepcopy(trajectories)
+    retriever_request = broken[0]["turns"][0]["executions"][0]["metadata"][  # type: ignore[index]
+        "request"
+    ]
+    retriever_request["execution_role"] = "director"
+    _write_jsonl(Path(args.trajectories), broken)
+
+    report = analysis.build_report(args)
+
+    assertions = report["protocol_assertions"]
+    assert assertions["worker_ownership_violation_count"] == 3
+    assert assertions["retrieval_tool_calls_by_worker_gt_0"] is False
+    assert assertions["protocol_valid"] is False
+    assert report["metrics"]["formal"] is None
+
+
+def test_missing_retriever_relation_receipt_route_fails_closed(
+    tmp_path: Path,
+) -> None:
+    args, trajectories = _fixture(tmp_path)
+    broken = copy.deepcopy(trajectories)
+    reasoner_request = broken[0]["turns"][0]["executions"][1]["metadata"][  # type: ignore[index]
+        "request"
+    ]
+    reasoner_request["upstream"][0]["tool_receipts"] = []
+    _write_jsonl(Path(args.trajectories), broken)
+
+    report = analysis.build_report(args)
+
+    assertions = report["protocol_assertions"]
+    assert assertions["retrieval_artifact_routed_via_relation"] is False
+    assert assertions["protocol_valid"] is False
+    assert report["metrics"]["formal"] is None
 
 
 def test_agent_facing_private_field_leak_withholds_formal_metrics(
@@ -556,14 +697,39 @@ def test_materialization_manifest_requires_every_strict_count_and_zero_fallback(
         "strict_semantic_paraphrase_count": (
             analysis.EXPECTED_FACT_MEMORY_COUNT - 1
         ),
+        "semantic_question_rewrite_count": (
+            analysis.EXPECTED_FACT_MEMORY_COUNT - 1
+        ),
         "lexical_or_phrase_replacement_count": (
             analysis.EXPECTED_FACT_MEMORY_COUNT - 1
         ),
+        "semantic_admission_checked_count": (
+            analysis.EXPECTED_FACT_MEMORY_COUNT - 1
+        ),
+        "fact_self_containment_checked_count": (
+            analysis.EXPECTED_FACT_MEMORY_COUNT - 1
+        ),
+        "fact_self_containment_pass_count": (
+            analysis.EXPECTED_FACT_MEMORY_COUNT - 1
+        ),
+        "fact_self_containment_admission_version": (
+            "triviaqa.fact_memory.self_containment.old"
+        ),
         "fact_text_count": analysis.EXPECTED_FACT_MEMORY_COUNT - 1,
+        "embedding_text_field": "paraphrase_question",
+        "fact_projection_fields": ["memory_id", "fact_text", "canonical_answer"],
+        "original_question_indexed": True,
+        "canonical_answer_indexed": True,
+        "accepted_answers_indexed": True,
+        "paraphrase_question_indexed": True,
+        "original_question_fallback_count": 1,
         "dataset_pair_fallback_count": 1,
         "bounded_failure_fallback_count": 1,
         "pending_gap_fallback_count": 1,
         "legacy_fallback_regeneration_count": 1,
+        "fact_external_reference_count": 1,
+        "fact_missing_source_anchor_count": 1,
+        "fact_question_answer_wrapper_count": 1,
         "exact_original_question_substring_count": 1,
     }
 

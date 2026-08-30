@@ -63,13 +63,32 @@ TOP_K_SELECTION_SCHEMA_VERSION = (
 MATERIALIZATION_SCHEMA_VERSION = (
     "flowsteer.triviaqa.fact_memory.materialization.v1"
 )
+FACT_SELF_CONTAINMENT_ADMISSION_VERSION = (
+    "triviaqa.fact_memory.self_containment.v2"
+)
 EXPECTED_FACT_MEMORY_COUNT = 76_523
 ZERO_FALLBACK_COUNT_FIELDS = (
+    "original_question_fallback_count",
     "dataset_pair_fallback_count",
     "bounded_failure_fallback_count",
     "pending_gap_fallback_count",
     "legacy_fallback_regeneration_count",
+    "fact_external_reference_count",
+    "fact_missing_source_anchor_count",
+    "fact_question_answer_wrapper_count",
 )
+FACT_ONLY_INDEX_FALSE_FIELDS = (
+    "original_question_indexed",
+    "canonical_answer_indexed",
+    "accepted_answers_indexed",
+    "paraphrase_question_indexed",
+)
+FACT_PROJECTION_FIELDS = [
+    "schema_version",
+    "memory_id",
+    "tool_id",
+    "fact_text",
+]
 FACT_RECORD_FIELDS = frozenset({"memory_id", "fact_text"})
 FACT_HIT_FIELDS = frozenset(
     {"memory_id", "rank", "similarity", "fact_text"}
@@ -736,6 +755,19 @@ def _aggregate_protocol(
     return assertions, per_task
 
 
+def _aggregate_control_plane(
+    selected_ids: Sequence[str],
+    trajectories: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Thin fact-memory adapter over the shared QA Tool boundary analyzer."""
+
+    if qa.QA_MEMORY_TOOL_ID != FACT_MEMORY_TOOL_ID:
+        raise RuntimeError(
+            "fact-memory and shared QA control-plane Tool IDs differ"
+        )
+    return qa._aggregate_control_plane(selected_ids, trajectories)
+
+
 def _wrong_demos(
     selected_by_id: Mapping[str, Mapping[str, Any]],
     trajectories: Mapping[str, dict[str, Any]],
@@ -822,6 +854,36 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     direct = qa._condition_metrics(selected_ids, paired, "direct")
     agentgraph = qa._condition_metrics(selected_ids, paired, "agentgraph")
     protocol, per_task = _aggregate_protocol(selected_ids, trajectories)
+    # Reuse the QA-memory analyzer's canonical Director-request, worker
+    # ownership, and explicit-relation checks. Fact memory intentionally keeps
+    # the same SkillFlow Tool ID and FlowSteer receipt/communication schema.
+    control_plane, per_task_control_plane = _aggregate_control_plane(
+        selected_ids,
+        trajectories,
+    )
+    control_assertions = qa.base._mapping(control_plane.get("assertions"))
+    for task_id, task_protocol in per_task.items():
+        task_protocol["control_plane_and_tool_routing"] = (
+            per_task_control_plane.get(task_id)
+        )
+    protocol.update(
+        {
+            key: control_assertions.get(key)
+            for key in (
+                "director_request_allowed_tools",
+                "director_execution_profile_violation_count",
+                "director_tool_calls_enabled_count",
+                "director_requests_toolless",
+                "director_retrieval_payload_exposure_count",
+                "director_data_plane_isolated",
+                "retrieval_tool_calls_by_worker",
+                "retrieval_tool_calls_by_worker_gt_0",
+                "worker_ownership_violation_count",
+                "retrieval_artifact_routed_via_relation",
+                "output_inbox_receipt_lineage",
+            )
+        }
+    )
     selected_top_k = top_k_selection_receipt.get("selected_top_k")
     final_index_frozen_top_k = index_manifest.get("frozen_top_k")
     expected_fact_memory_count = args.expected_fact_memory_count
@@ -838,8 +900,24 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             materialization_manifest.get("strict_semantic_paraphrase_count"),
             expected_fact_memory_count,
         ),
+        "semantic_question_rewrite_count": _exact_int(
+            materialization_manifest.get("semantic_question_rewrite_count"),
+            expected_fact_memory_count,
+        ),
         "lexical_or_phrase_replacement_count": _exact_int(
             materialization_manifest.get("lexical_or_phrase_replacement_count"),
+            expected_fact_memory_count,
+        ),
+        "semantic_admission_checked_count": _exact_int(
+            materialization_manifest.get("semantic_admission_checked_count"),
+            expected_fact_memory_count,
+        ),
+        "fact_self_containment_checked_count": _exact_int(
+            materialization_manifest.get("fact_self_containment_checked_count"),
+            expected_fact_memory_count,
+        ),
+        "fact_self_containment_pass_count": _exact_int(
+            materialization_manifest.get("fact_self_containment_pass_count"),
             expected_fact_memory_count,
         ),
         "fact_text_count": _exact_int(
@@ -857,6 +935,25 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         ),
         0,
     )
+    materialization_fact_only_index_checks = {
+        "fact_self_containment_admission_version": (
+            materialization_manifest.get(
+                "fact_self_containment_admission_version"
+            )
+            == FACT_SELF_CONTAINMENT_ADMISSION_VERSION
+        ),
+        "embedding_text_field_is_fact_text": (
+            materialization_manifest.get("embedding_text_field") == "fact_text"
+        ),
+        "fact_projection_fields_exact": (
+            materialization_manifest.get("fact_projection_fields")
+            == FACT_PROJECTION_FIELDS
+        ),
+        **{
+            f"{field}_false": materialization_manifest.get(field) is False
+            for field in FACT_ONLY_INDEX_FALSE_FIELDS
+        },
+    }
     materialization_manifest_valid = bool(
         materialization_manifest_error is None
         and materialization_manifest.get("schema_version")
@@ -864,6 +961,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         and all(materialization_count_checks.values())
         and all(materialization_fallback_checks.values())
         and exact_original_question_substring_count_eq_0
+        and all(materialization_fact_only_index_checks.values())
     )
     final_index_memory_count_valid = bool(
         index_manifest_error is None
@@ -894,6 +992,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "exact_original_question_substring_count_eq_0": (
                 exact_original_question_substring_count_eq_0
             ),
+            "materialization_fact_only_index_checks": (
+                materialization_fact_only_index_checks
+            ),
             "final_index_memory_count_valid": final_index_memory_count_valid,
             "top_k_selection_receipt_valid": top_k_selection_receipt_valid,
             "selected_top_k": selected_top_k,
@@ -905,6 +1006,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     )
     protocol["protocol_valid"] = bool(
         protocol.get("protocol_valid") is True
+        and protocol.get("director_requests_toolless") is True
+        and protocol.get("director_data_plane_isolated") is True
+        and protocol.get("retrieval_tool_calls_by_worker_gt_0") is True
+        and protocol.get("worker_ownership_violation_count") == 0
+        and protocol.get("retrieval_artifact_routed_via_relation") is True
+        and protocol.get("output_inbox_receipt_lineage") is True
         and materialization_manifest_valid
         and final_index_memory_count_valid
         and selected_top_k_matches_final_index
@@ -1048,6 +1155,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "manifest_valid": materialization_manifest_valid,
             "count_checks": materialization_count_checks,
             "fallback_checks": materialization_fallback_checks,
+            "fact_only_index_checks": materialization_fact_only_index_checks,
             "exact_original_question_substring_count": (
                 materialization_manifest.get(
                     "exact_original_question_substring_count"
@@ -1059,8 +1167,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                     "record_count",
                     "unique_source_count",
                     "strict_semantic_paraphrase_count",
+                    "semantic_question_rewrite_count",
                     "lexical_or_phrase_replacement_count",
+                    "semantic_admission_checked_count",
+                    "fact_self_containment_admission_version",
+                    "fact_self_containment_checked_count",
+                    "fact_self_containment_pass_count",
                     "fact_text_count",
+                    "embedding_text_field",
+                    "fact_projection_fields",
+                    *FACT_ONLY_INDEX_FALSE_FIELDS,
                     *ZERO_FALLBACK_COUNT_FIELDS,
                 )
             },
@@ -1076,6 +1192,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             ),
         },
         "protocol_assertions": protocol,
+        "control_plane_and_tool_routing": control_plane,
         "per_task_protocol": per_task,
         "failure_taxonomy": taxonomy,
         "wrong_demo_selection": {
@@ -1126,7 +1243,7 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
     terminal = qa.base._mapping(report.get("terminal"))
     demos = qa.base._list(report.get("wrong_demos"))
     lines = [
-        "# TriviaQA fact-memory v16 result analysis",
+        "# TriviaQA fact-memory result analysis",
         "",
         f"- Status: `{run.get('status')}`",
         f"- Fixed denominator: `{run.get('expected_denominator')}`",
@@ -1135,16 +1252,23 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         f"- Terminal failures: `{terminal.get('strict_failure_count')}`",
         f"- Protocol valid: `{protocol.get('protocol_valid')}`",
         f"- Materialization manifest valid: `{materialization.get('manifest_valid')}`",
+        f"- 100% semantic rewrite checks: `{materialization.get('count_checks')}`",
+        f"- Fact-only index checks: `{materialization.get('fact_only_index_checks')}`",
         f"- Materialized facts: `{materialization.get('record_count')}` / `{materialization.get('expected_fact_memory_count')}`",
         f"- Final index memories: `{fact_memory_index.get('memory_count')}`",
         f"- Selected Top-K: `{top_k_selection.get('selected_top_k')}`",
         f"- Final index frozen Top-K: `{top_k_selection.get('final_index_frozen_top_k')}`",
         f"- Top-K receipt/index match: `{top_k_selection.get('selected_top_k_matches_final_index')}`",
         f"- Director Tool calls: `{protocol.get('director_tool_calls')}`",
+        f"- Director request allowed_tools: `{protocol.get('director_request_allowed_tools')}`",
+        f"- Director requests Tool-free: `{protocol.get('director_requests_toolless')}`",
+        f"- Director data-plane isolated: `{protocol.get('director_data_plane_isolated')}`",
         f"- Worker search/read: `{protocol.get('worker_search_count')}` / `{protocol.get('worker_read_count')}`",
         f"- First data-plane Action is search: `{protocol.get('first_data_plane_action_is_search')}`",
         f"- Complete Top-K rank reads: `{protocol.get('complete_top_k_read_by_rank')}`",
         f"- Fact artifact explicit-relation route: `{protocol.get('fact_artifact_routed_via_explicit_relation')}`",
+        f"- Retrieval artifact relation route: `{protocol.get('retrieval_artifact_routed_via_relation')}`",
+        f"- Output inbox receipt lineage: `{protocol.get('output_inbox_receipt_lineage')}`",
         f"- Output lineage: `{protocol.get('output_lineage')}`",
         f"- Web Search count: `{protocol.get('web_search_count')}`",
         f"- Agent-facing data-plane violations: `{protocol.get('agent_facing_data_plane_violation_count')}`",

@@ -55,10 +55,12 @@ from scripts.materialize_triviaqa_full_train_qa_memory import (  # noqa: E402
 )
 
 
-PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v13"
+PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v15"
 SUPPORTED_PROMPT_TEMPLATE_VERSIONS = frozenset(
     {
         "triviaqa.qa_memory.qa_paraphrase.v12",
+        "triviaqa.qa_memory.qa_paraphrase.v13",
+        "triviaqa.qa_memory.qa_paraphrase.v14",
         PROMPT_TEMPLATE_VERSION,
     }
 )
@@ -70,6 +72,7 @@ FACT_SELF_CONTAINMENT_ADMISSION_VERSION = (
 PARAPHRASE_METHOD = "semantic-preserving-question-and-answer-paraphrase"
 GENERATOR_PROVIDER = "local-openai-compatible"
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
+FACT_ONLY_REPAIR_ATTEMPTS = 3
 FULL_NATIVE_UNIQUE_QA_COUNT = 76_523
 FACT_MEMORY_SCHEMA_VERSION = "flowsteer.triviaqa.fact_memory.record.v1"
 FACT_PROVENANCE_SCHEMA_VERSION = (
@@ -107,8 +110,9 @@ ANSWER_VERIFICATION_SYSTEM_PROMPT = """Verify whether a declarative answer state
 Return exactly one JSON object with these boolean fields and no other text:
 {"canonical_span_preserved":true,"answer_slot_bound":true,"relation_direction_preserved":true,"scope_and_constraints_preserved":true,"no_new_fact_or_relation":true}"""
 
-ANSWER_REPAIR_SYSTEM_PROMPT = """Repair only one TriviaQA declarative answer statement by literal slot substitution. Treat the original question and canonical answer as authoritative dataset strings; never fact-check or correct them. Never return only the canonical answer, even when that span already looks like a sentence or explanation. For a wh-question, copy every non-wh token and its order from original_question, including auxiliaries such as was, is, or did; replace only the complete wh-constituent with the exact canonical span and convert question punctuation to a declarative period. For a leading 'What/Which <answer type> is/was <predicate>?' question, use the relation-bearing declarative form 'The <answer type> that is/was <predicate> is/was <exact canonical span>.' When the exact canonical span begins with a preposition such as 'In', 'On', 'At', 'By', or 'From', place that exact span first as a fronted phrase, then a comma, then render the remaining subject and predicate in declarative order; never lowercase or duplicate its preposition. When the exact canonical span is possessive and ends in "'s", and original_question asks 'the <relation noun> of what/who ...', front the exact possessive span and follow it with that relation noun and the remaining predicate, for example '<exact possessive canonical> diet ...'; never return the possessive span alone. For an explicitly listed-choice question, preserve the proposition and alternatives, state the selected relation naturally, and include the exact uninflected canonical span as the selected option label in that same declarative statement. Do not use wording from rejected_answer_statement. Do not paraphrase the relation clause, reverse subject/object direction, write '<answer type> of <canonical answer>', or add a fact, relation, scope, or constraint.
-The repaired statement must be a self-contained declarative fact. Repeat every immutable_original_entity_token, immutable_number_or_date_token, and immutable_quoted_span required by the source, even when the rejected statement omitted it. Outside an immutable quoted span or the exact canonical answer span, replace every third-person or demonstrative pronoun with its explicit noun phrase. Do not emit a bare generic binding, a Question/Answer wrapper, or a question-plus-answer concatenation.
+ANSWER_REPAIR_SYSTEM_PROMPT = """Repair only one TriviaQA declarative answer statement by literal slot substitution. Treat the original question and canonical answer as authoritative dataset strings; never fact-check or correct them. Never return only the canonical answer, even when that span already looks like a sentence or explanation. For a wh-question, preserve every non-wh relation, entity, scope, number/date, quoted span, and required auxiliary from original_question in its source relation; replace only the complete wh-constituent with the exact canonical span and convert question punctuation to a declarative period. This preservation rule does not require copying an external-reference token: it, he, she, they, this, these, those, him, her, them, his, hers, its, their, theirs, itself, himself, herself, and themselves are forbidden outside an immutable quote or the exact canonical span. Replace a bound reference with its explicit source noun phrase. If the source contains no explicit antecedent, do not guess one; use an event nominalization that preserves the same predicate and constraints while eliminating the external reference. For a leading 'What/Which <answer type> is/was <predicate>?' question, use the relation-bearing declarative form 'The <answer type> that is/was <predicate> is/was <exact canonical span>.' When the exact canonical span begins with a preposition such as 'In', 'On', 'At', 'By', or 'From', place that exact span first as a fronted phrase, then a comma, then render the remaining subject and predicate in declarative order; never lowercase or duplicate its preposition. When the exact canonical span is possessive and ends in "'s", and original_question asks 'the <relation noun> of what/who ...', front the exact possessive span and follow it with that relation noun and the remaining predicate, for example '<exact possessive canonical> diet ...'; never return the possessive span alone. For an explicitly listed-choice question, preserve the proposition and alternatives, state the selected relation naturally, and include the exact uninflected canonical span as the selected option label in that same declarative statement. Do not copy wording from rejected_answer_statement merely to preserve its failed shape. Do not paraphrase the relation clause, reverse subject/object direction, write '<answer type> of <canonical answer>', or add a fact, relation, scope, or constraint.
+The repaired statement must be a self-contained declarative fact. Repeat every immutable_original_entity_token, immutable_number_or_date_token, and immutable_quoted_span required by the source, even when the rejected statement omitted it. Outside an immutable quoted span or the exact canonical answer span, replace every third-person or demonstrative pronoun with its explicit noun phrase. Do this mechanically even when the pronoun has an antecedent in the same sentence: after binding the answer slot, repeat the explicit antecedent noun phrase instead of copying the pronoun. Examples of fact-field de-pronominalization only: for "Which singer formed his own Berlee record label?" with canonical answer "Del Shannon", write "Del Shannon formed Del Shannon's own Berlee record label."; rewrite "Rene Higuita ... when he dived under the ball and back-heeled it" using "Rene Higuita" for "he" and "the ball" for "it"; rewrite "the court ... players being beaten on it" using "the court" for "it". Preserve the actual source relation and strings; do not copy these example entities into another record. Do not emit a bare generic binding, a Question/Answer wrapper, or a question-plus-answer concatenation.
+Use admission_failure_category, admission_failure_reason, and admission_diagnostics as the exact fail-closed repair target. Every missing token occurrence in admission_diagnostics is mandatory. Change only the failed fact field; never rewrite or return the paraphrased question.
 When canonical_training_answer is itself a complete clause and original_question has the form 'What <slot> did <subject> have?', preserve the clause character-for-character in the relation-bearing form 'The statement "<canonical>" identifies the <slot> that <subject> had.'
 Return exactly one JSON object with this schema and no other text:
 {"paraphrase_answer_statement":"..."}"""
@@ -191,6 +195,7 @@ _SENTENCE_BOUNDARY_NON_ENTITY_WORDS = frozenset(
         "him",
         "his",
         "her",
+        "if",
         "it",
         "its",
         "located",
@@ -208,6 +213,15 @@ _SENTENCE_BOUNDARY_NON_ENTITY_WORDS = frozenset(
         "your",
     }
 )
+_BOUNDARY_CONTEXTUAL_NON_ENTITY_FOLLOWERS = {
+    "born": frozenset({"at", "during", "in", "on"}),
+    "established": frozenset({"at", "by", "during", "in", "on"}),
+    "now": frozenset({"at", "based", "called", "known", "located", "named"}),
+    "there": frozenset(
+        {"are", "had", "has", "have", "is", "was", "were", "will"}
+    ),
+    "used": frozenset({"as", "by", "during", "for", "in"}),
+}
 _FACT_QA_WRAPPER = re.compile(
     r"(?:\b(?:question|answer|prompt|response)\s*:|"
     r"\b(?:dataset\s+source\s+prompt|paired\s+response|"
@@ -1998,6 +2012,20 @@ def _capitalized_identity_tokens(question: str) -> frozenset[str]:
                     question,
                     match,
                 )
+                and not (
+                    index == 1
+                    and tokens[0].casefold() in {"what", "which"}
+                    and token.casefold() == "album"
+                    and index + 1 < len(tokens)
+                    and tokens[index + 1][:1].islower()
+                )
+                and not (
+                    token.casefold() == "if"
+                    and any(
+                        quoted.start() <= match.start() < quoted.end()
+                        for quoted in _ORDERED_QUOTED_SLOT.finditer(question)
+                    )
+                )
             )
             or (
                 token.casefold() in _NAME_PARTICLES
@@ -2030,12 +2058,28 @@ def _sentence_boundary_non_entity_token(
     if not at_boundary:
         return False
     token = token_match.group(0)
+    next_token_match = _LEXICAL_TOKEN.search(text, token_match.end())
+    next_token = next_token_match.group(0) if next_token_match is not None else ""
+    token_folded = token.casefold()
+    if token_folded == "having" and next_token and next_token[:1].islower():
+        return True
+    contextual_followers = _BOUNDARY_CONTEXTUAL_NON_ENTITY_FOLLOWERS.get(
+        token_folded
+    )
+    if contextual_followers is not None and (
+        next_token.casefold() in contextual_followers
+        or (
+            token_folded in {"born", "established"}
+            and next_token[:1].isdigit()
+        )
+    ):
+        return True
     if _SENTENCE_BOUNDARY_CONTRACTION.fullmatch(token) is not None:
-        next_token = _LEXICAL_TOKEN.search(text, token_match.end())
+        next_token_match = _LEXICAL_TOKEN.search(text, token_match.end())
         # Preserve title-like capitalization such as ``Don't Panic``.  The
         # exception is only for ordinary sentence-boundary contractions such
         # as ``Don't guess`` or ``I'm ready``.
-        return next_token is None or not next_token.group(0)[:1].isupper()
+        return next_token_match is None or not next_token_match.group(0)[:1].isupper()
     return bool(
         _LEADING_INTERROGATIVE_CONTRACTION.fullmatch(token)
         or token.casefold() in _SENTENCE_BOUNDARY_IMPERATIVE
@@ -2397,7 +2441,14 @@ def build_paraphrase_messages(source: TriviaQATrainSource) -> list[dict[str, str
             _multiword_possessive_identity_bases(source.original_question)
         ),
         "immutable_number_or_date_tokens": sorted(
-            set(_NUMBER_OR_DATE_TOKEN.findall(source.original_question))
+            _NUMBER_OR_DATE_TOKEN.findall(source.original_question)
+        ),
+        "immutable_number_or_date_token_counts": dict(
+            sorted(
+                Counter(
+                    _NUMBER_OR_DATE_TOKEN.findall(source.original_question)
+                ).items()
+            )
         ),
         "immutable_quoted_spans": sorted(
             _quoted_spans(source.original_question)
@@ -2526,10 +2577,110 @@ def parse_answer_verification_response(text: str) -> Mapping[str, bool]:
     }
 
 
+def _fact_admission_failure_category(reason: str | None) -> str:
+    normalized = str(reason or "").casefold()
+    if "external anaphoric" in normalized or "anaphoric subject" in normalized:
+        return "external_anaphora"
+    if "immutable source entity" in normalized:
+        return "missing_entity_anchor"
+    if "numeric/date" in normalized:
+        return "missing_numeric_or_date_constraint"
+    if "immutable quoted" in normalized:
+        return "missing_quoted_scope"
+    if "exact canonical" in normalized or "canonical fact value" in normalized:
+        return "canonical_span_binding"
+    if "selected listed option" in normalized or "listed option" in normalized:
+        return "listed_option_binding"
+    if "question/answer" in normalized or "wrapper" in normalized:
+        return "qa_wrapper"
+    if "fields are incompatible" in normalized or "strict json" in normalized:
+        return "structured_output"
+    if "generic subject" in normalized or "relation-bearing" in normalized:
+        return "relation_binding"
+    return "unspecified_fact_admission"
+
+
+def _fact_admission_diagnostics(
+    source: TriviaQATrainSource,
+    rejected_answer_statement: str,
+) -> Mapping[str, object]:
+    """Describe the exact failed fact constraints without weakening admission."""
+
+    source = source_transport_view(source)
+    statement = " ".join(str(rejected_answer_statement).split())
+    canonical = " ".join(source.canonical_answer.split())
+    statement_tokens = frozenset(
+        token.casefold()
+        for token in _LEXICAL_TOKEN.findall(statement)
+        if token.casefold() not in _FUNCTION_WORDS
+    )
+    missing_entities = sorted(
+        token
+        for token in _capitalized_identity_tokens(source.original_question)
+        if not _identity_token_preserved(token, statement_tokens)
+        and not (
+            token.endswith(("'s", "’s"))
+            and token[:-2] in _multiword_possessive_identity_bases(
+                source.original_question
+            )
+            and token[:-2] in statement_tokens
+        )
+    )
+    source_numbers = Counter(
+        _NUMBER_OR_DATE_TOKEN.findall(source.original_question)
+    )
+    statement_numbers = Counter(_NUMBER_OR_DATE_TOKEN.findall(statement))
+    missing_numbers = sorted((source_numbers - statement_numbers).elements())
+    source_quotes = _quoted_spans(source.original_question)
+    statement_quotes = _quoted_spans(statement)
+    quoted_answer_slot = re.compile(
+        r"[‘'\"“](?:what|which|who|whom|whose|where|when|why|how)"
+        r"[’'\"”]",
+        re.IGNORECASE,
+    )
+    missing_quotes = sorted(
+        span
+        for span in source_quotes
+        if span not in statement_quotes
+        and quoted_answer_slot.sub(canonical, span) not in statement_quotes
+    )
+    reference_surface = _ORDERED_QUOTED_SLOT.sub(
+        " immutable quoted material ", statement
+    ).replace(canonical, " canonical fact value ")
+    external_references = sorted(
+        {
+            match.group(0).casefold()
+            for match in _FACT_EXTERNAL_REFERENCE.finditer(reference_surface)
+        }
+    )
+    return {
+        "missing_entity_tokens": missing_entities,
+        "missing_number_or_date_tokens": missing_numbers,
+        "required_number_or_date_token_counts": dict(
+            sorted(source_numbers.items())
+        ),
+        "missing_quoted_spans": missing_quotes,
+        "external_reference_tokens": external_references,
+        "canonical_span_preserved": exact_canonical_span_preserved(
+            statement,
+            canonical,
+        ),
+        "listed_option_binding_preserved": (
+            _listed_choice_answer_binding_preserved(
+                original_question=source.original_question,
+                canonical_answer=canonical,
+                answer_statement=statement,
+            )
+        ),
+    }
+
+
 def build_answer_repair_messages(
     source: TriviaQATrainSource,
     *,
     rejected_answer_statement: str,
+    admission_failure_reason: str | None = None,
+    repair_attempt: int = 0,
 ) -> list[dict[str, str]]:
     source = source_transport_view(source)
     payload = {
@@ -2540,11 +2691,27 @@ def build_answer_repair_messages(
             _capitalized_identity_surfaces(source.original_question)
         ),
         "immutable_number_or_date_tokens": sorted(
-            set(_NUMBER_OR_DATE_TOKEN.findall(source.original_question))
+            _NUMBER_OR_DATE_TOKEN.findall(source.original_question)
+        ),
+        "immutable_number_or_date_token_counts": dict(
+            sorted(
+                Counter(
+                    _NUMBER_OR_DATE_TOKEN.findall(source.original_question)
+                ).items()
+            )
         ),
         "immutable_quoted_spans": sorted(
             _quoted_spans(source.original_question)
         ),
+        "admission_failure_category": _fact_admission_failure_category(
+            admission_failure_reason
+        ),
+        "admission_failure_reason": admission_failure_reason,
+        "admission_diagnostics": _fact_admission_diagnostics(
+            source,
+            rejected_answer_statement,
+        ),
+        "repair_attempt": repair_attempt,
     }
     return [
         {"role": "system", "content": ANSWER_REPAIR_SYSTEM_PROMPT},
@@ -2578,6 +2745,9 @@ def _normalize_observed_response_keys(
     unexpected_fields: list[str] = []
     collision_fields: list[str] = []
     non_text_key_types: list[str] = []
+    singleton_expected_field = (
+        next(iter(expected_fields)) if len(expected_fields) == 1 else None
+    )
     for raw_field, field_value in value.items():
         if not isinstance(raw_field, str):
             non_text_key_types.append(type(raw_field).__name__)
@@ -2587,6 +2757,11 @@ def _normalize_observed_response_keys(
             raw_field,
             raw_field,
         )
+        if (
+            singleton_expected_field is not None
+            and raw_field == f"/{singleton_expected_field}"
+        ):
+            normalized_field = singleton_expected_field
         if normalized_field not in expected_fields:
             unexpected_fields.append(raw_field)
             continue
@@ -6143,20 +6318,15 @@ class LocalQwen35Paraphraser:
         question: str,
         rejected_statement: str,
         seed: int,
+        admission_failure_reason: str | None = None,
     ) -> str:
-        def validated_alias_repair(statement: str) -> str | None:
-            candidate = _canonicalize_answer_statement_from_accepted_alias(
-                source,
-                statement,
-            )
-            if candidate is None:
-                return None
+        def validated_local_candidate(statement: str) -> str | None:
             try:
                 _, candidate = parse_paraphrase_response(
                     json.dumps(
                         {
                             "paraphrase_question": question,
-                            "paraphrase_answer_statement": candidate,
+                            "paraphrase_answer_statement": statement,
                         },
                         ensure_ascii=False,
                     ),
@@ -6164,8 +6334,16 @@ class LocalQwen35Paraphraser:
                 )
                 return candidate
             except ValueError:
-                pass
-            return None
+                return None
+
+        def validated_alias_repair(statement: str) -> str | None:
+            candidate = _canonicalize_answer_statement_from_accepted_alias(
+                source,
+                statement,
+            )
+            if candidate is None:
+                return None
+            return validated_local_candidate(candidate)
 
         quoted_statement = _quote_terminal_punctuated_canonical_span(
             rejected_statement,
@@ -6176,76 +6354,33 @@ class LocalQwen35Paraphraser:
             protected_span=source.canonical_answer,
         )
         if punctuated_statement != " ".join(rejected_statement.split()).strip():
-            try:
-                _, punctuated_statement = parse_paraphrase_response(
-                    json.dumps(
-                        {
-                            "paraphrase_question": question,
-                            "paraphrase_answer_statement": punctuated_statement,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    source,
-                )
-                return punctuated_statement
-            except ValueError:
-                pass
+            admitted = validated_local_candidate(punctuated_statement)
+            if admitted is not None:
+                return admitted
 
         alias_repaired = validated_alias_repair(rejected_statement)
         if alias_repaired is not None:
             return alias_repaired
         clausal_statement = _clausal_canonical_relation_statement(source)
         if clausal_statement is not None:
-            _, clausal_statement = parse_paraphrase_response(
-                json.dumps(
-                    {
-                        "paraphrase_question": question,
-                        "paraphrase_answer_statement": clausal_statement,
-                    },
-                    ensure_ascii=False,
-                ),
-                source,
-            )
-            return clausal_statement
+            admitted = validated_local_candidate(clausal_statement)
+            if admitted is not None:
+                return admitted
         possessive_name_binding = _possessive_name_answer_statement(source)
         if possessive_name_binding is not None:
-            _, possessive_statement = parse_paraphrase_response(
-                json.dumps(
-                    {
-                        "paraphrase_question": question,
-                        "paraphrase_answer_statement": possessive_name_binding[1],
-                    },
-                    ensure_ascii=False,
-                ),
-                source,
-            )
-            return possessive_statement
+            admitted = validated_local_candidate(possessive_name_binding[1])
+            if admitted is not None:
+                return admitted
         literal_subject_statement = _literal_subject_wh_answer_statement(source)
         if literal_subject_statement is not None:
-            _, literal_subject_statement = parse_paraphrase_response(
-                json.dumps(
-                    {
-                        "paraphrase_question": question,
-                        "paraphrase_answer_statement": literal_subject_statement,
-                    },
-                    ensure_ascii=False,
-                ),
-                source,
-            )
-            return literal_subject_statement
+            admitted = validated_local_candidate(literal_subject_statement)
+            if admitted is not None:
+                return admitted
         deterministic_statement = _deterministic_answer_slot_statement(source)
         if deterministic_statement is not None:
-            _, deterministic_statement = parse_paraphrase_response(
-                json.dumps(
-                    {
-                        "paraphrase_question": question,
-                        "paraphrase_answer_statement": deterministic_statement,
-                    },
-                    ensure_ascii=False,
-                ),
-                source,
-            )
-            return deterministic_statement
+            admitted = validated_local_candidate(deterministic_statement)
+            if admitted is not None:
+                return admitted
         augmented_statement = _augment_listed_choice_answer_statement(
             original_question=source.original_question,
             canonical_answer=source.canonical_answer,
@@ -6271,46 +6406,70 @@ class LocalQwen35Paraphraser:
                     return augmented_statement
             except ValueError:
                 pass
-        repaired_statement = parse_answer_repair_response(
-            self._complete(
-                messages=build_answer_repair_messages(
+        current_statement = rejected_statement
+        current_reason = admission_failure_reason
+        last_repair_error: ValueError | None = None
+        for repair_attempt in range(FACT_ONLY_REPAIR_ATTEMPTS):
+            try:
+                repaired_statement = parse_answer_repair_response(
+                    self._complete(
+                        messages=build_answer_repair_messages(
+                            source,
+                            rejected_answer_statement=current_statement,
+                            admission_failure_reason=current_reason,
+                            repair_attempt=repair_attempt,
+                        ),
+                        seed=seed + repair_attempt,
+                        temperature=0.0,
+                    )
+                )
+                current_statement = repaired_statement
+                canonicalized = _canonicalize_answer_statement_from_accepted_alias(
                     source,
-                    rejected_answer_statement=rejected_statement,
-                ),
-                seed=seed,
-                temperature=0.0,
-            )
-        )
-        alias_repaired = validated_alias_repair(repaired_statement)
-        if alias_repaired is not None:
-            return alias_repaired
-        _, repaired_statement = parse_paraphrase_response(
-            json.dumps(
-                {
-                    "paraphrase_question": question,
-                    "paraphrase_answer_statement": repaired_statement,
-                },
-                ensure_ascii=False,
-            ),
-            source,
-        )
-        if not self._answer_statement_verified(
-            source,
-            statement=repaired_statement,
-            seed=seed + 1_000_000,
-        ) and not _literal_slot_substitution_preserved(
-            original_question=source.original_question,
-            canonical_answer=source.canonical_answer,
-            answer_statement=repaired_statement,
-        ) and not _called_relation_substitution_preserved(
-            original_question=source.original_question,
-            canonical_answer=source.canonical_answer,
-            answer_statement=repaired_statement,
-        ):
-            raise ValueError(
-                "answer-slot/relation verifier rejected repaired answer statement"
-            )
-        return repaired_statement
+                    repaired_statement,
+                )
+                if canonicalized is not None:
+                    repaired_statement = canonicalized
+                    current_statement = canonicalized
+                    admitted_alias = validated_local_candidate(canonicalized)
+                    if admitted_alias is not None:
+                        return admitted_alias
+                _, repaired_statement = parse_paraphrase_response(
+                    json.dumps(
+                        {
+                            "paraphrase_question": question,
+                            "paraphrase_answer_statement": repaired_statement,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    source,
+                )
+                if not self._answer_statement_verified(
+                    source,
+                    statement=repaired_statement,
+                    seed=seed + 1_000_000 + repair_attempt,
+                ) and not _literal_slot_substitution_preserved(
+                    original_question=source.original_question,
+                    canonical_answer=source.canonical_answer,
+                    answer_statement=repaired_statement,
+                ) and not _called_relation_substitution_preserved(
+                    original_question=source.original_question,
+                    canonical_answer=source.canonical_answer,
+                    answer_statement=repaired_statement,
+                ):
+                    raise ValueError(
+                        "answer-slot/relation verifier rejected repaired answer "
+                        "statement"
+                    )
+                return repaired_statement
+            except ValueError as exc:
+                last_repair_error = exc
+                current_reason = str(exc)
+        assert last_repair_error is not None
+        raise RuntimeError(
+            "bounded fact-only repair exhausted for an already generated "
+            "paraphrase question: " + str(last_repair_error)
+        ) from last_repair_error
 
     def _repair_paraphrase_question(
         self,
@@ -6640,6 +6799,7 @@ class LocalQwen35Paraphraser:
                             question=question,
                             rejected_statement=source.canonical_answer,
                             seed=seed + 2_750_000 + attempt,
+                            admission_failure_reason=str(parse_error),
                         )
                         question, statement = parse_paraphrase_response(
                             json.dumps(
@@ -6748,6 +6908,7 @@ class LocalQwen35Paraphraser:
                                 question=question,
                                 rejected_statement=statement,
                                 seed=seed + 3_000_000 + attempt,
+                                admission_failure_reason=str(parse_error),
                             )
                 verification = parse_verification_response(
                     self._complete(
@@ -6800,6 +6961,10 @@ class LocalQwen35Paraphraser:
                         question=question,
                         rejected_statement=statement,
                         seed=seed + 3_000_000 + attempt,
+                        admission_failure_reason=(
+                            "answer-slot/relation verifier rejected repaired "
+                            "answer statement"
+                        ),
                     )
                 contaminated = _exact_question_identity_contaminated_fields(
                     source,

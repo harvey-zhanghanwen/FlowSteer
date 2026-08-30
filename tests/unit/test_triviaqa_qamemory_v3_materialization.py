@@ -13,6 +13,8 @@ from src.interactive.triviaqa_qa_memory import (
 )
 from scripts.generate_triviaqa_qa_memory_paraphrases import (
     GENERATION_ROUND_SEED_STRIDE,
+    PROMPT_TEMPLATE_VERSION,
+    SUPPORTED_PROMPT_TEMPLATE_VERSIONS,
     ANSWER_VERIFICATION_SYSTEM_PROMPT,
     ANSWER_REPAIR_SYSTEM_PROMPT,
     QUESTION_REPAIR_SYSTEM_PROMPT,
@@ -405,6 +407,287 @@ def test_fact_projection_rejects_unresolved_reference_and_missing_scope() -> Non
         "Frosted food."
     )
     assert validate_self_contained_declarative_fact(source, fact) == fact
+
+
+@pytest.mark.parametrize(
+    ("task_id", "original", "canonical", "fact"),
+    (
+        (
+            "tc_3",
+            "Where in England was Dame Judi Dench born?",
+            "York",
+            "Dame Judi Dench was born in York, England.",
+        ),
+        (
+            "tc_15",
+            "In which country did he widespread use of ISDN begin in 1988?",
+            "Japan",
+            "The widespread use of ISDN began in Japan in 1988.",
+        ),
+        (
+            "tc_108",
+            (
+                "In 1999 Anna Kournikova signed a lucrative contract to model "
+                "what?"
+            ),
+            "Bras",
+            (
+                "In 1999, Anna Kournikova signed a lucrative contract to model "
+                "Bras."
+            ),
+        ),
+        (
+            "tc_2798",
+            (
+                "Which species of decapod has varieties called 'fiddler', "
+                "'spider' and 'hermit'?"
+            ),
+            "Crab",
+            (
+                "The decapod species with varieties called 'fiddler', 'spider' "
+                "and 'hermit' is Crab."
+            ),
+        ),
+        (
+            "qz_112",
+            (
+                "Which 90s song includes the line What a wicked thing to do, "
+                "to make me dream of you?"
+            ),
+            "Wicked Game",
+            (
+                "The 90s song that includes the line What a wicked thing to do, "
+                "to make me dream of you is Wicked Game."
+            ),
+        ),
+    ),
+)
+def test_strict_fact_repair_representatives_are_self_contained(
+    task_id: str,
+    original: str,
+    canonical: str,
+    fact: str,
+) -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id=f"triviaqa:{task_id}",
+        base_task_id=f"triviaqa:{task_id}",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=original,
+        canonical_answer=canonical,
+        native_split="train",
+    )
+
+    assert validate_self_contained_declarative_fact(source, fact) == fact
+
+
+@pytest.mark.parametrize(
+    ("reason", "category"),
+    (
+        (
+            "fact_text contains an external anaphoric reference",
+            "external_anaphora",
+        ),
+        (
+            "fact_text omitted immutable source entity anchors: England",
+            "missing_entity_anchor",
+        ),
+        (
+            "fact_text omitted source numeric/date constraints: 1999",
+            "missing_numeric_or_date_constraint",
+        ),
+        (
+            "fact_text omitted immutable quoted scope: example",
+            "missing_quoted_scope",
+        ),
+        (
+            "paraphrase_answer_statement does not preserve the exact canonical span",
+            "canonical_span_binding",
+        ),
+        (
+            "answer statement does not bind the selected listed option",
+            "listed_option_binding",
+        ),
+    ),
+)
+def test_answer_repair_payload_classifies_exact_admission_failure(
+    reason: str,
+    category: str,
+) -> None:
+    messages = build_answer_repair_messages(
+        _source(),
+        rejected_answer_statement="It contains the river.",
+        admission_failure_reason=reason,
+        repair_attempt=1,
+    )
+    payload = json.loads(messages[1]["content"])
+
+    assert payload["admission_failure_category"] == category
+    assert payload["admission_failure_reason"] == reason
+    assert payload["repair_attempt"] == 1
+    assert payload["admission_diagnostics"]["external_reference_tokens"] == [
+        "it"
+    ]
+
+
+def test_repair_payload_preserves_numeric_token_multiplicity() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:numeric_multiplicity",
+        base_task_id="triviaqa:numeric_multiplicity",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=(
+            "In 1999 and again in 1999, Anna Kournikova modelled what?"
+        ),
+        canonical_answer="Bras",
+        native_split="train",
+    )
+
+    paraphrase_payload = json.loads(
+        build_paraphrase_messages(source)[1]["content"]
+    )
+    repair_payload = json.loads(
+        build_answer_repair_messages(
+            source,
+            rejected_answer_statement="Anna Kournikova modelled Bras.",
+            admission_failure_reason=(
+                "fact_text omitted source numeric/date constraints: 1999, 1999"
+            ),
+        )[1]["content"]
+    )
+
+    assert paraphrase_payload["immutable_number_or_date_tokens"] == [
+        "1999",
+        "1999",
+    ]
+    assert paraphrase_payload["immutable_number_or_date_token_counts"] == {
+        "1999": 2
+    }
+    assert repair_payload["immutable_number_or_date_tokens"] == [
+        "1999",
+        "1999",
+    ]
+    assert repair_payload["admission_diagnostics"][
+        "missing_number_or_date_tokens"
+    ] == ["1999", "1999"]
+
+
+def test_prompt_v14_keeps_strictly_admitted_v12_v13_rows_supported() -> None:
+    assert PROMPT_TEMPLATE_VERSION == "triviaqa.qa_memory.qa_paraphrase.v15"
+    assert {
+        "triviaqa.qa_memory.qa_paraphrase.v12",
+        "triviaqa.qa_memory.qa_paraphrase.v13",
+        PROMPT_TEMPLATE_VERSION,
+    }.issubset(SUPPORTED_PROMPT_TEMPLATE_VERSIONS)
+
+
+@pytest.mark.parametrize(
+    ("question", "excluded", "preserved"),
+    (
+        (
+            "Born in Italy in 1895, who was known as cinema's first great lover?",
+            {"born"},
+            {"italy"},
+        ),
+        (
+            "Established by US President Lyndon B Johnson, what was it called?",
+            {"established"},
+            {"us", "lyndon", "johnson"},
+        ),
+        (
+            "Having returned from a summit in Guadeloupe, who made the statement?",
+            {"having"},
+            {"guadeloupe"},
+        ),
+        (
+            "Used during World War I, what is a Sopwith Camel?",
+            {"used"},
+            {"world", "war", "sopwith", "camel"},
+        ),
+        (
+            "There have been 12 prime ministers during the queen's reign. How many?",
+            {"there"},
+            set(),
+        ),
+        (
+            "Now at 38 St Mary Axe, London, which exchange started in 1744?",
+            {"now"},
+            {"st", "mary", "axe", "london"},
+        ),
+        (
+            "Which Album cover features 5 Beatles?",
+            {"album"},
+            {"beatles"},
+        ),
+    ),
+)
+def test_contextual_sentence_heads_are_not_entity_anchors(
+    question: str,
+    excluded: set[str],
+    preserved: set[str],
+) -> None:
+    anchors = _capitalized_identity_tokens(question)
+
+    assert anchors.isdisjoint(excluded)
+    assert preserved.issubset(anchors)
+
+
+def test_contextual_entity_filter_preserves_titles_and_geographic_constraints() -> None:
+    title_anchors = _capitalized_identity_tokens(
+        "What was the lioness in Born Free called?"
+    )
+    all_saints_anchors = _capitalized_identity_tokens(
+        "All Saints Day is celebrated in which month?"
+    )
+    geographic_anchors = _capitalized_identity_tokens(
+        "Which English, European or US institution was established first?"
+    )
+
+    assert {"born", "free"}.issubset(title_anchors)
+    assert {"all", "saints", "day"}.issubset(all_saints_anchors)
+    assert {"english", "european", "us"}.issubset(geographic_anchors)
+
+
+def test_born_title_is_not_mistaken_for_participial_sentence_head() -> None:
+    anchors = _capitalized_identity_tokens(
+        "Born Free was adapted into which film?"
+    )
+
+    assert {"born", "free"}.issubset(anchors)
+
+
+def test_sentence_initial_if_is_not_an_entity_anchor_but_quote_scope_remains() -> None:
+    question = (
+        "If you were watching a game between the Pittsburgh Penguins and the "
+        "Philadelphia Flyers, what sport would they be playing?"
+    )
+    anchors = _capitalized_identity_tokens(question)
+
+    assert "if" not in anchors
+    assert {
+        "pittsburgh",
+        "penguins",
+        "philadelphia",
+        "flyers",
+    }.issubset(anchors)
+
+    quoted_source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:quoted_if_scope",
+        base_task_id="triviaqa:quoted_if_scope",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question='Which song contains the lyric "If you leave me now"?',
+        canonical_answer="Example Song",
+        native_split="train",
+    )
+    with pytest.raises(FactProjectionAdmissionError, match="quoted scope"):
+        validate_self_contained_declarative_fact(
+            quoted_source,
+            "The song containing the lyric is Example Song.",
+        )
 
 
 def test_resume_partition_repairs_old_strict_non_fact_before_full_parse() -> None:
@@ -948,6 +1231,141 @@ def test_answer_repair_canonicalizes_and_verifies_model_statement_alias(
     assert repaired == (
         "The number of vice presidents Franklin D Roosevelt had was Three."
     )
+
+
+def test_answer_repair_retries_only_fact_with_exact_gate_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:tc_15",
+        base_task_id="triviaqa:tc_15",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=(
+            "In which country did he widespread use of ISDN begin in 1988?"
+        ),
+        canonical_answer="Japan",
+        native_split="train",
+    )
+    paraphrase_question = (
+        "In what nation did the widespread use of ISDN commence in 1988?"
+    )
+    client = object.__new__(LocalQwen35Paraphraser)
+    responses = iter(
+        (
+            json.dumps(
+                {
+                    "paraphrase_answer_statement": (
+                        "Japan is the country where he widespread use of ISDN "
+                        "began in 1988."
+                    )
+                }
+            ),
+            json.dumps(
+                {
+                    "paraphrase_answer_statement": (
+                        "The widespread use of ISDN began in Japan in 1988."
+                    )
+                }
+            ),
+        )
+    )
+    repair_payloads: list[dict[str, object]] = []
+
+    def complete(**kwargs: object) -> str:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        repair_payloads.append(json.loads(messages[1]["content"]))
+        return next(responses)
+
+    monkeypatch.setattr(client, "_complete", complete)
+    monkeypatch.setattr(
+        client,
+        "_answer_statement_verified",
+        lambda *_, **__: True,
+    )
+
+    repaired = client._repair_answer_statement(
+        source,
+        question=paraphrase_question,
+        rejected_statement="It began in Japan in 1988.",
+        seed=71,
+        admission_failure_reason=(
+            "fact_text contains an external anaphoric reference; replace it "
+            "with an explicit noun phrase"
+        ),
+    )
+
+    assert repaired == "The widespread use of ISDN began in Japan in 1988."
+    assert len(repair_payloads) == 2
+    assert repair_payloads[0]["repair_attempt"] == 0
+    assert repair_payloads[1]["repair_attempt"] == 1
+    assert repair_payloads[1]["admission_failure_category"] == (
+        "external_anaphora"
+    )
+    assert "external anaphoric" in str(
+        repair_payloads[1]["admission_failure_reason"]
+    )
+    assert repair_payloads[1]["rejected_answer_statement"].startswith(
+        "Japan is the country where he"
+    )
+    assert paraphrase_question not in {
+        str(payload["rejected_answer_statement"])
+        for payload in repair_payloads
+    }
+
+
+def test_fact_repair_exhaustion_does_not_regenerate_valid_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:tc_15",
+        base_task_id="triviaqa:tc_15",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=(
+            "In which country did he widespread use of ISDN begin in 1988?"
+        ),
+        canonical_answer="Japan",
+        native_split="train",
+    )
+    question = "In what nation did the widespread use of ISDN commence in 1988?"
+    client = object.__new__(LocalQwen35Paraphraser)
+    client.max_retries = 2
+    initial_generation_calls = 0
+    fact_repair_calls = 0
+
+    def complete(**kwargs: object) -> str:
+        nonlocal initial_generation_calls, fact_repair_calls
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        if messages[0]["content"] == ANSWER_REPAIR_SYSTEM_PROMPT:
+            fact_repair_calls += 1
+            return json.dumps(
+                {
+                    "paraphrase_answer_statement": (
+                        "Japan is the country where he widespread use of ISDN "
+                        "began in 1988."
+                    )
+                }
+            )
+        initial_generation_calls += 1
+        return json.dumps(
+            {
+                "paraphrase_question": question,
+                "paraphrase_answer_statement": "It began in Japan in 1988.",
+            }
+        )
+
+    monkeypatch.setattr(client, "_complete", complete)
+
+    with pytest.raises(RuntimeError, match="bounded fact-only repair exhausted"):
+        client.generate(source, seed=79)
+
+    assert initial_generation_calls == 1
+    assert fact_repair_calls == 3
 
 
 @pytest.mark.parametrize(
@@ -1574,6 +1992,12 @@ def test_generate_repairs_schema_failure_with_existing_repair_paths(
             ),
             "extra": True,
         },
+        {
+            "paraphrase_question": "Name the river holding the Kariba Dam.",
+            "/paraphrase_answer_statement": (
+                "The Kariba Dam was built on the Zambezi river."
+            ),
+        },
     ),
 )
 def test_response_parser_rejects_unobserved_key_variants(fields: object) -> None:
@@ -1736,10 +2160,15 @@ def test_two_token_leading_slot_question_does_not_index_past_tokens() -> None:
     assert _leading_answer_slot_anchor(source) == "Queen"
 
 
-def test_v10_answer_repair_normalizes_only_observed_leading_dot_key() -> None:
+def test_v12_answer_repair_normalizes_bounded_single_field_key_typos() -> None:
     assert parse_answer_repair_response(
         json.dumps(
             {".paraphrase_answer_statement": "Steinem co-founded Ms magazine."}
+        )
+    ) == "Steinem co-founded Ms magazine."
+    assert parse_answer_repair_response(
+        json.dumps(
+            {"/paraphrase_answer_statement": "Steinem co-founded Ms magazine."}
         )
     ) == "Steinem co-founded Ms magazine."
     with pytest.raises(ValueError, match="fields are incompatible"):
@@ -1752,6 +2181,41 @@ def test_v10_answer_repair_normalizes_only_observed_leading_dot_key() -> None:
                 }
             )
         )
+    with pytest.raises(ValueError, match="collision_fields"):
+        parse_answer_repair_response(
+            json.dumps(
+                {
+                    "/paraphrase_answer_statement": (
+                        "Steinem co-founded Ms magazine."
+                    ),
+                    "paraphrase_answer_statement": (
+                        "Steinem co-founded Ms magazine."
+                    ),
+                }
+            )
+        )
+    with pytest.raises(ValueError, match="unexpected_fields"):
+        parse_answer_repair_response(
+            json.dumps(
+                {
+                    "/paraphrase_answer_statement": (
+                        "Steinem co-founded Ms magazine."
+                    ),
+                    "extra": True,
+                }
+            )
+        )
+
+
+def test_v12_answer_repair_prompt_de_pronominalizes_bound_references() -> None:
+    assert "Del Shannon formed Del Shannon's own Berlee record label." in (
+        ANSWER_REPAIR_SYSTEM_PROMPT
+    )
+    assert 'using "Rene Higuita" for "he" and "the ball" for "it"' in (
+        ANSWER_REPAIR_SYSTEM_PROMPT
+    )
+    assert 'using "the court" for "it"' in ANSWER_REPAIR_SYSTEM_PROMPT
+    assert "Question/Answer wrapper" in ANSWER_REPAIR_SYSTEM_PROMPT
     with pytest.raises(ValueError, match="fields are incompatible"):
         parse_answer_repair_response(
             json.dumps(
