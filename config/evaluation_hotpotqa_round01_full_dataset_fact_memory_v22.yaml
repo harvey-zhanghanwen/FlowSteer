@@ -1,0 +1,225 @@
+# HotpotQA Round-01 highest-profile architecture with the explicitly
+# in-database full native train+validation declarative-fact memory. Only worker
+# Agents can search/read it; the Director remains on the control plane.
+schema_version: "flowsteer.agentgraph.config.v1"
+experiment:
+  name: "hotpotqa_round01_full_dataset_fact_memory_v22"
+  phase: "hotpotqa_evaluation"
+  training_enabled: false
+  seed: 20260815
+  condition_id: "hotpotqa_round01_full_dataset_fact_memory_v22"
+  sampling_schedule_purpose: "hotpotqa_round01_full_dataset_fact_memory_v22_inference_only"
+  prompt_version: "agentgraph.director.minimal.v2"
+  tool_version: "skillflow.document-passage+flowsteer.embedding-worker-relations.fact-v22"
+  output_dir: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v22"
+
+data:
+  catalog_path: "config/datasets_agentgraph.yaml"
+  train_path: "artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/train.jsonl"
+  validation_path: "artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/validation.jsonl"
+  test_path: "artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/test.jsonl"
+  # This remains true for the TaskRecord split. The separate retrieval corpus
+  # deliberately contains the 128 evaluation QA and is labelled below.
+  enforce_split_isolation: true
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+
+hotpotqa_evaluation:
+  dataset_key: "hotpotqa"
+  split: "validation"
+  selection: "sequential"
+  sample_count: 128
+  rollouts_per_task: 1
+  concurrency: 4
+  direct_model_id: "qwen3.5-9b-local"
+  direct_protocol: "round01_saved_outputs_official_rescore_v1"
+  direct_source_path: "artifacts/hotpotqa_round_01/direct_predictions.jsonl"
+  agentgraph_baseline_source_path: "artifacts/hotpotqa_round_01/agentgraph_trajectories.jsonl"
+  agentgraph_protocol: "round01_canvas_dynamic_full_dataset_fact_memory_worker_v22"
+  protocol_equivalent_to_direct: false
+
+qa_embedding_retrieval:
+  enabled: true
+  condition_id: "hotpotqa_round01_full_dataset_fact_memory_v22"
+  mode: "model_driven_search_read"
+  corpus_kind: "full_dataset_fact_memory"
+  index_scope: "global_native_train_plus_native_validation"
+  evaluation_regime: "in_database_transductive"
+  evaluation_scope: "in_database_transductive"
+  contains_evaluation_source_facts: true
+  contains_raw_questions: false
+  contains_raw_answers: false
+  document_format: "declarative_fact_only"
+  indexed_text_field: "fact_text"
+  official_heldout_eligible: false
+  fallback_policy: "parametric_only_when_retrieval_unsupported"
+  tool_id: "hotpotqa.fact_memory"
+  dataset_scope: ["hotpotqa"]
+  task_scope: "public_task"
+  retrieval_query_scope: "question_only"
+  dataset_catalog: "config/datasets_agentgraph.yaml"
+  native_train_count: 90447
+  native_validation_count: 7405
+  source_train_count: 90447
+  source_validation_count: 7405
+  frozen_validation_tasks: "artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/validation.jsonl"
+  validation_sample_count: 128
+  source_record_count: 97852
+  evaluation_overlap_count: 128
+  development_tasks: "artifacts/hotpotqa_qa_memory_source_freeze_v2/aligned/train.jsonl"
+  development_sample_count: 64
+  paraphrase_materialization_path: "data/hotpotqa_full_dataset_fact_memory_v1/fact_provenance_sidecar.jsonl"
+  paraphrase_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/materialization_manifest.json"
+  index_dir: "data/hotpotqa_full_dataset_fact_memory_v1/index_topk2"
+  embedding_model: "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5"
+  embedding_model_id: "BAAI/bge-base-en-v1.5"
+  embedding_device: "cpu"
+  normalize_embeddings: true
+  similarity: "cosine"
+  # Frozen only after architecture-development source IDs compare k={1,2,3,5}.
+  search_top_k: 2
+  profile_candidate_top_k: [1, 2, 3, 5]
+  max_turns_per_agent_call: 7
+  max_tool_calls_per_agent_call: 6
+  max_action_tokens: 4096
+  tool_timeout_seconds: 30.0
+  allow_query_rewriting: true
+  semantic_query_rewrite_required: true
+  raw_question_embedding_query_forbidden: true
+  web_search_enabled: false
+
+storage:
+  schema_version: "flowsteer.hotpotqa.full_dataset_fact_memory_retrieval.v1"
+  root: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v22/evidence"
+  selected_tasks_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v22/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v22/direct_rescored_predictions.jsonl"
+  trajectories_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v22/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v22/collection_failures.jsonl"
+  paired_results_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v22/paired_results.jsonl"
+  wrong_demos_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v22/wrong_demos.jsonl"
+  error_demos_path: "reports/hotpotqa_round01_full_dataset_fact_memory_v22/error_demos.jsonl"
+  retrieval_profile_selection_path: "data/hotpotqa_full_dataset_fact_memory_v1/top_k_selection.json"
+  retrieval_index_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/index_topk2/manifest.json"
+  retrieval_index_smoke_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v22/fact_memory_index_smoke_receipt.json"
+  paraphrase_manifest_path: "data/hotpotqa_full_dataset_fact_memory_v1/materialization_manifest.json"
+  manifest_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v22/run_manifest.json"
+  preflight_receipt_path: "artifacts/hotpotqa_round01_full_dataset_fact_memory_v22/preflight_receipt.json"
+  report_json_path: "reports/hotpotqa_round01_full_dataset_fact_memory_v22/report.json"
+  report_markdown_path: "reports/hotpotqa_round01_full_dataset_fact_memory_v22/report.md"
+
+director:
+  base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "qwen35-9b-smoke-step-0001"
+  behavior_adapter_name: "theta_smoke_step_000001"
+  behavior_adapter_checkpoint: "/ssd1/iclr/1/FlowSteer/artifacts/agentgraph_smoke/checkpoint_final/supervisor_lora/step_000001_20260815T071303632043Z/theta"
+  updated_policy_version: "unused-evaluation-only"
+  expected_server_weight_version: "default"
+  live_adapter_name: "theta_smoke_step_000001"
+  prompt_profile: "minimal"
+  sampling_action_profile: "model_admissible_canvas_actions"
+  sampling_action_schema_version: "agentgraph.model-admissible-action-mask.v3"
+  dtype: "bfloat16"
+  max_context_tokens: 8192
+  max_action_tokens: 256
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 20
+  execute_on_edit: true
+  history_window: 4
+  lora:
+    enabled: true
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+agent_graph:
+  max_agents: 10
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_agent, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "seeded_weighted_random"
+  max_bidirectional_block_size: 2
+  recovery_policy: "preserve_diagnose_repair_augment"
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  required_evidence_tool_id: "hotpotqa.fact_memory"
+  require_evidence_relation: true
+  director_feedback_mode: "control_plane"
+  model_catalog_path: "config/model_catalog_hotpotqa_qa_memory_v10.yaml"
+
+evaluation:
+  healthbench_judge_model: "gpt-4o-mini"
+  max_environment_steps: 20
+  swebench_harness_enabled: false
+  invalid_evaluator_action: "persist_and_exclude"
+
+grpo:
+  enabled: false
+  objective: "action_masked_one_pass"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 1
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 0
+  max_optimizer_updates: 0
+  learning_rate: 0.0
+  gradient_checkpointing: false
+  max_grad_norm: 0.0
+
+policy_sync:
+  enabled: false
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
+  adapter_name_prefix: "theta_smoke_step_"
+  request_timeout_seconds: 120
+  max_retries: 3
+  retry_backoff_seconds: 2
+
+exploration:
+  enabled: false
+  strategy: "none"
+  forced_probe_rollouts: 0
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+
+gpu:
+  learner_physical: 3
+  rollout_physical: 0
+  gradient_replica_physical: 5
+  learner_device: "cuda:3"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:5"
+  supervisor_gpu_id: 0
+  supervisor_api_base: "http://127.0.0.1:8015/v1"
+  training_enabled: false
+  oom_policy:
+    status: "inactive_evaluation_only"
+    micro_batch_size: 1
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [1]
+    retry_on_cuda_oom: false
+    split_items_across_learner_and_replica: false
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: false
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: false
+  require_version_compatible_skills: true
