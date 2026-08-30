@@ -892,6 +892,100 @@ _WEBSHOP_OPTION_LABELS = frozenset(
     }
 )
 
+# DIRECT_REUSE: SkillFlow's public WebShop state extracts this bounded phrase
+# inventory from the task instruction.  These phrases are evidence queries,
+# never hidden goal attributes or evaluator labels.
+_WEBSHOP_VISIBLE_REQUIREMENT_PHRASES = (
+    "queen size",
+    "long handle",
+    "dry skin",
+    "dual band",
+    "quad core",
+    "power amplifier",
+    "hands free",
+    "usb port",
+    "steel frame",
+    "storage space",
+    "living room",
+    "slim fit",
+    "loose fit",
+    "straight leg",
+    "elastic waist",
+    "elastic closure",
+    "faux fur",
+    "long sleeve",
+    "short sleeve",
+    "regular fit",
+    "classic fit",
+    "button closure",
+    "machine wash",
+    "wash cold",
+    "dry clean",
+    "tumble dry",
+    "polyester heathers",
+    "heathers cotton",
+    "cotton heather",
+    "needle sleeve",
+    "unique design",
+    "relaxed fit",
+    "polyester spandex",
+    "tummy control",
+    "high waist",
+    "rubber outsole",
+    "rubber sole",
+    "non slip",
+    "slip resistant",
+    "anti slip",
+    "tempered glass",
+    "glass screen",
+    "case cover",
+)
+
+# Values are comparison dimensions, not physical-unit conversions.  Only
+# spelling aliases known to denote the same public option dimension are
+# canonicalized.  For example, 16 oz is not inferred to equal 1 lb.
+_WEBSHOP_OPTION_UNIT_DIMENSIONS = MappingProxyType(
+    {
+        "oz": "ounce",
+        "ounce": "ounce",
+        "ounces": "ounce",
+        "ml": "milliliter",
+        "milliliter": "milliliter",
+        "milliliters": "milliliter",
+        "inch": "inch",
+        "inches": "inch",
+        "in": "inch",
+        "cm": "centimeter",
+        "centimeter": "centimeter",
+        "centimeters": "centimeter",
+        "count": "count",
+        "ct": "count",
+        "pc": "count",
+        "pcs": "count",
+        "piece": "count",
+        "pieces": "count",
+        "pack": "pack",
+        "packs": "pack",
+    }
+)
+
+_WEBSHOP_CANONICAL_APPAREL_SIZES = frozenset(
+    {
+        "xxs",
+        "xs",
+        "small",
+        "medium",
+        "large",
+        "xl",
+        "xxl",
+        "xxxl",
+        "x small",
+        "x large",
+        "2xl",
+        "3xl",
+    }
+)
+
 
 def _webshop_norm(text: object) -> str:
     """Reuse SkillFlow's normalization for visible WebShop option values."""
@@ -901,6 +995,151 @@ def _webshop_norm(text: object) -> str:
         " ",
         re.sub(r"[^a-z0-9.%]+", " ", str(text).lower()),
     ).strip()
+
+
+def _webshop_number_words(text: object) -> str:
+    """Normalize the bounded number words already used by option matching."""
+
+    normalized = _webshop_norm(text)
+    for word, number in {
+        "one": "1",
+        "two": "2",
+        "three": "3",
+        "four": "4",
+        "five": "5",
+        "six": "6",
+        "seven": "7",
+        "eight": "8",
+        "nine": "9",
+        "ten": "10",
+    }.items():
+        normalized = re.sub(
+            rf"(?:^| ){word}(?= |$)",
+            lambda match, value=number: (
+                (" " if match.group(0).startswith(" ") else "") + value
+            ),
+            normalized,
+        )
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _webshop_canonical_number(value: str) -> str:
+    """Return a comparison-only decimal spelling without changing actions."""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    if number.is_integer():
+        return str(int(number))
+    return (f"{number:.8f}").rstrip("0").rstrip(".")
+
+
+def _webshop_measurement_signatures(
+    text: object,
+) -> tuple[tuple[str, str, str], ...]:
+    """Extract public ``(dimension, value, surface)`` option signatures.
+
+    The original WebShop action string is never rewritten.  This comparison
+    projection only equates direct unit aliases such as ``oz``/``ounce`` and
+    the upstream pack/count word-order variants.
+    """
+
+    normalized = _webshop_number_words(text)
+    signatures: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    unit_pattern = "|".join(
+        sorted(
+            (re.escape(unit) for unit in _WEBSHOP_OPTION_UNIT_DIMENSIONS),
+            key=len,
+            reverse=True,
+        )
+    )
+    for match in re.finditer(
+        rf"\b([0-9]+(?:\.[0-9]+)?)\s*({unit_pattern})\b",
+        normalized,
+    ):
+        value = _webshop_canonical_number(match.group(1))
+        dimension = _WEBSHOP_OPTION_UNIT_DIMENSIONS[match.group(2)]
+        key = (dimension, value)
+        if key not in seen:
+            seen.add(key)
+            signatures.append((dimension, value, match.group(0)))
+    for match in re.finditer(
+        r"\b(?:pack|count|set) of ([0-9]+(?:\.[0-9]+)?)\b",
+        normalized,
+    ):
+        value = _webshop_canonical_number(match.group(1))
+        dimension = "pack" if match.group(0).startswith("pack") else "count"
+        key = (dimension, value)
+        if key not in seen:
+            seen.add(key)
+            signatures.append((dimension, value, match.group(0)))
+    return tuple(signatures)
+
+
+def _webshop_visible_requirement_phrases(task_instruction: str) -> tuple[str, ...]:
+    """Thin-adapt SkillFlow's answer-free public requirement phrase list."""
+
+    task = _webshop_norm(task_instruction)
+    return tuple(
+        phrase
+        for phrase in _WEBSHOP_VISIBLE_REQUIREMENT_PHRASES
+        if re.search(rf"(?:^| ){re.escape(phrase)}(?: |$)", task) is not None
+    )
+
+
+def _webshop_phrase_evidence_status(
+    phrase: str,
+    *,
+    title: str,
+    tab_evidence: Mapping[str, object],
+) -> dict[str, object]:
+    """Classify exact phrase support in current-candidate public evidence."""
+
+    phrase_normalized = _webshop_norm(phrase)
+    supported_sources: list[str] = []
+    contradicted_sources: list[str] = []
+    review_sources: list[str] = []
+    sources: list[tuple[str, str]] = [("title", title)]
+    sources.extend(
+        (str(tab), str(value))
+        for tab, value in tab_evidence.items()
+        if isinstance(value, str)
+    )
+    phrase_pattern = rf"(?:^| ){re.escape(phrase_normalized)}(?: |$)"
+    negative_pattern = (
+        rf"(?:^| )(?:not|no|without|isnt|isn t)\s+"
+        rf"(?:\w+\s+){{0,2}}{re.escape(phrase_normalized)}(?: |$)"
+    )
+    for source, text in sources:
+        normalized = _webshop_norm(text)
+        if not normalized or re.search(phrase_pattern, normalized) is None:
+            continue
+        if re.search(negative_pattern, normalized) is not None:
+            contradicted_sources.append(source)
+        elif source == "reviews":
+            review_sources.append(source)
+        else:
+            supported_sources.append(source)
+    if contradicted_sources:
+        status = "contradicted"
+        evidence_sources = contradicted_sources
+    elif supported_sources:
+        status = "supported"
+        evidence_sources = supported_sources
+    elif review_sources:
+        status = "review_only"
+        evidence_sources = review_sources
+    else:
+        status = "unverified"
+        evidence_sources = []
+    return {
+        "phrase": phrase,
+        "status": status,
+        "sources": evidence_sources,
+        "evidence_scope": "current_candidate_public_observations",
+    }
 
 
 def _webshop_price_limit(task_instruction: str) -> Optional[float]:
@@ -1053,6 +1292,7 @@ def _webshop_current_product_evidence(
     evidence_observation = str(observation or "") if purchase_action_visible else ""
     current_asin = ""
     inspected_tabs: list[str] = []
+    tab_evidence: dict[str, str] = {}
 
     if in_product_scope:
         for receipt in reversed(receipts):
@@ -1081,8 +1321,15 @@ def _webshop_current_product_evidence(
                 action,
                 flags=re.IGNORECASE,
             )
-            if tab is not None and tab.group(1).casefold() not in inspected_tabs:
-                inspected_tabs.append(tab.group(1).casefold())
+            if tab is not None:
+                tab_name = tab.group(1).casefold()
+                if tab_name not in inspected_tabs:
+                    inspected_tabs.append(tab_name)
+                next_observation = receipt.get("next_observation")
+                if isinstance(next_observation, str) and next_observation.strip():
+                    # The exact public text remains in the lossless receipt.
+                    # Bound only this model-visible state projection.
+                    tab_evidence.setdefault(tab_name, next_observation[:4000])
             if not evidence_observation:
                 for field in ("observation", "next_observation"):
                     candidate = receipt.get(field)
@@ -1105,6 +1352,10 @@ def _webshop_current_product_evidence(
         "visible_option_groups": groups,
         "selected_options": selected,
         "inspected_tabs": list(reversed(inspected_tabs)),
+        "tab_evidence": {
+            tab: tab_evidence[tab] for tab in reversed(inspected_tabs)
+            if tab in tab_evidence
+        },
         "evidence_source": "current_public_observation_or_episode_receipts",
     }
 
@@ -1142,6 +1393,7 @@ def _webshop_candidate_history(
                     "visible_option_groups": {},
                     "selected_options": {},
                     "inspected_tabs": [],
+                    "tab_evidence": {},
                     "visit_count": 0,
                 },
             )
@@ -1168,6 +1420,14 @@ def _webshop_candidate_history(
             tab = tab_match.group(1).casefold()
             if isinstance(tabs, list) and tab not in tabs:
                 tabs.append(tab)
+            evidence = records[current_asin].get("tab_evidence")
+            next_observation = receipt.get("next_observation")
+            if (
+                isinstance(evidence, dict)
+                and isinstance(next_observation, str)
+                and next_observation.strip()
+            ):
+                evidence[tab] = next_observation[:4000]
             continue
         option_match = re.fullmatch(r"click\[(.*)\]", action, flags=re.IGNORECASE)
         if option_match is not None and current_asin in records:
@@ -1216,6 +1476,7 @@ def _webshop_model_visible_actions(
         receipts=receipts,
     )
     required_targets = purchase.get("required_option_targets", {})
+    required_constraints = purchase.get("required_option_constraints", {})
     protected_groups: set[str] = set()
     if isinstance(required_targets, Mapping):
         for group, target_values in required_targets.items():
@@ -1232,6 +1493,24 @@ def _webshop_model_visible_actions(
     for group, values in groups.items():
         for value in values:
             option_value_groups.setdefault(_webshop_norm(value), set()).add(group)
+    opened_asins = {
+        str(candidate.get("asin")).casefold()
+        for candidate in _webshop_candidate_history(receipts)
+        if isinstance(candidate, Mapping) and candidate.get("asin")
+    }
+    result_asins = {
+        match.group(1).casefold()
+        for action in native_actions
+        if (
+            match := re.fullmatch(
+                r"click\[(b[0-9a-z]{9})\]", action, flags=re.IGNORECASE
+            )
+        )
+    }
+    unseen_result_asins = result_asins - opened_asins
+    has_further_results = any(
+        action.casefold() == "click[next >]" for action in native_actions
+    )
     visible: list[str] = []
     for action in native_actions:
         match = re.fullmatch(r"click\[(.*)\]", action, flags=re.IGNORECASE)
@@ -1249,6 +1528,32 @@ def _webshop_model_visible_actions(
                     )
                 ):
                     continue
+            if len(candidate_groups) == 1 and isinstance(
+                required_constraints, Mapping
+            ):
+                candidate_group = next(iter(candidate_groups))
+                constraint = required_constraints.get(candidate_group)
+                contradicted = (
+                    constraint.get("contradicted_values", ())
+                    if isinstance(constraint, Mapping)
+                    else ()
+                )
+                if isinstance(contradicted, (list, tuple)) and any(
+                    _webshop_option_values_equivalent(
+                        match.group(1), conflicting_value
+                    )
+                    for conflicting_value in contradicted
+                ):
+                    continue
+        asin_match = re.fullmatch(
+            r"click\[(b[0-9a-z]{9})\]", action, flags=re.IGNORECASE
+        )
+        if (
+            asin_match is not None
+            and asin_match.group(1).casefold() in opened_asins
+            and (unseen_result_asins or has_further_results)
+        ):
+            continue
         if (
             match is not None
             and match.group(1).strip().casefold() == "buy now"
@@ -1282,26 +1587,7 @@ def _webshop_option_targets(
         " ",
         task_normalized,
     )
-    for word, number in {
-        "one": "1",
-        "two": "2",
-        "three": "3",
-        "four": "4",
-        "five": "5",
-        "six": "6",
-        "seven": "7",
-        "eight": "8",
-        "nine": "9",
-        "ten": "10",
-    }.items():
-        task_binding_text = re.sub(
-            rf"(?:^| ){word}(?= |$)",
-            lambda match, value=number: (
-                (" " if match.group(0).startswith(" ") else "") + value
-            ),
-            task_binding_text,
-        )
-    task_binding_text = re.sub(r"\s+", " ", task_binding_text).strip()
+    task_binding_text = _webshop_number_words(task_binding_text)
     targets: dict[str, list[str]] = {}
     for group, values in groups.items():
         group_normalized = _webshop_norm(group)
@@ -1469,6 +1755,41 @@ def _webshop_option_targets(
                         )
                         if task_quantity == value_quantity:
                             binding_confidence = max(binding_confidence, 1)
+            if (
+                group_normalized == "size"
+                and normalized in _WEBSHOP_CANONICAL_APPAREL_SIZES
+                and re.search(
+                    rf"(?:^| ){re.escape(normalized)}(?: |$)",
+                    task_binding_text,
+                )
+                is not None
+            ):
+                # A bare apparel-size adjective is ambiguous in isolation
+                # (for example, ``small end table``).  Bind it only when it is
+                # adjacent in the instruction to a distinct visible option
+                # value from another group.  This retains the public joint
+                # option phrase without imposing a product-category lexicon.
+                for other_group, other_values in groups.items():
+                    if _webshop_norm(other_group) == group_normalized:
+                        continue
+                    if any(
+                        re.search(
+                            rf"(?:^| ){re.escape(normalized)} "
+                            rf"{re.escape(_webshop_norm(other_value))}(?: |$)",
+                            task_binding_text,
+                        )
+                        is not None
+                        or re.search(
+                            rf"(?:^| ){re.escape(_webshop_norm(other_value))} "
+                            rf"{re.escape(normalized)}(?: |$)",
+                            task_binding_text,
+                        )
+                        is not None
+                        for other_value in other_values
+                        if _webshop_norm(other_value)
+                    ):
+                        binding_confidence = max(binding_confidence, 2)
+                        break
             if binding_confidence:
                 matches.append((binding_confidence, len(compact), str(value)))
         if not matches:
@@ -1480,6 +1801,94 @@ def _webshop_option_targets(
             if confidence == strongest
         ]
     return targets
+
+
+def _webshop_required_option_constraints(
+    task_instruction: str,
+    groups: Mapping[str, Sequence[str]],
+) -> dict[str, dict[str, object]]:
+    """Align public instruction requirements with visible option dimensions.
+
+    SkillFlow's option suggestion returns a visible match when one exists.  A
+    stepwise action mask must additionally preserve an explicit requirement
+    whose requested value is absent from the page; otherwise a conflicting
+    same-dimension option becomes indistinguishable from "no requirement".
+    """
+
+    targets = _webshop_option_targets(task_instruction, groups)
+    constraints: dict[str, dict[str, object]] = {}
+    for group, values in targets.items():
+        acceptable = list(values)
+        contradicted = [
+            str(value)
+            for value in groups.get(group, ())
+            if not any(
+                _webshop_option_values_equivalent(value, target)
+                for target in acceptable
+            )
+        ]
+        constraints[str(group)] = {
+            "requirement_surfaces": list(acceptable),
+            "comparison_dimensions": [],
+            "acceptable_values": acceptable,
+            "contradicted_values": contradicted,
+            "status": "visible_match",
+            "source": "public_instruction_and_visible_options",
+        }
+
+    task_measurements = _webshop_measurement_signatures(task_instruction)
+    requirements_by_dimension: dict[str, list[tuple[str, str]]] = {}
+    for dimension, value, surface in task_measurements:
+        requirements_by_dimension.setdefault(dimension, []).append((value, surface))
+
+    for group, values in groups.items():
+        visible_signatures: dict[str, list[tuple[str, str, str]]] = {}
+        for value in values:
+            for dimension, number, surface in _webshop_measurement_signatures(value):
+                visible_signatures.setdefault(dimension, []).append(
+                    (number, str(value), surface)
+                )
+        shared_dimensions = [
+            dimension
+            for dimension in requirements_by_dimension
+            if dimension in visible_signatures
+        ]
+        if not shared_dimensions:
+            continue
+
+        acceptable: list[str] = []
+        contradicted: list[str] = []
+        requirement_surfaces: list[str] = []
+        for dimension in shared_dimensions:
+            required = requirements_by_dimension[dimension]
+            required_numbers = {number for number, _ in required}
+            requirement_surfaces.extend(surface for _, surface in required)
+            for number, visible_value, _ in visible_signatures[dimension]:
+                destination = (
+                    acceptable if number in required_numbers else contradicted
+                )
+                if visible_value not in destination:
+                    destination.append(visible_value)
+
+        existing = constraints.get(str(group))
+        if existing is not None:
+            for value in existing.get("acceptable_values", ()):
+                if str(value) not in acceptable:
+                    acceptable.append(str(value))
+            for value in existing.get("contradicted_values", ()):
+                if str(value) not in acceptable and str(value) not in contradicted:
+                    contradicted.append(str(value))
+        constraints[str(group)] = {
+            "requirement_surfaces": list(dict.fromkeys(requirement_surfaces)),
+            "comparison_dimensions": shared_dimensions,
+            "acceptable_values": acceptable,
+            "contradicted_values": [
+                value for value in contradicted if value not in acceptable
+            ],
+            "status": "visible_match" if acceptable else "no_visible_match",
+            "source": "public_instruction_and_visible_options",
+        }
+    return constraints
 
 
 def _webshop_option_values_equivalent(left: object, right: object) -> bool:
@@ -1509,7 +1918,19 @@ def _webshop_purchase_preconditions(
     selected = product["selected_options"]
     if not isinstance(selected, Mapping):
         selected = {}
-    targets = _webshop_option_targets(task_instruction, groups)
+    option_constraints = _webshop_required_option_constraints(
+        task_instruction, groups
+    )
+    targets = {
+        group: list(value.get("acceptable_values", ()))
+        for group, value in option_constraints.items()
+        if isinstance(value, Mapping) and value.get("acceptable_values")
+    }
+    unmatched = [
+        group
+        for group, value in option_constraints.items()
+        if isinstance(value, Mapping) and value.get("status") == "no_visible_match"
+    ]
     missing = [group for group in targets if group not in selected]
     mismatched = [
         group
@@ -1534,9 +1955,21 @@ def _webshop_purchase_preconditions(
         and product_price is not None
         and product_price > price_limit
     )
+    tab_evidence = product.get("tab_evidence", {})
+    if not isinstance(tab_evidence, Mapping):
+        tab_evidence = {}
+    attribute_evidence = {
+        phrase: _webshop_phrase_evidence_status(
+            phrase,
+            title=str(product.get("title") or ""),
+            tab_evidence=tab_evidence,
+        )
+        for phrase in _webshop_visible_requirement_phrases(task_instruction)
+    }
     minimum_actions_to_purchase: Optional[int] = None
     if (
         product_context_available
+        and not unmatched
         and not price_evidence_missing
         and not price_exceeds_limit
         and product_price is not None
@@ -1550,6 +1983,7 @@ def _webshop_purchase_preconditions(
         "admissible": (
             not missing
             and not mismatched
+            and not unmatched
             and not price_evidence_missing
             and not price_exceeds_limit
         ),
@@ -1559,10 +1993,14 @@ def _webshop_purchase_preconditions(
         "candidate_asin": product["asin"],
         "candidate_title": product["title"],
         "inspected_tabs": product["inspected_tabs"],
+        "attribute_evidence": attribute_evidence,
+        "attribute_evidence_policy": "public_advisory_not_purchase_hard_gate",
+        "required_option_constraints": option_constraints,
         "required_option_targets": targets,
         "selected_options": dict(selected),
         "missing_option_groups": missing,
         "mismatched_option_groups": mismatched,
+        "unmatched_required_option_groups": unmatched,
         "price_limit": price_limit,
         "product_price": product_price,
         "price_evidence_missing": price_evidence_missing,
@@ -1624,6 +2062,85 @@ def _webshop_search_queries(
     return tuple(queries)
 
 
+def _webshop_repeated_search_requires_reformulation(
+    query: str,
+    receipts: Sequence[Mapping[str, object]],
+) -> bool:
+    """Distinguish blind repetition from result-list restoration.
+
+    SkillFlow records reusing a query after ``Back to Search`` as public
+    history rather than an intrinsic error.  In the original WebShop UI, the
+    same query is the only native way to restore its result list.  Permit that
+    recovery only after a candidate ASIN from the prior result set was opened;
+    otherwise require a changed normalized query.
+    """
+
+    latest_match_index: Optional[int] = None
+    for index, receipt in enumerate(receipts):
+        if receipt.get("state_advanced") is not True:
+            continue
+        action = receipt.get("action")
+        if not isinstance(action, str):
+            continue
+        match = re.fullmatch(r"search\[(.*)\]", action, flags=re.IGNORECASE)
+        if match is not None and _webshop_norm(match.group(1)) == query:
+            latest_match_index = index
+    if latest_match_index is None:
+        return False
+    return not any(
+        receipt.get("state_advanced") is True
+        and isinstance(receipt.get("action"), str)
+        and re.fullmatch(
+            r"click\[b[0-9a-z]{9}\]",
+            str(receipt["action"]),
+            flags=re.IGNORECASE,
+        )
+        is not None
+        for receipt in receipts[latest_match_index + 1 :]
+    )
+
+
+def _webshop_conflicting_option_action(
+    *,
+    action: str,
+    task_instruction: str,
+    observation: object,
+    receipts: Sequence[Mapping[str, object]],
+) -> bool:
+    """Check one public option click against an explicit task requirement."""
+
+    click = re.fullmatch(r"click\[(.*)\]", action, flags=re.IGNORECASE)
+    if click is None or click.group(1).casefold() in _WEBSHOP_NAV_CLICKABLES:
+        return False
+    product = _webshop_current_product_evidence(observation, receipts)
+    groups = product.get("visible_option_groups", {})
+    if not isinstance(groups, Mapping):
+        return False
+    target = click.group(1)
+    candidate_groups = [
+        str(group)
+        for group, values in groups.items()
+        if isinstance(values, (list, tuple))
+        and any(
+            _webshop_option_values_equivalent(target, value) for value in values
+        )
+    ]
+    if len(candidate_groups) != 1:
+        return False
+    constraint = _webshop_required_option_constraints(
+        task_instruction, groups
+    ).get(candidate_groups[0])
+    contradicted = (
+        constraint.get("contradicted_values", ())
+        if isinstance(constraint, Mapping)
+        else ()
+    )
+    return isinstance(contradicted, (list, tuple)) and any(
+        _webshop_option_values_equivalent(target, value)
+        for value in contradicted
+    )
+
+
 def _webshop_repeats_unchanged_click(
     *,
     action: str,
@@ -1657,8 +2174,15 @@ def _webshop_action_precondition_failure(
         query = _webshop_norm(search.group(1))
         if query in _webshop_zero_result_queries(receipts):
             return "known_zero_result_query"
-        if query in _webshop_search_queries(receipts):
+        if _webshop_repeated_search_requires_reformulation(query, receipts):
             return "repeated_search_query"
+    if _webshop_conflicting_option_action(
+        action=action,
+        task_instruction=task_instruction,
+        observation=observation,
+        receipts=receipts,
+    ):
+        return "option_conflicts_with_instruction"
     if _webshop_repeats_unchanged_click(
         action=action,
         observation=observation,
@@ -1909,6 +2433,24 @@ def _public_transition_summary(
             observation=observation,
             receipts=receipts,
         )
+        candidate_history = _webshop_candidate_history(receipts)
+        requirement_phrases = _webshop_visible_requirement_phrases(
+            task_instruction
+        )
+        for candidate in candidate_history:
+            tab_evidence = candidate.get("tab_evidence", {})
+            if not isinstance(tab_evidence, Mapping):
+                tab_evidence = {}
+            candidate["attribute_evidence"] = {
+                phrase: _webshop_phrase_evidence_status(
+                    phrase,
+                    title=str(candidate.get("title") or ""),
+                    tab_evidence=tab_evidence,
+                )
+                for phrase in requirement_phrases
+            }
+            candidate["tab_evidence_sources"] = list(tab_evidence)
+            candidate.pop("tab_evidence", None)
         summary.update(
             {
                 "recent_search_queries": searches[-3:],
@@ -1919,7 +2461,7 @@ def _public_transition_summary(
                 "recent_click_targets": click_targets[-8:],
                 "latest_search_outcome": latest_search_outcome,
                 "purchase_preconditions": purchase_preconditions,
-                "candidate_history": _webshop_candidate_history(receipts),
+                "candidate_history": candidate_history,
                 "current_product": (
                     {
                         "asin": product_evidence["asin"],
@@ -1934,6 +2476,12 @@ def _public_transition_summary(
                         "inspected_tabs": product_evidence[
                             "inspected_tabs"
                         ],
+                        "tab_evidence_sources": list(
+                            product_evidence.get("tab_evidence", {})
+                        ),
+                        "attribute_evidence": purchase_preconditions.get(
+                            "attribute_evidence", {}
+                        ),
                         "visible_option_groups": {
                             group: list(values) for group, values in groups.items()
                         },
@@ -2117,6 +2665,18 @@ def _public_state_feedback(
                     f"inspected_tabs={tab_text}; "
                     f"visit_count={candidate.get('visit_count')}."
                 )
+                attribute_evidence = candidate.get("attribute_evidence")
+                if isinstance(attribute_evidence, Mapping) and attribute_evidence:
+                    lines.append(
+                        "  public attribute evidence: "
+                        + "; ".join(
+                            f"{phrase}={value.get('status')}"
+                            f"[{','.join(str(source) for source in value.get('sources', ())) or 'none'}]"
+                            for phrase, value in attribute_evidence.items()
+                            if isinstance(value, Mapping)
+                        )
+                        + "."
+                    )
         current_product = progress.get("current_product")
         if isinstance(current_product, Mapping):
             asin = current_product.get("asin")
@@ -2166,6 +2726,19 @@ def _public_state_feedback(
                     )
                     + "."
                 )
+            attribute_evidence = current_product.get("attribute_evidence")
+            if isinstance(attribute_evidence, Mapping) and attribute_evidence:
+                lines.append(
+                    "Current-candidate public attribute evidence: "
+                    + "; ".join(
+                        f"{phrase}={value.get('status')}"
+                        f"[{','.join(str(source) for source in value.get('sources', ())) or 'none'}]"
+                        for phrase, value in attribute_evidence.items()
+                        if isinstance(value, Mapping)
+                    )
+                    + ". Status is advisory and does not read or replace the "
+                    "native WebShop evaluator."
+                )
         purchase = progress.get("purchase_preconditions")
         if isinstance(purchase, Mapping):
             minimum_actions = purchase.get("minimum_actions_to_purchase")
@@ -2181,10 +2754,12 @@ def _public_state_feedback(
         ):
             missing = purchase.get("missing_option_groups", ())
             mismatched = purchase.get("mismatched_option_groups", ())
+            unmatched = purchase.get("unmatched_required_option_groups", ())
             lines.append(
                 "Purchase preconditions not satisfied: "
                 f"missing_option_groups={list(missing) if isinstance(missing, (list, tuple)) else []}; "
                 f"mismatched_option_groups={list(mismatched) if isinstance(mismatched, (list, tuple)) else []}; "
+                f"unmatched_required_option_groups={list(unmatched) if isinstance(unmatched, (list, tuple)) else []}; "
                 f"price_limit={purchase.get('price_limit')}; "
                 f"product_price={purchase.get('product_price')}; "
                 f"price_evidence_missing={purchase.get('price_evidence_missing')}; "
