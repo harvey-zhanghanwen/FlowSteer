@@ -362,7 +362,7 @@ def test_dataset_pair_fallback_is_a_resume_gap_not_a_formal_fact() -> None:
         ),
         ("Which river contains the Kariba Dam? Zambezi.", "not a question"),
         ("It contains the Zambezi.", "anaphoric"),
-        ("The river is Zambezi.", "generic subject"),
+        ("The river is Zambezi.", "entity anchors"),
         ("The Kariba Dam contains Zambezi", "complete declarative sentence"),
     ),
 )
@@ -372,6 +372,39 @@ def test_fact_projection_rejects_non_declarative_or_contextless_payloads(
 ) -> None:
     with pytest.raises(FactProjectionAdmissionError, match=message):
         validate_self_contained_declarative_fact(_source(), fact_text)
+
+
+def test_fact_projection_rejects_unresolved_reference_and_missing_scope() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:tc_199",
+        base_task_id="triviaqa:tc_199",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=(
+            "When Birdseye introduced the first frozen food in 1930, what "
+            "did the company call it?"
+        ),
+        canonical_answer="Frosted food",
+        native_split="train",
+    )
+
+    with pytest.raises(FactProjectionAdmissionError, match="anaphoric"):
+        validate_self_contained_declarative_fact(
+            source,
+            "The company called it Frosted food.",
+        )
+    with pytest.raises(FactProjectionAdmissionError, match="1930"):
+        validate_self_contained_declarative_fact(
+            source,
+            "Birdseye called the first frozen food Frosted food.",
+        )
+
+    fact = (
+        "Birdseye called the first frozen food introduced in 1930 "
+        "Frosted food."
+    )
+    assert validate_self_contained_declarative_fact(source, fact) == fact
 
 
 def test_resume_partition_repairs_old_strict_non_fact_before_full_parse() -> None:
@@ -433,8 +466,9 @@ def test_terminal_question_mark_in_canonical_is_quoted_not_removed() -> None:
         "They Shoot Horses Don’t They?",
     )
     raw = (
-        "British actress Susannah York was nominated for an Oscar for her "
-        "portrayal of Alice LeBlanc in They Shoot Horses Don’t They?"
+        "British actress Susannah York was nominated for an Oscar for "
+        "Susannah York's portrayal of Alice LeBlanc in the 1969 film They "
+        "Shoot Horses Don’t They?"
     )
     quoted = _quote_terminal_punctuated_canonical_span(
         raw,
@@ -1366,14 +1400,16 @@ def test_response_parser_normalizes_observed_qwen_leading_dot_key() -> None:
     response = json.dumps(
         {
             ".paraphrase_question": "Which Gloria helped establish Ms magazine?",
-            "paraphrase_answer_statement": "Steinem co-founded Ms magazine.",
+            "paraphrase_answer_statement": (
+                "Gloria Steinem co-founded Ms magazine."
+            ),
         }
     )
 
     question, statement = parse_paraphrase_response(response, source)
 
     assert question == "Which Gloria helped establish Ms magazine?"
-    assert statement == "Steinem co-founded Ms magazine."
+    assert statement == "Gloria Steinem co-founded Ms magazine."
 
 
 @pytest.mark.parametrize(
@@ -1899,7 +1935,7 @@ def test_parser_enforces_exact_curly_quoted_content() -> None:
             "Name the performer who released 'Blue Moon'."
         ),
         "paraphrase_answer_statement": (
-            "Example Singer recorded Blue Moon."
+            "Example Singer recorded ‘Blue Moon’."
         ),
     }
 
@@ -2003,7 +2039,7 @@ def test_generate_routes_quote_only_failure_through_slot_recovery(
                         'Name the performer who released "Blue Moon!".'
                     ),
                     "paraphrase_answer_statement": (
-                        "Example Singer recorded Blue Moon."
+                        "Example Singer recorded “Blue Moon”."
                     ),
                 }
             ),
@@ -2028,7 +2064,7 @@ def test_generate_routes_quote_only_failure_through_slot_recovery(
 
     assert client.generate(source, seed=17) == (
         'Name the performer who released "Blue Moon".',
-        "Example Singer recorded Blue Moon.",
+        "Example Singer recorded “Blue Moon”.",
         17,
     )
 
@@ -2297,7 +2333,8 @@ def test_v5_parser_accepts_possessive_entity_inflection_without_answer_leakage()
             ),
             "paraphrase_answer_statement": (
                 "Daphne du Maurier, best known for Rebecca wrote the story on "
-                "which Alfred Hitchcock based his 1963 suspense film The Birds."
+                "which Alfred Hitchcock based Alfred Hitchcock's 1963 suspense "
+                "film The Birds."
             ),
         }
     )
@@ -2855,6 +2892,15 @@ def test_v7_answer_repair_contract_preserves_wh_slot_direction() -> None:
     )
     payload = json.loads(messages[1]["content"])
     assert payload["original_question"] == source.original_question
+    assert payload["immutable_original_entity_tokens"] == [
+        "Richard",
+        "Nixon",
+        "Vice",
+        "President",
+        "US",
+    ]
+    assert payload["immutable_number_or_date_tokens"] == []
+    assert payload["immutable_quoted_spans"] == []
     assert "literal slot substitution" in ANSWER_REPAIR_SYSTEM_PROMPT
     assert parse_answer_repair_response(
         json.dumps(
@@ -3042,7 +3088,7 @@ def test_v8_called_relation_has_deterministic_answer_binding_fallback() -> None:
             "Which English king was known as Longshanks?",
             "Edward I",
             "Identify the English king who was known as Longshanks.",
-            "Edward I was known as Longshanks.",
+            "Edward I was the English king known as Longshanks.",
         ),
         (
             "How many red stripes are there on the national flag of Puerto Rico?",
@@ -3170,7 +3216,7 @@ def test_deterministic_answer_slot_statement_passes_existing_admission(
         ),
     ),
 )
-def test_deterministic_trailing_preposition_slot_is_literal_and_declarative(
+def test_legacy_trailing_preposition_slot_is_not_a_fact_release_fallback(
     original: str,
     canonical: str,
     expected: str,
@@ -3185,7 +3231,9 @@ def test_deterministic_trailing_preposition_slot_is_literal_and_declarative(
         canonical_answer=canonical,
         answer_statement=candidate,
     )
-    assert validate_self_contained_declarative_fact(source, candidate) == candidate
+    with pytest.raises(FactProjectionAdmissionError):
+        validate_self_contained_declarative_fact(source, candidate)
+    assert _deterministic_strict_pair(source) is None
 
 
 @pytest.mark.parametrize(
@@ -3327,13 +3375,19 @@ def test_deterministic_strict_pair_stays_fail_closed_for_do_support() -> None:
             "Which dictator returned to Haiti in January 2011?",
             "Jean-Claude Duvalier",
             "Identify the dictator that returned to Haiti in January 2011.",
-            "Jean-Claude Duvalier returned to Haiti in January 2011.",
+            (
+                "Jean-Claude Duvalier is the dictator that returned to Haiti "
+                "in January 2011."
+            ),
         ),
         (
             "Which playwright wrote the plays Tiny Alice and Seascape?",
             "Edward Albee",
             "Identify the playwright that wrote the plays Tiny Alice and Seascape.",
-            "Edward Albee wrote the plays Tiny Alice and Seascape.",
+            (
+                "Edward Albee is the playwright that wrote the plays Tiny "
+                "Alice and Seascape."
+            ),
         ),
         (
             "What medical procedure is also referred to as a lumbar puncture?",
@@ -3342,7 +3396,10 @@ def test_deterministic_strict_pair_stays_fail_closed_for_do_support() -> None:
                 "Identify the medical procedure that is also referred to as "
                 "a lumbar puncture."
             ),
-            "Spinal Tap is also referred to as a lumbar puncture.",
+            (
+                "Spinal Tap is the medical procedure that is also referred "
+                "to as a lumbar puncture."
+            ),
         ),
         (
             "Which TV series co-starred Pauline Quirke and Warren Clarke",
@@ -3351,7 +3408,10 @@ def test_deterministic_strict_pair_stays_fail_closed_for_do_support() -> None:
                 "Identify the TV series that co-starred Pauline Quirke and "
                 "Warren Clarke."
             ),
-            "Down To Earth co-starred Pauline Quirke and Warren Clarke.",
+            (
+                "Down To Earth is the TV series that co-starred Pauline "
+                "Quirke and Warren Clarke."
+            ),
         ),
     ),
 )
@@ -3404,12 +3464,10 @@ def test_bounded_subject_wh_pair_preserves_literal_leading_anchor() -> None:
 
     assert pair == (
         "Identify the Louisiana port that is regarded as the birthplace of jazz.",
-        "New Orleans is regarded as the birthplace of jazz.",
-    )
-    assert _literal_slot_substitution_preserved(
-        original_question=source.original_question,
-        canonical_answer=source.canonical_answer,
-        answer_statement=pair[1],
+        (
+            "New Orleans is the Louisiana port that is regarded as the "
+            "birthplace of jazz."
+        ),
     )
     assert _deterministic_strict_pair(source) == pair
 
@@ -3758,14 +3816,20 @@ def test_fronted_context_subject_wh_pair_rejects_unproved_subjects(
             "In which English town or city would you find the Hexagon theatre?",
             "READING",
             "In which English town or city could you locate the Hexagon theatre?",
-            "The Hexagon theatre is located in READING.",
+            (
+                "The English town or city where the Hexagon theatre is "
+                "located is READING."
+            ),
         ),
         (
             _english_theatre_location_analogue_pair,
             "In which English town or city would you find the Marlowe theatre?",
             "CANTERBURY",
             "In which English town or city could you locate the Marlowe theatre?",
-            "The Marlowe theatre is located in CANTERBURY.",
+            (
+                "The English town or city where the Marlowe theatre is "
+                "located is CANTERBURY."
+            ),
         ),
         (
             _alcock_brown_year_analogue_pair,
@@ -3779,8 +3843,8 @@ def test_fronted_context_subject_wh_pair_rejects_unproved_subjects(
                 "trans- Atlantic flight?"
             ),
             (
-                "The year Alcock and Brown completed the first non-stop trans- "
-                "Atlantic flight is 1919."
+                "Alcock and Brown completed the first non-stop trans- "
+                "Atlantic flight in 1919."
             ),
         ),
         (
@@ -3788,7 +3852,7 @@ def test_fronted_context_subject_wh_pair_rejects_unproved_subjects(
             "In which year did Alcock and Brown make their Atlantic crossing?",
             "1919",
             "During what year did Alcock and Brown complete their Atlantic crossing?",
-            "The year Alcock and Brown completed their Atlantic crossing is 1919.",
+            "Alcock and Brown completed the Atlantic crossing in 1919.",
         ),
         (
             _tells_lies_description_analogue_pair,
@@ -3824,8 +3888,8 @@ def test_fronted_context_subject_wh_pair_rejects_unproved_subjects(
             _eating_relation_analogue_pair,
             "If you are eating tripe, what are you eating?",
             "Stomach",
-            "If you are consuming tripe, identify the organ you are consuming?",
-            "The organ you are consuming is Stomach.",
+            "If you are consuming tripe, what are you consuming?",
+            "If you are eating tripe, you are eating Stomach.",
         ),
         (
             _darts_shanghai_analogue_pair,
@@ -3856,7 +3920,7 @@ def test_fronted_context_subject_wh_pair_rejects_unproved_subjects(
             ),
             (
                 "The name given in darts when a player hits a single, double and "
-                "treble of the same number in his turn is Shanghai."
+                "treble of the same number in the player's turn is Shanghai."
             ),
         ),
         (
@@ -4349,8 +4413,8 @@ def test_bounded_object_wh_families_reject_nearby_shapes(
             (
                 "Identify the King of Scotland who was born on March 17th "
                 "1473. He died 40 years later.",
-                "JAMES IV of Scotland was born on March 17th 1473. He died "
-                "40 years later.",
+                "JAMES IV was the King of Scotland who was born on March 17th "
+                "1473. JAMES IV died 40 years later.",
             ),
         ),
         (
@@ -4384,8 +4448,9 @@ def test_bounded_object_wh_families_reject_nearby_shapes(
             (
                 "For what reason was Erika Schinegger stripped of her 1966 "
                 "downhill skiing world title?",
-                "The reason Erika Schinegger was stripped of her 1966 "
-                "downhill skiing world title is that She was a man.",
+                "The reason Erika Schinegger was stripped of Erika "
+                "Schinegger's 1966 downhill skiing world title is that She "
+                "was a man.",
             ),
         ),
         (
@@ -4442,7 +4507,7 @@ def test_bounded_object_wh_families_reject_nearby_shapes(
                 "In the game ‘Mortal Kombat’, which phrase can be heard "
                 "when Scorpion uses his spear?",
                 "In the game ‘Mortal Kombat’, the phrase heard when Scorpion "
-                "uses his spear is ‘Get over here’.",
+                "uses Scorpion's spear is ‘Get over here’.",
             ),
         ),
     ),

@@ -67,6 +67,7 @@ _STRICT_PARAPHRASE_PROMPT_VERSIONS = frozenset(
         "triviaqa.qa_memory.qa_paraphrase.v10",
         "triviaqa.qa_memory.qa_paraphrase.v11",
         "triviaqa.qa_memory.qa_paraphrase.v12",
+        "triviaqa.qa_memory.qa_paraphrase.v13",
     }
 )
 

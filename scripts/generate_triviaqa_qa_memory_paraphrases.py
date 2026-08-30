@@ -55,9 +55,18 @@ from scripts.materialize_triviaqa_full_train_qa_memory import (  # noqa: E402
 )
 
 
-PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v12"
+PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v13"
+SUPPORTED_PROMPT_TEMPLATE_VERSIONS = frozenset(
+    {
+        "triviaqa.qa_memory.qa_paraphrase.v12",
+        PROMPT_TEMPLATE_VERSION,
+    }
+)
 PARAPHRASE_VERSION = "triviaqa.qa_memory.paraphrase.v12"
-SEMANTIC_ADMISSION_VERSION = "triviaqa.qa_memory.semantic_admission.v14"
+SEMANTIC_ADMISSION_VERSION = "triviaqa.qa_memory.semantic_admission.v15"
+FACT_SELF_CONTAINMENT_ADMISSION_VERSION = (
+    "triviaqa.fact_memory.self_containment.v2"
+)
 PARAPHRASE_METHOD = "semantic-preserving-question-and-answer-paraphrase"
 GENERATOR_PROVIDER = "local-openai-compatible"
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
@@ -77,6 +86,7 @@ DATASET_PAIR_FALLBACK_PROMPT_VERSION = (
 
 SYSTEM_PROMPT = """Paraphrase one TriviaQA training question and its training answer.
 Preserve the exact entity identity, requested relation, answer type, temporal or geographic scope, and every constraint. Replace at least one non-entity content word or multiword expression with a true synonym or equivalent phrase; changing only word order is not enough. lexical_replacement_source_tokens lists eligible original content wording, and at least one listed token or its containing phrase must be replaced rather than merely reordered. A dangling generic interrogative may instead be expanded by at least two content words that state its existing answer type without adding another relation. Do not put the answer into the question, including generic-looking words from the canonical answer: forbidden_question_canonical_tokens lists the answer tokens absent from the original question, and none may occur in paraphrase_question. Write one complete declarative answer statement by binding the supplied canonical answer span character-for-character to the original question's wh-dependency or explicitly listed-choice slot. The answer statement must copy at least one non-answer content token from original_question so its relation lineage is explicit. Preserve the original subject/object direction, relation, scope, and constraints; prefer a minimal question-to-declarative transformation and do not require the canonical span to begin the sentence. Never inflect, lowercase, or paraphrase the canonical span. If natural grammar requires an inflected form for a listed choice, use the natural relation wording and also include the exact canonical span as the selected option label in the same declarative statement. The answer statement must not be only the canonical span or a generic wrapper such as 'The answer is ...'. Do not add facts, broaden or narrow the meaning, or invent aliases.
+The answer statement is an independently retrievable fact, not a Question/Answer record. It must be understandable without the question: explicitly repeat every supplied immutable entity token, number/date token, and quoted span needed by the source relation and scope. Outside an immutable quoted span or the exact canonical answer span, do not use third-person personal, possessive, reflexive, or context-dependent demonstrative pronouns such as it, he, she, they, this, these, those, him, her, them, his, hers, its, their, theirs, itself, himself, herself, or themselves; replace each reference with its explicit noun phrase. A relative-clause marker such as 'that' is allowed. Do not begin with a bare generic binding such as 'The company is ...' or 'The film was ...' unless the same sentence contains a restrictive clause or explicit entity that identifies it. Never emit Question:, Answer:, Prompt:, Response:, a question followed by an answer, or any other Q-A concatenation.
 Preserve participation markers inside relations. In particular, co-founded must remain co-founded or use an explicitly equivalent phrase such as helped found, helped establish, or jointly founded; established/founded alone is broader and is not equivalent.
 Treat every supplied immutable entity token, number/date token, and quoted span as an exact dataset string even when it looks unusual or factually mistaken. Copy those strings into the paraphrased question; never correct, replace, delete, or complete them from world knowledge. The only morphology exception is a token listed in multiword_possessive_identity_bases: an original multiword person possessive such as "Andy Warhol's" may become the non-possessive "Andy Warhol" only inside an explicit "of Andy Warhol" construction.
 When leading_answer_slot_anchor is non-null, it is a disambiguating token in the original leading wh-phrase. Keep it verbatim in the initial interrogative or imperative answer-slot phrase of paraphrase_question; never move it into a downstream participant, object, title, or contextual clause.
@@ -98,6 +108,7 @@ Return exactly one JSON object with these boolean fields and no other text:
 {"canonical_span_preserved":true,"answer_slot_bound":true,"relation_direction_preserved":true,"scope_and_constraints_preserved":true,"no_new_fact_or_relation":true}"""
 
 ANSWER_REPAIR_SYSTEM_PROMPT = """Repair only one TriviaQA declarative answer statement by literal slot substitution. Treat the original question and canonical answer as authoritative dataset strings; never fact-check or correct them. Never return only the canonical answer, even when that span already looks like a sentence or explanation. For a wh-question, copy every non-wh token and its order from original_question, including auxiliaries such as was, is, or did; replace only the complete wh-constituent with the exact canonical span and convert question punctuation to a declarative period. For a leading 'What/Which <answer type> is/was <predicate>?' question, use the relation-bearing declarative form 'The <answer type> that is/was <predicate> is/was <exact canonical span>.' When the exact canonical span begins with a preposition such as 'In', 'On', 'At', 'By', or 'From', place that exact span first as a fronted phrase, then a comma, then render the remaining subject and predicate in declarative order; never lowercase or duplicate its preposition. When the exact canonical span is possessive and ends in "'s", and original_question asks 'the <relation noun> of what/who ...', front the exact possessive span and follow it with that relation noun and the remaining predicate, for example '<exact possessive canonical> diet ...'; never return the possessive span alone. For an explicitly listed-choice question, preserve the proposition and alternatives, state the selected relation naturally, and include the exact uninflected canonical span as the selected option label in that same declarative statement. Do not use wording from rejected_answer_statement. Do not paraphrase the relation clause, reverse subject/object direction, write '<answer type> of <canonical answer>', or add a fact, relation, scope, or constraint.
+The repaired statement must be a self-contained declarative fact. Repeat every immutable_original_entity_token, immutable_number_or_date_token, and immutable_quoted_span required by the source, even when the rejected statement omitted it. Outside an immutable quoted span or the exact canonical answer span, replace every third-person or demonstrative pronoun with its explicit noun phrase. Do not emit a bare generic binding, a Question/Answer wrapper, or a question-plus-answer concatenation.
 When canonical_training_answer is itself a complete clause and original_question has the form 'What <slot> did <subject> have?', preserve the clause character-for-character in the relation-bearing form 'The statement "<canonical>" identifies the <slot> that <subject> had.'
 Return exactly one JSON object with this schema and no other text:
 {"paraphrase_answer_statement":"..."}"""
@@ -176,12 +187,19 @@ _SENTENCE_BOUNDARY_NON_ENTITY_WORDS = frozenset(
         "according",
         "following",
         "given",
+        "he",
+        "him",
         "his",
         "her",
+        "it",
         "its",
         "located",
         "our",
+        "she",
+        "that",
+        "them",
         "their",
+        "they",
         "these",
         "this",
         "those",
@@ -200,6 +218,11 @@ _FACT_ANAPHORIC_SUBJECT = re.compile(
     r"^(?:it|he|she|they|this|that|these|those)\b",
     re.IGNORECASE,
 )
+_FACT_EXTERNAL_REFERENCE = re.compile(
+    r"\b(?:it|he|she|they|this|these|those|him|her|them|his|hers|its|"
+    r"their|theirs|itself|himself|herself|themselves)\b",
+    re.IGNORECASE,
+)
 _FACT_INTERROGATIVE_HEAD = re.compile(
     r"^(?:(?:who|what|which|where|when|why|how)\s+"
     r"(?:is|are|was|were|did|does|do|has|have|had|can|could|"
@@ -208,7 +231,11 @@ _FACT_INTERROGATIVE_HEAD = re.compile(
 )
 _GENERIC_FACT_SUBJECT = (
     r"(?:answer|response|person|man|woman|place|country|city|river|"
-    r"number|year|date|title|name|word|term|thing)"
+    r"number|year|date|title|name|word|term|thing|company|organisation|"
+    r"organization|show|series|musical|film|movie|band|group|book|novel|"
+    r"song|album|airport|building|work|event|team|club|school|university|"
+    r"instrument|language|animal|plant|chemical|element|food|product|"
+    r"brand|ship|aircraft|vehicle)"
 )
 _OBSERVED_RESPONSE_KEY_TYPOS = {
     ".paraphrase_question": "paraphrase_question",
@@ -1142,6 +1169,65 @@ def _literal_subject_wh_answer_statement(
     return f"{source.canonical_answer} {match.group(1)}."
 
 
+def _typed_subject_wh_answer_statement_preserved(
+    source: TriviaQATrainSource,
+    answer_statement: str,
+) -> bool:
+    """Prove an explicit answer-type binding for one subject-WH slot."""
+
+    original_with_punctuation = " ".join(source.original_question.split())
+    normalized = " ".join(answer_statement.split()).casefold()
+    trailing_context = re.fullmatch(
+        r"Which (?P<head>.+?) was born on (?P<date>[^?]+)\? "
+        r"He died (?P<duration>[^.]+) later\.",
+        original_with_punctuation,
+    )
+    if trailing_context is not None:
+        expected = (
+            f"{source.canonical_answer} was the "
+            f"{trailing_context.group('head')} who was born on "
+            f"{trailing_context.group('date')}. {source.canonical_answer} "
+            f"died {trailing_context.group('duration')} later."
+        )
+        return normalized == " ".join(expected.split()).casefold()
+
+    original = original_with_punctuation.rstrip("?.")
+    match = re.fullmatch(
+        r"(?i:what|which)\s+(?P<head>.+?)\s+"
+        r"(?P<predicate>(?:is|was|are|were|returned|returns|says?|runs?|"
+        r"wrote|writes|co[- ]?(?:founded|starred))\b.+)",
+        original,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return False
+    head = match.group("head")
+    predicate = match.group("predicate")
+    canonical = source.canonical_answer
+    candidates = {
+        _declarative_statement(f"{canonical} is the {head} that {predicate}"),
+        _declarative_statement(f"{canonical}, the {head}, {predicate}"),
+    }
+    copular = re.fullmatch(
+        r"(?P<copula>is|was|are|were)\s+(?P<rest>.+)",
+        predicate,
+        re.IGNORECASE,
+    )
+    if copular is not None:
+        candidates.add(
+            _declarative_statement(
+                f"{canonical} {copular.group('copula')} the {head} "
+                f"{copular.group('rest')}"
+            )
+        )
+    for alias in source.accepted_answers_for_admission:
+        if exact_canonical_span_preserved(alias, canonical):
+            candidates.add(_declarative_statement(f"{alias} {predicate}"))
+    return normalized in {
+        " ".join(candidate.split()).casefold() for candidate in candidates
+    }
+
+
 def _possessive_name_answer_statement(
     source: TriviaQATrainSource,
 ) -> tuple[str, str] | None:
@@ -1379,6 +1465,7 @@ def _deterministic_answer_slot_statement(
         ):
             candidate = _declarative_statement(
                 f"{canonical} {subject_called.group('copula')} "
+                f"the {subject_called.group('head')} "
                 f"{subject_called.group('predicate')} "
                 f"{subject_called.group('complement')}"
             )
@@ -2449,6 +2536,15 @@ def build_answer_repair_messages(
         "original_question": source.original_question,
         "canonical_training_answer": source.canonical_answer,
         "rejected_answer_statement": rejected_answer_statement,
+        "immutable_original_entity_tokens": list(
+            _capitalized_identity_surfaces(source.original_question)
+        ),
+        "immutable_number_or_date_tokens": sorted(
+            set(_NUMBER_OR_DATE_TOKEN.findall(source.original_question))
+        ),
+        "immutable_quoted_spans": sorted(
+            _quoted_spans(source.original_question)
+        ),
     }
     return [
         {"role": "system", "content": ANSWER_REPAIR_SYSTEM_PROMPT},
@@ -2920,6 +3016,73 @@ def validate_self_contained_declarative_fact(
             "fact_text begins with an unbound anaphoric subject"
         )
 
+    canonical = " ".join(source.canonical_answer.split())
+    reference_surface = _ORDERED_QUOTED_SLOT.sub(
+        " immutable quoted material ",
+        fact,
+    ).replace(canonical, " canonical fact value ")
+    if _FACT_EXTERNAL_REFERENCE.search(reference_surface):
+        raise FactProjectionAdmissionError(
+            "fact_text contains an external anaphoric reference; replace it "
+            "with an explicit noun phrase"
+        )
+
+    original_identity_tokens = _capitalized_identity_tokens(
+        source.original_question
+    )
+    fact_tokens = frozenset(
+        token.casefold()
+        for token in _LEXICAL_TOKEN.findall(fact)
+        if token.casefold() not in _FUNCTION_WORDS
+    )
+    missing_identity_tokens = frozenset(
+        token
+        for token in original_identity_tokens
+        if not _identity_token_preserved(token, fact_tokens)
+        and not (
+            token.endswith(("'s", "’s"))
+            and token[:-2] in _multiword_possessive_identity_bases(
+                source.original_question
+            )
+            and token[:-2] in fact_tokens
+        )
+    )
+    if missing_identity_tokens:
+        raise FactProjectionAdmissionError(
+            "fact_text omitted immutable source entity anchors: "
+            + ", ".join(sorted(missing_identity_tokens))
+        )
+
+    source_numbers = Counter(
+        _NUMBER_OR_DATE_TOKEN.findall(source.original_question)
+    )
+    fact_numbers = Counter(_NUMBER_OR_DATE_TOKEN.findall(fact))
+    missing_numbers = source_numbers - fact_numbers
+    if missing_numbers:
+        raise FactProjectionAdmissionError(
+            "fact_text omitted source numeric/date constraints: "
+            + ", ".join(sorted(missing_numbers.elements()))
+        )
+
+    source_quoted_spans = _quoted_spans(source.original_question)
+    fact_quoted_spans = _quoted_spans(fact)
+    quoted_answer_slot = re.compile(
+        r"[‘'\"“](?:what|which|who|whom|whose|where|when|why|how)"
+        r"[’'\"”]",
+        re.IGNORECASE,
+    )
+    missing_quoted_spans = frozenset(
+        span
+        for span in source_quoted_spans
+        if span not in fact_quoted_spans
+        and quoted_answer_slot.sub(canonical, span) not in fact_quoted_spans
+    )
+    if missing_quoted_spans:
+        raise FactProjectionAdmissionError(
+            "fact_text omitted immutable quoted scope: "
+            + ", ".join(sorted(missing_quoted_spans))
+        )
+
     punctuation_surface = fact.rstrip('"\'\u2019\u201d)]} ')
     container_surface = fact.rstrip(")]} ")
     quoted_terminal_punctuation = re.search(
@@ -2934,7 +3097,6 @@ def validate_self_contained_declarative_fact(
             "fact_text must end as a complete declarative sentence"
         )
 
-    canonical = " ".join(source.canonical_answer.split())
     if not exact_canonical_span_preserved(fact, canonical):
         raise FactProjectionAdmissionError(
             "fact_text does not preserve the canonical fact value"
@@ -3288,6 +3450,10 @@ def parse_paraphrase_response(
             canonical_answer=canonical,
             answer_statement=statement,
         )
+        and not _typed_subject_wh_answer_statement_preserved(
+            source,
+            statement,
+        )
     ):
         raise ValueError(
             "paraphrase_answer_statement does not preserve deterministic "
@@ -3345,7 +3511,7 @@ def load_resume_records(
             if value.get("prompt_template_version") in {
                 "triviaqa.qa_memory.qa_paraphrase.v4",
                 "triviaqa.qa_memory.qa_paraphrase.v5",
-                PROMPT_TEMPLATE_VERSION,
+                *SUPPORTED_PROMPT_TEMPLATE_VERSIONS,
             }:
                 statement = value.get("paraphrase_answer_statement")
                 canonical = value.get("canonical_answer")
@@ -3963,7 +4129,7 @@ def _bounded_subject_wh_pair(
     if question is None:
         return None
     return question, _declarative_statement(
-        f"{source.canonical_answer} {predicate}"
+        f"{source.canonical_answer} is the {head} that {predicate}"
     )
 
 
@@ -4170,7 +4336,10 @@ def _english_theatre_location_analogue_pair(source: TriviaQATrainSource) -> tupl
     )
     if question is None:
         return None
-    return question, _declarative_statement(f"{theatre} is located in {source.canonical_answer}")
+    return question, _declarative_statement(
+        f"The English town or city where {theatre} is located is "
+        f"{source.canonical_answer}"
+    )
 
 
 def _alcock_brown_year_analogue_pair(source: TriviaQATrainSource) -> tuple[str, str] | None:
@@ -4190,8 +4359,10 @@ def _alcock_brown_year_analogue_pair(source: TriviaQATrainSource) -> tuple[str, 
     )
     if question is None:
         return None
+    explicit_event = re.sub(r"(?i)^their\s+", "the ", event)
     return question, _declarative_statement(
-        f"The year Alcock and Brown completed {event} is {source.canonical_answer}"
+        f"Alcock and Brown completed {explicit_event} in "
+        f"{source.canonical_answer}"
     )
 
 
@@ -4243,11 +4414,13 @@ def _eating_relation_analogue_pair(source: TriviaQATrainSource) -> tuple[str, st
     if not re.fullmatch(r"If you are eating tripe, what are you eating\?", original, re.IGNORECASE):
         return None
     question = _finish_deterministic_question_candidate(
-        source, "If you are consuming tripe, identify the organ you are consuming?"
+        source, "If you are consuming tripe, what are you consuming?"
     )
     if question is None:
         return None
-    return question, _declarative_statement(f"The organ you are consuming is {source.canonical_answer}")
+    return question, _declarative_statement(
+        f"If you are eating tripe, you are eating {source.canonical_answer}"
+    )
 
 
 def _darts_shanghai_analogue_pair(source: TriviaQATrainSource) -> tuple[str, str] | None:
@@ -4283,7 +4456,8 @@ def _darts_shanghai_analogue_pair(source: TriviaQATrainSource) -> tuple[str, str
             return None
         return question, _declarative_statement(
             "The name given in darts when a player hits a single, double and treble "
-            f"of the same number in his turn is {source.canonical_answer}"
+            "of the same number in the player's turn is "
+            f"{source.canonical_answer}"
         )
     if not re.fullmatch(
         r"In darts, a three dart finish requiring a treble, single and double of "
@@ -4687,11 +4861,16 @@ def _quoted_relation_slot_pair(
     if match.group("heard_context") is not None:
         context = match.group("heard_context")
         tail = match.group("heard_tail")
+        explicit_tail = re.sub(
+            r"(?i)\bScorpion uses his\b",
+            "Scorpion uses Scorpion's",
+            tail,
+        )
         question_candidate = (
             f"In the {context}, which phrase can be heard {tail}?"
         )
         statement = (
-            f"In the {context}, the phrase heard {tail} is "
+            f"In the {context}, the phrase heard {explicit_tail} is "
             f"{source.canonical_answer}"
         )
     elif match.group("better_context") is not None:
@@ -4830,7 +5009,13 @@ def _simple_why_auxiliary_pair(
         fact_body = f"you will {future.group('predicate')}"
     elif stripped is not None:
         rest = f"was {stripped.group('subject')} {stripped.group('predicate')}"
-        fact_body = f"{stripped.group('subject')} was {stripped.group('predicate')}"
+        explicit_predicate = re.sub(
+            r"(?i)\bher\b",
+            f"{stripped.group('subject')}'s",
+            stripped.group("predicate"),
+            count=1,
+        )
+        fact_body = f"{stripped.group('subject')} was {explicit_predicate}"
     else:
         return None
     question = _finish_deterministic_question_candidate(
@@ -5329,8 +5514,9 @@ def _typed_subject_trailing_context_pair(
     if question is None:
         return None
     return question, (
-        f"{source.canonical_answer} {modifier} was born on {date}. "
-        f"He died {duration} later."
+        f"{source.canonical_answer} was the {title} {modifier} who was born "
+        f"on {date}. "
+        f"{source.canonical_answer} died {duration} later."
     )
 
 
@@ -6907,13 +7093,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                         source=source,
                         paraphrase_question=question,
                         paraphrase_answer_statement=statement,
-                        paraphrase_version=args.paraphrase_version,
-                        paraphrase_method=PARAPHRASE_METHOD,
-                        generator_provider=GENERATOR_PROVIDER,
-                        model_id=args.model_id,
-                        model_revision=args.model_revision,
-                        prompt_template_version=PROMPT_TEMPLATE_VERSION,
-                        generation_seed=args.base_seed + source.selection_index,
+                        paraphrase_version=seeded.paraphrase_version,
+                        paraphrase_method=seeded.paraphrase_method,
+                        generator_provider=seeded.generator_provider,
+                        model_id=seeded.model_id,
+                        model_revision=seeded.model_revision,
+                        prompt_template_version=(
+                            seeded.prompt_template_version
+                        ),
+                        generation_seed=seeded.generation_seed,
                     )
                 )
                 seed_reused_count += 1
@@ -6943,8 +7131,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 or record.generator_provider != GENERATOR_PROVIDER
                 or record.model_id != args.model_id
                 or record.model_revision != args.model_revision
-                or record.prompt_template_version != PROMPT_TEMPLATE_VERSION
-                or record.generation_seed not in admitted_seeds
+                or record.prompt_template_version
+                not in SUPPORTED_PROMPT_TEMPLATE_VERSIONS
+                or (
+                    record.prompt_template_version == PROMPT_TEMPLATE_VERSION
+                    and record.generation_seed not in admitted_seeds
+                )
             ):
                 raise ValueError(
                     "existing paraphrases use incompatible frozen provenance"
@@ -7236,8 +7428,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             "paraphrase_version": args.paraphrase_version,
             "prompt_template_version": PROMPT_TEMPLATE_VERSION,
+            "supported_prompt_template_versions": sorted(
+                SUPPORTED_PROMPT_TEMPLATE_VERSIONS
+            ),
+            "record_prompt_template_version_counts": dict(
+                sorted(
+                    Counter(
+                        record.prompt_template_version
+                        for record in completed
+                    ).items()
+                )
+            ),
+            "admitted_prompt_template_versions": sorted(
+                {
+                    record.prompt_template_version
+                    for record in completed
+                }
+            ),
             "paraphrase_method": PARAPHRASE_METHOD,
             "strict_semantic_paraphrase_count": len(strict_paraphrases),
+            "semantic_question_rewrite_count": lexical_replacement_count,
+            "original_question_fallback_count": 0,
             "dataset_pair_fallback_count": len(dataset_pair_fallbacks),
             "dataset_pair_fallback_method": DATASET_PAIR_FALLBACK_METHOD,
             "dataset_pair_fallback_prompt_template_version": (
@@ -7261,6 +7472,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "semantic_verification_model": args.model_id,
             "semantic_admission_version": SEMANTIC_ADMISSION_VERSION,
             "semantic_admission_checked_count": len(strict_paraphrases),
+            "fact_self_containment_admission_version": (
+                FACT_SELF_CONTAINMENT_ADMISSION_VERSION
+            ),
+            "fact_self_containment_checked_count": len(fact_rows),
+            "fact_self_containment_pass_count": len(fact_rows),
+            "fact_external_reference_count": 0,
+            "fact_missing_source_anchor_count": 0,
+            "fact_question_answer_wrapper_count": 0,
             "semantic_repair_count": len(semantic_repair_source_ids),
             "semantic_repair_source_ids": sorted(
                 semantic_repair_source_ids
