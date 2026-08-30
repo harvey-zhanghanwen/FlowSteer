@@ -2072,6 +2072,8 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                     "document_id": "doc-1",
                     "title": "Clinical reference",
                     "url": "https://example.test/doc-1",
+                    "score": 7.25,
+                    "matched_terms": ["clinical", "query"],
                     "excerpt": "full passage remains trajectory-only",
                 }
                 return AgentResponse(
@@ -2154,6 +2156,11 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             1,
             react_receipt["observation"]["result"]["evidence_count"],
         )
+        evidence_receipt = react_receipt["observation"]["result"][
+            "evidence_provenance"
+        ][0]
+        self.assertEqual(7.25, evidence_receipt["score"])
+        self.assertEqual(["clinical", "query"], evidence_receipt["matched_terms"])
         self.assertNotIn("excerpt", json.dumps(react_receipt))
         current = env.current_artifact_receipts()[0]
         self.assertEqual("react", current["execution_mode"])
@@ -2251,6 +2258,30 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(env.finish_admissibility()["admissible"])
 
         self.assertEqual(("finish",), env.model_admissible_action_types())
+
+    async def test_admissible_finish_remains_optional_when_finish_only_is_disabled(
+        self,
+    ) -> None:
+        env = AgentWorkflowEnv(
+            make_registry(),
+            _ImmediateGateway(),
+            problem="question",
+            execute_on_edit=True,
+            finish_only_when_admissible=False,
+        )
+        await env.step(
+            '{"action":"add_agent","agent_id":"a","model_id":"balanced",'
+            '"contract":"produce the complete assistant response"}'
+        )
+        selected = await env.step('{"action":"set_output","agent_id":"a"}')
+        self.assertTrue(selected.accepted, selected.feedback)
+        self.assertTrue(env.finish_admissibility()["admissible"])
+
+        actions = env.model_admissible_action_types()
+        self.assertIn("finish", actions)
+        self.assertIn("add_subgraph", actions)
+        self.assertIn("modify_agent", actions)
+        self.assertNotEqual(("finish",), actions)
 
     async def test_rejected_relation_is_masked_only_for_current_revision(self) -> None:
         env = AgentWorkflowEnv(

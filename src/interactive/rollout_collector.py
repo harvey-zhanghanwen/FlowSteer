@@ -124,6 +124,11 @@ _ADD_ACTION_CONTINUATION = (
 _PARAMETER_REGENERATION_CONTINUATION = (
     "Return one complete JSON object that conforms to the current schema."
 )
+_ACTION_PHASE_INSTRUCTION = (
+    "Using the reasoning above, return only the next Canvas action as one "
+    "JSON object allowed by the current schema."
+)
+_TWO_PHASE_GENERATION_STRATEGY = "reasoning_action_two_phase"
 
 
 def _sglang_backend_sampling_seed(seed: int) -> int:
@@ -139,6 +144,26 @@ def _sglang_backend_sampling_seed(seed: int) -> int:
     if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**64:
         raise ValueError("Director seed must be a uint64 integer")
     return seed & _SGLANG_DETERMINISTIC_SEED_MASK
+
+
+def _reasoning_phase_seed(seed: int) -> int:
+    """Derive the REASONING-call seed from one Director-turn seed.
+
+    SkillFlow derives independent REASONING and ACTION seeds from its full
+    scientific coordinate.  This adapter receives the already-derived
+    Director-turn seed, so it keeps that seed for ACTION compatibility and
+    derives only the additional REASONING seed through the project's canonical
+    stable-ID boundary.
+    """
+
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**64:
+        raise ValueError("Director seed must be a uint64 integer")
+    digest = stable_id(
+        "phase_seed",
+        {"generation_seed": seed, "phase": "reasoning"},
+        length=16,
+    ).removeprefix("phase_seed_")
+    return int(digest, 16)
 
 
 def _hierarchical_continuation_prompt(
@@ -405,9 +430,16 @@ class SGLangReceiptDirectorClient:
     """Qwen3.5 Director client using SGLang's exact native token receipt.
 
     ``tokenizer`` must be loaded from the same Qwen3.5 checkpoint as the SGLang
-    behavior server.  The client intentionally requires
-    ``apply_chat_template(..., enable_thinking=False)`` and never falls back to
-    an approximately reconstructed prompt.
+    behavior server.  The client requires an explicit Qwen chat-template
+    ``enable_thinking`` value and never falls back to an approximately
+    reconstructed prompt.  Thinking is fail-closed with SGLang's native JSON
+    Schema grammar through SGLang's ReasonerGrammarBackend: when thinking is
+    enabled, the native request carries ``require_reasoning=true`` and the
+    backend applies the action grammar to the suffix after its exact
+    ``meta_info.reasoning_tokens`` boundary.  ``two_phase_generation`` is the
+    thin SGLang adaptation of SkillFlow ``RolloutEngine.run``: it makes a
+    separately budgeted REASONING call, conditions an ACTION call on that
+    reasoning, and exposes only the schema-bound ACTION text to Canvas.
     """
 
     def __init__(
@@ -428,6 +460,11 @@ class SGLangReceiptDirectorClient:
         max_retries: int = 2,
         action_json_schema: Optional[str] = None,
         action_json_schema_version: Optional[str] = None,
+        enable_thinking: bool = False,
+        two_phase_generation: bool = False,
+        max_reasoning_tokens: Optional[int] = None,
+        max_action_tokens: Optional[int] = None,
+        repetition_penalty: float = 1.0,
     ) -> None:
         if not hasattr(tokenizer, "apply_chat_template") or not hasattr(tokenizer, "decode"):
             raise ValueError("tokenizer must expose apply_chat_template() and decode()")
@@ -472,7 +509,33 @@ class SGLangReceiptDirectorClient:
             )
         if adapter_name is not None and not adapter_name.strip():
             raise ValueError("adapter_name must be non-empty when supplied")
-
+        if type(enable_thinking) is not bool:
+            raise ValueError("enable_thinking must be a bool")
+        if type(two_phase_generation) is not bool:
+            raise ValueError("two_phase_generation must be a bool")
+        if two_phase_generation and not enable_thinking:
+            raise ValueError("two_phase_generation requires enable_thinking=True")
+        if max_reasoning_tokens is not None and (
+            type(max_reasoning_tokens) is not int or max_reasoning_tokens <= 0
+        ):
+            raise ValueError("max_reasoning_tokens must be a positive integer")
+        if max_action_tokens is not None and (
+            type(max_action_tokens) is not int or max_action_tokens <= 0
+        ):
+            raise ValueError("max_action_tokens must be a positive integer")
+        if not two_phase_generation and (
+            max_reasoning_tokens is not None or max_action_tokens is not None
+        ):
+            raise ValueError(
+                "phase token budgets require two_phase_generation=True"
+            )
+        if (
+            isinstance(repetition_penalty, bool)
+            or not isinstance(repetition_penalty, (int, float))
+            or not math.isfinite(float(repetition_penalty))
+            or not 0.0 < float(repetition_penalty) <= 2.0
+        ):
+            raise ValueError("repetition_penalty must be finite and in (0, 2]")
         self.tokenizer = tokenizer
         self.base_url = normalized_base
         self.api_key = api_key
@@ -493,6 +556,11 @@ class SGLangReceiptDirectorClient:
         self.max_retries = int(max_retries)
         self.action_json_schema = action_json_schema
         self.action_json_schema_version = action_json_schema_version
+        self.enable_thinking = enable_thinking
+        self.two_phase_generation = two_phase_generation
+        self.max_reasoning_tokens = int(max_reasoning_tokens or max_tokens)
+        self.max_action_tokens = int(max_action_tokens or max_tokens)
+        self.repetition_penalty = float(repetition_penalty)
 
     @property
     def generate_url(self) -> str:
@@ -551,17 +619,65 @@ class SGLangReceiptDirectorClient:
                 self._expected_server_weight_version,
             )
 
-    def prompt_token_ids(self, prompt: str) -> Tuple[int, ...]:
+    def _prompt_messages(self, prompt: str) -> list[Mapping[str, str]]:
         if not isinstance(prompt, str) or not prompt:
             raise ReceiptValidationError("Director prompt must be non-empty")
         transcript = decode_director_transcript(prompt)
-        messages = (
+        return (
             list(transcript)
             if transcript is not None
             else [
                 {"role": "system", "content": DIRECTOR_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ]
+        )
+
+    def prompt_token_ids(
+        self,
+        prompt: str,
+        *,
+        enable_thinking: Optional[bool] = None,
+    ) -> Tuple[int, ...]:
+        messages = self._prompt_messages(prompt)
+        template_enable_thinking = (
+            self.enable_thinking
+            if enable_thinking is None
+            else enable_thinking
+        )
+        if type(template_enable_thinking) is not bool:
+            raise ReceiptValidationError(
+                "chat-template enable_thinking must be a bool"
+            )
+        try:
+            encoded = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                enable_thinking=template_enable_thinking,
+            )
+        except TypeError as exc:
+            raise ReceiptValidationError(
+                "Qwen3.5 tokenizer must support an explicit enable_thinking bool"
+            ) from exc
+        return _token_ids(encoded, "prompt_token_ids")
+
+    def _action_phase_prompt_token_ids(
+        self,
+        prompt: str,
+        reasoning_text: str,
+    ) -> Tuple[int, ...]:
+        """Render SkillFlow's forward condition through Qwen chat messages."""
+
+        if not isinstance(reasoning_text, str) or not reasoning_text:
+            raise ReceiptValidationError(
+                "two-phase Director reasoning must decode to non-empty text"
+            )
+        messages = self._prompt_messages(prompt)
+        messages.extend(
+            (
+                {"role": "assistant", "content": reasoning_text},
+                {"role": "user", "content": _ACTION_PHASE_INSTRUCTION},
+            )
         )
         try:
             encoded = self.tokenizer.apply_chat_template(
@@ -572,9 +688,9 @@ class SGLangReceiptDirectorClient:
             )
         except TypeError as exc:
             raise ReceiptValidationError(
-                "Qwen3.5 tokenizer must support enable_thinking=False"
+                "Qwen3.5 tokenizer must support enable_thinking=False for ACTION"
             ) from exc
-        return _token_ids(encoded, "prompt_token_ids")
+        return _token_ids(encoded, "action_phase_prompt_token_ids")
 
     def _request_payload(
         self,
@@ -593,10 +709,17 @@ class SGLangReceiptDirectorClient:
         prompt_ids = self.prompt_token_ids(prompt)
         payload: dict[str, Any] = {
             "input_ids": list(prompt_ids),
+            # Local request receipt only.  ``_post_json`` removes this field
+            # before sending the native SGLang payload; ``_parse_response``
+            # validates and materializes it into the exact Director receipt.
+            "_flowsteer_request_metadata": {
+                "chat_template_enable_thinking": self.enable_thinking,
+            },
             "sampling_params": {
                 "temperature": self.temperature,
                 "top_p": self.top_p,
                 "top_k": self.top_k,
+                "repetition_penalty": self.repetition_penalty,
                 "max_new_tokens": self.max_tokens,
                 "skip_special_tokens": False,
                 "spaces_between_special_tokens": False,
@@ -608,6 +731,15 @@ class SGLangReceiptDirectorClient:
             "return_text_in_logprobs": True,
             "stream": False,
         }
+        if self.two_phase_generation:
+            payload["_flowsteer_request_metadata"].update(
+                {
+                    "base_prompt_text": prompt,
+                    "generation_phase": "logical_action",
+                    "generation_seed": seed,
+                    "two_phase_generation": True,
+                }
+            )
         if seed is not None:
             # SkillFlow's OpenAI boundary calls this field ``seed``.  The
             # deployed SGLang 0.5.15 native /generate SamplingParams exposes
@@ -616,6 +748,11 @@ class SGLangReceiptDirectorClient:
             payload["sampling_params"]["sampling_seed"] = (
                 _sglang_backend_sampling_seed(seed)
             )
+        if self.enable_thinking:
+            # SGLang 0.5.15.post1 ReasonerGrammarBackend uses this native flag
+            # to admit reasoning tokens before applying json_schema to the
+            # public action suffix.
+            payload["require_reasoning"] = True
         (
             resolved_action_schema,
             _,
@@ -915,6 +1052,95 @@ class SGLangReceiptDirectorClient:
         self,
         payload: Mapping[str, Any],
     ) -> tuple[Mapping[str, Any], float, int]:
+        """Submit one logical action, optionally as REASONING then ACTION."""
+
+        if not self.two_phase_generation:
+            return await self._post_one_with_retries(payload)
+
+        request_metadata = payload.get("_flowsteer_request_metadata")
+        if not isinstance(request_metadata, Mapping):
+            raise ReceiptValidationError(
+                "two-phase Director request has no local metadata"
+            )
+        prompt = request_metadata.get("base_prompt_text")
+        generation_seed = request_metadata.get("generation_seed")
+        if not isinstance(prompt, str) or not prompt:
+            raise ReceiptValidationError(
+                "two-phase Director request has no base prompt"
+            )
+        if generation_seed is not None:
+            _sglang_backend_sampling_seed(generation_seed)
+
+        reasoning_payload = dict(payload)
+        reasoning_sampling = dict(payload.get("sampling_params", {}))
+        reasoning_sampling.pop("json_schema", None)
+        reasoning_sampling["max_new_tokens"] = self.max_reasoning_tokens
+        if generation_seed is not None:
+            reasoning_sampling["sampling_seed"] = _sglang_backend_sampling_seed(
+                _reasoning_phase_seed(generation_seed)
+            )
+        reasoning_payload["sampling_params"] = reasoning_sampling
+        reasoning_payload["require_reasoning"] = True
+        reasoning_payload["_flowsteer_request_metadata"] = {
+            "base_prompt_text": prompt,
+            "chat_template_enable_thinking": True,
+            "generation_phase": "reasoning",
+            "generation_seed": (
+                None
+                if generation_seed is None
+                else _reasoning_phase_seed(generation_seed)
+            ),
+            "two_phase_generation": True,
+        }
+        reasoning_value, reasoning_latency_ms, reasoning_attempt_count = (
+            await self._post_one_with_retries(reasoning_payload)
+        )
+        _, adapter_name, expected_server_weight_version = self._policy_route()
+        reasoning_receipt, reasoning_text = self._reasoning_phase_receipt(
+            reasoning_payload,
+            reasoning_value,
+            adapter_name=adapter_name,
+            expected_server_weight_version=expected_server_weight_version,
+            latency_ms=reasoning_latency_ms,
+            attempt_count=reasoning_attempt_count,
+        )
+
+        action_payload = dict(payload)
+        action_sampling = dict(payload.get("sampling_params", {}))
+        action_sampling["max_new_tokens"] = self.max_action_tokens
+        action_payload["input_ids"] = list(
+            self._action_phase_prompt_token_ids(prompt, reasoning_text)
+        )
+        action_payload["logprob_start_len"] = len(action_payload["input_ids"])
+        action_payload["sampling_params"] = action_sampling
+        action_payload.pop("require_reasoning", None)
+        action_payload["_flowsteer_request_metadata"] = {
+            "base_prompt_text": prompt,
+            "chat_template_enable_thinking": False,
+            "generation_phase": "action",
+            "generation_seed": generation_seed,
+            "two_phase_generation": True,
+        }
+        action_value, action_latency_ms, action_attempt_count = (
+            await self._post_one_with_retries(action_payload)
+        )
+        value_with_receipt = dict(action_value)
+        value_with_receipt["_flowsteer_two_phase_context"] = {
+            "action_payload": action_payload,
+            "action_latency_ms": action_latency_ms,
+            "action_attempt_count": action_attempt_count,
+            "reasoning_receipt": reasoning_receipt,
+        }
+        return (
+            value_with_receipt,
+            reasoning_latency_ms + action_latency_ms,
+            reasoning_attempt_count + action_attempt_count,
+        )
+
+    async def _post_one_with_retries(
+        self,
+        payload: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], float, int]:
         """Submit one exact SGLang generation phase with transport retries."""
 
         last_error: BaseException | None = None
@@ -941,6 +1167,145 @@ class SGLangReceiptDirectorClient:
             else type(last_error).__name__
         )
         raise DirectorError(f"SGLang Director request failed: {detail}") from last_error
+
+    def _reasoning_phase_receipt(
+        self,
+        payload: Mapping[str, Any],
+        value: Mapping[str, Any],
+        *,
+        adapter_name: Optional[str],
+        expected_server_weight_version: Optional[str],
+        latency_ms: float,
+        attempt_count: int,
+    ) -> tuple[Mapping[str, Any], str]:
+        """Validate one hidden REASONING call without exposing it to Canvas."""
+
+        raw_text = value.get("text")
+        meta_info = value.get("meta_info")
+        if not isinstance(raw_text, str) or not isinstance(meta_info, Mapping):
+            raise ReceiptValidationError(
+                "SGLang REASONING response is missing text or meta_info"
+            )
+        output_ids, behavior_log_probs = _behavior_receipt(
+            meta_info.get("output_token_logprobs")
+        )
+        if self._decode(output_ids) != raw_text:
+            raise ReceiptValidationError(
+                "SGLang REASONING text does not match sampled token IDs"
+            )
+        if "output_ids" in value:
+            direct_output_ids = _token_ids(value["output_ids"], "output_ids")
+            if direct_output_ids != output_ids:
+                raise ReceiptValidationError(
+                    "SGLang REASONING output_ids disagree with log-prob token IDs"
+                )
+
+        prompt_ids = _token_ids(payload.get("input_ids"), "prompt_token_ids")
+        request_metadata = payload.get("_flowsteer_request_metadata")
+        if (
+            not isinstance(request_metadata, Mapping)
+            or request_metadata.get("generation_phase") != "reasoning"
+            or request_metadata.get("chat_template_enable_thinking") is not True
+            or payload.get("require_reasoning") is not True
+        ):
+            raise ReceiptValidationError(
+                "REASONING request lacks its thinking-phase receipt"
+            )
+        sampling = payload.get("sampling_params")
+        if not isinstance(sampling, Mapping) or "json_schema" in sampling:
+            raise ReceiptValidationError(
+                "REASONING phase must not carry the ACTION JSON Schema"
+            )
+        if sampling.get("max_new_tokens") != self.max_reasoning_tokens:
+            raise ReceiptValidationError(
+                "REASONING phase token budget differs from the client"
+            )
+        if sampling.get("repetition_penalty") != self.repetition_penalty:
+            raise ReceiptValidationError(
+                "REASONING phase repetition penalty differs from the client"
+            )
+
+        prompt_count = _exact_count(meta_info.get("prompt_tokens"), "prompt_tokens")
+        completion_count = _exact_count(
+            meta_info.get("completion_tokens"), "completion_tokens"
+        )
+        if prompt_count is not None and prompt_count != len(prompt_ids):
+            raise ReceiptValidationError(
+                "SGLang REASONING prompt count differs from input_ids"
+            )
+        if completion_count is not None and completion_count != len(output_ids):
+            raise ReceiptValidationError(
+                "SGLang REASONING completion count differs from its receipt"
+            )
+        reasoning_tokens = _exact_count(
+            meta_info.get("reasoning_tokens"), "reasoning_tokens"
+        )
+        if reasoning_tokens is None or reasoning_tokens <= 0:
+            raise ReceiptValidationError(
+                "thinking-enabled REASONING response has no reasoning tokens"
+            )
+        if reasoning_tokens > len(output_ids):
+            raise ReceiptValidationError(
+                "SGLang REASONING token count exceeds completion tokens"
+            )
+        reasoning_token_ids = output_ids[:reasoning_tokens]
+        reasoning_log_probs = behavior_log_probs[:reasoning_tokens]
+        suffix_token_ids = output_ids[reasoning_tokens:]
+        suffix_log_probs = behavior_log_probs[reasoning_tokens:]
+        reasoning_text = self._decode(reasoning_token_ids)
+        if not reasoning_text:
+            raise ReceiptValidationError("REASONING tokens decode to empty text")
+
+        raw_server_weight_version = meta_info.get("weight_version")
+        if (
+            isinstance(raw_server_weight_version, bool)
+            or raw_server_weight_version is None
+        ):
+            raise ReceiptValidationError(
+                "SGLang REASONING response has no weight_version"
+            )
+        server_weight_version = str(raw_server_weight_version).strip()
+        if not server_weight_version:
+            raise ReceiptValidationError(
+                "SGLang REASONING response has an empty weight_version"
+            )
+        if (
+            expected_server_weight_version is not None
+            and server_weight_version != expected_server_weight_version
+        ):
+            raise ReceiptValidationError(
+                "SGLang REASONING weight_version differs from the expected server"
+            )
+
+        receipt = {
+            "phase": "reasoning",
+            "prompt_token_ids": prompt_ids,
+            "output_token_ids": output_ids,
+            "behavior_log_probs": behavior_log_probs,
+            "reasoning_token_ids": reasoning_token_ids,
+            "reasoning_behavior_log_probs": reasoning_log_probs,
+            "unconsumed_suffix_token_ids": suffix_token_ids,
+            "unconsumed_suffix_behavior_log_probs": suffix_log_probs,
+            "request_id": meta_info.get("id"),
+            "finish_reason": meta_info.get("finish_reason"),
+            "prompt_tokens": len(prompt_ids),
+            "completion_tokens": len(output_ids),
+            "reasoning_tokens": reasoning_tokens,
+            "reasoning_characters": len(reasoning_text),
+            "unconsumed_suffix_tokens": len(suffix_token_ids),
+            "latency_ms": latency_ms,
+            "attempt_count": attempt_count,
+            "generation_seed": request_metadata.get("generation_seed"),
+            "backend_sampling_seed": sampling.get("sampling_seed"),
+            "chat_template_enable_thinking": True,
+            "max_new_tokens": self.max_reasoning_tokens,
+            "repetition_penalty": self.repetition_penalty,
+            "server_weight_version": server_weight_version,
+            "adapter_name": adapter_name,
+            "requested_lora_path": payload.get("lora_path"),
+            "receipt_verified": True,
+        }
+        return receipt, reasoning_text
 
     @staticmethod
     def _hierarchical_choice(
@@ -1030,6 +1395,32 @@ class SGLangReceiptDirectorClient:
             "backend_sampling_seed": metadata.get("backend_sampling_seed"),
             "server_weight_version": metadata.get("server_weight_version"),
             "receipt_verified": metadata.get("receipt_verified"),
+            "chat_template_enable_thinking": metadata.get(
+                "chat_template_enable_thinking"
+            ),
+            "reasoning_tokens": metadata.get("reasoning_tokens"),
+            "reasoning_content_present": metadata.get(
+                "reasoning_content_present"
+            ),
+            "reasoning_characters": metadata.get("reasoning_characters"),
+            "action_token_offset": metadata.get("action_token_offset"),
+            "repetition_penalty": metadata.get("repetition_penalty"),
+            "generation_strategy": metadata.get("generation_strategy"),
+            "generation_request_count": metadata.get(
+                "generation_request_count"
+            ),
+            "generation_phase_receipts": metadata.get(
+                "generation_phase_receipts"
+            ),
+            "max_reasoning_tokens": metadata.get("max_reasoning_tokens"),
+            "max_action_tokens": metadata.get("max_action_tokens"),
+            "two_phase_generation": metadata.get("two_phase_generation"),
+            "phase_logprob_factorization": metadata.get(
+                "phase_logprob_factorization"
+            ),
+            "single_autoregressive_receipt": metadata.get(
+                "single_autoregressive_receipt"
+            ),
         }
         if metadata.get("action_target_domain_version") is not None:
             receipt["action_json_schema_version"] = metadata.get(
@@ -1744,9 +2135,11 @@ class SGLangReceiptDirectorClient:
         return DirectorResponse(text=response.text, metadata=metadata)
 
     def _post_json(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        wire_payload = dict(payload)
+        wire_payload.pop("_flowsteer_request_metadata", None)
         request = Request(
             self.generate_url,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            data=json.dumps(wire_payload, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
@@ -1793,15 +2186,38 @@ class SGLangReceiptDirectorClient:
         attempt_count: int,
         generation_seed: Optional[int] = None,
     ) -> DirectorResponse:
-        text = value.get("text")
+        two_phase_context = value.get("_flowsteer_two_phase_context")
+        if self.two_phase_generation:
+            if not isinstance(two_phase_context, Mapping):
+                raise ReceiptValidationError(
+                    "two-phase Director response has no phase context"
+                )
+            action_payload = two_phase_context.get("action_payload")
+            reasoning_receipt = two_phase_context.get("reasoning_receipt")
+            if not isinstance(action_payload, Mapping) or not isinstance(
+                reasoning_receipt, Mapping
+            ):
+                raise ReceiptValidationError(
+                    "two-phase Director response has incomplete phase receipts"
+                )
+            receipt_payload = action_payload
+        else:
+            if two_phase_context is not None:
+                raise ReceiptValidationError(
+                    "single-phase Director received an unexpected phase context"
+                )
+            reasoning_receipt = None
+            receipt_payload = payload
+
+        raw_text = value.get("text")
         meta_info = value.get("meta_info")
-        if not isinstance(text, str) or not isinstance(meta_info, Mapping):
+        if not isinstance(raw_text, str) or not isinstance(meta_info, Mapping):
             raise ReceiptValidationError("SGLang response is missing text or meta_info")
 
         output_ids, behavior_log_probs = _behavior_receipt(
             meta_info.get("output_token_logprobs")
         )
-        if self._decode(output_ids) != text:
+        if self._decode(output_ids) != raw_text:
             raise ReceiptValidationError(
                 "SGLang output text does not exactly match its sampled token IDs"
             )
@@ -1812,7 +2228,44 @@ class SGLangReceiptDirectorClient:
                     "SGLang output_ids disagree with output_token_logprobs token IDs"
                 )
 
-        prompt_ids = _token_ids(payload.get("input_ids"), "prompt_token_ids")
+        prompt_ids = _token_ids(
+            receipt_payload.get("input_ids"), "prompt_token_ids"
+        )
+        request_metadata = receipt_payload.get("_flowsteer_request_metadata")
+        if not isinstance(request_metadata, Mapping):
+            raise ReceiptValidationError(
+                "Director request has no chat-template metadata receipt"
+            )
+        receipt_enable_thinking = request_metadata.get(
+            "chat_template_enable_thinking"
+        )
+        expected_phase_thinking = False if self.two_phase_generation else self.enable_thinking
+        if (
+            type(receipt_enable_thinking) is not bool
+            or receipt_enable_thinking is not expected_phase_thinking
+        ):
+            raise ReceiptValidationError(
+                "Director chat-template thinking receipt does not match the client"
+            )
+        if self.two_phase_generation and request_metadata.get(
+            "generation_phase"
+        ) != "action":
+            raise ReceiptValidationError(
+                "two-phase Director ACTION request has the wrong phase receipt"
+            )
+        sampling = receipt_payload.get("sampling_params")
+        if not isinstance(sampling, Mapping):
+            raise ReceiptValidationError("Director request has no sampling receipt")
+        if sampling.get("repetition_penalty") != self.repetition_penalty:
+            raise ReceiptValidationError(
+                "Director repetition penalty differs from the client"
+            )
+        if self.two_phase_generation and sampling.get(
+            "max_new_tokens"
+        ) != self.max_action_tokens:
+            raise ReceiptValidationError(
+                "ACTION phase token budget differs from the client"
+            )
         prompt_count = _exact_count(meta_info.get("prompt_tokens"), "prompt_tokens")
         completion_count = _exact_count(
             meta_info.get("completion_tokens"), "completion_tokens"
@@ -1825,6 +2278,40 @@ class SGLangReceiptDirectorClient:
             raise ReceiptValidationError(
                 "SGLang completion token count disagrees with its behavior receipt"
             )
+
+        raw_reasoning_tokens = meta_info.get("reasoning_tokens")
+        if raw_reasoning_tokens is None:
+            reasoning_tokens = 0
+        else:
+            reasoning_tokens = _exact_count(
+                raw_reasoning_tokens,
+                "reasoning_tokens",
+            )
+            assert reasoning_tokens is not None
+        if reasoning_tokens > len(output_ids):
+            raise ReceiptValidationError(
+                "SGLang reasoning token count exceeds completion tokens"
+            )
+        if receipt_enable_thinking:
+            if receipt_payload.get("require_reasoning") is not True:
+                raise ReceiptValidationError(
+                    "thinking-enabled Director request lacks require_reasoning=true"
+                )
+            if reasoning_tokens <= 0:
+                raise ReceiptValidationError(
+                    "thinking-enabled SGLang response has no reasoning_tokens receipt"
+                )
+        elif reasoning_tokens != 0:
+            raise ReceiptValidationError(
+                "thinking-disabled SGLang response unexpectedly contains reasoning tokens"
+            )
+        reasoning_text = self._decode(output_ids[:reasoning_tokens])
+        action_token_ids = output_ids[reasoning_tokens:]
+        if not action_token_ids:
+            raise ReceiptValidationError(
+                "SGLang response has no public Canvas action tokens"
+            )
+        text = self._decode(action_token_ids)
 
         raw_server_weight_version = meta_info.get("weight_version")
         if isinstance(raw_server_weight_version, bool) or raw_server_weight_version is None:
@@ -1840,33 +2327,169 @@ class SGLangReceiptDirectorClient:
                 "SGLang server weight_version does not match the expected server receipt"
             )
 
+        if self.two_phase_generation:
+            assert reasoning_receipt is not None
+            if reasoning_receipt.get("receipt_verified") is not True:
+                raise ReceiptValidationError(
+                    "two-phase REASONING receipt is not verified"
+                )
+            if reasoning_receipt.get(
+                "server_weight_version"
+            ) != server_weight_version:
+                raise ReceiptValidationError(
+                    "REASONING and ACTION used different server weights"
+                )
+            if reasoning_receipt.get("adapter_name") != adapter_name:
+                raise ReceiptValidationError(
+                    "REASONING and ACTION used different adapters"
+                )
+            overall_reasoning_tokens = _exact_count(
+                reasoning_receipt.get("reasoning_tokens"),
+                "reasoning_phase.reasoning_tokens",
+            )
+            overall_reasoning_characters = _exact_count(
+                reasoning_receipt.get("reasoning_characters"),
+                "reasoning_phase.reasoning_characters",
+            )
+            assert overall_reasoning_tokens is not None
+            assert overall_reasoning_characters is not None
+            reasoning_token_ids = _token_ids(
+                reasoning_receipt.get("reasoning_token_ids"),
+                "reasoning_phase.reasoning_token_ids",
+            )
+            raw_reasoning_log_probs = reasoning_receipt.get(
+                "reasoning_behavior_log_probs"
+            )
+            if not isinstance(raw_reasoning_log_probs, (list, tuple)) or len(
+                raw_reasoning_log_probs
+            ) != len(reasoning_token_ids):
+                raise ReceiptValidationError(
+                    "REASONING log-prob receipt must match its sampled span"
+                )
+            _, reasoning_behavior_log_probs = _behavior_receipt(
+                list(zip(raw_reasoning_log_probs, reasoning_token_ids))
+            )
+            if overall_reasoning_tokens != len(reasoning_token_ids):
+                raise ReceiptValidationError(
+                    "REASONING token count differs from its sampled span"
+                )
+            base_prompt_ids = _token_ids(
+                payload.get("input_ids"), "base_prompt_token_ids"
+            )
+            # Preserve the ordered joint phase product required by the MD and
+            # SkillFlow trajectory contract.  The nested phase prompts remain
+            # authoritative: this is two conditioned calls, not one
+            # autoregressive completion from ``base_prompt_ids``.
+            top_prompt_ids = base_prompt_ids
+            top_output_ids = reasoning_token_ids + output_ids
+            top_behavior_log_probs = (
+                reasoning_behavior_log_probs + behavior_log_probs
+            )
+            action_token_offset = len(reasoning_token_ids)
+        else:
+            overall_reasoning_tokens = reasoning_tokens
+            overall_reasoning_characters = len(reasoning_text)
+            top_prompt_ids = prompt_ids
+            top_output_ids = output_ids
+            top_behavior_log_probs = behavior_log_probs
+            action_token_offset = reasoning_tokens
+
         metadata = {
                 "prompt_text": prompt,
-                "prompt_token_ids": prompt_ids,
-                "output_token_ids": output_ids,
-                "behavior_log_probs": behavior_log_probs,
+                "prompt_token_ids": top_prompt_ids,
+                "output_token_ids": top_output_ids,
+                "behavior_log_probs": top_behavior_log_probs,
                 "policy_version": policy_version,
                 "server_weight_version": server_weight_version,
                 "adapter_name": adapter_name,
-                "requested_lora_path": payload.get("lora_path"),
+                "requested_lora_path": receipt_payload.get("lora_path"),
                 "request_id": meta_info.get("id"),
                 "finish_reason": meta_info.get("finish_reason"),
-                "prompt_tokens": len(prompt_ids),
-                "completion_tokens": len(output_ids),
+                "prompt_tokens": len(top_prompt_ids),
+                "completion_tokens": len(top_output_ids),
                 "latency_ms": latency_ms,
                 "attempt_count": attempt_count,
                 "generation_seed": (
                     generation_seed
                     if generation_seed is not None
-                    else payload.get("sampling_params", {}).get("sampling_seed")
+                    else sampling.get("sampling_seed")
                 ),
-                "backend_sampling_seed": payload.get(
-                    "sampling_params", {}
-                ).get("sampling_seed"),
+                "backend_sampling_seed": sampling.get("sampling_seed"),
+                "action_json_schema_version": action_json_schema_version,
+                "action_schema_branch": action_schema_branch,
+                "chat_template_enable_thinking": self.enable_thinking,
+                "reasoning_tokens": overall_reasoning_tokens,
+                "reasoning_content_present": overall_reasoning_tokens > 0,
+                "reasoning_characters": overall_reasoning_characters,
+                "action_token_offset": action_token_offset,
+                "repetition_penalty": self.repetition_penalty,
+                "receipt_verified": True,
+            }
+        if self.two_phase_generation:
+            assert reasoning_receipt is not None
+            action_latency_ms = two_phase_context.get("action_latency_ms")
+            action_attempt_count = two_phase_context.get("action_attempt_count")
+            if (
+                isinstance(action_latency_ms, bool)
+                or not isinstance(action_latency_ms, (int, float))
+                or float(action_latency_ms) < 0
+                or type(action_attempt_count) is not int
+                or action_attempt_count <= 0
+            ):
+                raise ReceiptValidationError(
+                    "two-phase ACTION transport receipt is invalid"
+                )
+            action_phase_receipt = {
+                "phase": "action",
+                "base_prompt_text": prompt,
+                "prompt_token_ids": prompt_ids,
+                "output_token_ids": output_ids,
+                "behavior_log_probs": behavior_log_probs,
+                "text": text,
+                "request_id": meta_info.get("id"),
+                "finish_reason": meta_info.get("finish_reason"),
+                "prompt_tokens": len(prompt_ids),
+                "completion_tokens": len(output_ids),
+                "latency_ms": float(action_latency_ms),
+                "attempt_count": action_attempt_count,
+                "generation_seed": generation_seed,
+                "backend_sampling_seed": sampling.get("sampling_seed"),
+                "chat_template_enable_thinking": False,
+                "max_new_tokens": self.max_action_tokens,
+                "repetition_penalty": self.repetition_penalty,
+                "server_weight_version": server_weight_version,
+                "adapter_name": adapter_name,
+                "requested_lora_path": receipt_payload.get("lora_path"),
                 "action_json_schema_version": action_json_schema_version,
                 "action_schema_branch": action_schema_branch,
                 "receipt_verified": True,
             }
+            metadata.update(
+                {
+                    "action_phase_chat_template_enable_thinking": False,
+                    "generation_phase_receipts": {
+                        "reasoning": dict(reasoning_receipt),
+                        "action": action_phase_receipt,
+                    },
+                    "generation_request_count": 2,
+                    "generation_strategy": _TWO_PHASE_GENERATION_STRATEGY,
+                    "max_reasoning_tokens": self.max_reasoning_tokens,
+                    "max_action_tokens": self.max_action_tokens,
+                    "phase_logprob_factorization": (
+                        "p(reasoning|base_prompt)*"
+                        "p(action|base_prompt,reasoning)"
+                    ),
+                    "single_autoregressive_receipt": False,
+                    "total_prompt_tokens": (
+                        int(reasoning_receipt["prompt_tokens"]) + len(prompt_ids)
+                    ),
+                    "total_completion_tokens": (
+                        int(reasoning_receipt["completion_tokens"])
+                        + len(output_ids)
+                    ),
+                    "two_phase_generation": True,
+                }
+            )
         if action_target_domain_version is not None:
             metadata["action_target_domains_json"] = action_target_domains_json
             metadata["action_target_domain_version"] = action_target_domain_version
@@ -1885,18 +2508,29 @@ class SGLangReceiptDirectorClient:
             raise ReceiptValidationError("Director response is not an exact receipt")
         if metadata.get("prompt_text") is None:
             raise ReceiptValidationError("Director receipt has no prompt binding")
+        action_token_offset = metadata.get("action_token_offset")
+        if (
+            type(action_token_offset) is not int
+            or not 0 <= action_token_offset < len(output_ids)
+        ):
+            raise ReceiptValidationError(
+                "Director response has an invalid action-token offset receipt"
+            )
         if not (0 <= action.consumed_start < action.consumed_end <= len(response.text)):
             raise ReceiptValidationError("parsed action has an invalid consumed character span")
         if response.text[action.consumed_start : action.consumed_end] != action.raw_json:
             raise ReceiptValidationError("parsed action span disagrees with the sampled text")
-        if self._decode(output_ids) != response.text:
-            raise ReceiptValidationError("sampled text/token IDs changed after receipt creation")
+        action_output_ids = output_ids[action_token_offset:]
+        if self._decode(action_output_ids) != response.text:
+            raise ReceiptValidationError(
+                "public action text/token IDs changed after receipt creation"
+            )
 
         consumed_text = response.text[: action.consumed_end]
-        for count in range(1, len(output_ids) + 1):
-            decoded_prefix = self._decode(output_ids[:count])
+        for action_count in range(1, len(action_output_ids) + 1):
+            decoded_prefix = self._decode(action_output_ids[:action_count])
             if decoded_prefix.startswith(consumed_text):
-                return count
+                return action_token_offset + action_count
         raise ReceiptValidationError(
             "the Canvas-consumed character prefix is not a sampled token prefix"
         )
@@ -3794,6 +4428,44 @@ class AgentGraphRolloutCollector:
             runtime_summary["director_backend_sampling_seed"] = (
                 metadata.get("backend_sampling_seed")
             )
+            runtime_summary["director_chat_template_enable_thinking"] = (
+                metadata.get("chat_template_enable_thinking")
+            )
+            runtime_summary["director_reasoning_tokens"] = metadata.get(
+                "reasoning_tokens"
+            )
+            runtime_summary["director_reasoning_content_present"] = metadata.get(
+                "reasoning_content_present"
+            )
+            runtime_summary["director_reasoning_characters"] = metadata.get(
+                "reasoning_characters"
+            )
+            runtime_summary["director_action_token_offset"] = metadata.get(
+                "action_token_offset"
+            )
+            runtime_summary["director_repetition_penalty"] = metadata.get(
+                "repetition_penalty"
+            )
+            if metadata.get("two_phase_generation") is True:
+                runtime_summary["director_two_phase_generation"] = True
+                runtime_summary["director_generation_strategy"] = metadata.get(
+                    "generation_strategy"
+                )
+                runtime_summary["director_generation_phase_receipts"] = (
+                    metadata.get("generation_phase_receipts")
+                )
+                runtime_summary["director_max_reasoning_tokens"] = metadata.get(
+                    "max_reasoning_tokens"
+                )
+                runtime_summary["director_max_action_tokens"] = metadata.get(
+                    "max_action_tokens"
+                )
+                runtime_summary["director_phase_logprob_factorization"] = (
+                    metadata.get("phase_logprob_factorization")
+                )
+                runtime_summary["director_single_autoregressive_receipt"] = (
+                    metadata.get("single_autoregressive_receipt")
+                )
             availability_receipt = env.model_availability_receipt()
             if availability_receipt["failure_receipts"]:
                 runtime_summary["model_availability"] = {

@@ -4585,6 +4585,14 @@ class AgentWorkflowEnv:
                                 "title",
                                 "date",
                                 "url",
+                                # SkillFlow's BM25 adapter already measures
+                                # these relevance fields.  Preserve them in
+                                # the bounded Director receipt so later Canvas
+                                # edits can distinguish weak lexical matches
+                                # from stronger evidence without copying the
+                                # passage body or evaluator truth.
+                                "score",
+                                "matched_terms",
                             )
                             if evidence.get(field_name) is not None
                         }

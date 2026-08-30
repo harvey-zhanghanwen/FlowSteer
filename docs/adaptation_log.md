@@ -928,3 +928,116 @@ change was made during profile selection.
   action-target-domain receipt used v12; `SET_OUTPUT` made zero executor calls.
   Model-visible Director/Agent prompts contained no rubric, physician response,
   reference response, grader output or canary field.
+
+## 2026-08-30: HealthBench Qwen3.5 thinking condition v4
+
+- Added an independent Qwen3.5-9B catalog and evaluation namespace with
+  `chat_template_enable_thinking=true` for Direct, AgentGraph Executors, and
+  the Director. The frozen 525 public-test tasks, seed, Tool condition, grader,
+  and v3 free AgentGraph search space are unchanged. The total per-Action
+  completion budget was increased from 1,024 to 4,096 tokens, but hidden
+  reasoning and the public JSON action still share it; later v4 receipts
+  observed length termination, so this is not a non-truncating guarantee. v4
+  is also not a controlled thinking-only ablation.
+- Kept ReAct strictly as an Agent `execution_mode`. No Agent role, medical role,
+  topology, or minimum Agent count was introduced.
+- Wired Director thinking through the tokenizer chat template and native
+  SGLang `require_reasoning` flag while retaining the existing JSON Schema for
+  the public Canvas action. The server `reasoning_tokens` boundary separates
+  hidden reasoning from that action; hidden reasoning plaintext is not routed
+  or stored as a text field. The existing exact output token IDs/log-probability
+  receipt still contains the reasoning prefix and is tokenizer-reconstructible.
+- Extended Executor receipts with the explicit thinking request and bounded
+  reasoning presence/count metadata. The hidden `reasoning_content` body is
+  deliberately excluded from receipts and Agent communication. On the current
+  OpenAI-compatible SGLang response, `reasoning_content_present=true` and the
+  character count demonstrate applied thinking, while `reasoning_tokens=0`
+  denotes an unavailable provider token count rather than no reasoning.
+- The first v4 two-task attempt generated both Direct calls but failed closed
+  before grading because its nested scientific-sampling receipt omitted the
+  already requested thinking flag. Added that missing result-affecting field to
+  the existing receipt projection; no model, prompt, sample, Tool, or evaluator
+  condition changed.
+- Re-ran the same two-task canary after the receipt repair. Both Direct and
+  AgentGraph arms completed model generation, Tool execution, valid rubric
+  grading, explicit `FINISH`, terminal Artifact storage, and full trajectory
+  receipts. Stable Zero passed 2/2 with zero terminal failures. These two
+  samples validate the chain only and are not a 525-task score estimate.
+- The 525-task v4 formal evaluation was started only after the successful
+  Stable Zero gate. No training, GRPO, LoRA, backward pass, optimizer update,
+  MACE, Bayesian update, Skill injection, or Skill evolution is enabled.
+
+## 2026-08-30: HealthBench two-phase Director and paired ReAct v5/v6
+
+- Diagnosed the interrupted v4 formal checkpoint without altering it. Among
+  125 completed Graph trajectories, all used one Agent and no relation because
+  `finish_only_when_admissible=true` reduced the post-Output action mask to
+  `FINISH` only. This was an action-space defect, not evidence that free
+  topology had been learned or rejected by reward.
+- Added SkillFlow-style two-phase Director generation: a bounded 512-token
+  REASONING call followed by a separately schema-constrained ACTION call.
+  Per-phase exact receipts are retained, the Canvas receives only ACTION, and
+  metadata states that the two calls are not one autoregressive training
+  receipt. The condition is evaluation-only.
+- Set `finish_only_when_admissible=false`. `FINISH` remains legal as soon as the
+  current public Output is admissible, while ADD/MODIFY/relation edits remain
+  available when they can change the Graph. No minimum Agent count, relation,
+  reciprocal edge, medical role, or fixed workflow was introduced.
+- Preserved SkillFlow BM25 `score` and `matched_terms` through the authoritative
+  evidence aggregation and bounded Director provenance; PubMed records retain
+  only their real source metadata.
+- The v5 two-task Stable Zero chain passed 2/2 with evaluator-valid Direct and
+  AgentGraph responses, explicit FINISH, terminal Artifact, Output inbox, and
+  verified two-phase receipts. It was rejected as a paired comparison because
+  one Graph chose Tool-free reasoning while Direct used ReAct+Tool.
+- Created an independent v6 condition rather than relabelling or resuming v5.
+  v6 adds a task-scoped execution-profile allowlist equal to Direct
+  `react + [healthbench-authoritative.search]`. The allowlist reuses the
+  existing Runtime capability/action-mask/dispatch path and leaves Agent IDs,
+  models, free-text contracts, counts, relations, Output and topology free.
+- Added fail-closed preflight and provenance: the v6 allowlist must exactly
+  equal Direct execution mode and Tool IDs, and is recorded in manifest,
+  Direct generation identity, paired receipt, and report. The comparison must
+  be labelled fixed-protocol/free-topology and not compute-matched.
+- No training, backward, optimizer update, GRPO, LoRA, MACE, Bayesian update,
+  Skill retrieval/injection/evolution, medical memory, or benchmark-answer
+  retrieval is enabled.
+
+## 2026-08-31: HealthBench v6 formal public-test evaluation
+
+- Completed the frozen 525-task public-test condition
+  `healthbench_professional_react_paired_two_phase_artifact_v6_gpt54_rubric`.
+  No task, model, Tool, seed, generation setting, evaluator, or topology rule
+  changed while the batch was running.
+- The Single-Agent ReAct comparator produced 524 evaluator-valid responses;
+  one ReAct execution exhausted six turns without a valid completion and is
+  retained as the manifest-declared strict-zero terminal failure. Its strict
+  `overall_score_length_adjusted` is `0.2380870546` and strict raw score is
+  `0.2213730706` over the full denominator of 525.
+- Free AgentGraph produced 525/525 evaluator-valid responses, 525 explicit
+  `FINISH` actions, zero `max_rounds`, zero Graph terminal failures, and zero
+  terminal parsing failures. Its strict `overall_score_length_adjusted` is
+  `0.1771755622` and strict raw score is `0.1759485462`.
+- AgentGraph therefore trails the comparator by `0.0609114924` on the primary
+  length-adjusted metric and by `0.0454245244` on raw score. This is a
+  descriptive separate-protocol comparison, not a compute-matched causal
+  estimate: AgentGraph adds Director calls and may add Executor calls.
+- The untrained Director selected 522 singleton Graphs and only three
+  two-Agent serial Graphs; it selected no three-Agent or non-chain topology.
+  All three two-Agent cases scored below their corresponding Direct response.
+  The action mask left graph editing available, so this is observed policy
+  collapse rather than a forced singleton topology.
+- The offline mutually exclusive taxonomy contains 478 below-full-score Graph
+  cases: 350 rubric/response-quality shortfalls, 40 terminal character-length
+  adjustments, 84 recovered Director action parsing/recovery anomalies, and 4
+  recovered Canvas relation/edit anomalies. Final Tool execution, Agent
+  runtime, output extraction, evaluator operation, and max-rounds categories
+  are each zero; this does not prove that every retrieved passage was
+  semantically sufficient.
+- Updated the existing offline failure-demo adapter to accept an absent Direct
+  response only when the run manifest, paired strict-zero record, and
+  append-only ReAct exhaustion receipt all agree. Ordinary population mismatch
+  still fails closed. Full conversation/rubric/private demos remain outside
+  Git and model input.
+- No training, backward pass, optimizer update, LoRA, GRPO, MACE, Bayesian
+  update, Skill injection/evolution, or benchmark-answer retrieval ran.

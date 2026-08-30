@@ -133,6 +133,13 @@ def supports_local_sglang_repetition_penalty(request: AgentRequest) -> bool:
 def _requested_sampling(payload: Mapping[str, Any]) -> Dict[str, Any]:
     """Project only the decoding fields placed on the provider request."""
 
+    chat_template_kwargs = payload.get("chat_template_kwargs")
+    chat_template_enable_thinking = (
+        chat_template_kwargs.get("enable_thinking")
+        if isinstance(chat_template_kwargs, Mapping)
+        else None
+    )
+
     return {
         "temperature": payload.get("temperature"),
         "top_p": payload.get("top_p"),
@@ -140,6 +147,7 @@ def _requested_sampling(payload: Mapping[str, Any]) -> Dict[str, Any]:
         "repetition_penalty": payload.get("repetition_penalty"),
         "max_tokens": payload.get("max_tokens"),
         "seed": payload.get("seed"),
+        "chat_template_enable_thinking": chat_template_enable_thinking,
     }
 
 
@@ -1130,6 +1138,14 @@ class OpenAICompatibleGateway:
         if not isinstance(message, dict) or not isinstance(message.get("content"), str):
             raise OpenAICompatibleGatewayError("provider response has no text message content")
         usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+        completion_token_details = (
+            usage.get("completion_tokens_details")
+            if isinstance(usage.get("completion_tokens_details"), Mapping)
+            else {}
+        )
+        reasoning_tokens = completion_token_details.get("reasoning_tokens")
+        if isinstance(reasoning_tokens, bool) or not isinstance(reasoning_tokens, int):
+            reasoning_tokens = 0
         metadata = {
             "provider_id": request.provider.provider_id,
             "model_id": request.model.model_id,
@@ -1139,6 +1155,18 @@ class OpenAICompatibleGateway:
             "completion_tokens": usage.get("completion_tokens"),
             "total_tokens": usage.get("total_tokens"),
             "provider_request_id": response.get("id"),
+            # Keep the hidden reasoning body out of Agent artifacts while
+            # retaining a public receipt that the provider returned one.
+            "reasoning_content_present": isinstance(
+                message.get("reasoning_content"), str
+            )
+            and bool(message.get("reasoning_content")),
+            "reasoning_content_characters": (
+                len(message["reasoning_content"])
+                if isinstance(message.get("reasoning_content"), str)
+                else 0
+            ),
+            "reasoning_tokens": reasoning_tokens,
         }
         return AgentResponse(text=message["content"], metadata=metadata)
 

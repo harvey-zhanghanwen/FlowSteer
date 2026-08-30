@@ -77,6 +77,90 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_execution_profile_allowlist_filters_capability_boundary_and_execution(
+        self,
+    ) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        tool_registry = self._stateful_tool_registry()
+        profile = ("react", ("webshop.environment",))
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            execution_adapters={
+                "react": ReasoningExecutionAdapter(gateway),
+            },
+            tool_registry=tool_registry,
+            dataset_id="webshop",
+            execution_profile_allowlist=(profile,),
+        )
+
+        self.assertEqual((profile,), runtime.registered_execution_profiles())
+        runtime.validate_execution_contracts(
+            (
+                AgentNode(
+                    "react_node",
+                    "m1",
+                    "Use the admitted Tool and return a complete artifact.",
+                    execution_mode="react",
+                    allowed_tools=("webshop.environment",),
+                ),
+            )
+        )
+        with self.assertRaisesRegex(
+            AgentRuntimeError,
+            "outside the active execution_profile_allowlist",
+        ):
+            runtime.validate_execution_contracts(
+                (
+                    AgentNode(
+                        "reasoning_node",
+                        "m1",
+                        "Answer without a Tool.",
+                    ),
+                )
+            )
+
+    def test_execution_profile_allowlist_is_nonempty_registered_and_unique(
+        self,
+    ) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        tool_registry = self._stateful_tool_registry()
+        arguments = {
+            "execution_adapters": {
+                "react": ReasoningExecutionAdapter(gateway),
+            },
+            "tool_registry": tool_registry,
+            "dataset_id": "webshop",
+        }
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            AgentRuntime(
+                catalog,
+                gateway,
+                **arguments,
+                execution_profile_allowlist=(),
+            )
+        with self.assertRaisesRegex(ValueError, "unregistered Runtime profile"):
+            AgentRuntime(
+                catalog,
+                gateway,
+                **arguments,
+                execution_profile_allowlist=(
+                    ("react", ("missing.search",)),
+                ),
+            )
+        with self.assertRaisesRegex(ValueError, "profiles must be unique"):
+            AgentRuntime(
+                catalog,
+                gateway,
+                **arguments,
+                execution_profile_allowlist=(
+                    ("react", ("webshop.environment",)),
+                    ("react", ("webshop.environment",)),
+                ),
+            )
+
     async def test_chain_routes_final_outputs_and_models(self) -> None:
         catalog = registry()
         gateway = RecordingGateway()

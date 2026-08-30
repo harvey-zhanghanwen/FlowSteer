@@ -41,7 +41,7 @@ from report_multidataset_stable_zero import (
 )
 
 
-SCHEMA_VERSION = "flowsteer.healthbench.failure-demo-report.v1"
+SCHEMA_VERSION = "flowsteer.healthbench.failure-demo-report.v3"
 DEFAULT_EVALUATION_DIR = (
     PROJECT_ROOT
     / "artifacts"
@@ -72,6 +72,10 @@ DEFAULT_PRIVATE_MANIFEST = (
 )
 
 CATEGORY_ORDER = (
+    "retrieval_tool_failure",
+    "agent_runtime_failure",
+    "terminal_output_extraction_failure",
+    "evaluator_operational_failure",
     "rubric_response_quality",
     "terminal_response_length_adjustment",
     "finished_graph_relation_anomaly",
@@ -80,6 +84,10 @@ CATEGORY_ORDER = (
 )
 
 CATEGORY_LABELS = {
+    "retrieval_tool_failure": "Retrieval / Tool execution",
+    "agent_runtime_failure": "Agent runtime / provider execution",
+    "terminal_output_extraction_failure": "Terminal output extraction",
+    "evaluator_operational_failure": "Evaluator / grader operational",
     "rubric_response_quality": "Rubric / response quality",
     "terminal_response_length_adjustment": "Terminal response length adjustment",
     "finished_graph_relation_anomaly": "已 FINISH 的 Canvas / graph / relation edit anomaly",
@@ -87,17 +95,7 @@ CATEGORY_LABELS = {
     "terminal_max_rounds": "Terminal / max_rounds",
 }
 
-ZERO_OR_NOT_APPLICABLE = (
-    (
-        "Retrieval / Tool",
-        "0",
-        "官方 public base condition 为 no-Tool；全部 final node 的 allowed_tools=[]，无 Tool 或 ReAct Action–Observation receipt。",
-    ),
-    (
-        "Agent communication transport/runtime",
-        "0",
-        "没有 Agent runtime failed turn、execution error 或 message transport failure；relation construction anomaly 单列，不与 transport failure 混算。",
-    ),
+NOT_SEPARATELY_OBSERVABLE = (
     (
         "Agent communication semantic use",
         "N/A",
@@ -114,19 +112,9 @@ ZERO_OR_NOT_APPLICABLE = (
         "统一 search space 未强制 Verifier role，不能把 rubric miss 追溯为不存在的固定验证节点故障。",
     ),
     (
-        "Formatter / terminal output parsing",
-        "0",
-        "require_format_agent=false，terminal parsing failure=0；长度校正不是格式解析失败。",
-    ),
-    (
-        "Final evaluator / canonicalization",
-        "0",
-        "最终 operational/evaluator failure=0；HealthBench 使用 rubric score，不使用 QA canonicalization。",
-    ),
-    (
-        "Final provider / collection",
-        "0",
-        "历史 provider/collection attempts 已恢复并单列，不能计作最终 task failure。",
+        "QA answer canonicalization",
+        "N/A",
+        "HealthBench Professional 使用 rubric-level grading，不使用 EM/F1 或 QA answer canonicalization。",
     ),
 )
 
@@ -150,6 +138,115 @@ def _index(rows: Sequence[Mapping[str, Any]], *, name: str) -> dict[str, dict[st
     return result
 
 
+def _load_json_object(path: Path, *, name: str) -> dict[str, Any]:
+    if not path.is_file():
+        raise FailureDemoReportError(f"missing {name}: {path}")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise FailureDemoReportError(f"{name} must be a JSON object: {path}")
+    return dict(value)
+
+
+def _validate_task_populations(
+    *,
+    paired: Mapping[str, Mapping[str, Any]],
+    direct: Mapping[str, Mapping[str, Any]],
+    trajectories: Mapping[str, Mapping[str, Any]],
+    private_cases: Mapping[str, Mapping[str, Any]],
+    run_manifest: Mapping[str, Any],
+    historical_failures: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Validate exact task identity, including declared Direct strict-zero terminals.
+
+    A Direct response may be absent only when the completion runner froze that task
+    as a strict-zero ReAct terminal failure.  The manifest declaration, paired zero
+    record, and append-only terminal receipt must all agree.  This does not relax
+    population checks for ordinary missing predictions.
+    """
+
+    paired_ids = set(paired)
+    trajectory_ids = set(trajectories)
+    private_ids = set(private_cases)
+    direct_ids = set(direct)
+    if trajectory_ids != paired_ids or private_ids != paired_ids:
+        raise FailureDemoReportError(
+            "paired/trajectory/private task populations do not match"
+        )
+    extra_direct_ids = direct_ids - paired_ids
+    if extra_direct_ids:
+        raise FailureDemoReportError(
+            "Direct predictions contain tasks outside the paired population: "
+            + ", ".join(sorted(extra_direct_ids))
+        )
+
+    missing_direct_ids = paired_ids - direct_ids
+    if not missing_direct_ids:
+        return {}
+
+    manifest_sample_count = run_manifest.get("sample_count")
+    direct_progress = run_manifest.get("direct_progress")
+    direct_progress = direct_progress if isinstance(direct_progress, Mapping) else {}
+    completed_count = direct_progress.get("completed")
+    strict_zero_count = direct_progress.get("strict_zero_terminal_failures")
+    frozen_count = direct_progress.get("frozen_react_terminal_failures")
+    if (
+        manifest_sample_count != len(paired_ids)
+        or completed_count != len(direct_ids)
+        or not isinstance(strict_zero_count, int)
+        or isinstance(strict_zero_count, bool)
+        or not isinstance(frozen_count, int)
+        or isinstance(frozen_count, bool)
+        or strict_zero_count != len(missing_direct_ids)
+        or frozen_count != len(missing_direct_ids)
+    ):
+        raise FailureDemoReportError(
+            "Direct population and manifest progress do not exactly declare the "
+            "missing responses as frozen strict-zero ReAct terminal failures"
+        )
+
+    receipts_by_task: dict[str, list[dict[str, Any]]] = {
+        task_id: [] for task_id in missing_direct_ids
+    }
+    for failure in historical_failures:
+        task_id = failure.get("task_id")
+        if task_id not in receipts_by_task:
+            continue
+        condition = str(failure.get("condition") or "").casefold()
+        stage = str(failure.get("stage") or "").casefold()
+        error = str(failure.get("error") or "").casefold()
+        if (
+            condition.startswith("direct")
+            and stage == "generation_or_evaluator"
+            and "react agent" in error
+            and "exhausted" in error
+            and "without a valid completion" in error
+        ):
+            receipts_by_task[str(task_id)].append(dict(failure))
+
+    validated: dict[str, dict[str, Any]] = {}
+    for task_id in sorted(missing_direct_ids):
+        paired_direct = paired[task_id].get("direct")
+        paired_direct = paired_direct if isinstance(paired_direct, Mapping) else {}
+        score = paired_direct.get("overall_score")
+        adjusted_score = paired_direct.get("overall_score_length_adjusted")
+        if not (
+            paired_direct.get("available") is False
+            and paired_direct.get("valid") is False
+            and score == 0
+            and adjusted_score == 0
+        ):
+            raise FailureDemoReportError(
+                f"{task_id} missing Direct response lacks a paired strict-zero record"
+            )
+        receipts = receipts_by_task[task_id]
+        if not receipts:
+            raise FailureDemoReportError(
+                f"{task_id} missing Direct response lacks a frozen ReAct terminal receipt"
+            )
+        validated[task_id] = receipts[-1]
+    return validated
+
+
 def _diagnosis(row: Mapping[str, Any]) -> Mapping[str, Any]:
     value = row.get("wrong_demo_diagnosis")
     return value if isinstance(value, Mapping) else {}
@@ -163,6 +260,14 @@ def primary_category(row: Mapping[str, Any]) -> str:
     layer = diagnosis.get("failure_layer")
     if failure_type == "agentgraph_terminal_failure":
         return "terminal_max_rounds"
+    if layer == "tool":
+        return "retrieval_tool_failure"
+    if layer == "runtime":
+        return "agent_runtime_failure"
+    if layer == "output_extraction":
+        return "terminal_output_extraction_failure"
+    if layer == "evaluator":
+        return "evaluator_operational_failure"
     if layer == "rubric_evaluation":
         return "rubric_response_quality"
     if layer == "terminal_response_length_adjustment":
@@ -245,6 +350,15 @@ def select_representatives(
     """Select deterministic severe examples without task-ID hard-coding."""
 
     selected: dict[str, list[dict[str, Any]]] = {}
+    for category in (
+        "retrieval_tool_failure",
+        "agent_runtime_failure",
+        "terminal_output_extraction_failure",
+        "evaluator_operational_failure",
+    ):
+        rows = list(categorized.get(category, ()))
+        selected[category] = [dict(min(rows, key=_delta))] if rows else []
+
     rubric_rows = list(categorized.get("rubric_response_quality", ()))
     selected["rubric_response_quality"] = []
     for subcategory in (
@@ -289,7 +403,13 @@ def select_representatives(
 
     terminal = list(categorized.get("terminal_max_rounds", ()))
     terminal_selected: list[dict[str, Any]] = []
-    for layer in ("graph", "director"):
+    terminal_layers = sorted(
+        {
+            str(_diagnosis(row).get("failure_layer") or "unknown")
+            for row in terminal
+        }
+    )
+    for layer in terminal_layers:
         candidates = [row for row in terminal if _diagnosis(row).get("failure_layer") == layer]
         if not candidates:
             continue
@@ -322,6 +442,8 @@ def _execution_view(execution: Mapping[str, Any]) -> Mapping[str, Any]:
     metadata = metadata if isinstance(metadata, Mapping) else {}
     request = metadata.get("request")
     response = metadata.get("response")
+    request_agent = request.get("agent") if isinstance(request, Mapping) else None
+    request_agent = request_agent if isinstance(request_agent, Mapping) else {}
     return {
         "execution_id": execution.get("execution_id"),
         "agent_id": execution.get("agent_id"),
@@ -332,12 +454,46 @@ def _execution_view(execution: Mapping[str, Any]) -> Mapping[str, Any]:
         "input_tokens": execution.get("input_tokens"),
         "output_tokens": execution.get("output_tokens"),
         "latency_ms": execution.get("latency_ms"),
+        "execution_mode": request_agent.get("execution_mode"),
+        "allowed_tools": request_agent.get("allowed_tools"),
         "request": dict(request) if isinstance(request, Mapping) else request,
         "output": execution.get("output"),
         "response_receipt": (
             dict(response) if isinstance(response, Mapping) else response
         ),
     }
+
+
+def _execution_mode_call_counts(
+    trajectories: Sequence[Mapping[str, Any]],
+) -> Mapping[str, int]:
+    """Count executed Agent calls by execution_mode, never by role label."""
+
+    counts: Counter[str] = Counter()
+    for trajectory in trajectories:
+        turns = trajectory.get("turns")
+        if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+            continue
+        for turn in turns:
+            if not isinstance(turn, Mapping):
+                continue
+            executions = turn.get("executions")
+            if not isinstance(executions, Sequence) or isinstance(
+                executions, (str, bytes)
+            ):
+                continue
+            for execution in executions:
+                if not isinstance(execution, Mapping):
+                    continue
+                metadata = execution.get("metadata")
+                metadata = metadata if isinstance(metadata, Mapping) else {}
+                request = metadata.get("request")
+                request = request if isinstance(request, Mapping) else {}
+                agent = request.get("agent")
+                agent = agent if isinstance(agent, Mapping) else {}
+                mode = agent.get("execution_mode")
+                counts[str(mode) if isinstance(mode, str) and mode else "unspecified"] += 1
+    return dict(sorted(counts.items()))
 
 
 def _turn_view(turn: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -384,6 +540,27 @@ def _metric_view(value: Mapping[str, Any]) -> Mapping[str, Any]:
 def _causal_boundary(row: Mapping[str, Any]) -> str:
     category = primary_category(row)
     diagnosis = _diagnosis(row)
+    if category == "retrieval_tool_failure":
+        return (
+            f"round {diagnosis.get('first_error_turn')} 的 Agent Tool Action–Observation "
+            f"receipt 首次记录 `{diagnosis.get('error')}`；这是可观察的 retrieval/Tool "
+            "execution boundary，不把 ReAct 当作 Agent role，也不据此虚构隐藏医学推理错误。"
+        )
+    if category == "agent_runtime_failure":
+        return (
+            f"round {diagnosis.get('first_error_turn')} 的 Agent runtime/provider receipt "
+            f"首次记录 `{diagnosis.get('error')}`；后续影响只按保存的 receipt span 描述。"
+        )
+    if category == "terminal_output_extraction_failure":
+        return (
+            "AgentGraph 已到达终局，但 evaluator receipt 明确记录 final-response "
+            f"output extraction 失败：`{diagnosis.get('error')}`；该类不等同于 rubric shortfall。"
+        )
+    if category == "evaluator_operational_failure":
+        return (
+            "终局 response 已产生，但 HealthBench grader/evaluator receipt 无效："
+            f"`{diagnosis.get('error')}`；没有有效 rubric-level score，不能改报为模型答案错误。"
+        )
     if category == "rubric_response_quality":
         return (
             "此前没有保存到 runtime/Canvas fault；首个可观察短板位于 Output "
@@ -408,8 +585,8 @@ def _causal_boundary(row: Mapping[str, Any]) -> str:
         )
     return (
         f"首个可观察 fault 位于 round {diagnosis.get('first_error_turn')} 的 "
-        f"{diagnosis.get('first_error_action')}；后续持续 graph editing，最终 20 turns "
-        "内没有合法 FINISH，formal evaluator 未调用。terminal failure 为确定结果。"
+        f"{diagnosis.get('first_error_action')}；后续持续 graph editing，最终到达 "
+        "max_rounds 而没有合法 FINISH。terminal failure 为确定结果。"
     )
 
 
@@ -440,7 +617,24 @@ def _subcategory_counts(
         str(_diagnosis(row).get("failure_layer") or "unknown")
         for row in categorized["terminal_max_rounds"]
     )
+    operational_counts = {
+        category: dict(
+            sorted(
+                Counter(
+                    str(_diagnosis(row).get("error") or "unspecified")
+                    for row in categorized[category]
+                ).items()
+            )
+        )
+        for category in (
+            "retrieval_tool_failure",
+            "agent_runtime_failure",
+            "terminal_output_extraction_failure",
+            "evaluator_operational_failure",
+        )
+    }
     return {
+        "first_observable_operational_errors": operational_counts,
         "rubric_response_quality": dict(sorted(rubric_counts.items())),
         "finished_graph_relation_anomaly": dict(sorted(graph_counts.items())),
         "terminal_max_rounds_first_observable_layer": dict(
@@ -451,6 +645,13 @@ def _subcategory_counts(
 
 def _representative_subcategory(row: Mapping[str, Any]) -> str:
     category = primary_category(row)
+    if category in {
+        "retrieval_tool_failure",
+        "agent_runtime_failure",
+        "terminal_output_extraction_failure",
+        "evaluator_operational_failure",
+    }:
+        return str(_diagnosis(row).get("error") or "unspecified")
     if category == "rubric_response_quality":
         return _rubric_subcategory(row)
     if category == "finished_graph_relation_anomaly":
@@ -467,12 +668,24 @@ def _public_report(
     sample_count: int,
     historical_failures: Sequence[Mapping[str, Any]],
     grader_provider_retries: Mapping[str, int],
+    execution_mode_call_counts: Mapping[str, int],
+    direct_record_count: int | None = None,
+    direct_strict_zero_terminal_failures: (
+        Mapping[str, Mapping[str, Any]] | None
+    ) = None,
 ) -> str:
     wrong_count = sum(len(rows) for rows in categorized.values())
+    strict_zero_failures = dict(direct_strict_zero_terminal_failures or {})
     lines = [
         "# HealthBench Professional Failure Taxonomy 与脱敏 Wrong Demo",
         "",
         "本报告完全来自冻结的 paired-result、trajectory 与 evaluator receipt；没有重新调用模型、Tool 或 grader，也没有训练。完整 conversation、rubric、physician response、candidate output 和逐轮 prompt 只保存在 evaluator-private 本地报告，不进入 Git 或模型输入。Wrong Demo 的固定定义是 `agentgraph.overall_score_length_adjusted < 1.0`，不是 Direct-vs-AgentGraph 高低。",
+        "",
+        "## 任务分母完整性",
+        "",
+        f"- paired / trajectory / evaluator-private task：`{sample_count}`。",
+        f"- Direct 完成响应记录：`{direct_record_count if direct_record_count is not None else sample_count}`。",
+        f"- Direct 冻结 strict-zero ReAct terminal failure：`{len(strict_zero_failures)}`。这些任务没有伪造 response；只有 manifest、paired strict-zero 和 append-only terminal receipt 三者一致时才允许作为缺失响应计入固定分母。",
         "",
         "## 互斥分类",
         "",
@@ -499,32 +712,40 @@ def _public_report(
     subcategories = _subcategory_counts(categorized)
     lines.extend(
         [
+            f"- Tool/runtime/output-extraction/evaluator 首个可观察 error：`{json.dumps(subcategories['first_observable_operational_errors'], ensure_ascii=False, sort_keys=True)}`。",
             f"- Rubric / response quality：`{json.dumps(subcategories['rubric_response_quality'], ensure_ascii=False, sort_keys=True)}`。",
             f"- 已 FINISH 的 graph/relation anomaly 首个 rejected action：`{json.dumps(subcategories['finished_graph_relation_anomaly'], ensure_ascii=False, sort_keys=True)}`。",
             f"- Terminal/max_rounds 首个可观察 layer：`{json.dumps(subcategories['terminal_max_rounds_first_observable_layer'], ensure_ascii=False, sort_keys=True)}`。",
             "",
-            "## 适用性为 0 或 N/A 的类别",
+            "## Agent execution_mode",
+            "",
+            f"- 实际 Agent call 的 `execution_mode` 分布：`{json.dumps(execution_mode_call_counts, ensure_ascii=False, sort_keys=True)}`。",
+            "- `react` 只表示 Agent 的执行模式（StructuredAction → Tool Observation → completion）；它不是 Agent role，也不作为 role family 统计。",
+            "",
+            "## 不可从 receipt 单独识别的类别",
             "",
             "| 类别 | 数量 | 依据 |",
             "| --- | ---: | --- |",
         ]
     )
-    for label, count, evidence in ZERO_OR_NOT_APPLICABLE:
+    for label, count, evidence in NOT_SEPARATELY_OBSERVABLE:
         lines.append(f"| {label} | {count} | {evidence} |")
     lines.extend(
         [
             "",
-            "上述 0/N/A 类别没有对应真实 failure receipt，因此不生成 demo。",
+            "上述 N/A 类别没有可支持独立因果计数的 receipt，因此不生成 demo。",
         ]
     )
 
     stage_counts = Counter(str(row.get("stage") or "unknown") for row in historical_failures)
+    strict_zero_count = len(strict_zero_failures)
+    recovered_attempt_count = max(0, len(historical_failures) - strict_zero_count)
     lines.extend(
         [
             "",
-            "## 历史已恢复 attempts",
+            "## 历史失败 attempts 与终局状态",
             "",
-            f"append-only `collection_failures.jsonl` 保留 {len(historical_failures)} 个历史 attempt：`{json.dumps(dict(sorted(stage_counts.items())), ensure_ascii=False)}`。这些 attempt 已被最终 receipt 取代，最终 provider/collection/evaluator operational failure 为 0。",
+            f"append-only `collection_failures.jsonl` 保留 {len(historical_failures)} 个历史 attempt：`{json.dumps(dict(sorted(stage_counts.items())), ensure_ascii=False)}`。其中 {recovered_attempt_count} 个 attempt 已由最终有效 receipt 取代；另有 {strict_zero_count} 个 manifest-declared Direct ReAct terminal failure 没有 response，按冻结协议严格计 0，不能称为已恢复。",
             f"valid terminal grader receipt 内另记录已恢复的 provider error attempts：Direct={grader_provider_retries.get('direct', 0)}，AgentGraph={grader_provider_retries.get('agentgraph', 0)}。它们是物理调用 retry，不是最终 task failure。",
             "",
             "## 各类代表样本（脱敏）",
@@ -576,7 +797,8 @@ def _private_demo(
     row: Mapping[str, Any],
     *,
     private_case: Mapping[str, Any],
-    direct_record: Mapping[str, Any],
+    direct_record: Mapping[str, Any] | None,
+    direct_terminal_failure: Mapping[str, Any] | None,
     trajectory: Mapping[str, Any],
 ) -> str:
     task_id = str(row["task_id"])
@@ -597,6 +819,7 @@ def _private_demo(
         if isinstance(turn.get("action"), Mapping)
     ]
     final_graph = graph.get("terminal_canvas_graph") or graph.get("final_graph")
+    direct_record = direct_record if isinstance(direct_record, Mapping) else {}
     direct_execution = direct_record.get("execution")
     direct_execution = (
         _execution_view(direct_execution)
@@ -628,6 +851,11 @@ def _private_demo(
         "",
         _json_details("Direct 完整执行输入/输出与 provider receipt", direct_execution),
         "",
+        _json_details(
+            "Direct strict-zero terminal failure receipt（若无 Direct response）",
+            direct_terminal_failure,
+        ),
+        "",
         _json_details("AgentGraph terminal / evaluated graph", final_graph),
         "",
         _json_details("Output Agent 最终 inbox", graph.get("output_agent_inbox")),
@@ -652,13 +880,17 @@ def _private_demo(
         [
             _json_details("Agent-to-Agent CommunicationEnvelope", communication),
             "",
-            _json_details("Executor ReAct StructuredAction–Observation receipt", react_entries),
+            _json_details(
+                "Agent execution_mode=react StructuredAction–Observation receipt",
+                react_entries,
+            ),
             "",
             _json_details("Tool receipts", tool_receipts),
             "",
             (
-                "Tool/ReAct 结论：本 condition 为 `no_tool`；保存到的 Tool receipt "
-                f"数量={len(tool_receipts)}，ReAct Action–Observation 数量={len(react_entries)}。"
+                "执行模式结论：ReAct 仅为 Agent `execution_mode`，不是 role；"
+                f"保存到的 Tool receipt 数量={len(tool_receipts)}，"
+                f"StructuredAction–Observation 数量={len(react_entries)}。"
             ),
             "",
             _json_details("AgentGraph terminal evaluator receipt", trajectory.get("evaluation")),
@@ -676,6 +908,7 @@ def _private_report(
     selected: Mapping[str, Sequence[Mapping[str, Any]]],
     private_cases: Mapping[str, Mapping[str, Any]],
     direct_records: Mapping[str, Mapping[str, Any]],
+    direct_strict_zero_terminal_failures: Mapping[str, Mapping[str, Any]],
     trajectories: Mapping[str, Mapping[str, Any]],
     sample_count: int,
 ) -> str:
@@ -686,6 +919,8 @@ def _private_report(
         "> **EVALUATOR-PRIVATE：不得提交 Git，不得进入 Director/Agent prompt，不得作为训练输入。** 本文件由冻结 evidence 离线生成，没有模型、Tool、grader 或训练调用。",
         "",
         f"- public-test population：{sample_count}",
+        f"- Direct response records：{len(direct_records)}",
+        f"- Direct frozen strict-zero terminal failures：{len(direct_strict_zero_terminal_failures)}",
         f"- wrong demo：{wrong_count}",
         "- 正式目标：signed rubric；没有单一 reference answer。",
         "- physician_response：physician completion；非 ground truth、非本轮评分输入，仅供人工对照。",
@@ -704,11 +939,15 @@ def _private_report(
                 name
                 for name, index in (
                     ("private case", private_cases),
-                    ("direct record", direct_records),
                     ("trajectory", trajectories),
                 )
                 if task_id not in index
             ]
+            if (
+                task_id not in direct_records
+                and task_id not in direct_strict_zero_terminal_failures
+            ):
+                missing.append("direct record or declared strict-zero terminal receipt")
             if missing:
                 raise FailureDemoReportError(
                     f"{task_id} missing private evidence: {', '.join(missing)}"
@@ -718,13 +957,32 @@ def _private_report(
                     _private_demo(
                         row,
                         private_case=private_cases[task_id],
-                        direct_record=direct_records[task_id],
+                        direct_record=direct_records.get(task_id),
+                        direct_terminal_failure=direct_strict_zero_terminal_failures.get(
+                            task_id
+                        ),
                         trajectory=trajectories[task_id],
                     ),
                     "",
                 ]
             )
     return "\n".join(lines)
+
+
+def _direct_predictions_path(evaluation_dir: Path) -> Path:
+    """Resolve legacy reasoning and v3 ReAct Direct artifact names."""
+
+    candidates = (
+        evaluation_dir / "direct_predictions.jsonl",
+        evaluation_dir / "single_agent_react_predictions.jsonl",
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise FailureDemoReportError(
+        "missing Direct predictions artifact; expected one of: "
+        + ", ".join(path.name for path in candidates)
+    )
 
 
 def build_reports(
@@ -734,22 +992,37 @@ def build_reports(
 ) -> tuple[str, str, Mapping[str, Any]]:
     wrong_rows = _load_jsonl(evaluation_dir / "wrong_demos.jsonl")
     paired_rows = _load_jsonl(evaluation_dir / "paired_results.jsonl")
-    direct_rows = _load_jsonl(evaluation_dir / "direct_predictions.jsonl")
+    direct_rows = _load_jsonl(_direct_predictions_path(evaluation_dir))
     trajectory_rows = _load_jsonl(evaluation_dir / "agentgraph_trajectories.jsonl")
     private_rows = _load_jsonl(private_cases_path)
     historical_failures = _load_jsonl(evaluation_dir / "collection_failures.jsonl")
+    run_manifest = _load_json_object(
+        evaluation_dir / "run_manifest.json", name="run manifest"
+    )
 
     paired = _index(paired_rows, name="paired results")
     direct = _index(direct_rows, name="direct predictions")
     trajectories = _index(trajectory_rows, name="agentgraph trajectories")
     private_cases = _index(private_rows, name="private cases")
-    if not (len(paired) == len(direct) == len(trajectories) == len(private_cases)):
-        raise FailureDemoReportError(
-            "paired/direct/trajectory/private task populations do not match"
-        )
+    direct_strict_zero_terminal_failures = _validate_task_populations(
+        paired=paired,
+        direct=direct,
+        trajectories=trajectories,
+        private_cases=private_cases,
+        run_manifest=run_manifest,
+        historical_failures=historical_failures,
+    )
     for row in wrong_rows:
         task_id = str(row.get("task_id"))
-        if task_id not in paired or task_id not in trajectories:
+        if (
+            task_id not in paired
+            or task_id not in trajectories
+            or task_id not in private_cases
+            or (
+                task_id not in direct
+                and task_id not in direct_strict_zero_terminal_failures
+            )
+        ):
             raise FailureDemoReportError(f"wrong demo lacks frozen evidence: {task_id}")
 
     categorized = _category_rows(wrong_rows)
@@ -759,24 +1032,37 @@ def build_reports(
         "direct": _grader_provider_error_count(direct_rows),
         "agentgraph": _grader_provider_error_count(trajectory_rows),
     }
+    execution_mode_call_counts = _execution_mode_call_counts(trajectory_rows)
     public = _public_report(
         categorized=categorized,
         selected=selected,
         sample_count=sample_count,
         historical_failures=historical_failures,
         grader_provider_retries=grader_provider_retries,
+        execution_mode_call_counts=execution_mode_call_counts,
+        direct_record_count=len(direct),
+        direct_strict_zero_terminal_failures=direct_strict_zero_terminal_failures,
     )
     private = _private_report(
         categorized=categorized,
         selected=selected,
         private_cases=private_cases,
         direct_records=direct,
+        direct_strict_zero_terminal_failures=direct_strict_zero_terminal_failures,
         trajectories=trajectories,
         sample_count=sample_count,
     )
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "sample_count": sample_count,
+        "direct_response_record_count": len(direct),
+        "direct_strict_zero_terminal_failure_count": len(
+            direct_strict_zero_terminal_failures
+        ),
+        "direct_strict_zero_terminal_failure_task_ids": sorted(
+            direct_strict_zero_terminal_failures
+        ),
+        "task_population_validation": "exact_with_declared_direct_strict_zero_terminals",
         "wrong_demo_count": len(wrong_rows),
         "category_counts": {
             category: len(categorized[category]) for category in CATEGORY_ORDER
@@ -788,6 +1074,7 @@ def build_reports(
         },
         "historical_attempt_count": len(historical_failures),
         "recovered_grader_provider_error_attempts": grader_provider_retries,
+        "agent_execution_mode_call_counts": execution_mode_call_counts,
         "model_calls": 0,
         "tool_calls": 0,
         "grader_calls": 0,

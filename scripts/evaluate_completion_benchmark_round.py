@@ -413,6 +413,20 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                 and tool_runtime.get("condition_id")
                 == experiment.get("condition_id")
             )
+            if (
+                isinstance(tool_runtime, Mapping)
+                and "execution_profile_allowlist" in tool_runtime
+            ):
+                checks[
+                    "healthbench_tool_runtime.execution_profile_allowlist"
+                ] = tool_runtime.get("execution_profile_allowlist") == [
+                    {
+                        "execution_mode": direct_execution_mode,
+                        "allowed_tools": list(
+                            bounded.get("direct_allowed_tools", ())
+                        ),
+                    }
+                ]
         else:
             checks["healthbench_tool_runtime.disabled"] = not isinstance(
                 tool_runtime, Mapping
@@ -1457,6 +1471,16 @@ def _healthbench_direct_generation_identity(
         )
         if raw_penalty is not None:
             repetition_penalty = float(raw_penalty)
+    raw_enable_thinking = model.metadata.get("chat_template_enable_thinking")
+    if not isinstance(raw_enable_thinking, str) or raw_enable_thinking.strip().lower() not in {
+        "true",
+        "false",
+    }:
+        raise CompletionBenchmarkRoundError(
+            "HealthBench Qwen model catalog must declare "
+            "chat_template_enable_thinking as true or false"
+        )
+    chat_template_enable_thinking = raw_enable_thinking.strip().lower() == "true"
     generation_identity = {
         "schema_version": _HEALTHBENCH_DIRECT_GENERATION_IDENTITY_SCHEMA,
         "dataset_key": "healthbench_professional",
@@ -1472,6 +1496,7 @@ def _healthbench_direct_generation_identity(
             "model_id": model_id,
             "provider_id": provider.provider_id,
             "provider_model": model.model_name,
+            "chat_template_enable_thinking": chat_template_enable_thinking,
         },
         "tool": {
             "tool_version": str(experiment["tool_version"]),
@@ -1488,9 +1513,18 @@ def _healthbench_direct_generation_identity(
                 "top_k": top_k,
                 "repetition_penalty": repetition_penalty,
                 "max_tokens": max_action_tokens,
+                "chat_template_enable_thinking": chat_template_enable_thinking,
             },
         },
     }
+    if "execution_profile_allowlist" in tool_runtime:
+        generation_identity["agentgraph_execution_profile_allowlist"] = [
+            {
+                "execution_mode": str(profile["execution_mode"]),
+                "allowed_tools": list(profile["allowed_tools"]),
+            }
+            for profile in tool_runtime["execution_profile_allowlist"]
+        ]
     retrieval_identity = {
         "mode": str(tool_runtime["mode"]),
         "source_identity": str(tool_runtime["source_identity"]),
@@ -1543,6 +1577,7 @@ def _react_scientific_sampling_receipt(
     max_action_tokens: int,
     expected_top_k: int | None,
     expected_repetition_penalty: float | None,
+    expected_chat_template_enable_thinking: bool,
 ) -> Mapping[str, Any]:
     """Validate and project every SkillFlow-style ReAct generation receipt."""
 
@@ -1579,6 +1614,9 @@ def _react_scientific_sampling_receipt(
             "top_k": expected_top_k,
             "max_tokens": max_action_tokens,
             "seed": expected_seed,
+            "chat_template_enable_thinking": (
+                expected_chat_template_enable_thinking
+            ),
         }
         receipt_sampling = sampling.get("requested_sampling")
         outer_sampling = raw_call.get("requested_sampling")
@@ -1674,6 +1712,9 @@ def _persisted_healthbench_direct_identity_matches(
             max_action_tokens=int(requested["max_tokens"]),
             expected_top_k=requested.get("top_k"),
             expected_repetition_penalty=requested.get("repetition_penalty"),
+            expected_chat_template_enable_thinking=bool(
+                requested["chat_template_enable_thinking"]
+            ),
         )
     except (KeyError, TypeError, ValueError, CompletionBenchmarkRoundError):
         return False
@@ -1772,6 +1813,9 @@ async def _direct_one(
                 expected_top_k=expected_sampling.get("top_k"),
                 expected_repetition_penalty=expected_sampling.get(
                     "repetition_penalty"
+                ),
+                expected_chat_template_enable_thinking=bool(
+                    expected_sampling["chat_template_enable_thinking"]
                 ),
             )
             executions = [
@@ -3599,6 +3643,9 @@ def _graph_generation_identity_check(
                 expected_repetition_penalty=requested.get(
                     "repetition_penalty"
                 ),
+                expected_chat_template_enable_thinking=bool(
+                    requested["chat_template_enable_thinking"]
+                ),
             )
     except (KeyError, TypeError, ValueError, CompletionBenchmarkRoundError):
         return {
@@ -3777,6 +3824,15 @@ def _report(
             if isinstance(config.get("healthbench_tool_runtime"), Mapping)
             and config["healthbench_tool_runtime"].get("enabled") is True
             else "none"
+        ),
+        "agentgraph_execution_profile_allowlist": (
+            list(
+                config["healthbench_tool_runtime"].get(
+                    "execution_profile_allowlist", ()
+                )
+            )
+            if isinstance(config.get("healthbench_tool_runtime"), Mapping)
+            else []
         ),
         "protocol_equivalent_to_direct": protocol_equivalent_to_direct,
         "paired_generation_identity": paired_generation_identity,
@@ -4374,6 +4430,15 @@ async def run_completion_benchmark_round(
         "training_enabled": False,
         "optimizer_updates": 0,
         "direct_only": direct_only,
+        "agentgraph_execution_profile_allowlist": (
+            list(
+                config["healthbench_tool_runtime"].get(
+                    "execution_profile_allowlist", ()
+                )
+            )
+            if isinstance(config.get("healthbench_tool_runtime"), Mapping)
+            else []
+        ),
         "runtime_resource": {
             "configured_rollout_physical": configured_rollout_gpu,
             "effective_rollout_physical": effective_rollout_gpu,

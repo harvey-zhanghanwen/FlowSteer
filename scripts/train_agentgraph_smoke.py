@@ -11,6 +11,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -924,6 +925,61 @@ def _healthbench_tool_runtime_settings(
         "max_tool_calls": int(section["max_tool_calls_per_agent_call"]),
         "tool_timeout_seconds": float(timeout_seconds),
     }
+    raw_profile_allowlist = section.get("execution_profile_allowlist")
+    if raw_profile_allowlist is not None:
+        if (
+            not isinstance(raw_profile_allowlist, list)
+            or not raw_profile_allowlist
+        ):
+            raise ConfigurationError(
+                "healthbench_tool_runtime.execution_profile_allowlist must "
+                "be a non-empty list"
+            )
+        normalized_profiles: list[tuple[str, tuple[str, ...]]] = []
+        for position, raw_profile in enumerate(raw_profile_allowlist):
+            field = (
+                "healthbench_tool_runtime.execution_profile_allowlist"
+                f"[{position}]"
+            )
+            if (
+                not isinstance(raw_profile, Mapping)
+                or set(raw_profile) != {"execution_mode", "allowed_tools"}
+            ):
+                raise ConfigurationError(
+                    f"{field} must contain exactly execution_mode and "
+                    "allowed_tools"
+                )
+            execution_mode = raw_profile.get("execution_mode")
+            allowed_tools = raw_profile.get("allowed_tools")
+            if (
+                not isinstance(execution_mode, str)
+                or execution_mode not in {"reasoning", "react", "coding"}
+            ):
+                raise ConfigurationError(
+                    f"{field}.execution_mode must be reasoning, react, or coding"
+                )
+            if (
+                not isinstance(allowed_tools, list)
+                or any(
+                    not isinstance(tool_id, str)
+                    or not tool_id.strip()
+                    or tool_id != tool_id.strip()
+                    for tool_id in allowed_tools
+                )
+                or len(allowed_tools) != len(set(allowed_tools))
+            ):
+                raise ConfigurationError(
+                    f"{field}.allowed_tools must be a list of unique canonical "
+                    "Tool IDs"
+                )
+            profile = (execution_mode, tuple(allowed_tools))
+            if profile in normalized_profiles:
+                raise ConfigurationError(
+                    "healthbench_tool_runtime.execution_profile_allowlist "
+                    "must not contain duplicate profiles"
+                )
+            normalized_profiles.append(profile)
+        settings["execution_profile_allowlist"] = tuple(normalized_profiles)
     if runtime_mode == HEALTHBENCH_AUTHORITATIVE_TOOL_RUNTIME_MODE:
         max_successful_queries = section.get("max_successful_queries")
         if (
@@ -2369,6 +2425,11 @@ class LiveSmokeBackend:
                     artifact_communication_profile=(
                         self.runtime.artifact_communication_profile
                     ),
+                    execution_profile_allowlist=(
+                        healthbench_settings.get(
+                            "execution_profile_allowlist"
+                        )
+                    ),
                 )
             except BaseException:
                 opened.close()
@@ -2577,6 +2638,63 @@ class LiveSmokeBackend:
             raise ConfigurationError(
                 "director.action_decoding must be unconstrained or json_schema"
             )
+        chat_template_enable_thinking = director.get(
+            "chat_template_enable_thinking",
+            False,
+        )
+        if type(chat_template_enable_thinking) is not bool:
+            raise ConfigurationError(
+                "director.chat_template_enable_thinking must be a bool"
+            )
+        # SkillFlow's RolloutEngine keeps reasoning and public Action
+        # generation as two separately budgeted phases.  This opt-in wiring
+        # preserves the existing single-call Director path unless a condition
+        # explicitly requests the same boundary.
+        two_phase_generation = director.get("two_phase_generation", False)
+        if type(two_phase_generation) is not bool:
+            raise ConfigurationError(
+                "director.two_phase_generation must be a bool"
+            )
+        raw_max_reasoning_tokens = director.get("max_reasoning_tokens")
+        if raw_max_reasoning_tokens is not None and (
+            isinstance(raw_max_reasoning_tokens, bool)
+            or not isinstance(raw_max_reasoning_tokens, int)
+            or raw_max_reasoning_tokens < 1
+        ):
+            raise ConfigurationError(
+                "director.max_reasoning_tokens must be a positive integer "
+                "when supplied"
+            )
+        raw_max_action_tokens = director.get("max_action_tokens")
+        if (
+            isinstance(raw_max_action_tokens, bool)
+            or not isinstance(raw_max_action_tokens, int)
+            or raw_max_action_tokens < 1
+        ):
+            raise ConfigurationError(
+                "director.max_action_tokens must be a positive integer"
+            )
+        if two_phase_generation:
+            if not chat_template_enable_thinking:
+                raise ConfigurationError(
+                    "director.two_phase_generation requires "
+                    "director.chat_template_enable_thinking=true"
+                )
+            if raw_max_reasoning_tokens is None:
+                raise ConfigurationError(
+                    "director.two_phase_generation requires a positive "
+                    "director.max_reasoning_tokens"
+                )
+        director_repetition_penalty = director.get("repetition_penalty", 1.0)
+        if (
+            isinstance(director_repetition_penalty, bool)
+            or not isinstance(director_repetition_penalty, (int, float))
+            or not math.isfinite(float(director_repetition_penalty))
+            or not 0.0 < float(director_repetition_penalty) <= 2.0
+        ):
+            raise ConfigurationError(
+                "director.repetition_penalty must be finite and in (0, 2]"
+            )
         if action_decoding == "json_schema" and not evaluation_only:
             raise ConfigurationError(
                 "json_schema Director decoding is evaluation-only until the "
@@ -2659,7 +2777,7 @@ class LiveSmokeBackend:
             temperature=float(director["temperature"]),
             top_p=float(director["top_p"]),
             top_k=int(director["top_k"]),
-            max_tokens=int(director["max_action_tokens"]),
+            max_tokens=raw_max_action_tokens,
             action_json_schema=(
                 director_sglang_sampling_json_schema_text(
                     tuple(str(value) for value in graph_config["actions"])
@@ -2678,6 +2796,15 @@ class LiveSmokeBackend:
                 )
                 else None
             ),
+            enable_thinking=chat_template_enable_thinking,
+            two_phase_generation=two_phase_generation,
+            max_reasoning_tokens=(
+                raw_max_reasoning_tokens if two_phase_generation else None
+            ),
+            max_action_tokens=(
+                raw_max_action_tokens if two_phase_generation else None
+            ),
+            repetition_penalty=float(director_repetition_penalty),
         )
 
         gateway = OpenAICompatibleGateway(

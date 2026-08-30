@@ -186,7 +186,11 @@ class HealthBenchEvidenceAdapterTests(unittest.TestCase):
             item["rank"] for item in evidence
         ])
         self.assertEqual("frozen_medical_textbook", evidence[0]["source_type"])
+        self.assertGreater(evidence[0]["score"], 0.0)
+        self.assertIn("aspirin", evidence[0]["matched_terms"])
         self.assertEqual("peer_reviewed_literature", evidence[1]["source_type"])
+        self.assertNotIn("score", evidence[1])
+        self.assertNotIn("matched_terms", evidence[1])
         self.assertEqual("111", evidence[1]["document_id"])
         self.assertEqual(
             "Aspirin and gastrointestinal bleeding",
@@ -228,6 +232,11 @@ class HealthBenchEvidenceAdapterTests(unittest.TestCase):
         self.assertTrue(result.value["evidence"])
         self.assertTrue(all(
             item["source_type"] == "frozen_medical_textbook"
+            for item in result.value["evidence"]
+        ))
+        self.assertTrue(all(
+            isinstance(item.get("score"), float)
+            and isinstance(item.get("matched_terms"), list)
             for item in result.value["evidence"]
         ))
         pubmed_receipt = result.value["source_receipts"][1]
@@ -274,6 +283,11 @@ class HealthBenchEvidenceAdapterTests(unittest.TestCase):
                 "rank",
             },
             set(evidence_schema["required"]),
+        )
+        self.assertEqual("number", evidence_schema["properties"]["score"]["type"])
+        self.assertEqual(
+            {"type": "array", "items": {"type": "string"}},
+            evidence_schema["properties"]["matched_terms"],
         )
 
     def test_react_state_allows_one_complementary_search_then_completion(

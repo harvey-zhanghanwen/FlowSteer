@@ -631,6 +631,21 @@ class ToolReactExecutionAdapter:
                     "max_tokens": self._max_action_tokens,
                     "seed": generation_seed,
                 }
+                raw_enable_thinking = model_metadata.get(
+                    "chat_template_enable_thinking"
+                )
+                if isinstance(raw_enable_thinking, str):
+                    normalized_enable_thinking = (
+                        raw_enable_thinking.strip().casefold()
+                    )
+                    if normalized_enable_thinking in {"true", "false"}:
+                        # The gateway puts this Qwen chat-template switch on
+                        # the provider request.  Mirror the declared value in
+                        # the pre-dispatch scientific receipt so frozen-run
+                        # validation compares the same result-affecting field.
+                        requested_sampling["chat_template_enable_thinking"] = (
+                            normalized_enable_thinking == "true"
+                        )
                 scientific_sampling_receipt = {
                     "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
                     "base_seed": self._sampling_base_seed,

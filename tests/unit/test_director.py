@@ -52,9 +52,11 @@ from src.interactive.director import (
     SCALAR_DIRECTOR_PROMPT_VERSION,
     SCALAR_DIRECTOR_PROMPT_VERSION_V3,
     SCALAR_DIRECTOR_PROMPT_VERSION_V4,
+    SCALAR_DIRECTOR_PROMPT_VERSION_V5,
     SCALAR_DIRECTOR_SYSTEM_PROMPT,
     SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
     SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
+    SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
@@ -328,6 +330,10 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             director_system_prompt_for_version(SCALAR_DIRECTOR_PROMPT_VERSION_V4),
         )
         self.assertIs(
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
+            director_system_prompt_for_version(SCALAR_DIRECTOR_PROMPT_VERSION_V5),
+        )
+        self.assertIs(
             LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1,
             director_system_prompt_for_version(
                 LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1
@@ -490,6 +496,40 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("doctor", SCALAR_DIRECTOR_SYSTEM_PROMPT_V4.casefold())
         self.assertNotIn("verifier", SCALAR_DIRECTOR_SYSTEM_PROMPT_V4.casefold())
+
+    async def test_scalar_v5_remains_topology_neutral_and_compacts_history(
+        self,
+    ) -> None:
+        model_registry = registry()
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            problem="answer all parts of the supplied request",
+            execute_on_edit=True,
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=SCALAR_DIRECTOR_PROMPT_VERSION_V5,
+            max_rounds=5,
+        )
+        initial_prompt = orchestrator.build_prompt(env, 0, ())
+        action = (
+            '{"action":"add_agent","agent_id":"node_1",'
+            '"model_id":"qwen","contract":"produce a complete direct artifact"}'
+        )
+        accepted = await env.step(action)
+        self.assertTrue(accepted.accepted, accepted.feedback)
+        continued = orchestrator.continue_prompt(initial_prompt, action, env, ())
+        state = observation_payload(transcript_messages(continued)[-1])
+
+        self.assertIn("current_artifact_receipts", state)
+        self.assertIn("finish_admissibility", state)
+        self.assertIn("independent unresolved work", SCALAR_DIRECTOR_SYSTEM_PROMPT_V5)
+        self.assertIn("avoid redundant execution", SCALAR_DIRECTOR_SYSTEM_PROMPT_V5)
+        prompt = SCALAR_DIRECTOR_SYSTEM_PROMPT_V5.casefold()
+        for prohibited in ("doctor", "researcher", "reviewer", "verifier"):
+            self.assertNotIn(prohibited, prompt)
 
     async def test_hotpot_v22_prompt_encodes_semantic_and_recovery_policy(self) -> None:
         model_registry = registry()

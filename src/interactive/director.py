@@ -92,6 +92,15 @@ SCALAR_DIRECTOR_SYSTEM_PROMPT_V4 = SCALAR_DIRECTOR_SYSTEM_PROMPT_V3 + """
 
 execution_mode specifies how an Agent executes, not its role. Select exactly one registered execution profile; use react only when that Agent must invoke an admitted Tool. After each accepted edit, inspect the returned execution phases, communication envelopes, public ReAct Action--Observation receipts, current Artifacts, task goal, and finish state."""
 
+# v5 keeps the same topology-neutral free-AgentGraph boundary.  It adds only
+# generic decisions supported by the measured v4 receipts: use another Agent
+# or relation when the latest public feedback leaves independent work,
+# conflicting evidence, or an unchecked result, and avoid repeated content.
+# It does not name a role, prescribe a graph, or expose evaluator information.
+SCALAR_DIRECTOR_SYSTEM_PROMPT_V5 = SCALAR_DIRECTOR_SYSTEM_PROMPT_V4 + """
+
+Use additional Agents or relations only when the current public feedback leaves independent unresolved work, conflicting evidence, or an unchecked result; otherwise avoid redundant execution. Agent contracts should request a complete, direct artifact without repeating available information."""
+
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
 SCALAR_DIRECTOR_PROMPT_VERSION_V3 = (
@@ -99,6 +108,9 @@ SCALAR_DIRECTOR_PROMPT_VERSION_V3 = (
 )
 SCALAR_DIRECTOR_PROMPT_VERSION_V4 = (
     "agentgraph.director.minimal-neutral-scalar.v4"
+)
+SCALAR_DIRECTOR_PROMPT_VERSION_V5 = (
+    "agentgraph.director.minimal-neutral-scalar.v5"
 )
 LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1 = (
     "agentgraph.director.minimal-neutral-scalar.v1"
@@ -536,6 +548,7 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_PROMPT_VERSION_V3: SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_PROMPT_VERSION_V4: SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
+        SCALAR_DIRECTOR_PROMPT_VERSION_V5: SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
         LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1: (
             LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1
         ),
@@ -605,6 +618,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
+        SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
         LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
@@ -3612,7 +3626,11 @@ class AgentGraphOrchestrator:
         # FINISH or repeatedly modifying the Formatter.
         if (
             verified_qa_semantic_protocol(self.semantic_protocol)
-            or self.prompt_version == SCALAR_DIRECTOR_PROMPT_VERSION_V4
+            or self.prompt_version
+            in {
+                SCALAR_DIRECTOR_PROMPT_VERSION_V4,
+                SCALAR_DIRECTOR_PROMPT_VERSION_V5,
+            }
         ):
             payload["finish_admissibility"] = _director_neutral_state_projection(
                 env.finish_admissibility()
@@ -3738,6 +3756,7 @@ class AgentGraphOrchestrator:
             LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
             QA_DIRECTOR_PROMPT_VERSION,
             SCALAR_DIRECTOR_PROMPT_VERSION_V4,
+            SCALAR_DIRECTOR_PROMPT_VERSION_V5,
         }:
             return copied
         return self._compact_qa_historical_messages(copied)
@@ -3944,6 +3963,8 @@ __all__ = [
     "SCALAR_DIRECTOR_PROMPT_VERSION_V3",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT_V4",
     "SCALAR_DIRECTOR_PROMPT_VERSION_V4",
+    "SCALAR_DIRECTOR_SYSTEM_PROMPT_V5",
+    "SCALAR_DIRECTOR_PROMPT_VERSION_V5",
     "LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1",
     "LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1",
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",

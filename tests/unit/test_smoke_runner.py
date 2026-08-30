@@ -154,6 +154,50 @@ def test_live_backend_rejects_invalid_model_admissible_sampling_contract():
     )
     invalid_cases = (
         (
+            {"chat_template_enable_thinking": "true"},
+            "director.chat_template_enable_thinking must be a bool",
+        ),
+        (
+            {"two_phase_generation": "true"},
+            "director.two_phase_generation must be a bool",
+        ),
+        (
+            {"max_reasoning_tokens": 0},
+            "director.max_reasoning_tokens must be a positive integer",
+        ),
+        (
+            {"max_action_tokens": 0},
+            "director.max_action_tokens must be a positive integer",
+        ),
+        (
+            {"repetition_penalty": float("inf")},
+            "director.repetition_penalty must be finite and in",
+        ),
+        (
+            {"repetition_penalty": True},
+            "director.repetition_penalty must be finite and in",
+        ),
+        (
+            {"repetition_penalty": 0.0},
+            r"director.repetition_penalty must be finite and in \(0, 2\]",
+        ),
+        (
+            {
+                "two_phase_generation": True,
+                "chat_template_enable_thinking": False,
+                "max_reasoning_tokens": 512,
+            },
+            "director.two_phase_generation requires .*enable_thinking=true",
+        ),
+        (
+            {
+                "two_phase_generation": True,
+                "chat_template_enable_thinking": True,
+                "max_reasoning_tokens": None,
+            },
+            "director.two_phase_generation requires a positive .*max_reasoning_tokens",
+        ),
+        (
             {
                 "action_decoding": "unconstrained",
                 "sampling_action_profile": "model_admissible_canvas_actions",
@@ -235,6 +279,91 @@ def test_live_backend_requires_and_wires_explicit_execution_timeout():
 
     assert backend.runtime.timeout_seconds == 37.0
     assert backend.runtime.gateway.timeout_seconds == 37.0
+
+
+def test_live_backend_wires_qwen_thinking_with_json_schema_director():
+    root = Path(__file__).resolve().parents[2]
+    source = yaml.safe_load(
+        (root / "config/evaluation_hotpotqa_unified_architecture_v1.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    source["execution_timeout"] = 37.0
+    source["director"]["chat_template_enable_thinking"] = True
+    fake_transformers = SimpleNamespace(
+        AutoTokenizer=SimpleNamespace(
+            from_pretrained=lambda *args, **kwargs: object()
+        )
+    )
+    with patch.dict(
+        os.environ,
+        {"VECTOR_ENGINE_API_KEY": "unit-test-placeholder"},
+        clear=False,
+    ), patch.dict(sys.modules, {"transformers": fake_transformers}), patch.object(
+        _MODULE,
+        "SGLangReceiptDirectorClient",
+        return_value=object(),
+    ) as created:
+        _MODULE.LiveSmokeBackend.from_config(
+            source,
+            root,
+            evaluation_only=True,
+        )
+
+    director_kwargs = created.call_args.kwargs
+    assert director_kwargs["enable_thinking"] is True
+    assert director_kwargs["two_phase_generation"] is False
+    assert director_kwargs["max_reasoning_tokens"] is None
+    assert director_kwargs["max_action_tokens"] is None
+    assert director_kwargs["repetition_penalty"] == 1.0
+
+
+def test_live_backend_wires_opt_in_skillflow_two_phase_director_budgets():
+    root = Path(__file__).resolve().parents[2]
+    source = yaml.safe_load(
+        (root / "config/evaluation_hotpotqa_unified_architecture_v1.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    source["execution_timeout"] = 37.0
+    source["director"].update(
+        {
+            "chat_template_enable_thinking": True,
+            "two_phase_generation": True,
+            "max_reasoning_tokens": 512,
+            "max_action_tokens": 384,
+            "repetition_penalty": 1.05,
+        }
+    )
+    fake_transformers = SimpleNamespace(
+        AutoTokenizer=SimpleNamespace(
+            from_pretrained=lambda *args, **kwargs: object()
+        )
+    )
+    with patch.dict(
+        os.environ,
+        {"VECTOR_ENGINE_API_KEY": "unit-test-placeholder"},
+        clear=False,
+    ), patch.dict(sys.modules, {"transformers": fake_transformers}), patch.object(
+        _MODULE,
+        "SGLangReceiptDirectorClient",
+        return_value=object(),
+    ) as created:
+        _MODULE.LiveSmokeBackend.from_config(
+            source,
+            root,
+            evaluation_only=True,
+        )
+
+    director_kwargs = created.call_args.kwargs
+    assert director_kwargs["enable_thinking"] is True
+    assert director_kwargs["two_phase_generation"] is True
+    assert director_kwargs["max_reasoning_tokens"] == 512
+    assert director_kwargs["max_action_tokens"] == 384
+    assert director_kwargs["repetition_penalty"] == 1.05
+    # The legacy max_tokens field remains wired for the old single-call path;
+    # the two-phase client consumes the explicit phase budgets above.
+    assert director_kwargs["max_tokens"] == 384
 
 
 def test_interactive_workflow_problem_exposes_only_the_execution_contract():
@@ -1281,6 +1410,14 @@ class HealthBenchMedRAGRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("healthbench_professional", runtime.dataset_id)
         self.assertEqual(37.0, runtime.timeout_seconds)
+        self.assertEqual(
+            (
+                ("reasoning", ()),
+                ("react", ()),
+                ("react", (HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,)),
+            ),
+            runtime.registered_execution_profiles(),
+        )
 
         orchestrator = AgentGraphOrchestrator(
             backend.registry,
@@ -1314,6 +1451,104 @@ class HealthBenchMedRAGRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
 
         close()
         close()
+        self.assertTrue(owner.closed)
+
+    def test_healthbench_execution_profile_allowlist_limits_runtime_and_canvas(
+        self,
+    ) -> None:
+        config = self._config()
+        config["healthbench_tool_runtime"][
+            "execution_profile_allowlist"
+        ] = [
+            {
+                "execution_mode": "react",
+                "allowed_tools": [HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID],
+            }
+        ]
+        settings = healthbench_tool_runtime_settings(config, self._task())
+        assert settings is not None
+        self.assertEqual(
+            (("react", (HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,)),),
+            settings["execution_profile_allowlist"],
+        )
+
+        backend = self._backend(config)
+        owner = self._registry_owner()
+        with patch.object(
+            _MODULE,
+            "open_healthbench_medrag_tool_registry",
+            return_value=owner,
+        ):
+            runtime, _, close = backend._runtime_for_task(self._task())
+
+        expected_profile = (
+            ("react", (HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,)),
+        )
+        self.assertEqual(expected_profile, runtime.registered_execution_profiles())
+        environment = AgentWorkflowEnv(
+            backend.registry,
+            runtime=runtime,
+            problem=self._task().question,
+            allowed_actions=("add_agent", "set_output", "finish"),
+        )
+        add_domain = environment.model_admissible_action_targets()["add_agent"]
+        self.assertEqual(
+            [
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": [HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID],
+                }
+            ],
+            add_domain["registered_execution_profiles"],
+        )
+        close()
+
+    def test_healthbench_execution_profile_allowlist_fails_closed(self) -> None:
+        for value, message in (
+            ([], "non-empty list"),
+            (
+                [{"execution_mode": "react"}],
+                "exactly execution_mode and allowed_tools",
+            ),
+            (
+                [
+                    {
+                        "execution_mode": "react",
+                        "allowed_tools": [
+                            HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                            HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                        ],
+                    }
+                ],
+                "unique canonical Tool IDs",
+            ),
+        ):
+            with self.subTest(value=value):
+                invalid = self._config()
+                invalid["healthbench_tool_runtime"][
+                    "execution_profile_allowlist"
+                ] = value
+                with self.assertRaisesRegex(ConfigurationError, message):
+                    healthbench_tool_runtime_settings(invalid, self._task())
+
+        unknown = self._config()
+        unknown["healthbench_tool_runtime"][
+            "execution_profile_allowlist"
+        ] = [
+            {
+                "execution_mode": "react",
+                "allowed_tools": ["healthbench-missing.search"],
+            }
+        ]
+        backend = self._backend(unknown)
+        owner = self._registry_owner()
+        with patch.object(
+            _MODULE,
+            "open_healthbench_medrag_tool_registry",
+            return_value=owner,
+        ):
+            with self.assertRaisesRegex(ValueError, "unregistered Runtime profile"):
+                backend._runtime_for_task(self._task())
         self.assertTrue(owner.closed)
 
     def test_enabled_condition_wires_skillflow_scientific_sampling(self) -> None:

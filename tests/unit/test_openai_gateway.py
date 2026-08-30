@@ -863,6 +863,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 "repetition_penalty": None,
                 "max_tokens": 512,
                 "seed": 17,
+                "chat_template_enable_thinking": None,
             },
         )
 
@@ -894,6 +895,63 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             payload["chat_template_kwargs"],
             {"enable_thinking": False},
         )
+
+    def test_qwen_chat_template_thinking_can_be_enabled_explicitly(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={"chat_template_enable_thinking": "true"},
+            ),
+        )
+        payload = OpenAICompatibleGateway().request_payload(item)
+        self.assertEqual(
+            payload["chat_template_kwargs"],
+            {"enable_thinking": True},
+        )
+
+    async def test_qwen_thinking_response_records_counts_not_reasoning_body(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={"chat_template_enable_thinking": "true"},
+            ),
+        )
+        gateway = OpenAICompatibleGateway(max_retries=0)
+        gateway._post_json = lambda *_: {  # type: ignore[method-assign]
+            "id": "req-thinking",
+            "model": "supervisor_theta",
+            "choices": [
+                {
+                    "message": {
+                        "content": "final answer",
+                        "reasoning_content": "private reasoning body",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "completion_tokens": 15,
+                "completion_tokens_details": {"reasoning_tokens": 11},
+            },
+        }
+
+        response = await gateway.generate(item)
+
+        self.assertEqual(response.text, "final answer")
+        self.assertIs(response.metadata["reasoning_content_present"], True)
+        self.assertEqual(response.metadata["reasoning_content_characters"], 22)
+        self.assertEqual(response.metadata["reasoning_tokens"], 11)
+        self.assertNotIn("private reasoning body", json.dumps(response.metadata))
 
     def test_skillflow_response_schema_is_forwarded(self) -> None:
         item = request()

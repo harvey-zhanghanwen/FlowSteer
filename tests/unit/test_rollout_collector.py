@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import threading
 import time
@@ -97,6 +98,12 @@ class CharacterTokenizer:
         return "".join(chr(token_id) for token_id in token_ids)
 
 
+class PhaseDistinctCharacterTokenizer(CharacterTokenizer):
+    def apply_chat_template(self, messages, **kwargs):
+        self.chat_calls.append((messages, kwargs))
+        return [101, 102, 103] if len(messages) == 2 else [201, 202, 203, 204]
+
+
 class ScriptedSGLangClient(SGLangReceiptDirectorClient):
     def __init__(self, actions, **kwargs):
         self.actions = list(actions)
@@ -124,12 +131,54 @@ class ScriptedSGLangClient(SGLangReceiptDirectorClient):
         }
 
 
+class ThinkingScriptedSGLangClient(ScriptedSGLangClient):
+    def __init__(self, actions, reasoning_token_counts, **kwargs):
+        self.reasoning_token_counts = list(reasoning_token_counts)
+        super().__init__(actions, enable_thinking=True, **kwargs)
+
+    def _post_json(self, payload):
+        value = super()._post_json(payload)
+        value["meta_info"]["reasoning_tokens"] = (
+            self.reasoning_token_counts.pop(0)
+        )
+        return value
+
+
+class TwoPhaseScriptedSGLangClient(ScriptedSGLangClient):
+    def __init__(self, actions, reasoning_token_counts, **kwargs):
+        self.actions = list(actions)
+        self.payloads = []
+        self.reasoning_token_counts = list(reasoning_token_counts)
+        SGLangReceiptDirectorClient.__init__(
+            self,
+            PhaseDistinctCharacterTokenizer(),
+            enable_thinking=True,
+            two_phase_generation=True,
+            **kwargs,
+        )
+
+    def _post_json(self, payload):
+        value = super()._post_json(payload)
+        metadata = payload["_flowsteer_request_metadata"]
+        if metadata["generation_phase"] == "reasoning":
+            value["meta_info"]["reasoning_tokens"] = (
+                self.reasoning_token_counts.pop(0)
+            )
+        return value
+
+
 class MismatchedTokenClient(ScriptedSGLangClient):
     def _post_json(self, payload):
         value = dict(super()._post_json(payload))
         value["output_ids"] = list(value["output_ids"])
         value["output_ids"][-1] += 1
         return value
+
+
+async def _inline_to_thread(function, *args, **kwargs):
+    """Keep receipt-only unit tests independent of an executor lifecycle."""
+
+    return function(*args, **kwargs)
 
 
 class FakeGateway:
@@ -351,6 +400,10 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     }
     assert client.generate_url == "http://127.0.0.1:8015/generate"
     assert payload["input_ids"] == [101, 102, 103]
+    assert payload["_flowsteer_request_metadata"] == {
+        "chat_template_enable_thinking": False,
+    }
+    assert "require_reasoning" not in payload
     assert payload["return_logprob"] is True
     assert payload["lora_path"] == "theta_live"
     assert payload["sampling_params"]["sampling_seed"] == 23
@@ -367,6 +420,11 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     assert response.metadata["action_json_schema_version"] == (
         "agentgraph.canvas-action-json-schema.v1"
     )
+    assert response.metadata["chat_template_enable_thinking"] is False
+    assert response.metadata["reasoning_tokens"] == 0
+    assert response.metadata["reasoning_content_present"] is False
+    assert response.metadata["reasoning_characters"] == 0
+    assert response.metadata["action_token_offset"] == 0
     assert len(response.metadata["output_token_ids"]) == len(
         response.metadata["behavior_log_probs"]
     )
@@ -375,6 +433,330 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     consumed = client.executed_prefix_tokens(response, action)
     assert consumed == action.consumed_end
     assert consumed < len(response.metadata["output_token_ids"])
+
+
+def test_native_sglang_receipt_uses_reasoning_token_boundary(monkeypatch):
+    monkeypatch.setattr(
+        "src.interactive.rollout_collector.asyncio.to_thread",
+        _inline_to_thread,
+    )
+    reasoning = "<think>private reasoning</think>\n"
+    action_text = '{"action":"finish"}'
+    client = ThinkingScriptedSGLangClient(
+        [reasoning + action_text],
+        [len(reasoning)],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(client.propose("ordinary prompt", seed=31))
+
+    _, template_kwargs = client.tokenizer.chat_calls[0]
+    assert template_kwargs["enable_thinking"] is True
+    assert client.payloads[0]["_flowsteer_request_metadata"] == {
+        "chat_template_enable_thinking": True,
+    }
+    assert client.payloads[0]["require_reasoning"] is True
+    assert response.text == action_text
+    assert response.metadata["chat_template_enable_thinking"] is True
+    assert response.metadata["reasoning_tokens"] == len(reasoning)
+    assert response.metadata["reasoning_content_present"] is True
+    assert response.metadata["reasoning_characters"] == len(reasoning)
+    assert response.metadata["action_token_offset"] == len(reasoning)
+    assert "private reasoning" not in response.text
+    assert response.metadata["receipt_verified"] is True
+    action = AgentActionParser().parse(response.text)
+    assert client.executed_prefix_tokens(response, action) == len(
+        reasoning + action_text
+    )
+
+
+def test_native_sglang_thinking_preserves_json_schema_after_reasoning(monkeypatch):
+    monkeypatch.setattr(
+        "src.interactive.rollout_collector.asyncio.to_thread",
+        _inline_to_thread,
+    )
+    reasoning = "<think>select a legal action</think>\n"
+    action_text = '{"action":"finish"}'
+    client = ThinkingScriptedSGLangClient(
+        [reasoning + action_text],
+        [len(reasoning)],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        action_json_schema=DIRECTOR_ACTION_JSON_SCHEMA_TEXT,
+        action_json_schema_version="agentgraph.canvas-action-json-schema.v1",
+    )
+
+    response = asyncio.run(client.propose("ordinary prompt", seed=37))
+
+    assert client.payloads[0]["require_reasoning"] is True
+    assert json.loads(client.payloads[0]["sampling_params"]["json_schema"]) == (
+        DIRECTOR_ACTION_JSON_SCHEMA
+    )
+    assert response.text == action_text
+    assert response.metadata["reasoning_tokens"] == len(reasoning)
+
+
+def test_native_sglang_two_phase_has_independent_budgets_and_exact_receipts(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "src.interactive.rollout_collector.asyncio.to_thread",
+        _inline_to_thread,
+    )
+    reasoning = "<think>compare evidence</think>\n"
+    discarded_suffix = '{"action":"finish"}'
+    action_text = '{"action":"finish"}'
+    client = TwoPhaseScriptedSGLangClient(
+        [reasoning + discarded_suffix, action_text],
+        [len(reasoning)],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        action_json_schema=DIRECTOR_ACTION_JSON_SCHEMA_TEXT,
+        action_json_schema_version="agentgraph.canvas-action-json-schema.v1",
+        max_reasoning_tokens=17,
+        max_action_tokens=41,
+        repetition_penalty=1.1,
+    )
+
+    response = asyncio.run(client.propose("ordinary prompt", seed=43))
+
+    assert len(client.payloads) == 2
+    reasoning_payload, action_payload = client.payloads
+    assert reasoning_payload["require_reasoning"] is True
+    assert reasoning_payload["sampling_params"]["max_new_tokens"] == 17
+    assert "json_schema" not in reasoning_payload["sampling_params"]
+    assert reasoning_payload["sampling_params"]["repetition_penalty"] == 1.1
+    assert reasoning_payload["_flowsteer_request_metadata"][
+        "generation_phase"
+    ] == "reasoning"
+    assert reasoning_payload["_flowsteer_request_metadata"][
+        "chat_template_enable_thinking"
+    ] is True
+    assert "require_reasoning" not in action_payload
+    assert action_payload["sampling_params"]["max_new_tokens"] == 41
+    assert action_payload["sampling_params"]["json_schema"] == (
+        DIRECTOR_ACTION_JSON_SCHEMA_TEXT
+    )
+    assert action_payload["sampling_params"]["repetition_penalty"] == 1.1
+    assert action_payload["_flowsteer_request_metadata"][
+        "generation_phase"
+    ] == "action"
+    assert action_payload["_flowsteer_request_metadata"][
+        "chat_template_enable_thinking"
+    ] is False
+    assert action_payload["sampling_params"]["sampling_seed"] == 43
+    assert reasoning_payload["sampling_params"]["sampling_seed"] != 43
+
+    assert len(client.tokenizer.chat_calls) == 2
+    _, reasoning_template = client.tokenizer.chat_calls[0]
+    action_messages, action_template = client.tokenizer.chat_calls[1]
+    assert reasoning_template["enable_thinking"] is True
+    assert action_template["enable_thinking"] is False
+    assert action_messages[-2] == {
+        "role": "assistant",
+        "content": reasoning,
+    }
+    assert action_messages[-1]["role"] == "user"
+    assert "Canvas action" in action_messages[-1]["content"]
+
+    assert response.text == action_text
+    assert "compare evidence" not in response.text
+    assert response.metadata["two_phase_generation"] is True
+    assert response.metadata["generation_strategy"] == (
+        "reasoning_action_two_phase"
+    )
+    assert response.metadata["max_reasoning_tokens"] == 17
+    assert response.metadata["max_action_tokens"] == 41
+    assert response.metadata["repetition_penalty"] == 1.1
+    assert response.metadata["reasoning_tokens"] == len(reasoning)
+    assert response.metadata["prompt_token_ids"] == tuple(
+        reasoning_payload["input_ids"]
+    )
+    assert response.metadata["prompt_token_ids"] != tuple(
+        action_payload["input_ids"]
+    )
+    assert response.metadata["action_token_offset"] == len(reasoning)
+    assert response.metadata["output_token_ids"] == tuple(
+        map(ord, reasoning + action_text)
+    )
+    assert len(response.metadata["behavior_log_probs"]) == len(
+        reasoning + action_text
+    )
+    phases = response.metadata["generation_phase_receipts"]
+    assert phases["reasoning"]["output_token_ids"] == tuple(
+        map(ord, reasoning + discarded_suffix)
+    )
+    assert phases["reasoning"]["reasoning_token_ids"] == tuple(
+        map(ord, reasoning)
+    )
+    assert phases["reasoning"]["unconsumed_suffix_token_ids"] == tuple(
+        map(ord, discarded_suffix)
+    )
+    assert "text" not in phases["reasoning"]
+    assert phases["action"]["text"] == action_text
+    assert phases["action"]["chat_template_enable_thinking"] is False
+    assert response.metadata["generation_request_count"] == 2
+    assert response.metadata["phase_logprob_factorization"] == (
+        "p(reasoning|base_prompt)*p(action|base_prompt,reasoning)"
+    )
+    assert response.metadata["single_autoregressive_receipt"] is False
+    assert response.metadata["total_completion_tokens"] == len(
+        reasoning + discarded_suffix + action_text
+    )
+    action = AgentActionParser().parse(response.text)
+    assert client.executed_prefix_tokens(response, action) == len(
+        reasoning + action_text
+    )
+
+
+def test_native_sglang_two_phase_validates_mode_budgets_and_penalty():
+    with pytest.raises(ValueError, match="requires enable_thinking"):
+        ScriptedSGLangClient(
+            ['{"action":"finish"}'],
+            policy_version=POLICY_VERSION,
+            two_phase_generation=True,
+        )
+    with pytest.raises(ValueError, match="phase token budgets require"):
+        ScriptedSGLangClient(
+            ['{"action":"finish"}'],
+            policy_version=POLICY_VERSION,
+            max_action_tokens=64,
+        )
+    for invalid in (0.0, -0.1, 2.1, float("inf"), "1.1", True):
+        with pytest.raises(ValueError, match="repetition_penalty"):
+            ScriptedSGLangClient(
+                ['{"action":"finish"}'],
+                policy_version=POLICY_VERSION,
+                repetition_penalty=invalid,
+            )
+
+
+def test_native_sglang_two_phase_wraps_hierarchical_schema_calls(monkeypatch):
+    monkeypatch.setattr(
+        "src.interactive.rollout_collector.asyncio.to_thread",
+        _inline_to_thread,
+    )
+    reasoning = "<think>finish is admissible</think>\n"
+    action_text = '{"action":"finish"}'
+    client = TwoPhaseScriptedSGLangClient(
+        [reasoning, action_text, reasoning, action_text],
+        [len(reasoning), len(reasoning)],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        max_reasoning_tokens=23,
+        max_action_tokens=67,
+    )
+    actions = ("add_subgraph", "finish")
+
+    response = asyncio.run(
+        client.propose(
+            "terminal Canvas",
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+            action_schema_branch=director_model_admissible_schema_branch(actions),
+        )
+    )
+
+    assert response.text == action_text
+    assert response.metadata["selected_action"] == "finish"
+    assert len(client.payloads) == 4
+    assert [
+        payload["_flowsteer_request_metadata"]["generation_phase"]
+        for payload in client.payloads
+    ] == ["reasoning", "action", "reasoning", "action"]
+    selector = response.metadata["hierarchical_phase_receipts"][
+        "action_selection"
+    ]
+    assert selector["two_phase_generation"] is True
+    assert set(selector["generation_phase_receipts"]) == {
+        "reasoning",
+        "action",
+    }
+    assert response.metadata["two_phase_generation"] is True
+    parsed = AgentActionParser().parse(response.text)
+    assert client.executed_prefix_tokens(response, parsed) == len(
+        reasoning + action_text
+    )
+
+
+def test_native_sglang_wire_payload_keeps_only_server_reasoning_flag(monkeypatch):
+    captured = []
+
+    def opened(request, timeout):
+        captured.append(json.loads(request.data.decode("utf-8")))
+        return io.BytesIO(b"{}")
+
+    monkeypatch.setattr("src.interactive.rollout_collector.urlopen", opened)
+    thinking_client = SGLangReceiptDirectorClient(
+        CharacterTokenizer(),
+        policy_version=POLICY_VERSION,
+        enable_thinking=True,
+    )
+    plain_client = SGLangReceiptDirectorClient(
+        CharacterTokenizer(),
+        policy_version=POLICY_VERSION,
+    )
+
+    thinking_client._post_json(thinking_client.request_payload("thinking"))
+    plain_client._post_json(plain_client.request_payload("plain"))
+
+    assert captured[0]["require_reasoning"] is True
+    assert "_flowsteer_request_metadata" not in captured[0]
+    assert "require_reasoning" not in captured[1]
+    assert "_flowsteer_request_metadata" not in captured[1]
+
+
+def test_native_sglang_reasoning_token_receipt_fails_closed(monkeypatch):
+    monkeypatch.setattr(
+        "src.interactive.rollout_collector.asyncio.to_thread",
+        _inline_to_thread,
+    )
+    missing = ThinkingScriptedSGLangClient(
+        ['{"action":"finish"}'],
+        [0],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    with pytest.raises(ReceiptValidationError, match="no reasoning_tokens"):
+        asyncio.run(missing.propose("ordinary prompt"))
+
+    excessive = ThinkingScriptedSGLangClient(
+        ['{"action":"finish"}'],
+        [100],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    with pytest.raises(ReceiptValidationError, match="exceeds completion"):
+        asyncio.run(excessive.propose("ordinary prompt"))
+
+    class UnexpectedReasoningClient(ScriptedSGLangClient):
+        def _post_json(self, payload):
+            value = super()._post_json(payload)
+            value["meta_info"]["reasoning_tokens"] = 1
+            return value
+
+    unexpected = UnexpectedReasoningClient(
+        ['{"action":"finish"}'],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    with pytest.raises(ReceiptValidationError, match="unexpectedly contains"):
+        asyncio.run(unexpected.propose("ordinary prompt"))
+
+
+@pytest.mark.parametrize("invalid", (1, 0, "true", None))
+def test_native_sglang_thinking_requires_strict_bool(invalid):
+    with pytest.raises(ValueError, match="enable_thinking must be a bool"):
+        ScriptedSGLangClient(
+            ['{"action":"finish"}'],
+            policy_version=POLICY_VERSION,
+            enable_thinking=invalid,
+        )
 
 
 def test_native_sglang_projects_uint64_seed_to_signed_backend_receipt():
@@ -507,6 +889,53 @@ def test_native_sglang_validates_model_admissible_schema_receipt():
             ),
             action_schema_branch="admissible:finish|unknown",
         )
+
+
+def test_native_sglang_hierarchical_selector_parses_public_suffix_only(monkeypatch):
+    monkeypatch.setattr(
+        "src.interactive.rollout_collector.asyncio.to_thread",
+        _inline_to_thread,
+    )
+    reasoning = "<think>hidden branch analysis</think>\n"
+    public_values = [
+        '{"action":"modify_agent"}',
+        '{"action":"modify_agent","field":"contract"}',
+        '{"action":"modify_agent","agent_id":"solver","contract":"repair"}',
+    ]
+    client = ThinkingScriptedSGLangClient(
+        [reasoning + value for value in public_values],
+        [len(reasoning)] * len(public_values),
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    actions = ("add_subgraph", "modify_agent", "finish")
+
+    response = asyncio.run(
+        client.propose(
+            "current Canvas",
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+            action_schema_branch=director_model_admissible_schema_branch(actions),
+        )
+    )
+
+    assert response.text == public_values[-1]
+    assert response.metadata["selected_action"] == "modify_agent"
+    assert response.metadata["selected_modify_field"] == "contract"
+    assert all(payload["require_reasoning"] is True for payload in client.payloads)
+    phase_receipts = response.metadata["hierarchical_phase_receipts"]
+    assert all(
+        receipt["reasoning_tokens"] == len(reasoning)
+        for receipt in phase_receipts.values()
+    )
+    assert all(
+        "hidden branch analysis" not in receipt["text"]
+        for receipt in phase_receipts.values()
+    )
 
 
 def test_native_sglang_v3_uses_exact_live_relation_candidate_receipt():

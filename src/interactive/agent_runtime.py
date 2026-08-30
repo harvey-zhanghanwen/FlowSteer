@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import json
 from types import MappingProxyType
-from typing import Awaitable, Collection, Dict, List, Mapping, MutableMapping, Optional, Protocol, Set, Tuple, Union
+from typing import Awaitable, Collection, Dict, List, Mapping, MutableMapping, Optional, Protocol, Sequence, Set, Tuple, Union
 import uuid
 
 from .agent_graph import (
@@ -632,6 +632,9 @@ class AgentRuntime:
         dataset_id: Optional[str] = None,
         semantic_protocol: str = "none",
         artifact_communication_profile: str = ARTIFACT_COMMUNICATION_LEGACY,
+        execution_profile_allowlist: Optional[
+            Sequence[Tuple[str, Sequence[str]]]
+        ] = None,
     ) -> None:
         if max_concurrency is not None and (
             type(max_concurrency) is not int or max_concurrency <= 0
@@ -671,6 +674,11 @@ class AgentRuntime:
         self.dataset_id = None if dataset_id is None else dataset_id.strip()
         self.semantic_protocol = semantic_protocol
         self.artifact_communication_profile = artifact_communication_profile
+        self._execution_profile_allowlist = (
+            self._validate_execution_profile_allowlist(
+                execution_profile_allowlist
+            )
+        )
         self.timeout_seconds = timeout_seconds
         self._global_semaphore = (
             asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
@@ -683,16 +691,9 @@ class AgentRuntime:
             if self.model_registry.require_provider(provider_id).max_concurrency is not None
         }
 
-    def registered_execution_profiles(
+    def _registered_execution_profiles_unfiltered(
         self,
     ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
-        """Return execution-mode/Tool pairs runnable by this Runtime.
-
-        This is the shared FlowSteer Canvas capability boundary used by the
-        live action domain.  It describes registered executors and available
-        task-scoped resources; semantic role names do not create an executor.
-        """
-
         profiles: list[Tuple[str, Tuple[str, ...]]] = []
         for mode_value in ("reasoning", "react", "coding"):
             if mode_value not in self.execution_adapters:
@@ -715,6 +716,85 @@ class AgentRuntime:
                     continue
                 profiles.append((mode_value, (tool_id,)))
         return tuple(profiles)
+
+    def _validate_execution_profile_allowlist(
+        self,
+        value: Optional[Sequence[Tuple[str, Sequence[str]]]],
+    ) -> Optional[Tuple[Tuple[str, Tuple[str, ...]], ...]]:
+        """Bind an optional condition profile to registered Runtime resources."""
+
+        if value is None:
+            return None
+        if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+            raise TypeError("execution_profile_allowlist must be a sequence")
+        if not value:
+            raise ValueError("execution_profile_allowlist must not be empty")
+        normalized: list[Tuple[str, Tuple[str, ...]]] = []
+        for item in value:
+            if (
+                not isinstance(item, (list, tuple))
+                or len(item) != 2
+                or not isinstance(item[0], str)
+                or not item[0].strip()
+                or item[0] != item[0].strip()
+                or isinstance(item[1], (str, bytes))
+                or not isinstance(item[1], Sequence)
+            ):
+                raise TypeError(
+                    "execution_profile_allowlist entries must be "
+                    "(execution_mode, allowed_tools) pairs"
+                )
+            execution_mode = item[0]
+            allowed_tools = tuple(item[1])
+            if any(
+                not isinstance(tool_id, str)
+                or not tool_id.strip()
+                or tool_id != tool_id.strip()
+                for tool_id in allowed_tools
+            ):
+                raise TypeError(
+                    "execution_profile_allowlist Tool IDs must be canonical "
+                    "non-empty strings"
+                )
+            if len(allowed_tools) != len(set(allowed_tools)):
+                raise ValueError(
+                    "execution_profile_allowlist Tool IDs must be unique"
+                )
+            profile = (execution_mode, allowed_tools)
+            if profile in normalized:
+                raise ValueError(
+                    "execution_profile_allowlist profiles must be unique"
+                )
+            normalized.append(profile)
+
+        registered = set(self._registered_execution_profiles_unfiltered())
+        unregistered = tuple(
+            profile for profile in normalized if profile not in registered
+        )
+        if unregistered:
+            raise ValueError(
+                "execution_profile_allowlist contains an unregistered "
+                f"Runtime profile: {unregistered[0]!r}"
+            )
+        return tuple(normalized)
+
+    def registered_execution_profiles(
+        self,
+    ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+        """Return execution-mode/Tool pairs exposed by this Runtime.
+
+        This is the shared FlowSteer Canvas capability boundary used by the
+        live action domain.  It describes registered executors and available
+        task-scoped resources; semantic role names do not create an executor.
+        An optional condition allowlist narrows this same boundary without
+        changing Agent contracts, relations, counts, or topology.
+        """
+
+        registered = self._registered_execution_profiles_unfiltered()
+        if self._execution_profile_allowlist is None:
+            return registered
+        allowed = set(self._execution_profile_allowlist)
+        return tuple(profile for profile in registered if profile in allowed)
 
     @staticmethod
     def _component_cache_eligible(
@@ -1447,6 +1527,16 @@ class AgentRuntime:
                 raise AgentRuntimeError(
                     f"agent {node.id!r} requires unregistered execution adapter "
                     f"{mode_value!r}"
+                )
+            if (
+                self._execution_profile_allowlist is not None
+                and (mode_value, tuple(node.allowed_tools))
+                not in self._execution_profile_allowlist
+            ):
+                raise AgentRuntimeError(
+                    f"agent {node.id!r} execution profile "
+                    f"{(mode_value, tuple(node.allowed_tools))!r} is outside "
+                    "the active execution_profile_allowlist"
                 )
             if not node.allowed_tools:
                 continue

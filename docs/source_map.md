@@ -543,3 +543,64 @@ count, a medical role, a reciprocal relation, or any fixed topology.  It only
 makes registered capabilities and measured execution feedback available to the
 free Director search space.  Rubrics, physician/reference responses and grader
 state remain evaluator-only.
+
+### HealthBench Qwen3.5 thinking condition v4
+
+The v4 condition changes the Qwen generation mode, its exact receipts, and the
+per-Action total completion budget from 1,024 to 4,096 tokens. Hidden reasoning
+and the public JSON action still share that single budget; the interrupted v4
+formal run later observed length termination, so 4,096 must not be described
+as a non-truncating allowance. It retains the v3 AgentGraph search space,
+prompt profile, 525-task order, generation seed, Tool condition, grader, and
+inference-only boundary. The result is therefore not a controlled
+thinking-only ablation against v3.
+
+| v4 boundary | Source and classification |
+| --- | --- |
+| Executor `chat_template_kwargs.enable_thinking` | **Direct reuse** of the existing `OpenAICompatibleGateway` Qwen/SGLang request path and SkillFlow `training/batch_inference.py` explicit `enable_thinking` switch. The registered model metadata is the single source of truth for Direct and AgentGraph Executors. |
+| Director tokenizer thinking template plus native SGLang `require_reasoning` | **Necessary Qwen3.5/SGLang adaptation** in `SGLangReceiptDirectorClient`. The checked SkillFlow entry points default or hard-code thinking off, while Director Canvas actions require hidden reasoning followed by the existing JSON-Schema-constrained public action. |
+| `meta_info.reasoning_tokens` action boundary | **Necessary provider-receipt adaptation**. Director hidden reasoning tokens are separated from the public Canvas action using the server-supplied token boundary; no heuristic scan for the first JSON brace is used. The public action alone reaches the parser and Canvas. |
+| Thinking observability | **Receipt-only adaptation**. Trajectories record the thinking flag, available reasoning-token/character counts, presence flag, and public-action token offset. The Director's hidden reasoning is not stored as plaintext or routed between Agents or back to the Director, although the exact output token IDs/log-probabilities retained for the existing rollout receipt can reconstruct that prefix with the tokenizer. Executor `reasoning_tokens=0` means the OpenAI-compatible server omitted an exact token count when `reasoning_content_present=true`; it must not be read as evidence of zero reasoning. |
+| ReAct scientific-sampling identity | **Necessary receipt wiring** over the existing SkillFlow scientific sampling coordinate. `chat_template_enable_thinking` is recorded in the pre-dispatch nested receipt and checked against the provider request/response receipt before a result can be resumed or reported. |
+
+Thinking is a model generation mode. ReAct remains an Agent
+`execution_mode`; neither is an Agent role. The condition does not add a
+medical role, fixed topology, fixed Agent count, learned Skill, GRPO, LoRA,
+MACE, Bayesian update, backward pass, or optimizer step.
+
+### HealthBench two-phase Director and paired ReAct profile v5/v6
+
+The v5 diagnostic and v6 paired condition keep the same unified Canvas,
+Runtime, trajectory, Tool, dataset adapter, and official/reference evaluator
+boundaries. They do not introduce a HealthBench-specific orchestration core.
+
+| Boundary | Source and classification |
+| --- | --- |
+| Director `REASONING -> ACTION` generation with independent phase budgets | **Thin adaptation of direct SkillFlow reuse** from `/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/skillev/rollout/engine.py::RolloutEngine.run`. The local SGLang client makes two conditioned calls, exposes only the JSON-Schema ACTION to Canvas, and stores exact per-phase prompt/token/log-probability receipts. The receipt explicitly records `p(reasoning\|base_prompt) * p(action\|base_prompt,reasoning)` and `single_autoregressive_receipt=false`; it is evaluation-compatible and is not represented as an action-masked one-pass training trajectory. |
+| 512-token Director reasoning budget | **Direct parameter reuse** of the bounded Qwen Supervisor thinking budget in SkillFlow `training/batch_inference.py`. The paired Direct/Executor response budget stays at 4,096 because the existing evaluation identity uses the same field for both arms. |
+| `FINISH` legal but not exclusive once the current Graph is admissible | **Direct reuse of the current FlowSteer-derived state-conditioned action domain** in `AgentWorkflowEnv.model_admissible_action_types`. v4 set `finish_only_when_admissible=true`, which forced every admissible singleton to terminate; v5/v6 set it to false without rewarding or requiring a larger Graph. |
+| BM25 `score` and `matched_terms` retained in authoritative evidence | **Necessary projection repair over direct SkillFlow retrieval output**. `FrozenMedRAGBM25Corpus.search` already computes these fields; the HealthBench aggregation layer now preserves them in Tool Observation, trajectory receipt, and bounded Director evidence provenance. PubMed evidence does not fabricate BM25 fields. |
+| `healthbench_tool_runtime.execution_profile_allowlist` | **Necessary project compatibility adaptation**, not an upstream module. SkillFlow filters task-scoped Tool resources and FlowSteer masks unavailable operators, but neither upstream represents heterogeneous `(execution_mode, allowed_tools)` pairs. The implementation narrows the existing `AgentRuntime.registered_execution_profiles -> Canvas action_target_domains -> validate_execution_contracts` path and rechecks the profile before dispatch. No Agent role, contract, count, relation, Output, or topology is selected by this allowlist. |
+| Direct/Graph profile identity and resume boundary | **Evaluation provenance adaptation**. Preflight requires the v6 allowlist to equal Direct `(react, direct_allowed_tools)` exactly; manifest, Direct generation identity, paired receipt, and report persist the allowlist. A mismatch fails closed rather than being labelled protocol-equivalent. |
+
+The v5 two-task run passed the execution/evaluator Stable Zero chain, but one
+Graph selected Tool-free `reasoning`; its paired identity therefore failed and
+v5 is retained only as rejected diagnostic evidence. v6 is accurately
+described as a **fixed ReAct+Tool execution protocol with a free-topology
+AgentGraph**. It is not compute-matched to the Single-Agent ReAct comparator,
+because a freely selected multi-Agent Graph can make more total model and Tool
+calls. ReAct remains an execution mode, never a role. Training, GRPO, LoRA,
+MACE, Bayesian updates, and Skill retrieval/evolution remain disabled.
+
+### HealthBench receipt-backed failure report v3
+
+| Boundary | Source and classification |
+| --- | --- |
+| JSONL loading, trajectory communication extraction, ReAct trace extraction, Tool receipt extraction, and atomic Markdown output | **Direct project reuse** from `report_joint_qa_progressive_experiment.py` and `report_multidataset_stable_zero.py`; no second trajectory/report storage model is introduced. |
+| Mutually exclusive first-observable failure taxonomy | **HealthBench evaluator adaptation** over the existing completion runner's `wrong_demo_diagnosis`, terminal receipt, and rubric-level grader receipt. It does not infer hidden reasoning or a fixed Verifier role. |
+| Direct response population with one frozen strict-zero terminal | **Necessary reporting compatibility adaptation**. `scripts/report_healthbench_failure_demos.py::_validate_task_populations` requires exact paired/trajectory/private task-ID equality. A missing Direct response is admitted only when `run_manifest.direct_progress`, the paired unavailable/invalid zero-score record, and an append-only Direct ReAct exhaustion receipt agree exactly. No answer or evaluator record is synthesized. |
+| Public versus evaluator-private reports | **Direct reuse of the repository's evaluator-only boundary**. Public output contains aggregate counts and redacted receipts; full conversation, signed rubric, physician response, candidate outputs, and full turns remain under ignored `artifacts/.../evaluator_private/` and never enter Director/Agent input. |
+
+The v3 failure report is generated entirely offline from the frozen 525-task
+evaluation. Its own manifest records zero model calls, zero Tool calls, zero
+grader calls, and no training.

@@ -272,6 +272,41 @@ def test_healthbench_authoritative_retrieval_is_a_distinct_valid_condition():
     _assert_config_rejected(invalid, "healthbench.direct_allowed_tools")
 
 
+def test_healthbench_react_paired_profile_matches_direct_tool_condition():
+    config = _healthbench_authoritative_config()
+    config["healthbench_tool_runtime"]["execution_profile_allowlist"] = [
+        {
+            "execution_mode": "react",
+            "allowed_tools": ["healthbench-authoritative.search"],
+        }
+    ]
+    _MODULE.validate_completion_benchmark_config(config)
+
+    for invalid_profile in (
+        [
+            {
+                "execution_mode": "reasoning",
+                "allowed_tools": [],
+            }
+        ],
+        [
+            {
+                "execution_mode": "react",
+                "allowed_tools": ["healthbench-medrag.search"],
+            }
+        ],
+        [],
+    ):
+        invalid = deepcopy(config)
+        invalid["healthbench_tool_runtime"][
+            "execution_profile_allowlist"
+        ] = invalid_profile
+        _assert_config_rejected(
+            invalid,
+            "healthbench_tool_runtime.execution_profile_allowlist",
+        )
+
+
 def test_evaluation_config_allows_base_director_without_lora_adapter():
     config = _evaluation_config("aime_2026")
     config["director"]["behavior_adapter_name"] = None
@@ -2062,6 +2097,7 @@ def test_healthbench_direct_react_is_one_agent_with_same_medrag_registry():
                 "repetition_penalty": None,
                 "max_tokens": int(config["director"]["max_action_tokens"]),
                 "seed": generation_seed,
+                "chat_template_enable_thinking": False,
             }
             scientific_requested_sampling = {
                 key: value
@@ -2221,6 +2257,12 @@ def test_healthbench_direct_react_is_one_agent_with_same_medrag_registry():
     assert result["direct_generation_identity"]["model"]["catalog_id"] == (
         registry.catalog_id
     )
+    assert (
+        result["direct_generation_identity"]["model"][
+            "chat_template_enable_thinking"
+        ]
+        is False
+    )
     assert result["direct_generation_identity"]["medrag"]["source_revision"] == (
         "fixture-revision"
     )
@@ -2245,6 +2287,12 @@ def test_healthbench_retrieval_report_requires_measured_paired_identity():
         _ROOT / "config" / "model_catalog_hotpotqa_deep_v6.yaml"
     )
     config = _healthbench_react_config()
+    config["healthbench_tool_runtime"]["execution_profile_allowlist"] = [
+        {
+            "execution_mode": "react",
+            "allowed_tools": ["healthbench-medrag.search"],
+        }
+    ]
     base_seed = int(config["experiment"]["seed"])
     task = _MODULE.TaskRecord(
         task_id="healthbench-professional:paired-identity",
@@ -2268,6 +2316,12 @@ def test_healthbench_retrieval_report_requires_measured_paired_identity():
         seed=base_seed,
         coordinate=coordinate,
     )
+    assert identity["agentgraph_execution_profile_allowlist"] == [
+        {
+            "execution_mode": "react",
+            "allowed_tools": ["healthbench-medrag.search"],
+        }
+    ]
     generation_seed = _MODULE.derive_generation_seed(
         base_seed=base_seed,
         coordinate=coordinate,
@@ -2282,6 +2336,9 @@ def test_healthbench_retrieval_report_requires_measured_paired_identity():
         "repetition_penalty": action_sampling["repetition_penalty"],
         "max_tokens": action_sampling["max_tokens"],
         "seed": generation_seed,
+        "chat_template_enable_thinking": action_sampling[
+            "chat_template_enable_thinking"
+        ],
     }
     scientific_requested_sampling = {
         key: value
@@ -2317,6 +2374,9 @@ def test_healthbench_retrieval_report_requires_measured_paired_identity():
         max_action_tokens=int(action_sampling["max_tokens"]),
         expected_top_k=action_sampling["top_k"],
         expected_repetition_penalty=action_sampling["repetition_penalty"],
+        expected_chat_template_enable_thinking=action_sampling[
+            "chat_template_enable_thinking"
+        ],
     )
     execution = {
         "metadata": {"response": {"model_calls": model_calls}},
@@ -2381,6 +2441,12 @@ def test_healthbench_retrieval_report_requires_measured_paired_identity():
     }
 
     report = _MODULE._report([row], config, [trajectory])
+    assert report["agentgraph_execution_profile_allowlist"] == [
+        {
+            "execution_mode": "react",
+            "allowed_tools": ["healthbench-medrag.search"],
+        }
+    ]
     assert report["protocol_equivalent_to_direct"] is True
     assert report["comparison_interpretation"] == "paired_architecture_comparison"
     assert report["paired_generation_identity"]["verified_task_count"] == 1

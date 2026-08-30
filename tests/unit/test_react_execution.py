@@ -297,6 +297,53 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
             response.metadata["model_calls"][0]["requested_sampling"]["top_k"],
         )
 
+    async def test_scientific_receipt_records_declared_thinking_mode(self) -> None:
+        coordinate = ScientificSamplingCoordinate(
+            sampling_schedule_hash=scientific_sampling_schedule_hash(base_seed=17),
+            schedule_purpose="healthbench-thinking-fixed-schedule",
+            ordered_sequence_hash=stable_hash(["healthbench-professional:case-1"]),
+            sequence_position=0,
+            task_id="healthbench-professional:case-1",
+            optimizer_step_or_anchor_ordinal=0,
+        )
+        gateway = SequenceGateway(
+            [
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "answer"},
+                    resource_id=None,
+                )
+            ]
+        )
+        base_request = request()
+        thinking_request = replace(
+            base_request,
+            model=replace(
+                base_request.model,
+                metadata={"chat_template_enable_thinking": "true"},
+            ),
+        )
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=1,
+            max_tool_calls=1,
+            sampling_base_seed=17,
+            sampling_coordinate=coordinate,
+        ).execute(thinking_request)
+
+        requested = response.metadata["model_calls"][0][
+            "scientific_sampling"
+        ]["requested_sampling"]
+        self.assertIs(True, requested["chat_template_enable_thinking"])
+        self.assertEqual(
+            "true",
+            gateway.requests[0].model.metadata[
+                "chat_template_enable_thinking"
+            ],
+        )
+
     async def test_failed_generation_preserves_scientific_sampling_receipt(self) -> None:
         coordinate = ScientificSamplingCoordinate(
             sampling_schedule_hash=scientific_sampling_schedule_hash(base_seed=17),

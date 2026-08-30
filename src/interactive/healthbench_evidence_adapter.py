@@ -283,6 +283,16 @@ class HealthBenchAuthoritativeSearchToolBackend:
                 "date": None,
                 "url": None,
                 "excerpt": cast(str, chunk["text"]),
+                # DIRECT_REUSE_SKILLFLOW: the frozen BM25 implementation
+                # already emits these public relevance fields.  Preserve them
+                # in the aggregate Tool Observation so the acting Agent can
+                # distinguish a strong lexical match from an incidental top-k
+                # result without consulting evaluator-only information.
+                "score": float(cast(float, chunk["score"])),
+                "matched_terms": [
+                    str(term)
+                    for term in cast(list[object], chunk["matched_terms"])
+                ],
             }
             for chunk in local_chunks
         ]
@@ -585,6 +595,14 @@ def _evidence_schema() -> dict[str, object]:
             "url": {"type": ["string", "null"]},
             "excerpt": {"type": "string"},
             "rank": {"type": "integer", "minimum": 1},
+            # SkillFlow BM25 fields are present only on frozen-textbook
+            # evidence.  PubMed evidence therefore keeps them optional under
+            # the shared evidence schema.
+            "score": {"type": "number"},
+            "matched_terms": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
         },
     }
 
