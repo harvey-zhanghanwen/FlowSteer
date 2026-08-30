@@ -45,7 +45,7 @@ Evaluator 为 `triviaqa.official.answer.v1`，固定分母为 128。
 
 AgentGraph 相对 Direct 的描述性差值为 **EM +47.66 个百分点、F1 +44.12 个百分点**。
 
-但是，128 题中只有 123 题通过完整 Output lineage 断言，且有 18 个 terminal failure。因此 formal protocol 状态为 `partial_or_protocol_invalid`，82.81/84.94 是固定分母 diagnostic，不应写成 protocol-valid official result。
+按当前 analyzer 的终局 accepted-FINISH 口径，128 题中有 110 题通过完整 Output inbox receipt lineage，另有 18 个 terminal failure。因此 formal protocol 状态为 `partial_or_protocol_invalid`，82.81/84.94 是固定分母 diagnostic，不应写成 protocol-valid official result。旧的 123/128 计数混入了部分未 FINISH 任务的历史 artifact；当前口径会忽略已被合法 supersede 的历史 projection，同时对无 Env-accepted FINISH 的任务 fail closed。
 
 ## thinking accuracy gate
 
@@ -68,7 +68,8 @@ fixed128 前 16 个同题样本上，thinking 的 EM 与 F1 均下降 **6.25 个
 | first data-plane action is search | 128/128 |
 | complete Top-K read by rank | 128/128 |
 | fact artifact routed via explicit relation | 128/128 |
-| Output lineage | 123/128 |
+| native fact receipt projection | 177/177 exact，0 violation |
+| terminal Output inbox receipt lineage | 110/128 |
 | Web Search calls | 0 |
 | non-fact-memory search calls | 0 |
 | Agent-facing data-plane violations | 0 |

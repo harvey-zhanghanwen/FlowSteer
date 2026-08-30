@@ -55,12 +55,14 @@ def _director_prompt(
 
 
 def _fact_receipts(
-    *, top_k: int = 2
+    *,
+    top_k: int = 2,
+    query: str = "rewritten public task",
+    memory_prefix: str = "fact",
 ) -> tuple[dict[str, object], list[dict[str, object]], dict[str, object]]:
-    query = "rewritten public task"
     hits = [
         {
-            "memory_id": f"fact-{index}",
+            "memory_id": f"{memory_prefix}-{index}",
             "rank": index,
             "similarity": round(0.95 - index * 0.05, 2),
             "fact_text": f"Entity {index} has a self-contained public fact.",
@@ -191,6 +193,11 @@ def _trajectory(
         "tool_receipts": receipts,
     }
     final_answer = "<answer>wrong span</answer>"
+    terminal_provenance = {
+        **routed_semantics,
+        "graph_revision": 1,
+        "artifact_version": f"artifact-{task_id}",
+    }
     return {
         "schema_version": "flowsteer.agentgraph.trajectory.v1",
         "task": {
@@ -267,11 +274,42 @@ def _trajectory(
                     "output_agent_id": "formatter",
                     "final_answer": final_answer,
                 },
-            }
+            },
+            {
+                "round_index": 1,
+                "director_request_id": f"finish-{task_id}",
+                "prompt": _director_prompt(),
+                "policy_response": '{"action":"finish"}',
+                "action": {"action": "finish"},
+                "canvas_feedback": "workflow finished",
+                "execution_reused": True,
+                "graph_revision": 1,
+                "graph_snapshot": graph,
+                "executions": [],
+                "runtime_summary": {
+                    "director_action_target_domains": {
+                        "finish": {
+                            "admissible": True,
+                            "submission_semantics": "explicit_finish",
+                        }
+                    },
+                    "graph_revision": 1,
+                    "output_agent_id": "formatter",
+                    "final_answer": final_answer,
+                    "output_metadata": {
+                        "formatter": {
+                            "input_artifact_provenance": [
+                                terminal_provenance
+                            ]
+                        }
+                    },
+                },
+            },
         ],
         "final_answer": final_answer,
         "termination_reason": "finish",
         "explicit_finish": True,
+        "terminal_failure": False,
         "evaluation": {
             "evaluator_version": "triviaqa.official.answer.v1",
             "valid": True,
@@ -482,6 +520,16 @@ def test_complete_snapshot_reports_formal_metrics_and_protocol(tmp_path: Path) -
     assert assertions["director_data_plane_isolated"] is True
     assert assertions["retrieval_tool_calls_by_worker_gt_0"] is True
     assert assertions["worker_ownership_violation_count"] == 0
+    assert assertions["native_artifact_receipt_projection_count"] == 3
+    assert assertions[
+        "native_artifact_receipt_projection_violation_count"
+    ] == 0
+    assert assertions["native_artifacts_match_exact_read_receipts"] is True
+    assert assertions["native_top_k_batch_projection_count"] == 3
+    assert assertions["native_top_k_batch_complete_count"] == 3
+    assert assertions["native_top_k_batch_incomplete_count"] == 0
+    assert assertions["native_top_k_batch_expected_k_values"] == [2]
+    assert assertions["native_top_k_batches_complete"] is True
     assert assertions["first_data_plane_action_is_search"] is True
     assert assertions["complete_top_k_read_by_rank"] is True
     assert assertions["fact_artifact_routed_via_explicit_relation"] is True
@@ -505,6 +553,151 @@ def test_complete_snapshot_reports_formal_metrics_and_protocol(tmp_path: Path) -
     assert report["wrong_demo_selection"]["shortfall"] == 0
     assert len({demo["task_id"] for demo in report["wrong_demos"]}) == 3
     assert all(demo["actual_execution_chain"] for demo in report["wrong_demos"])
+    first_control = report["per_task_protocol"][
+        "triviaqa:validation:0"
+    ]["control_plane_and_tool_routing"]
+    projection = first_control["native_artifact_receipt_projections"][0]
+    assert projection["projection_kind"] == "ordered_top_k_batch"
+    assert projection["issues"] == []
+    assert projection["receipt_exact"] is True
+    task_protocol = report["per_task_protocol"]["triviaqa:validation:0"]
+    assert task_protocol["accepted_finish_output_inbox"]["accepted"] is True
+    assert task_protocol["terminal_lineage_projection_count"] == 1
+    assert task_protocol["superseded_projection_count"] == 0
+
+
+def test_accepted_finish_uses_terminal_projection_and_supersedes_history() -> None:
+    trajectory = _trajectory("triviaqa:validation:superseding")
+    first_turn = trajectory["turns"][0]  # type: ignore[index]
+    stale_search, stale_reads, stale_artifact = _fact_receipts(
+        query="superseded retrieval query",
+        memory_prefix="stale-fact",
+    )
+    stale_receipts = [stale_search, *stale_reads]
+    stale_artifact_text = json.dumps(
+        stale_artifact,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    stale_agent = {
+        "id": "stale_retriever",
+        "role_family": "evidence_retriever",
+        "execution_mode": "react",
+        "allowed_tools": [analysis.FACT_MEMORY_TOOL_ID],
+    }
+    stale_relation = {
+        "source_id": "stale_retriever",
+        "target_id": "reasoner",
+        "source_to_target": True,
+        "target_to_source": False,
+    }
+    seen_graphs: set[int] = set()
+    for turn in trajectory["turns"]:  # type: ignore[index]
+        graph = turn["graph_snapshot"]
+        if id(graph) in seen_graphs:
+            continue
+        seen_graphs.add(id(graph))
+        graph["nodes"].append(copy.deepcopy(stale_agent))
+        graph["relations"].append(copy.deepcopy(stale_relation))
+    stale_execution = {
+        "agent_id": "stale_retriever",
+        "execution_id": "stale-retriever-execution",
+        "output": stale_artifact_text,
+        "metadata": {
+            "request": {
+                "execution_role": "worker",
+                "graph_revision": 1,
+                "problem": "public validation task",
+                "agent": stale_agent,
+                "upstream": [],
+            },
+            "response": {
+                "tool_receipts": stale_receipts,
+                "react_trace": [],
+            },
+        },
+    }
+    first_turn["executions"].insert(0, stale_execution)
+    reasoner_request = first_turn["executions"][2]["metadata"]["request"]
+    reasoner_request["upstream"].append(
+        {
+            "source_agent_id": "stale_retriever",
+            "target_agent_id": "reasoner",
+            "artifact_type": "evidence",
+            "artifact": stale_artifact_text,
+            "tool_receipts": stale_receipts,
+        }
+    )
+
+    protocol = analysis._task_protocol(  # noqa: SLF001
+        "triviaqa:validation:superseding",
+        trajectory,
+    )
+
+    assert protocol["complete_top_k_projection_count"] == 2
+    assert protocol["fact_artifact_routed_via_explicit_relation"] is True
+    assert protocol["accepted_finish_output_inbox"]["accepted"] is True
+    assert protocol["terminal_lineage_projection_count"] == 1
+    assert protocol["superseded_projection_count"] == 1
+    assert protocol["output_lineage"] is True
+    assert [
+        route["terminal_output_inbox_lineage"]
+        for route in protocol["projection_routes"]
+    ] == [False, True]
+
+
+def test_output_lineage_requires_env_accepted_finish() -> None:
+    trajectory = _trajectory("triviaqa:validation:no-finish")
+    trajectory["turns"] = trajectory["turns"][:-1]  # type: ignore[index]
+    trajectory["explicit_finish"] = False
+    trajectory["termination_reason"] = "canvas_action_domain_exhausted"
+    trajectory["terminal_failure"] = True
+    trajectory["final_answer"] = None
+
+    protocol = analysis._task_protocol(  # noqa: SLF001
+        "triviaqa:validation:no-finish",
+        trajectory,
+    )
+
+    assert protocol["complete_top_k_projection_count"] == 1
+    assert protocol["fact_artifact_routed_via_explicit_relation"] is True
+    assert protocol["accepted_finish_output_inbox"]["accepted"] is False
+    assert "accepted_finish_count" in protocol[
+        "accepted_finish_output_inbox"
+    ]["issues"]
+    assert protocol["terminal_lineage_projection_count"] == 0
+    assert protocol["output_lineage"] is False
+
+
+def test_native_fact_projection_fails_closed_on_search_read_mismatch(
+    tmp_path: Path,
+) -> None:
+    args, trajectories = _fixture(tmp_path)
+    broken = copy.deepcopy(trajectories)
+    first_execution = broken[0]["turns"][0]["executions"][0]  # type: ignore[index]
+    first_response = first_execution["metadata"]["response"]
+    first_response["tool_receipts"][0]["result"]["value"]["hits"][0][
+        "fact_text"
+    ] = "A search hit that does not match its exact read receipt."
+    _write_jsonl(Path(args.trajectories), broken)
+
+    report = analysis.build_report(args)
+
+    assertions = report["protocol_assertions"]
+    assert assertions[
+        "native_artifact_receipt_projection_violation_count"
+    ] == 1
+    assert assertions["native_artifacts_match_exact_read_receipts"] is False
+    assert assertions["native_top_k_batch_incomplete_count"] == 1
+    assert assertions["native_top_k_batches_complete"] is False
+    assert assertions["protocol_valid"] is False
+    assert report["metrics"]["formal"] is None
+    first_control = report["per_task_protocol"][
+        "triviaqa:validation:0"
+    ]["control_plane_and_tool_routing"]
+    projection = first_control["native_artifact_receipt_projections"][0]
+    assert projection["issues"] == ["artifact_candidate_exact_1"]
+    assert projection["receipt_exact"] is False
 
 
 def test_director_tool_enabled_request_fails_closed(tmp_path: Path) -> None:

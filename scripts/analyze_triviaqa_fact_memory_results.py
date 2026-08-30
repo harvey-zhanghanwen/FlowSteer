@@ -450,6 +450,7 @@ def _fact_projection(
             candidate.get("memory_id") != hit.get("memory_id")
             or candidate.get("rank") != hit.get("rank")
             or candidate.get("similarity") != hit.get("similarity")
+            or candidate.get("fact_text") != hit.get("fact_text")
             or candidate.get("fact_text") != memory.get("fact_text")
         ):
             issues.append(f"artifact_candidate_exact_{index + 1}")
@@ -507,6 +508,137 @@ def _web_and_nonfact_search(
         if any(marker in tool_id.casefold() for marker in WEB_TOOL_MARKERS):
             web_events[signature] = event
     return len(web_events), len(nonfact_events), list(web_events.values())
+
+
+def _accepted_finish_output_inbox(
+    trajectory: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Read the revision-local Output inbox from one Env-accepted FINISH.
+
+    ``AgentWorkflowEnv`` accepts FINISH only after graph, semantic-lineage,
+    terminal-format, and current Runtime-result validation.  The persisted
+    FINISH turn carries that admission plus the exact Output Agent provenance.
+    Historical retrieval projections are therefore not additional terminal
+    requirements: a later accepted Runtime artifact can supersede them.  This
+    helper remains fail-closed unless the accepted FINISH receipt, graph and
+    Runtime revisions, final answer, Output identity, directed inbox edge, and
+    receipt-bearing provenance all agree.
+    """
+
+    accepted_turns: list[Mapping[str, Any]] = []
+    for raw_turn in qa.base._list(trajectory.get("turns")):
+        turn = qa.base._mapping(raw_turn)
+        action = qa.base._mapping(turn.get("action"))
+        if (
+            action.get("action") == "finish"
+            and set(action) == {"action"}
+            and turn.get("canvas_feedback") == "workflow finished"
+        ):
+            accepted_turns.append(turn)
+
+    issues: list[str] = []
+    if len(accepted_turns) != 1:
+        issues.append("accepted_finish_count")
+    turn = accepted_turns[0] if len(accepted_turns) == 1 else {}
+    runtime = qa.base._mapping(turn.get("runtime_summary"))
+    snapshot = qa.base._mapping(turn.get("graph_snapshot"))
+    target_domains = qa.base._mapping(
+        runtime.get("director_action_target_domains")
+    )
+    finish_domain = qa.base._mapping(target_domains.get("finish"))
+    turn_revision = turn.get("graph_revision")
+    runtime_revision = runtime.get("graph_revision")
+    snapshot_revision = snapshot.get("revision")
+    output_agent_id = runtime.get("output_agent_id")
+    snapshot_output_agent_id = snapshot.get("output_agent_id")
+    final_answer = trajectory.get("final_answer")
+    runtime_final_answer = runtime.get("final_answer")
+    if not (
+        trajectory.get("explicit_finish") is True
+        and trajectory.get("termination_reason") == "finish"
+        and trajectory.get("terminal_failure") is not True
+    ):
+        issues.append("trajectory_terminal_state")
+    if not (
+        type(turn_revision) is int
+        and runtime_revision == turn_revision
+        and snapshot_revision == turn_revision
+    ):
+        issues.append("terminal_graph_revision")
+    if not (
+        isinstance(output_agent_id, str)
+        and output_agent_id
+        and snapshot_output_agent_id == output_agent_id
+    ):
+        issues.append("terminal_output_agent")
+    if not (
+        isinstance(final_answer, str)
+        and final_answer.strip()
+        and runtime_final_answer == final_answer
+    ):
+        issues.append("terminal_final_answer")
+    if not (
+        finish_domain.get("admissible") is True
+        and finish_domain.get("submission_semantics") == "explicit_finish"
+    ):
+        issues.append("finish_admissibility")
+
+    terminal_edges = qa._directed_edges(snapshot)
+    output_metadata = qa.base._mapping(runtime.get("output_metadata"))
+    output_agent_metadata = qa.base._mapping(
+        output_metadata.get(output_agent_id)
+    )
+    routes: list[dict[str, Any]] = []
+    receipt_signatures: set[str] = set()
+    for raw_provenance in qa.base._list(
+        output_agent_metadata.get("input_artifact_provenance")
+    ):
+        provenance = qa.base._mapping(raw_provenance)
+        source_agent_id = provenance.get("source_agent_id")
+        target_agent_id = provenance.get("target_agent_id")
+        tool_receipts = [
+            qa.base._mapping(receipt)
+            for receipt in qa.base._list(provenance.get("tool_receipts"))
+            if (
+                isinstance(receipt, Mapping)
+                and receipt.get("tool_id") == FACT_MEMORY_TOOL_ID
+                and _successful_value(receipt) is not None
+            )
+        ]
+        route_valid = bool(
+            isinstance(source_agent_id, str)
+            and source_agent_id
+            and target_agent_id == output_agent_id
+            and (source_agent_id, target_agent_id) in terminal_edges
+            and provenance.get("graph_revision") == turn_revision
+            and isinstance(provenance.get("artifact_version"), str)
+            and bool(str(provenance.get("artifact_version")).strip())
+            and tool_receipts
+        )
+        routes.append(
+            {
+                "source_agent_id": source_agent_id,
+                "target_agent_id": target_agent_id,
+                "graph_revision": provenance.get("graph_revision"),
+                "fact_receipt_count": len(tool_receipts),
+                "valid": route_valid,
+            }
+        )
+        if route_valid:
+            receipt_signatures.update(
+                qa._receipt_signature(receipt) for receipt in tool_receipts
+            )
+    if not routes or not any(route["valid"] for route in routes):
+        issues.append("terminal_output_inbox_provenance")
+    return {
+        "accepted": not issues,
+        "round_index": turn.get("round_index"),
+        "graph_revision": turn_revision,
+        "output_agent_id": output_agent_id,
+        "receipt_signatures": sorted(receipt_signatures),
+        "routes": routes,
+        "issues": sorted(set(issues)),
+    }
 
 
 def _task_protocol(task_id: str, trajectory: Mapping[str, Any]) -> dict[str, Any]:
@@ -589,7 +721,11 @@ def _task_protocol(task_id: str, trajectory: Mapping[str, Any]) -> dict[str, Any
         (item["source_agent_id"], item["target_agent_id"]) for item in messages
     }
     projection_routes: list[dict[str, Any]] = []
-    output_lineage_results: list[bool] = []
+    accepted_finish = _accepted_finish_output_inbox(trajectory)
+    terminal_receipt_signatures = set(
+        accepted_finish["receipt_signatures"]
+    )
+    terminal_lineage_results: list[bool] = []
     for projection in valid_projections:
         receipt_signatures = set(projection["receipt_signatures"])
         immediate = [
@@ -619,16 +755,26 @@ def _task_protocol(task_id: str, trajectory: Mapping[str, Any]) -> dict[str, Any
             )
             and receipt_signatures.issubset(output_signatures)
         )
-        output_lineage_results.append(output_lineage)
+        terminal_lineage = bool(
+            accepted_finish["accepted"] is True
+            and receipt_signatures
+            and receipt_signatures.issubset(terminal_receipt_signatures)
+        )
+        terminal_lineage_results.append(terminal_lineage)
         projection_routes.append(
             {
                 "agent_id": projection.get("agent_id"),
                 "receipt_signature_count": len(receipt_signatures),
                 "explicit_relation_route_count": len(immediate),
                 "routed": bool(immediate),
-                "output_lineage": output_lineage,
+                "historical_output_lineage": output_lineage,
+                "terminal_output_inbox_lineage": terminal_lineage,
             }
         )
+    terminal_projection_count = sum(terminal_lineage_results)
+    superseded_projection_count = sum(
+        result is False for result in terminal_lineage_results
+    ) if terminal_projection_count else 0
     data_plane_violations = _scan_data_plane(trajectory)
     web_search_count, nonfact_search_count, web_events = _web_and_nonfact_search(
         trajectory
@@ -650,8 +796,12 @@ def _task_protocol(task_id: str, trajectory: Mapping[str, Any]) -> dict[str, Any
         "fact_artifact_routed_via_explicit_relation": bool(valid_projections)
         and all(route["routed"] for route in projection_routes),
         "output_agent_id": output_agent_id,
+        "accepted_finish_output_inbox": accepted_finish,
+        "terminal_lineage_projection_count": terminal_projection_count,
+        "superseded_projection_count": superseded_projection_count,
         "output_lineage": bool(valid_projections)
-        and all(output_lineage_results),
+        and accepted_finish["accepted"] is True
+        and terminal_projection_count > 0,
         "projection_routes": projection_routes,
         "web_search_count": web_search_count,
         "non_fact_memory_search_count": nonfact_search_count,
@@ -759,13 +909,148 @@ def _aggregate_control_plane(
     selected_ids: Sequence[str],
     trajectories: Mapping[str, Mapping[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
-    """Thin fact-memory adapter over the shared QA Tool boundary analyzer."""
+    """Reuse shared control checks with the native fact-receipt projection.
+
+    Director isolation, worker ownership, communication routing, and output
+    lineage use the shared QA-memory analyzer unchanged.  Its artifact checker
+    is deliberately QA-record-specific, however: it expects the old
+    ``memory.text``/training-QA fields and a completion ``memory_ids`` value.
+    Fact-memory execution instead follows
+    ``QARetrievalReactExecutionAdapter._fact_memory_completion_receipt_projection``:
+    completion selects ``relevant_ranks`` while the projected artifact is the
+    exact ordered ``fact_text`` search/read batch.  Reuse ``_fact_projection``
+    above, which mirrors that existing runtime boundary, rather than treating
+    the fact wire as a malformed QA-record wire.
+    """
 
     if qa.QA_MEMORY_TOOL_ID != FACT_MEMORY_TOOL_ID:
         raise RuntimeError(
             "fact-memory and shared QA control-plane Tool IDs differ"
         )
-    return qa._aggregate_control_plane(selected_ids, trajectories)
+    control, shared_per_task = qa._aggregate_control_plane(
+        selected_ids,
+        trajectories,
+    )
+    per_task: dict[str, dict[str, Any]] = {}
+    for task_id in selected_ids:
+        trajectory = trajectories.get(task_id)
+        if trajectory is None:
+            continue
+        fact_projections = [
+            {
+                **projection,
+                "projection_kind": "ordered_top_k_batch",
+                "expected_top_k": projection.get("top_k"),
+                "artifact_candidate_count": len(
+                    qa.base._list(projection.get("candidate_memory_ids"))
+                ),
+                "successful_read_count": len(
+                    qa.base._list(projection.get("read_memory_ids"))
+                ),
+                "k_completeness_applicable": True,
+                "k_complete": projection.get("complete_top_k_rank_reads")
+                is True,
+                "receipt_exact": projection.get("complete_top_k_rank_reads")
+                is True,
+            }
+            for round_index, execution_position, execution in (
+                qa.base._iter_executions(trajectory)
+            )
+            if (
+                projection := _fact_projection(
+                    round_index,
+                    execution_position,
+                    execution,
+                )
+            )
+            is not None
+        ]
+        task_protocol = _task_protocol(task_id, trajectory)
+        task_control = dict(shared_per_task.get(task_id, {}))
+        task_control.update(
+            {
+                "native_artifact_receipt_projections": fact_projections,
+                "native_artifact_receipt_projection_count": len(
+                    fact_projections
+                ),
+                "native_artifact_receipt_projection_violation_count": sum(
+                    projection["receipt_exact"] is not True
+                    for projection in fact_projections
+                ),
+                "native_top_k_batch_projection_count": len(fact_projections),
+                "native_top_k_batch_complete_count": sum(
+                    projection["k_complete"] is True
+                    for projection in fact_projections
+                ),
+                "native_top_k_batch_incomplete_count": sum(
+                    projection["k_complete"] is not True
+                    for projection in fact_projections
+                ),
+                "accepted_finish_output_inbox": task_protocol[
+                    "accepted_finish_output_inbox"
+                ],
+                "terminal_lineage_projection_count": task_protocol[
+                    "terminal_lineage_projection_count"
+                ],
+                "superseded_projection_count": task_protocol[
+                    "superseded_projection_count"
+                ],
+                "output_inbox_receipt_lineage": task_protocol[
+                    "output_lineage"
+                ],
+            }
+        )
+        per_task[task_id] = task_control
+
+    projections = [
+        projection
+        for task_control in per_task.values()
+        for projection in task_control[
+            "native_artifact_receipt_projections"
+        ]
+    ]
+    violation_count = sum(
+        projection["receipt_exact"] is not True for projection in projections
+    )
+    incomplete_count = sum(
+        projection["k_complete"] is not True for projection in projections
+    )
+    assertions = dict(qa.base._mapping(control.get("assertions")))
+    output_lineage_task_count = sum(
+        task_control["output_inbox_receipt_lineage"] is True
+        for task_control in per_task.values()
+    )
+    assertions.update(
+        {
+            "native_artifact_receipt_projection_count": len(projections),
+            "native_artifact_receipt_projection_violation_count": (
+                violation_count
+            ),
+            "native_artifacts_match_exact_read_receipts": bool(projections)
+            and violation_count == 0,
+            "native_top_k_batch_projection_count": len(projections),
+            "native_top_k_batch_complete_count": (
+                len(projections) - incomplete_count
+            ),
+            "native_top_k_batch_incomplete_count": incomplete_count,
+            "native_top_k_batch_expected_k_values": sorted(
+                {
+                    projection["expected_top_k"]
+                    for projection in projections
+                    if type(projection.get("expected_top_k")) is int
+                }
+            ),
+            "native_top_k_batches_complete": (
+                None if not projections else incomplete_count == 0
+            ),
+            "retrieval_tasks_with_output_inbox_receipt_lineage": (
+                output_lineage_task_count
+            ),
+            "output_inbox_receipt_lineage": bool(per_task)
+            and output_lineage_task_count == len(per_task),
+        }
+    )
+    return {**control, "assertions": assertions}, per_task
 
 
 def _wrong_demos(
@@ -879,6 +1164,14 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 "retrieval_tool_calls_by_worker",
                 "retrieval_tool_calls_by_worker_gt_0",
                 "worker_ownership_violation_count",
+                "native_artifact_receipt_projection_count",
+                "native_artifact_receipt_projection_violation_count",
+                "native_artifacts_match_exact_read_receipts",
+                "native_top_k_batch_projection_count",
+                "native_top_k_batch_complete_count",
+                "native_top_k_batch_incomplete_count",
+                "native_top_k_batch_expected_k_values",
+                "native_top_k_batches_complete",
                 "retrieval_artifact_routed_via_relation",
                 "output_inbox_receipt_lineage",
             )
@@ -1010,6 +1303,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         and protocol.get("director_data_plane_isolated") is True
         and protocol.get("retrieval_tool_calls_by_worker_gt_0") is True
         and protocol.get("worker_ownership_violation_count") == 0
+        and protocol.get("native_artifacts_match_exact_read_receipts") is True
+        and protocol.get("native_top_k_batches_complete") is True
         and protocol.get("retrieval_artifact_routed_via_relation") is True
         and protocol.get("output_inbox_receipt_lineage") is True
         and materialization_manifest_valid

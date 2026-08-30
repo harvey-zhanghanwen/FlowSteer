@@ -19,11 +19,11 @@
 | Agent-facing embedding input 只使用 `fact_text` | 已满足 | facts/index payload 只有 `schema_version,memory_id,tool_id,fact_text`；`provenance_loaded_by_index=false` |
 | CPU BGE、768 维、L2、dot product | 已满足 | index manifest；实际 embeddings 为 `(76523,768)` float32 且已归一化 |
 | development-only Top-K 冻结 | 已满足 | 512 development tasks，validation 未用于选择，Top-K=5，并与 final index manifest 一致 |
-| 19 条 canary 完整执行 | 采样与计分已完成；当前严格 lineage 未完全通过 | selected/paired/trajectory=19；FINISH=19；EM=94.74%、F1=98.25%；当前 lineage 15/19 |
+| 19 条 canary 完整执行 | 采样、计分与终局 lineage 已完成 | selected/paired/trajectory=19；FINISH=19；EM=94.74%、F1=98.25%；terminal Output inbox lineage=19/19 |
 | 固定 128 条 AgentGraph 完整采样与计分 | 已完成 | selected/paired/trajectory=128；task ID 集合一致；evaluator-valid=128；collection failure=0 |
-| 固定 128 条正式协议 | **未满足** | FINISH=110/128；terminal failure=18；Output lineage=123/128；`protocol_valid=false` |
+| 固定 128 条正式协议 | **未满足** | FINISH=110/128；terminal failure=18；terminal Output inbox receipt lineage=110/128；`protocol_valid=false` |
 | worker-Agent 动态 Tool 检索 | 已满足旧运行协议 | Director Tool=0；worker search=189/read=939；首个 data-plane action search=128/128；Web Search=0 |
-| 当前 exact receipt validator | **未满足** | 当前 validator 将旧 native artifact projection 判为 schema 不匹配，需对齐 artifact/receipt schema 后重跑 |
+| 当前 exact receipt validator | 已修复并通过 | fact analyzer 已对齐现有 `fact_text + relevant_ranks` runtime receipt；真实 fixed128 为 177/177 exact projections、0 violation |
 | 指标、receipt、错误 demo 保存 | 已落盘 | report、formal analysis、run/preflight manifest、128 trajectories、22 wrong demos 均存在 |
 | 无训练、无 Web Search、未进入其他数据集 | 已满足 | `training_enabled=false`、optimizer updates=0、Web Search=0 |
 | GitHub 远端备份 | **未完成** | 当前分支无 upstream；环境拒绝向未确认的 `origin` 外发 |
@@ -50,7 +50,7 @@ thinking 的 EM/F1 均下降 6.25 个百分点，因此不再续跑。
 ## 完成目标所需的最小后续工作
 
 1. 获得用户授权后，修复所有非 self-contained fact，重新 materialize 76,523 条 fact-memory 并重建 CPU BGE index；当前用户已明确要求停止继续构建，因此本轮不能执行。
-2. 对齐 native fact artifact 与当前 exact search/read receipt schema，并修复 Output lineage/terminal recovery。
+2. 修复 18 个 terminal failure 的 AgentGraph/terminal recovery；native fact exact receipt analyzer 已完成对齐，不再是缺口。
 3. 冻结同一条件后重新运行完整 fixed128，使当前 analyzer 得到 `protocol_valid=true`；不能拼接不同条件的局部结果。
 4. 用户在获知外发风险后明确确认现有 `origin` 目的地，才能重试 GitHub push；不得绕过环境拒绝。
 
