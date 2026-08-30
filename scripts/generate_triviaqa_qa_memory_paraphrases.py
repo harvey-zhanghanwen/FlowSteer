@@ -55,12 +55,13 @@ from scripts.materialize_triviaqa_full_train_qa_memory import (  # noqa: E402
 )
 
 
-PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v15"
+PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v16"
 SUPPORTED_PROMPT_TEMPLATE_VERSIONS = frozenset(
     {
         "triviaqa.qa_memory.qa_paraphrase.v12",
         "triviaqa.qa_memory.qa_paraphrase.v13",
         "triviaqa.qa_memory.qa_paraphrase.v14",
+        "triviaqa.qa_memory.qa_paraphrase.v15",
         PROMPT_TEMPLATE_VERSION,
     }
 )
@@ -72,7 +73,7 @@ FACT_SELF_CONTAINMENT_ADMISSION_VERSION = (
 PARAPHRASE_METHOD = "semantic-preserving-question-and-answer-paraphrase"
 GENERATOR_PROVIDER = "local-openai-compatible"
 GENERATION_ROUND_SEED_STRIDE = 100_000_000
-FACT_ONLY_REPAIR_ATTEMPTS = 3
+FACT_ONLY_REPAIR_ATTEMPTS = 5
 FULL_NATIVE_UNIQUE_QA_COUNT = 76_523
 FACT_MEMORY_SCHEMA_VERSION = "flowsteer.triviaqa.fact_memory.record.v1"
 FACT_PROVENANCE_SCHEMA_VERSION = (
@@ -6543,7 +6544,12 @@ class LocalQwen35Paraphraser:
                             repair_attempt=repair_attempt,
                         ),
                         seed=seed + repair_attempt,
-                        temperature=0.0,
+                        temperature=(
+                            0.0 if repair_attempt == 0 else min(
+                                0.1 * repair_attempt,
+                                0.3,
+                            )
+                        ),
                     )
                 )
                 current_statement = repaired_statement

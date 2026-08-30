@@ -681,7 +681,7 @@ def test_repair_payload_preserves_numeric_token_multiplicity() -> None:
 
 
 def test_prompt_v14_keeps_strictly_admitted_v12_v13_rows_supported() -> None:
-    assert PROMPT_TEMPLATE_VERSION == "triviaqa.qa_memory.qa_paraphrase.v15"
+    assert PROMPT_TEMPLATE_VERSION == "triviaqa.qa_memory.qa_paraphrase.v16"
     assert {
         "triviaqa.qa_memory.qa_paraphrase.v12",
         "triviaqa.qa_memory.qa_paraphrase.v13",
@@ -1471,7 +1471,7 @@ def test_fact_repair_exhaustion_does_not_regenerate_valid_question(
         client.generate(source, seed=79)
 
     assert initial_generation_calls == 1
-    assert fact_repair_calls == 3
+    assert fact_repair_calls == 5
 
 
 @pytest.mark.parametrize(
