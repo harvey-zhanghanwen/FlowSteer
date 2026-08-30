@@ -918,7 +918,7 @@ def test_repair_payload_preserves_numeric_token_multiplicity() -> None:
 
 
 def test_prompt_v14_keeps_strictly_admitted_v12_v13_rows_supported() -> None:
-    assert PROMPT_TEMPLATE_VERSION == "triviaqa.qa_memory.qa_paraphrase.v19"
+    assert PROMPT_TEMPLATE_VERSION == "triviaqa.qa_memory.qa_paraphrase.v20"
     assert {
         "triviaqa.qa_memory.qa_paraphrase.v12",
         "triviaqa.qa_memory.qa_paraphrase.v13",
@@ -1615,11 +1615,13 @@ def test_answer_repair_retries_only_fact_non_destructively_with_gate_feedback(
         )
     )
     repair_payloads: list[dict[str, object]] = []
+    repair_temperatures: list[float] = []
 
     def complete(**kwargs: object) -> str:
         messages = kwargs["messages"]
         assert isinstance(messages, list)
         repair_payloads.append(json.loads(messages[1]["content"]))
+        repair_temperatures.append(float(kwargs["temperature"]))
         return next(responses)
 
     monkeypatch.setattr(client, "_complete", complete)
@@ -1642,6 +1644,7 @@ def test_answer_repair_retries_only_fact_non_destructively_with_gate_feedback(
 
     assert repaired == "The widespread use of ISDN began in Japan in 1988."
     assert len(repair_payloads) == 2
+    assert repair_temperatures == [0.0, 0.2]
     assert repair_payloads[0]["repair_attempt"] == 0
     assert repair_payloads[1]["repair_attempt"] == 1
     assert repair_payloads[1]["admission_failure_category"] == (
