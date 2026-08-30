@@ -44,6 +44,8 @@ Reasoner-only thinking 的固定 19 题结果与 non-thinking 精确持平，没
 
 用户已停止 strict-v2 数据继续构建。fixed128 比较复用完整的 76,523 条 full-native-v1 fact-memory、CPU BGE index 和 development-only 冻结 Top-K；这是 in-database transductive evaluation，不是 held-out benchmark。
 
-当前 fixed128 配置：`config/evaluation_triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_fixed128.yaml`。门控规则：若其 EM 或 F1 任一低于同题 non-thinking 的 EM 82.81、F1 84.94，或出现 terminal failure，则默认 profile 回退至 non-thinking v16.4。
+fixed128 thinking 在完成 16 条时触发门控并停止：同一 16 题上，Reasoner-only thinking 为 EM 87.50、F1 91.67、FINISH 15/16；non-thinking 为 EM 93.75、F1 97.92、FINISH 16/16。新增回归 `triviaqa:tc_11` 的 termination 是 `canvas_action_domain_exhausted`，final answer 为空，而同题 non-thinking 正确。因此该条件不是完整 128 题正式结果，只是足以拒绝 thinking 的 paired partial diagnostic。
+
+当前默认 profile 已回退到 `config/evaluation_triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive.yaml`（non-thinking）。其完整 128 条 transductive diagnostic 为 EM 82.81、F1 84.94；Reasoner-only thinking fixed128 配置仅保留为可恢复的拒绝条件，不再续跑。
 
 本轮没有 GRPO、LoRA、backward、optimizer step 或权重更新。
