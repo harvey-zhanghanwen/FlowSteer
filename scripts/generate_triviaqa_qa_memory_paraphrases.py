@@ -55,7 +55,7 @@ from scripts.materialize_triviaqa_full_train_qa_memory import (  # noqa: E402
 )
 
 
-PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v20"
+PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v21"
 SUPPORTED_PROMPT_TEMPLATE_VERSIONS = frozenset(
     {
         "triviaqa.qa_memory.qa_paraphrase.v12",
@@ -66,6 +66,7 @@ SUPPORTED_PROMPT_TEMPLATE_VERSIONS = frozenset(
         "triviaqa.qa_memory.qa_paraphrase.v17",
         "triviaqa.qa_memory.qa_paraphrase.v18",
         "triviaqa.qa_memory.qa_paraphrase.v19",
+        "triviaqa.qa_memory.qa_paraphrase.v20",
         PROMPT_TEMPLATE_VERSION,
     }
 )
@@ -6748,11 +6749,9 @@ class LocalQwen35Paraphraser:
                             repair_attempt=repair_attempt,
                         ),
                         seed=seed + repair_attempt,
-                        temperature=(
-                            0.0 if repair_attempt == 0 else min(
-                                0.2 * repair_attempt,
-                                0.8,
-                            )
+                        temperature=min(
+                            0.1 + 0.2 * repair_attempt,
+                            0.8,
                         ),
                     )
                 )
@@ -6950,9 +6949,8 @@ class LocalQwen35Paraphraser:
         for attempt in range(self.max_retries + 1):
             try:
                 attempt_messages = list(messages)
-                temperature = 0.0
+                temperature = min(0.2 + 0.25 * attempt, 0.7)
                 if attempt:
-                    temperature = min(0.3 * attempt, 0.6)
                     prior_rejection = (
                         str(last_error)
                         if isinstance(last_error, ValueError)
