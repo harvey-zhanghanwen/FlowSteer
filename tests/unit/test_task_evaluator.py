@@ -692,6 +692,158 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, outcome.details["replayed_environment_steps"])
         self.assertEqual(3.0, outcome.metrics["steps"])
 
+    async def test_environment_replay_preserves_typed_precondition_failure_and_native_reward(
+        self,
+    ) -> None:
+        prompts: list[str] = []
+        stepped_actions: list[str] = []
+
+        class Adapter:
+            def __init__(self):
+                self._env = SimpleNamespace(current_goal_index=24)
+                self.available_actions = ["click[P1]"]
+
+            def reset(self, env_type, env_config, question="", extra=None):
+                return "Home"
+
+            def step(self, action):
+                stepped_actions.append(action)
+                return "Bought", 1.0, True, {"graded_score": 1.0}
+
+        reason = "search_query_already_exhausted"
+        replay_trace = [
+            {
+                "step": 0,
+                "observation": "Home",
+                "legal_actions": ["click[P1]"],
+                "action": "<INVALID>",
+                "raw_graph_output": "",
+                "next_observation": "Home",
+                "reward": 0.0,
+                "done": False,
+                "info": {"precondition_failed": True, "reason": reason},
+                "parse_error": False,
+                "state_advanced": False,
+                "precondition_failed": True,
+                "precondition_failure_reason": reason,
+                "feedback": (
+                    f"[INVALID] Public action precondition failed: {reason}."
+                ),
+            }
+        ]
+
+        async def run_graph(problem):
+            prompts.append(problem)
+            return "click[P1]"
+
+        record = task(
+            "WebShop",
+            environment={
+                "env_type": "webshop",
+                "env_config": {"goal_index": 24},
+            },
+        )
+        with patch(
+            "src.interactive.task_evaluator._load_ragen_module",
+            return_value=SimpleNamespace(RAGENAdapter=Adapter),
+        ):
+            outcome = await evaluate_task(
+                record,
+                "",
+                run_graph=run_graph,
+                environment_replay_trace=replay_trace,
+            )
+
+        self.assertTrue(outcome.valid)
+        self.assertEqual(1.0, outcome.reward)
+        self.assertEqual(["click[P1]"], stepped_actions)
+        self.assertEqual(1, len(prompts))
+        self.assertIn("already taken 1 step(s)", prompts[0])
+        self.assertIn(reason, prompts[0])
+        self.assertEqual(1, outcome.details["replayed_environment_steps"])
+        self.assertEqual(2.0, outcome.metrics["steps"])
+        self.assertEqual(
+            reason,
+            outcome.details["trace"][0]["precondition_failure_reason"],
+        )
+        self.assertEqual(1.0, outcome.details["trace"][1]["reward"])
+
+    async def test_environment_replay_precondition_receipt_mismatches_fail_closed(
+        self,
+    ) -> None:
+        reason = "search_query_already_exhausted"
+        base_entry = {
+            "step": 0,
+            "observation": "Home",
+            "legal_actions": ["click[P1]"],
+            "action": "<INVALID>",
+            "raw_graph_output": "",
+            "next_observation": "Home",
+            "reward": 0.0,
+            "done": False,
+            "info": {"precondition_failed": True, "reason": reason},
+            "parse_error": False,
+            "state_advanced": False,
+            "precondition_failed": True,
+            "precondition_failure_reason": reason,
+            "feedback": f"[INVALID] Public action precondition failed: {reason}.",
+        }
+        mutations = {
+            "reason": {"precondition_failure_reason": "different_reason"},
+            "feedback": {"feedback": "[INVALID] Different feedback."},
+            "info": {
+                "info": {"precondition_failed": True, "reason": "different_reason"}
+            },
+            "observation": {"observation": "Different home"},
+        }
+
+        for name, mutation in mutations.items():
+            with self.subTest(name=name):
+                callback_called = False
+
+                class Adapter:
+                    def __init__(self):
+                        self._env = SimpleNamespace(current_goal_index=25)
+                        self.available_actions = ["click[P1]"]
+
+                    def reset(self, env_type, env_config, question="", extra=None):
+                        return "Home"
+
+                    def step(self, action):
+                        raise AssertionError("precondition receipt must not dispatch action")
+
+                async def run_graph(problem):
+                    nonlocal callback_called
+                    callback_called = True
+                    return "click[P1]"
+
+                entry = dict(base_entry)
+                entry.update(mutation)
+                record = task(
+                    "WebShop",
+                    environment={
+                        "env_type": "webshop",
+                        "env_config": {"goal_index": 25},
+                    },
+                )
+                with patch(
+                    "src.interactive.task_evaluator._load_ragen_module",
+                    return_value=SimpleNamespace(RAGENAdapter=Adapter),
+                ):
+                    outcome = await evaluate_task(
+                        record,
+                        "",
+                        run_graph=run_graph,
+                        environment_replay_trace=[entry],
+                    )
+
+                self.assertFalse(outcome.valid)
+                self.assertIsNone(outcome.reward)
+                self.assertEqual(
+                    "environment_replay_precondition_mismatch", outcome.reason
+                )
+                self.assertFalse(callback_called)
+
     async def test_environment_replay_rejects_non_sequence_before_runtime(
         self,
     ) -> None:

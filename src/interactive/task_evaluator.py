@@ -1287,7 +1287,6 @@ async def _evaluate_environment(
             or not isinstance(entry.get("step"), int)
             or entry.get("step") != step_index
             or not isinstance(entry.get("observation"), str)
-            or entry.get("observation") != observation
         ):
             return _invalid(
                 "environment_replay_state_mismatch",
@@ -1310,6 +1309,52 @@ async def _evaluate_environment(
 
         action = entry.get("action")
         state_advanced = entry.get("state_advanced")
+        if (
+            action == "<INVALID>"
+            and state_advanced is False
+            and entry.get("precondition_failed") is True
+        ):
+            reason = entry.get("precondition_failure_reason")
+            stored_reward = entry.get("reward")
+            if (
+                not isinstance(reason, str)
+                or not reason
+                or entry.get("observation") != observation
+                or entry.get("parse_error") is not False
+                or entry.get("feedback")
+                != f"[INVALID] Public action precondition failed: {reason}."
+                or entry.get("raw_graph_output", "") != ""
+                or entry.get("next_observation") != observation
+                or type(entry.get("done")) is not bool
+                or entry.get("done") is not False
+                or isinstance(stored_reward, bool)
+                or not isinstance(stored_reward, (int, float))
+                or not math.isfinite(float(stored_reward))
+                or float(stored_reward) != 0.0
+                or entry.get("info")
+                != {"precondition_failed": True, "reason": reason}
+            ):
+                return _invalid(
+                    "environment_replay_precondition_mismatch",
+                    evaluator_version=RAGEN_EVALUATOR_VERSION,
+                    details={
+                        "replay_step": step_index,
+                        "trace": trace,
+                        **lock_details,
+                    },
+                )
+            # The Runtime intentionally did not dispatch this sampled action
+            # to WebShop.  Preserve the typed receipt in the replay trace,
+            # keep the public environment state unchanged, and continue with
+            # the next recorded Agent action.
+            trace.append(entry)
+            continue
+        if entry.get("observation") != observation:
+            return _invalid(
+                "environment_replay_state_mismatch",
+                evaluator_version=RAGEN_EVALUATOR_VERSION,
+                details={"replay_step": step_index, "trace": trace, **lock_details},
+            )
         if action == "<INVALID>" and state_advanced is False:
             stored_reward = entry.get("reward")
             if (
