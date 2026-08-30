@@ -455,6 +455,271 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             .split(";", 1)[0],
         )
 
+    async def test_alfworld_public_state_tracks_visited_receptacles(self) -> None:
+        class SearchSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = ("go to cabinet 1", "go to cabinet 2")
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                if action == "go to cabinet 1":
+                    self._available = ("go to cabinet 2",)
+                    return (
+                        "You arrive at cabinet 1. In it, you see nothing.",
+                        0.0,
+                        False,
+                        {"won": False},
+                    )
+                return "task terminal observation", 1.0, True, {"won": True}
+
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Put some soapbar in cabinet.",
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        session = SearchSession()
+        gateway = SequenceGateway(["go to cabinet 1", "go to cabinet 2"])
+        runtime = resources(session=session, gateway=gateway, max_turns=2)
+
+        await runtime.execution_adapter.execute(request)
+
+        second_prompt = gateway.requests[1].problem
+        self.assertIn(
+            "Visited receptacles from public Action--Observation history",
+            second_prompt,
+        )
+        self.assertIn("cabinet 1", second_prompt)
+        self.assertIn("you see nothing", second_prompt)
+        self.assertIn(
+            "Currently admissible unvisited receptacles: cabinet 2.",
+            second_prompt,
+        )
+
+    async def test_alfworld_visible_memory_retains_visited_destination_action(
+        self,
+    ) -> None:
+        class DestinationSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = ("go to cart 1",)
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                if action == "go to cart 1":
+                    self._available = ("go to shelf 2",)
+                    return "You arrive at cart 1.", 0.0, False, {"won": False}
+                if action == "go to shelf 2":
+                    self._available = ("take soapbar 1 from shelf 2",)
+                    return (
+                        "You arrive at shelf 2 and see soapbar 1.",
+                        0.0,
+                        False,
+                        {"won": False},
+                    )
+                if action.startswith("take "):
+                    self._available = (
+                        "go to cart 1",
+                        "move soapbar 1 to shelf 2",
+                    )
+                    return "You pick up soapbar 1.", 0.0, False, {"won": False}
+                return "You return to cart 1.", 0.0, False, {"won": False}
+
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Put a soapbar in cart.",
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        session = DestinationSession()
+        gateway = SequenceGateway(
+            [
+                "go to cart 1",
+                "go to shelf 2",
+                "take soapbar 1 from shelf 2",
+                "go to cart 1",
+            ]
+        )
+        runtime = resources(session=session, gateway=gateway, max_turns=4)
+
+        await runtime.execution_adapter.execute(request)
+
+        held_prompt = gateway.requests[3].problem
+        self.assertIn("Current visible go targets: cart 1.", held_prompt)
+        self.assertIn(
+            "Current admissible strings mentioning the destination class: "
+            "go to cart 1.",
+            held_prompt,
+        )
+        self.assertIn("Objects implied as held by current actions: soapbar 1.", held_prompt)
+
+    async def test_alfworld_public_goal_state_joins_transform_and_placement(
+        self,
+    ) -> None:
+        class TransformSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = ("move soapbar 1 to cabinet 1",)
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                if action.startswith("move "):
+                    self._available = ("finish",)
+                    return (
+                        "soapbar 1 is in cabinet 1",
+                        0.0,
+                        False,
+                        {"won": False},
+                    )
+                return "still nonterminal", 0.0, False, {"won": False}
+
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Put a clean soapbar in cabinet.",
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        gateway = SequenceGateway(["move soapbar 1 to cabinet 1", "finish"])
+        runtime = resources(
+            session=TransformSession(),
+            gateway=gateway,
+            max_turns=2,
+        )
+
+        response = await runtime.execution_adapter.execute(request)
+        public_state = response.metadata["model_calls"][1]["public_state"]
+
+        self.assertIn("Visible placement progress: 1/1", public_state)
+        self.assertIn(
+            "Visible required transform progress: no completed clean action",
+            public_state,
+        )
+        self.assertIn("Visible transformed-and-placed progress: 0/1", public_state)
+
+    async def test_alfworld_public_state_reports_visible_entity_binding_conflict(
+        self,
+    ) -> None:
+        session = FakeSession()
+        session._available = ("move potato 1 to fridge 1", "finish")
+        gateway = SequenceGateway(["finish"])
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Cool an apple and put it in sidetable.",
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        runtime = resources(session=session, gateway=gateway, max_turns=1)
+
+        await runtime.execution_adapter.execute(request)
+
+        self.assertIn(
+            "Visible entity binding conflict: held object class(es)=potato; "
+            "task target_class=apple.",
+            gateway.requests[0].problem,
+        )
+
+    async def test_alfworld_revisit_does_not_claim_no_progress(self) -> None:
+        class RevisitSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = ("go to cart 1",)
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                if action == "go to cart 1":
+                    self._available = ("go to shelf 1",)
+                    return "at cart", 0.0, False, {"won": False}
+                self._available = ("go to cart 1",)
+                return "at shelf", 0.0, False, {"won": False}
+
+        session = RevisitSession()
+        gateway = SequenceGateway(
+            ["go to cart 1", "go to shelf 1", "go to cart 1", "go to shelf 1"]
+        )
+        runtime = resources(session=session, gateway=gateway, max_turns=4)
+
+        await runtime.execution_adapter.execute(make_request())
+
+        self.assertNotIn("No-progress signal", gateway.requests[3].problem)
+
+    async def test_alfworld_public_progress_retracts_taken_placement(self) -> None:
+        class PlacementSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = ("move newspaper 2 to sidetable 1",)
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                if action.startswith("move "):
+                    self._available = (
+                        "take newspaper 2 from sidetable 1",
+                    )
+                    return "newspaper 2 is on sidetable 1", 0.0, False, {
+                        "won": False
+                    }
+                if action.startswith("take "):
+                    self._available = ("finish",)
+                    return "newspaper 2 is held", 0.0, False, {"won": False}
+                return "task terminal observation", 1.0, True, {"won": True}
+
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Put two newspaper and put them on sidetable.",
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        session = PlacementSession()
+        gateway = SequenceGateway(
+            [
+                "move newspaper 2 to sidetable 1",
+                "take newspaper 2 from sidetable 1",
+                "finish",
+            ]
+        )
+        runtime = resources(session=session, gateway=gateway, max_turns=3)
+
+        response = await runtime.execution_adapter.execute(request)
+
+        self.assertIn(
+            "Visible placement progress: 1/2",
+            response.metadata["model_calls"][1]["public_state"],
+        )
+        self.assertIn(
+            "Visible placement progress: 0/2",
+            response.metadata["model_calls"][2]["public_state"],
+        )
+
     async def test_alfworld_public_state_binds_it_to_transformed_target(self) -> None:
         request = make_request()
         request = AgentRequest(
@@ -798,10 +1063,27 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["finish"], first_state["admissible_actions"])
         self.assertEqual(1, first_state["remaining_action_budget"])
         self.assertFalse(first_state["environment_terminal"])
+        self.assertEqual(1, len(first_state["action_observation_history"]))
+        self.assertEqual(
+            "room one",
+            first_state["latest_action_observation"]["observation_result"],
+        )
         self.assertEqual("finish", second_state["last_action"])
         self.assertEqual([], second_state["admissible_actions"])
         self.assertEqual(0, second_state["remaining_action_budget"])
         self.assertTrue(second_state["environment_terminal"])
+        self.assertEqual(2, len(second_state["action_observation_history"]))
+        self.assertEqual(
+            ["look", "finish"],
+            [
+                item["action"]
+                for item in second_state["action_observation_history"]
+            ],
+        )
+        self.assertIn(
+            "Recent executed actions: look.",
+            gateway.requests[1].problem,
+        )
         for public_value in (first_state, second_state):
             self.assertNotIn("reward", str(public_value))
             self.assertNotIn("won", str(public_value))
@@ -917,6 +1199,15 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["finish"], director_state["admissible_actions"])
         self.assertEqual(1, director_state["environment_revision"])
         self.assertEqual(1, director_state["remaining_action_budget"])
+        self.assertEqual(
+            "complete the alfworld task",
+            director_state["task_instruction"],
+        )
+        self.assertEqual(
+            "look",
+            director_state["latest_action_observation"]["action"],
+        )
+        self.assertIn("[PUBLIC OBSERVABLE STATE]", director_state["public_state"])
         self.assertNotIn("reward", str(director_state))
         self.assertNotIn("won", str(director_state))
         self.assertNotIn("score", str(director_state))
@@ -949,6 +1240,73 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('"won"', continued.feedback)
         finished = await canvas.step('{"action":"finish"}')
         self.assertTrue(finished.done)
+
+    async def test_alfworld_repeated_parse_error_requires_contract_repair(
+        self,
+    ) -> None:
+        session = FakeSession()
+        gateway = SequenceGateway(
+            [
+                "move soapbar 1 to cart 1",
+                "move soapbar 1 to cart 1",
+            ]
+        )
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="alfworld",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="Put a soapbar in cart.",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "continue",
+                "finish",
+            ),
+        )
+        added = await canvas.step(
+            '{"action":"add_agent","agent_id":"actor","model_id":"m",'
+            '"contract":"Act once in ALFWorld.","execution_mode":"react",'
+            '"allowed_tools":["alfworld.environment"]}'
+        )
+        self.assertTrue(added.accepted)
+        self.assertIn("continue", canvas.model_admissible_action_types())
+
+        continued = await canvas.step('{"action":"continue"}')
+
+        self.assertTrue(continued.accepted)
+        self.assertEqual(
+            ("modify_agent",),
+            canvas.model_admissible_action_types(),
+        )
+        modify_domain = canvas.model_admissible_action_targets()["modify_agent"]
+        self.assertEqual(["actor"], modify_domain["agent_ids"])
+        self.assertEqual(["contract"], modify_domain["mutable_fields"])
+        self.assertEqual(
+            ["contract"],
+            modify_domain["per_agent_candidates"][0]["mutable_fields"],
+        )
+        rejected = await canvas.step('{"action":"continue"}')
+        self.assertFalse(rejected.accepted)
+        self.assertIn("repair the existing environment Agent contract", rejected.feedback)
+        self.assertEqual([], session.actions)
 
     async def test_alfworld_second_tool_owner_is_rejected_before_environment_step(
         self,
@@ -1043,6 +1401,10 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             '"allowed_tools":["alfworld.environment"]}'
         )
         self.assertTrue(added.accepted)
+        self.assertEqual(
+            ("set_output",),
+            canvas.model_admissible_action_types(),
+        )
         selected = await canvas.step(
             '{"action":"set_output","agent_id":"actor"}'
         )

@@ -357,6 +357,29 @@ class ConfigLoaderTests(unittest.TestCase):
                 with self.assertRaises(ConfigurationError):
                     validate_agent_graph_config(config)
 
+    def test_alfworld_stepwise_feedback_v4_uses_live_action_domains(self) -> None:
+        config = load_yaml(
+            "config/evaluation_alfworld_stepwise_feedback_v4.yaml"
+        )
+        validate_agent_graph_config(config)
+
+        self.assertEqual(
+            "agentgraph.model-admissible-action-mask.v3",
+            config["director"]["sampling_schema_version"],
+        )
+        self.assertTrue(config["environment_runtime"]["stepwise_director"])
+        self.assertEqual(
+            20,
+            config["environment_runtime"]["max_environment_steps_by_source"][
+                "alfworld"
+            ],
+        )
+        self.assertEqual(32768, config["director"]["max_context_tokens"])
+        self.assertEqual(0, config["gpu"]["rollout_physical"])
+        self.assertFalse(config["experiment"]["training_enabled"])
+        self.assertFalse(config["grpo"]["enabled"])
+        self.assertFalse(config["skills"]["enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

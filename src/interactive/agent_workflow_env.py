@@ -845,6 +845,8 @@ class AgentWorkflowEnv:
             "observation_status",
             "current_observation",
             "admissible_actions",
+            "public_state",
+            "latest_action_observation",
             "turns_used",
             "remaining_action_budget",
             "environment_terminal",
@@ -888,7 +890,54 @@ class AgentWorkflowEnv:
         remaining = state.get("remaining_action_budget")
         if type(remaining) is not int or remaining <= 0:
             return "the environment has no remaining action budget"
+        if self._environment_action_parse_repair_agent_id() is not None:
+            return (
+                "the same non-admissible environment action was repeated; "
+                "repair the existing environment Agent contract before continuing"
+            )
         return None
+
+    def _environment_action_parse_repair_agent_id(self) -> Optional[str]:
+        """Return the Tool owner after one repeated native-action parse failure."""
+
+        if self.required_tool_id is None:
+            return None
+        owners = self._required_tool_actor_ids()
+        if len(owners) != 1:
+            return None
+        metadata = self._progressive_output_metadata.get(owners[0])
+        if not isinstance(metadata, Mapping):
+            return None
+        state = metadata.get("environment_current_state")
+        history = (
+            state.get("action_observation_history")
+            if isinstance(state, Mapping)
+            else None
+        )
+        if (
+            not isinstance(history, (list, tuple))
+            or len(history) < 2
+            or not all(isinstance(item, Mapping) for item in history[-2:])
+        ):
+            return None
+        previous, latest = history[-2:]
+        if (
+            previous.get("observation_status") != "parse_error"
+            or latest.get("observation_status") != "parse_error"
+            or previous.get("environment_revision_after")
+            != latest.get("environment_revision_after")
+        ):
+            return None
+        previous_output = previous.get("raw_action")
+        latest_output = latest.get("raw_action")
+        if (
+            not isinstance(previous_output, str)
+            or not previous_output.strip()
+            or not isinstance(latest_output, str)
+            or previous_output.strip() != latest_output.strip()
+        ):
+            return None
+        return owners[0]
 
     def _required_tool_capability_repair_domains(
         self,
@@ -961,13 +1010,36 @@ class AgentWorkflowEnv:
                 environment_state.get("environment_terminal") is True
                 or environment_state.get("environment_truncated") is True
             )
-            and finish_admitted
-            and AgentActionType.FINISH.value in self._allowed_action_type_set
         ):
             # A real terminal receipt or a measured fixed-budget exhaustion
-            # closes the mutable environment.  Only the native evaluator may
-            # classify the former as success; the latter remains valid zero.
-            return (AgentActionType.FINISH.value,)
+            # closes the mutable environment.  Do not reopen execution or grow
+            # the graph after that boundary.  If the Canvas still lacks a
+            # structurally reachable Output, expose only the existing relation
+            # and Output edits needed to reach explicit FINISH.
+            if (
+                finish_admitted
+                and AgentActionType.FINISH.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.FINISH.value,)
+            closure_actions: list[str] = []
+            for action_type in self.allowed_action_types:
+                if (
+                    action_type == AgentActionType.SET_RELATION.value
+                    and self._model_admissible_relation_candidates()
+                ):
+                    closure_actions.append(action_type)
+                elif (
+                    action_type == AgentActionType.SET_OUTPUT.value
+                    and self._model_admissible_output_agent_ids()
+                ):
+                    closure_actions.append(action_type)
+                elif (
+                    action_type == AgentActionType.FINISH.value
+                    and finish_admitted
+                ):
+                    closure_actions.append(action_type)
+            return tuple(closure_actions)
 
         if self.required_tool_issue() is not None:
             # Establish exactly one typed stateful Tool owner before admitting
@@ -981,6 +1053,19 @@ class AgentWorkflowEnv:
                 self._required_tool_capability_repair_domains()
                 and AgentActionType.MODIFY_AGENT.value
                 in self._allowed_action_type_set
+            ):
+                return (AgentActionType.MODIFY_AGENT.value,)
+            return ()
+
+        environment_parse_repair_id = (
+            self._environment_action_parse_repair_agent_id()
+        )
+        if environment_parse_repair_id is not None:
+            if (
+                AgentActionType.MODIFY_AGENT.value
+                in self._allowed_action_type_set
+                and environment_parse_repair_id
+                in self._model_admissible_modify_agent_ids()
             ):
                 return (AgentActionType.MODIFY_AGENT.value,)
             return ()
@@ -3723,13 +3808,22 @@ class AgentWorkflowEnv:
                 ),
             }
         if AgentActionType.MODIFY_AGENT.value in admitted:
-            modifiable_node_ids = list(self._model_admissible_modify_agent_ids())
+            environment_parse_repair_id = (
+                self._environment_action_parse_repair_agent_id()
+            )
+            modifiable_node_ids = (
+                [environment_parse_repair_id]
+                if environment_parse_repair_id is not None
+                else list(self._model_admissible_modify_agent_ids())
+            )
             capability_repairs = (
                 self._required_tool_capability_repair_domains()
                 if self.required_tool_issue() is not None
                 else {}
             )
-            if capability_repairs:
+            if environment_parse_repair_id is not None:
+                base_mutable_fields = ["contract"]
+            elif capability_repairs:
                 base_mutable_fields = list(
                     dict.fromkeys(
                         field
@@ -3807,7 +3901,9 @@ class AgentWorkflowEnv:
                 agent_id: [
                     field
                     for field in (
-                        list(capability_repairs[agent_id])
+                        ["contract"]
+                        if agent_id == environment_parse_repair_id
+                        else list(capability_repairs[agent_id])
                         if agent_id in capability_repairs
                         else ["model_id"]
                         if agent_id in provider_failure_agent_ids

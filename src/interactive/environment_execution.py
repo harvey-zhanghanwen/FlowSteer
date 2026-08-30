@@ -535,7 +535,14 @@ def _admissible_actions(
     if isinstance(available_actions, Sequence) and not isinstance(
         available_actions, (str, bytes)
     ):
-        return tuple(str(action) for action in available_actions), False
+        return (
+            tuple(
+                str(action)
+                for action in available_actions
+                if task_family.lower() != "alfworld" or str(action) != "help"
+            ),
+            False,
+        )
     return (), False
 
 
@@ -621,7 +628,7 @@ def _alfworld_task_facts(task: str) -> dict[str, object]:
     if not text:
         return facts
     match = re.search(
-        r"pick up (?:the |a |some )?(\S+?)(?: \d)? from (\S+?)(?: \d)? "
+        r"pick up (?:the |an? |some )?(\S+?)(?: \d)? from (\S+?)(?: \d)? "
         r"and put it (?:in/on|in|on) (\S+?)(?: \d)?$",
         text,
     )
@@ -633,8 +640,8 @@ def _alfworld_task_facts(task: str) -> dict[str, object]:
         )
         return facts
     match = re.search(
-        r"(?:examine|look at) (?:the |a |some )?(\S+?)(?: \d)? "
-        r"(?:with|under|by) (?:the |a )?(?:desklamp|lamp)",
+        r"(?:examine|look at) (?:the |an? |some )?(\S+?)(?: \d)? "
+        r"(?:with|under|by) (?:the |an? )?(?:desklamp|lamp)",
         text,
     )
     if match:
@@ -645,7 +652,7 @@ def _alfworld_task_facts(task: str) -> dict[str, object]:
         )
         return facts
     match = re.search(
-        r"(heat|cool|clean) (?:some |a |the )?(\S+?)(?: \d)? and put it "
+        r"(heat|cool|clean) (?:some |an? |the )?(\S+?)(?: \d)? and put it "
         r"(?:in/on|in|on) (\S+?)(?: \d)?$",
         text,
     )
@@ -669,12 +676,14 @@ def _alfworld_task_facts(task: str) -> dict[str, object]:
         )
         return facts
     match = re.search(
-        r"put (?:a |some |the )?(?:(clean|washed|cool|cold|hot|heated|cooked) )?"
+        r"put (?:an? |some |the )?(?:(clean|washed|cool|cold|hot|heated|cooked) )?"
         r"(\S+?)(?: \d)? (?:in/on|in|on) (\S+?)(?: \d)?$",
         text,
     )
     if match:
         adjective, target, destination = match.groups()
+        if target in {"it", "them"}:
+            return facts
         transform = None
         if adjective in {"clean", "washed"}:
             transform = "clean"
@@ -801,6 +810,77 @@ def _public_state_feedback(
             lines.append(
                 f"Task coreference: `them` refers to the required `{target}` instances."
             )
+        go_targets = [
+            action[6:].strip()
+            for action in admissible_actions
+            if action.lower().startswith("go to ")
+        ]
+        open_targets = [
+            action[5:].strip()
+            for action in admissible_actions
+            if action.lower().startswith("open ")
+        ]
+        action_groups = (
+            ("go", go_targets),
+            ("open", open_targets),
+            (
+                "take",
+                [
+                    action
+                    for action in admissible_actions
+                    if action.lower().startswith("take ")
+                ],
+            ),
+            (
+                "move",
+                [
+                    action
+                    for action in admissible_actions
+                    if action.lower().startswith("move ")
+                ],
+            ),
+            (
+                "state",
+                [
+                    action
+                    for action in admissible_actions
+                    if action.lower().startswith(("clean ", "cool ", "heat "))
+                ],
+            ),
+            (
+                "use",
+                [
+                    action
+                    for action in admissible_actions
+                    if action.lower().startswith("use ")
+                ],
+            ),
+        )
+        action_counts = [
+            f"{label}={len(values)}"
+            for label, values in action_groups
+            if values
+        ]
+        if action_counts:
+            lines.append(
+                "Current admissible action type counts: "
+                + ", ".join(action_counts)
+                + "."
+            )
+        if go_targets:
+            lines.append(
+                "Current visible go targets: "
+                + ", ".join(go_targets[:18])
+                + (" ..." if len(go_targets) > 18 else "")
+                + "."
+            )
+        if open_targets:
+            lines.append(
+                "Current visible open targets: "
+                + ", ".join(open_targets[:12])
+                + (" ..." if len(open_targets) > 12 else "")
+                + "."
+            )
         held: list[str] = []
         for action in admissible_actions:
             if action.lower().startswith(("move ", "clean ", "heat ", "cool ")):
@@ -809,6 +889,71 @@ def _public_state_feedback(
                     held.append(obj)
         if held:
             lines.append("Objects implied as held by current actions: " + ", ".join(held[:6]) + ".")
+        target_class = _alfworld_object_class(target)
+        held_classes = {
+            _alfworld_object_class(object_id)
+            for object_id in held
+            if _alfworld_object_class(object_id)
+        }
+        if target_class and held_classes and target_class not in held_classes:
+            lines.append(
+                "Visible entity binding conflict: held object class(es)="
+                + ", ".join(sorted(held_classes))
+                + f"; task target_class={target_class}."
+            )
+        if target_class:
+            target_mentions = []
+            for action in admissible_actions:
+                object_id = _alfworld_action_object(action)
+                target_go = (
+                    action.lower().startswith("go to ")
+                    and _alfworld_object_class(action[6:].strip()) == target_class
+                )
+                if (
+                    object_id
+                    and _alfworld_object_class(object_id) == target_class
+                ) or target_go:
+                    target_mentions.append(action)
+            if target_mentions:
+                lines.append(
+                    "Current admissible strings mentioning the target class: "
+                    + " | ".join(target_mentions[:10])
+                    + (" ..." if len(target_mentions) > 10 else "")
+                    + "."
+                )
+        destination_class = _alfworld_object_class(
+            facts.get("destination_class")
+        )
+        if destination_class:
+            destination_mentions = []
+            for action in admissible_actions:
+                go_match = re.match(
+                    r"^go\s+to\s+(.+)$",
+                    action,
+                    flags=re.IGNORECASE,
+                )
+                move_match = re.match(
+                    r"^move\s+.+?\s+to\s+(.+)$",
+                    action,
+                    flags=re.IGNORECASE,
+                )
+                if (
+                    go_match
+                    and _alfworld_object_class(go_match.group(1))
+                    == destination_class
+                ) or (
+                    move_match
+                    and _alfworld_object_class(move_match.group(1))
+                    == destination_class
+                ):
+                    destination_mentions.append(action)
+            if destination_mentions:
+                lines.append(
+                    "Current admissible strings mentioning the destination class: "
+                    + " | ".join(destination_mentions[:10])
+                    + (" ..." if len(destination_mentions) > 10 else "")
+                    + "."
+                )
         transform_actions = [
             action
             for action in completed_actions
@@ -820,26 +965,176 @@ def _public_state_feedback(
                 + " | ".join(transform_actions[-4:])
                 + "."
             )
+        required_transform = facts.get("required_transform")
+        transformed_target_ids: set[str] = set()
+        if required_transform in {"clean", "cool", "heat"} and target_class:
+            for action in transform_actions:
+                match = re.match(
+                    rf"^{re.escape(str(required_transform))}\s+(.+?)\s+with\s+",
+                    action,
+                    flags=re.IGNORECASE,
+                )
+                if (
+                    match
+                    and _alfworld_object_class(match.group(1)) == target_class
+                ):
+                    transformed_target_ids.add(match.group(1).strip().casefold())
+            lines.append(
+                "Visible required transform progress: "
+                + (
+                    f"{required_transform} observed for "
+                    + ", ".join(sorted(transformed_target_ids))
+                    if transformed_target_ids
+                    else (
+                        f"no completed {required_transform} action for "
+                        f"target_class={target_class}"
+                    )
+                )
+                + "."
+            )
+            appliance = {
+                "clean": "sinkbasin",
+                "cool": "fridge",
+                "heat": "microwave",
+            }[str(required_transform)]
+            transform_mentions = [
+                action
+                for action in admissible_actions
+                if (
+                    action.lower().startswith(f"{required_transform} ")
+                    and _alfworld_object_class(
+                        _alfworld_action_object(action)
+                    )
+                    == target_class
+                )
+                or (
+                    action.lower().startswith("go to ")
+                    and _alfworld_object_class(action[6:].strip()) == appliance
+                )
+                or appliance in action.lower()
+            ]
+            if transform_mentions:
+                lines.append(
+                    f"Current admissible strings for visible {required_transform} "
+                    "state/appliance: "
+                    + " | ".join(transform_mentions[:8])
+                    + (" ..." if len(transform_mentions) > 8 else "")
+                    + "."
+                )
+        if facts.get("examine_with_desklamp"):
+            lamp_mentions = [
+                action
+                for action in admissible_actions
+                if "desklamp" in action.lower()
+                or action.lower().startswith("use ")
+            ]
+            if lamp_mentions:
+                lines.append(
+                    "Current admissible strings mentioning desklamp/use actions: "
+                    + " | ".join(lamp_mentions[:8])
+                    + (" ..." if len(lamp_mentions) > 8 else "")
+                    + "."
+                )
         if target and facts.get("destination_class"):
-            target_class = str(target)
-            destination_class = str(facts["destination_class"])
-            placed = []
+            # This is current public placement state, not an ever-completed
+            # counter. A later ``take X from destination`` visibly retracts
+            # the earlier subgoal and must therefore remove X from progress.
+            placed: dict[str, str] = {}
             for action in completed_actions:
+                take = re.match(
+                    r"^take\s+(.+?)\s+from\s+(.+)$",
+                    action,
+                    flags=re.IGNORECASE,
+                )
+                if take and _alfworld_object_class(take.group(1)) == target_class:
+                    placed.pop(take.group(1).strip().casefold(), None)
+                    continue
                 match = re.match(
                     r"^move\s+(.+?)\s+to\s+(.+)$", action, flags=re.IGNORECASE
                 )
                 if not match:
                     continue
-                if (
-                    _alfworld_object_class(match.group(1)) == target_class
-                    and _alfworld_object_class(match.group(2)) == destination_class
-                ):
-                    placed.append(match.group(1).strip())
-            if placed:
+                if _alfworld_object_class(match.group(1)) != target_class:
+                    continue
+                object_id = match.group(1).strip()
+                if _alfworld_object_class(match.group(2)) == destination_class:
+                    placed[object_id.casefold()] = object_id
+                else:
+                    placed.pop(object_id.casefold(), None)
+            placement_detail = (
+                "; " + ", ".join(placed.values()) if placed else ""
+            )
+            lines.append(
+                "Visible placement progress: "
+                f"{len(placed)}/{facts['count']} distinct target instance(s)"
+                f"{placement_detail}."
+            )
+            if required_transform in {"clean", "cool", "heat"}:
+                transformed_and_placed = [
+                    object_id
+                    for key, object_id in placed.items()
+                    if key in transformed_target_ids
+                ]
                 lines.append(
-                    "Visible placement progress: "
-                    f"{len(dict.fromkeys(placed))}/{facts['count']} distinct target instance(s); "
-                    + ", ".join(dict.fromkeys(placed))
+                    "Visible transformed-and-placed progress: "
+                    f"{len(transformed_and_placed)}/{facts['count']} distinct "
+                    "target instance(s)"
+                    + (
+                        "; " + ", ".join(transformed_and_placed)
+                        if transformed_and_placed
+                        else ""
+                    )
+                    + "."
+                )
+
+        # Thin adaptation of SkillFlow ``_extract_visited_receptacles`` and
+        # ``_build_alfworld_progress_block``: retain deterministic public
+        # exploration memory while omitting its prescriptive next-action rule.
+        visited: dict[str, dict[str, object]] = {}
+        for item in receipts:
+            if item.get("state_advanced") is not True:
+                continue
+            action = item.get("action")
+            if not isinstance(action, str):
+                continue
+            match = re.match(r"^\s*go\s+to\s+(.+?)\s*$", action, re.IGNORECASE)
+            if not match:
+                continue
+            location = match.group(1).strip()
+            key = location.casefold()
+            entry = visited.setdefault(
+                key,
+                {"location": location, "turns": [], "last_observation": ""},
+            )
+            turns = entry["turns"]
+            if isinstance(turns, list):
+                turns.append(item.get("turn"))
+            result = str(item.get("next_observation", "")).replace("\n", " ")
+            entry["last_observation"] = result[:300]
+        if visited:
+            lines.append("Visited receptacles from public Action--Observation history:")
+            for entry in visited.values():
+                turns = entry["turns"] if isinstance(entry["turns"], list) else []
+                lines.append(
+                    f"- {entry['location']}: turns={turns[-6:]}; "
+                    f"last_observation={entry['last_observation']}"
+                )
+            current_locations = []
+            for action in admissible_actions:
+                match = re.match(
+                    r"^\s*go\s+to\s+(.+?)\s*$", action, re.IGNORECASE
+                )
+                if match:
+                    current_locations.append(match.group(1).strip())
+            unvisited = [
+                location
+                for location in current_locations
+                if location.casefold() not in visited
+            ]
+            if unvisited:
+                lines.append(
+                    "Currently admissible unvisited receptacles: "
+                    + ", ".join(unvisited[:25])
                     + "."
                 )
     elif task_family.lower() == "webshop":
@@ -874,29 +1169,67 @@ def _public_state_feedback(
         and recent_actions[-3] == recent_actions[-1]
     ):
         lines.append(
-            "No-progress signal: the last four public actions form an A-B-A-B "
-            "oscillation; reassess the task constraints and current observation."
-        )
-    repeated_pairs = 0
-    for item in receipts:
-        if (
-            item.get("state_advanced") is True
-            and item.get("observation") == observation
-            and isinstance(item.get("action"), str)
-        ):
-            repeated_pairs += 1
-    if repeated_pairs:
-        lines.append(
-            "No-progress signal: this exact public observation has already been "
-            "used as an action-decision state; avoid repeating an action that did not "
-            "advance the task."
+            "Repeated public action pattern observed: the last four executed "
+            "actions form A-B-A-B. Interpret it together with the current "
+            "observation and admissible actions."
         )
     if receipts and receipts[-1].get("observation_status") == "parse_error":
         lines.append(
             "Format repair: the preceding response was invalid and the environment "
             "state is unchanged; copy exactly one current admissible action."
         )
+    failed_transitions = [
+        item for item in receipts if item.get("state_advanced") is False
+    ]
+    if failed_transitions:
+        lines.append(
+            "Failed public transitions with environment state preserved: "
+            + " | ".join(
+                "turn={turn}, status={status}, revision={revision}".format(
+                    turn=item.get("turn"),
+                    status=item.get("observation_status"),
+                    revision=item.get("environment_revision_after"),
+                )
+                for item in failed_transitions[-6:]
+            )
+            + "."
+        )
     return "\n".join(lines)
+
+
+def _public_action_observation_history(
+    receipts: Sequence[Mapping[str, object]],
+    *,
+    max_result_chars: int = 600,
+) -> list[dict[str, object]]:
+    """Project every public transition without evaluator or hidden state."""
+
+    result: list[dict[str, object]] = []
+    for item in receipts:
+        raw_result = str(item.get("next_observation", ""))
+        clipped = max_result_chars > 0 and len(raw_result) > max_result_chars
+        observation_result = (
+            raw_result[:max_result_chars] + "..." if clipped else raw_result
+        )
+        result.append(
+            {
+                "turn": item.get("turn"),
+                "environment_revision_before": item.get(
+                    "environment_revision_before"
+                ),
+                "environment_revision_after": item.get(
+                    "environment_revision_after"
+                ),
+                "raw_action": item.get("raw_model_output"),
+                "action": item.get("action"),
+                "observation_result": observation_result,
+                "observation_result_clipped": clipped,
+                "observation_status": item.get("observation_status"),
+                "state_advanced": item.get("state_advanced"),
+                "environment_terminal": item.get("terminal"),
+            }
+        )
+    return result
 
 
 def _prompt_observation(observation: str, max_observation_chars: int) -> tuple[str, bool]:
@@ -980,6 +1313,13 @@ def _action_prompt(
                 ),
             }
         )
+    public_state = _public_state_feedback(
+        request,
+        task_family=task_family,
+        observation=observation,
+        admissible_actions=admissible_actions,
+        receipts=receipts,
+    )
     return _environment_prompt(
         dataset=task_family.lower(),
         task_description=instruction,
@@ -987,6 +1327,7 @@ def _action_prompt(
         legal_actions=admissible_actions,
         trace=trace,
         step_index=turn - 1,
+        public_state=public_state,
     )
 
 
@@ -1073,6 +1414,7 @@ class EnvironmentExecutionAdapter:
     def _current_public_state(
         self,
         episode: _EnvironmentEpisode,
+        request: AgentRequest,
     ) -> dict[str, object]:
         """Project only the public next-step state returned to the Director."""
 
@@ -1084,6 +1426,16 @@ class EnvironmentExecutionAdapter:
             )
         last = episode.receipts[-1] if episode.receipts else None
         turns_used = len(episode.receipts)
+        action_observation_history = _public_action_observation_history(
+            episode.receipts
+        )
+        public_state = _public_state_feedback(
+            request,
+            task_family=episode.session.task_family,
+            observation=episode.observation,
+            admissible_actions=admissible_actions,
+            receipts=episode.receipts,
+        )
         return {
             "environment_episode_id": episode.episode_id,
             "environment_id": episode.session.environment_id,
@@ -1098,6 +1450,13 @@ class EnvironmentExecutionAdapter:
             ),
             "current_observation": episode.observation,
             "admissible_actions": list(admissible_actions),
+            "public_state": public_state,
+            "latest_action_observation": (
+                action_observation_history[-1]
+                if action_observation_history
+                else None
+            ),
+            "action_observation_history": action_observation_history,
             "turns_used": turns_used,
             "remaining_action_budget": max(self._max_turns - turns_used, 0),
             "environment_terminal": episode.terminal,
@@ -1331,7 +1690,8 @@ class EnvironmentExecutionAdapter:
                     "environment_reset_receipt": reset_receipt,
                     "environment_receipts": list(receipts),
                     "environment_current_state": self._current_public_state(
-                        episode
+                        episode,
+                        request,
                     ),
                     "environment_terminal": terminal,
                     "environment_truncated": (

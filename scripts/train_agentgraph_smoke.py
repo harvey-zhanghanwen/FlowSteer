@@ -2531,6 +2531,11 @@ class LiveSmokeBackend:
             top_p=float(director["top_p"]),
             top_k=int(director["top_k"]),
             max_tokens=int(director["max_action_tokens"]),
+            max_context_tokens=(
+                int(director["max_context_tokens"])
+                if director.get("max_context_tokens") is not None
+                else None
+            ),
             action_json_schema=(
                 director_sglang_sampling_json_schema_text(
                     tuple(str(value) for value in graph_config["actions"])

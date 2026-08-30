@@ -940,7 +940,11 @@ def _environment_actions(
     if isinstance(available_actions, Sequence) and not isinstance(
         available_actions, (str, bytes)
     ):
-        return [str(action) for action in available_actions], False
+        return [
+            str(action)
+            for action in available_actions
+            if dataset != "alfworld" or str(action) != "help"
+        ], False
     return [], False
 
 
@@ -988,6 +992,7 @@ def _environment_prompt(
     legal_actions: Sequence[str],
     trace: Sequence[Mapping[str, Any]],
     step_index: int,
+    public_state: str = "",
 ) -> str:
     """Render the stateful subset of SkillFlow's WebShop/ALFWorld templates."""
 
@@ -1010,6 +1015,7 @@ def _environment_prompt(
             "For click actions, copy one value from the admissible action list "
             "exactly. You may instead enclose that one action in <action> tags."
         )
+    public_state_block = f"{public_state}\n" if public_state else ""
     return (
         "You are an expert agent operating in the ALFRED Embodied Environment.\n"
         f"{_ALFWORLD_ACTION_EXAMPLES}"
@@ -1019,6 +1025,7 @@ def _environment_prompt(
         f"{history}\n"
         f"You are now at step {step_index + 1} and your current observation is: "
         f"{observation}\n"
+        f"{public_state_block}"
         "Your admissible actions of the current situation are: [\n"
         f"{actions}\n].\n\n"
         "Pick exactly one action from the admissible actions list. Output only "

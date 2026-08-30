@@ -509,6 +509,23 @@ def test_native_sglang_validates_model_admissible_schema_receipt():
         )
 
 
+def test_native_sglang_fails_closed_when_prompt_exceeds_context_limit():
+    client = ScriptedSGLangClient(
+        ['{"action":"finish"}'],
+        policy_version=POLICY_VERSION,
+        max_tokens=2,
+        max_context_tokens=4,
+    )
+
+    with pytest.raises(
+        ReceiptValidationError,
+        match="exceeds max_context_tokens=4",
+    ):
+        asyncio.run(client.propose("current Canvas"))
+
+    assert client.payloads == []
+
+
 def test_native_sglang_v3_uses_exact_live_relation_candidate_receipt():
     candidates = [
         {
@@ -1433,6 +1450,90 @@ def test_native_sglang_v3_binds_modify_agent_and_discrete_value():
         "modify_field_selection",
         "modify_agent_selection",
     }
+
+
+def test_native_sglang_v3_binds_scalar_add_agent_execution_profile():
+    actions = ("add_agent",)
+    domains = {
+        "add_agent": {
+            "existing_agent_ids": [],
+            "model_ids": ["qwen"],
+            "contract_type": "free_text",
+            "execution_profiles": [
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["alfworld.environment"],
+                }
+            ],
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+                "execution_mode",
+                "allowed_tools",
+            ],
+        }
+    }
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    final_action = {
+        "action": "add_agent",
+        "agent_id": "node_1",
+        "model_id": "qwen",
+        "contract": "Execute one native ALFWorld action.",
+        "execution_mode": "react",
+        "allowed_tools": ["alfworld.environment"],
+    }
+    client = ScriptedSGLangClient(
+        [json.dumps(final_action, separators=(",", ":"))],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(actions),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+
+    response = asyncio.run(client.propose("empty Canvas", **schema_request))
+    parsed = AgentActionParser().parse(response.text)
+    _validate_v3_hierarchical_action_receipt(
+        parsed,
+        response.metadata,
+        schema_request,
+    )
+
+    assert client.payloads[0]["sampling_params"]["json_schema"] == (
+        director_live_action_parameter_json_schema_text("add_agent", domains)
+    )
+    assert response.metadata["selected_action"] == "add_agent"
+    assert response.metadata["parameter_schema_branch"] == "add_agent"
+    assert response.metadata["request_count"] == 1
+    invalid_profile = AgentActionParser().parse(
+        json.dumps(
+            {
+                **final_action,
+                "execution_mode": "reasoning",
+            },
+            separators=(",", ":"),
+        )
+    )
+    with pytest.raises(
+        ReceiptValidationError,
+        match="execution profile is outside",
+    ):
+        _validate_v3_hierarchical_action_receipt(
+            invalid_profile,
+            response.metadata,
+            schema_request,
+        )
 
 
 def test_native_sglang_v3_regenerates_one_truncated_parameter_with_exact_receipts():

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import unittest
 
+from jsonschema import Draft202012Validator
+
 from src.interactive.agent_graph import AgentGraph, AgentNode
 from src.interactive.agent_runtime import (
     AgentResponse,
@@ -1811,6 +1813,115 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                 "continue",
                 {"continue": {"admissible": True}},
             )
+
+    def test_live_scalar_add_agent_binds_complete_execution_profile(self) -> None:
+        domains = {
+            "add_agent": {
+                "existing_agent_ids": ["node_1"],
+                "model_ids": ["qwen", "other"],
+                "contract_type": "free_text",
+                "execution_profiles": [
+                    {
+                        "execution_mode": "reasoning",
+                        "allowed_tools": [],
+                    },
+                    {
+                        "execution_mode": "react",
+                        "allowed_tools": ["alfworld.environment"],
+                    },
+                ],
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+            }
+        }
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_agent",
+                domains,
+            )
+        )
+        validator = Draft202012Validator(schema)
+        valid = {
+            "action": "add_agent",
+            "agent_id": "node_2",
+            "model_id": "qwen",
+            "contract": "Execute one native ALFWorld action.",
+            "execution_mode": "react",
+            "allowed_tools": ["alfworld.environment"],
+        }
+
+        self.assertEqual(2, len(schema["oneOf"]))
+        for branch in schema["oneOf"]:
+            self.assertEqual(
+                {"const": "node_2"}, branch["properties"]["agent_id"]
+            )
+            self.assertEqual(
+                {"enum": ["qwen", "other"]},
+                branch["properties"]["model_id"],
+            )
+            self.assertEqual(
+                {
+                    "action",
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "execution_mode",
+                    "allowed_tools",
+                },
+                set(branch["required"]),
+            )
+        self.assertTrue(validator.is_valid(valid))
+        self.assertFalse(
+            validator.is_valid(
+                {
+                    key: value
+                    for key, value in valid.items()
+                    if key not in {"execution_mode", "allowed_tools"}
+                }
+            )
+        )
+
+        single_profile_domains = {
+            "add_agent": {
+                **domains["add_agent"],
+                "execution_profiles": [
+                    {
+                        "execution_mode": "react",
+                        "allowed_tools": ["alfworld.environment"],
+                    }
+                ],
+            }
+        }
+        single_profile_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_agent",
+                single_profile_domains,
+            )
+        )
+        self.assertNotIn("oneOf", single_profile_schema)
+        self.assertEqual(
+            {"const": "react"},
+            single_profile_schema["properties"]["execution_mode"],
+        )
+        self.assertEqual(
+            {"const": ["alfworld.environment"]},
+            single_profile_schema["properties"]["allowed_tools"],
+        )
+        self.assertTrue(Draft202012Validator(single_profile_schema).is_valid(valid))
+        self.assertFalse(
+            validator.is_valid(
+                {
+                    **valid,
+                    "execution_mode": "reasoning",
+                    "allowed_tools": ["alfworld.environment"],
+                }
+            )
+        )
 
     def test_model_admissible_v2_factorizes_action_and_exact_parameters(self) -> None:
         actions = ("modify_agent", "set_relation", "finish")

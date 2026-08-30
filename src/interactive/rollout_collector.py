@@ -422,6 +422,7 @@ class SGLangReceiptDirectorClient:
         top_p: float = 0.95,
         top_k: int = 20,
         max_tokens: int = 768,
+        max_context_tokens: Optional[int] = None,
         timeout_seconds: float = 180.0,
         max_retries: int = 2,
         action_json_schema: Optional[str] = None,
@@ -442,6 +443,17 @@ class SGLangReceiptDirectorClient:
             raise ValueError("top_k must be -1 or a positive integer")
         if max_tokens <= 0 or timeout_seconds <= 0 or max_retries < 0:
             raise ValueError("Director token, timeout, and retry limits are invalid")
+        if (
+            max_context_tokens is not None
+            and (
+                isinstance(max_context_tokens, bool)
+                or not isinstance(max_context_tokens, int)
+                or max_context_tokens <= max_tokens
+            )
+        ):
+            raise ValueError(
+                "Director max_context_tokens must exceed max_tokens"
+            )
         if not isinstance(policy_version, str) or not policy_version.strip():
             raise ValueError("policy_version must be non-empty")
         if action_json_schema is not None and (
@@ -487,6 +499,7 @@ class SGLangReceiptDirectorClient:
         self.top_p = float(top_p)
         self.top_k = int(top_k)
         self.max_tokens = int(max_tokens)
+        self.max_context_tokens = max_context_tokens
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
         self.action_json_schema = action_json_schema
@@ -589,6 +602,16 @@ class SGLangReceiptDirectorClient:
         if seed is not None:
             _sglang_backend_sampling_seed(seed)
         prompt_ids = self.prompt_token_ids(prompt)
+        if (
+            self.max_context_tokens is not None
+            and len(prompt_ids) + self.max_tokens > self.max_context_tokens
+        ):
+            raise ReceiptValidationError(
+                "Director prompt plus maximum completion exceeds "
+                f"max_context_tokens={self.max_context_tokens}: "
+                f"prompt_tokens={len(prompt_ids)}, "
+                f"max_new_tokens={self.max_tokens}"
+            )
         payload: dict[str, Any] = {
             "input_ids": list(prompt_ids),
             "sampling_params": {
@@ -2604,6 +2627,40 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError(
                 "v3 final action violates its live target domain"
             ) from exc
+        if action_value is not None and selected_action == "add_agent":
+            add_domain = domains["add_agent"]
+            required_fields = add_domain["required_agent_fields"]
+            if not set(required_fields).issubset(action_value):
+                raise ReceiptValidationError(
+                    "v3 final add_agent omits a required live-domain field"
+                )
+            existing_ids = set(add_domain["existing_agent_ids"])
+            next_index = 1
+            while f"node_{next_index}" in existing_ids:
+                next_index += 1
+            if action_value.get("agent_id") != f"node_{next_index}":
+                raise ReceiptValidationError(
+                    "v3 final add_agent ID differs from its live neutral ID"
+                )
+            if action_value.get("model_id") not in add_domain["model_ids"]:
+                raise ReceiptValidationError(
+                    "v3 final add_agent model is outside its live domain"
+                )
+            profile = (
+                action_value.get("execution_mode"),
+                tuple(action_value.get("allowed_tools", ())),
+            )
+            admitted_profiles = {
+                (
+                    candidate["execution_mode"],
+                    tuple(candidate["allowed_tools"]),
+                )
+                for candidate in add_domain["execution_profiles"]
+            }
+            if profile not in admitted_profiles:
+                raise ReceiptValidationError(
+                    "v3 final add_agent execution profile is outside its live domain"
+                )
         if (
             action_value is not None
             and selected_action in {"delete_agent", "set_output"}

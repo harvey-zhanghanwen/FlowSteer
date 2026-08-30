@@ -195,6 +195,18 @@ def _director_neutral_feedback_projection(feedback: str) -> str:
             # a workflow recipe, so preserve it verbatim.
             return feedback
         projected = _director_neutral_state_projection(structured)
+        if isinstance(projected, Mapping):
+            # ``AgentWorkflowEnv._accepted_feedback`` retains the complete
+            # execution receipt, including its public environment state.  The
+            # current state is also exposed as the canonical top-level
+            # ``environment_state`` below.  Keep the receipt unchanged in the
+            # trajectory, but do not duplicate the same potentially large
+            # observation inside the Director view.
+            projected = {
+                key: value
+                for key, value in projected.items()
+                if key != "environment_state"
+            }
         return feedback[:payload_index] + json.dumps(
             projected,
             ensure_ascii=False,
@@ -2277,7 +2289,77 @@ def director_live_action_parameter_json_schema_text(
     if not isinstance(domain, Mapping):
         raise ValueError(f"missing live target domain for {action}")
 
-    if action == "add_subgraph":
+    if action == "add_agent":
+        existing_agent_ids = domain.get("existing_agent_ids")
+        if (
+            not isinstance(existing_agent_ids, (list, tuple))
+            or any(
+                not isinstance(agent_id, str) or not agent_id
+                for agent_id in existing_agent_ids
+            )
+            or len(existing_agent_ids) != len(set(existing_agent_ids))
+        ):
+            raise ValueError("add_agent existing Agent IDs are invalid")
+        if domain.get("contract_type") != "free_text":
+            raise ValueError("add_agent contract domain must be free_text")
+        model_ids = _live_string_domain(
+            domain.get("model_ids"),
+            label="add_agent.model_ids",
+        )
+        profiles = _live_execution_profiles(
+            domain.get("execution_profiles"),
+            label="add_agent.execution_profiles",
+        )
+        required_fields = _live_string_domain(
+            domain.get("required_agent_fields"),
+            label="add_agent.required_agent_fields",
+        )
+        base_required = {
+            "agent_id",
+            "model_id",
+            "contract",
+            "execution_mode",
+            "allowed_tools",
+        }
+        schema = json.loads(
+            director_state_conditioned_sampling_json_schema_text("add_agent")
+        )
+        agent_properties = set(schema["properties"]) - {"action"}
+        if not base_required.issubset(required_fields) or not set(
+            required_fields
+        ).issubset(agent_properties):
+            raise ValueError("add_agent required Agent fields are invalid")
+        schema["required"] = ["action", *required_fields]
+        schema["properties"] = {
+            key: value
+            for key, value in schema["properties"].items()
+            if key == "action" or key in required_fields
+        }
+        schema["properties"]["agent_id"] = {
+            "const": _live_new_agent_ids(existing_agent_ids, 1)[0]
+        }
+        schema["properties"]["model_id"] = {"enum": list(model_ids)}
+        # Preserve each registered execution-mode/Tool pair in a complete
+        # object branch. SGLang/xgrammar does not reliably preserve the outer
+        # object fields when they are intersected with a partial root-level
+        # ``oneOf``; FlowSteer's relation compatibility renderer uses the same
+        # self-contained branch boundary for this reason.
+        profile_schemas: list[dict[str, Any]] = []
+        for execution_mode, allowed_tools in profiles:
+            profile_schema = json.loads(json.dumps(schema))
+            profile_schema["properties"]["execution_mode"] = {
+                "const": execution_mode
+            }
+            profile_schema["properties"]["allowed_tools"] = {
+                "const": list(allowed_tools)
+            }
+            profile_schemas.append(profile_schema)
+        schema = (
+            profile_schemas[0]
+            if len(profile_schemas) == 1
+            else {"oneOf": profile_schemas}
+        )
+    elif action == "add_subgraph":
         if add_agents is None:
             raise ValueError(
                 "add_subgraph v3 parameter phase requires sampled Agent declarations"
