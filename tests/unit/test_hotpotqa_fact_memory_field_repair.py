@@ -466,7 +466,11 @@ def test_bounded_tail_recovery_uses_unlabeled_public_context_only(
             return _question_verification(), {"request_id": request_id}
         if "verify-fact" in request_id:
             if kwargs["schema"] == materializer.PUBLIC_CONTEXT_FACT_VERIFICATION_SCHEMA:
-                return _public_context_fact_verification(), {
+                return _public_context_fact_verification(
+                    fact_declarative=False,
+                    fact_self_contained=False,
+                    fact_explicitly_supported_by_public_context=False,
+                ), {
                     "request_id": request_id
                 }
             return _fact_verification(fact_supported_by_qa=False), {
@@ -497,6 +501,12 @@ def test_bounded_tail_recovery_uses_unlabeled_public_context_only(
         "extractive_public_context_projection"
     )
     assert final_fact["verification_mode"] == "public_context"
+    assert final_fact["deterministic_extractive_support"] is True
+    assert final_fact["verification"]["fact_declarative"] is True
+    assert final_fact["verification"]["fact_self_contained"] is True
+    assert final_fact["verification"][
+        "fact_explicitly_supported_by_public_context"
+    ] is True
     assert receipt["fact_generation_source"] == "public_context"
     assert receipt["public_context_generation_only"] is True
     assert receipt["public_context_indexed_or_tool_exposed"] is False

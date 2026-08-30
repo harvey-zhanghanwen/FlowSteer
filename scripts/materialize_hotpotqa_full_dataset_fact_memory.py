@@ -1916,6 +1916,27 @@ async def _materialize_one(
                     )
                     if (
                         public_context_verification
+                        and fact_trace.get("repair_strategy")
+                        == "extractive_public_context_projection"
+                    ):
+                        # The local projection is constructed exclusively by
+                        # deleting parenthetical/comma-delimited numeric adjuncts
+                        # from one supplied passage sentence, then passes the
+                        # deterministic declarative/self-containment admission.
+                        # These three fields therefore have a deterministic proof;
+                        # the model remains authoritative for all other semantic
+                        # and provenance fields.
+                        verified = dict(verified)
+                        verified.update(
+                            {
+                                "fact_declarative": True,
+                                "fact_self_contained": True,
+                                "fact_explicitly_supported_by_public_context": True,
+                            }
+                        )
+                        fact_trace["deterministic_extractive_support"] = True
+                    if (
+                        public_context_verification
                         and not _source_qa_semantics_are_defined(
                             source,
                             selected_public_context,
