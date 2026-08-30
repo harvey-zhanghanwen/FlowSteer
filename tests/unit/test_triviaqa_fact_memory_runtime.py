@@ -18,10 +18,13 @@ from src.interactive.qa_tool_adapter import (
     QARetrievalReactExecutionAdapter,
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     TRIVIAQA_QA_MEMORY_TOOL_ID,
+    _missing_question_named_constraints,
+    _missing_question_retrieval_named_constraints,
+    _question_retrieval_entity_anchor_alternatives,
     build_qa_tool_registry,
     qa_reasoner_artifact_json_schema,
 )
-from src.interactive.tool_runtime import ToolRequest
+from src.interactive.tool_runtime import ActionKind, StructuredAction, ToolRequest
 
 
 @dataclass(frozen=True)
@@ -174,6 +177,97 @@ def _reasoner_request(artifact: str, receipts: tuple[dict[str, object], ...]) ->
 
 
 class TriviaQAFactMemoryRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def test_coordinated_entity_query_decomposition_preserves_final_scope(
+        self,
+    ) -> None:
+        question = (
+            "Who wrote The Turn Of The Screw in the 19th century and "
+            "The Ambassadors in the 20th?"
+        )
+        self.assertEqual(
+            (("turn", "of", "the", "screw"), ("ambassadors",)),
+            _question_retrieval_entity_anchor_alternatives(question),
+        )
+        self.assertEqual(
+            (),
+            _missing_question_retrieval_named_constraints(
+                question,
+                "The Ambassadors wrote 20th century",
+            ),
+        )
+        self.assertEqual(
+            ("screw", "turn"),
+            _missing_question_named_constraints(
+                question,
+                "The Ambassadors wrote 20th century",
+            ),
+        )
+
+        adapter = QARetrievalReactExecutionAdapter(
+            gateway=SimpleNamespace(generate=lambda request: None),
+            tool_registry=build_qa_tool_registry(FactIndex()),
+            max_turns=8,
+            max_tool_calls=6,
+            task_type="factual_qa",
+            completion_policy="required_evidence",
+            parametric_fallback_after_coverage_failure=True,
+            retrieval_tool_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+        )
+        request = AgentRequest(
+            request_id="triviaqa:coordinated-entity",
+            run_id="fact-memory",
+            graph_revision=1,
+            problem=question,
+            agent=AgentNode(
+                "retriever",
+                "model",
+                "retrieve evidence",
+                role_family="evidence_retriever",
+                allowed_tools=(TRIVIAQA_QA_MEMORY_TOOL_ID,),
+                execution_mode="react",
+            ),
+            model=ModelSpec("model", "provider"),
+            provider=ProviderSpec("provider", kind="test"),
+            phase=ExecutionPhase.SINGLE,
+            semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
+        )
+        public_state = adapter._public_retrieval_continuation_state(
+            request,
+            [],
+        )
+        assert public_state is not None
+        self.assertEqual(
+            [["turn", "of", "the", "screw"], ["ambassadors"]],
+            public_state["question_entity_anchor_alternatives"],
+        )
+        for query in (
+            "The Turn Of The Screw wrote 19th century",
+            "The Ambassadors wrote 20th century",
+        ):
+            with self.subTest(query=query):
+                issue = adapter._tool_action_error(
+                    request=request,
+                    action=StructuredAction(
+                        ActionKind.TOOL,
+                        "search",
+                        {"query": query, "limit": 2},
+                        resource_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+                    ),
+                    observations=[],
+                )
+                self.assertIsNone(issue)
+        issue = adapter._tool_action_error(
+            request=request,
+            action=StructuredAction(
+                ActionKind.TOOL,
+                "search",
+                {"query": "wrote 19th century", "limit": 2},
+                resource_id=TRIVIAQA_QA_MEMORY_TOOL_ID,
+            ),
+            observations=[],
+        )
+        self.assertEqual("qa_retrieval_query_entity_anchor_loss", issue)
+
     async def test_registry_projects_fact_only_search_and_read_payloads(self) -> None:
         registry = build_qa_tool_registry(FactIndex())
         self.assertEqual((TRIVIAQA_QA_MEMORY_TOOL_ID,), registry.resource_ids)
@@ -216,9 +310,8 @@ class TriviaQAFactMemoryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         receipts = _fact_receipts()
         selection = json.dumps(
             {
-                "memory_ids": ["fact-1", "fact-2"],
                 "retrieval_status": "evidence_found",
-                "relevant_memory_ids": ["fact-1"],
+                "relevant_ranks": [1],
             }
         )
         projected, issue = (
@@ -234,6 +327,7 @@ class TriviaQAFactMemoryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         assert projected is not None
         artifact = json.loads(projected)
         self.assertEqual(["fact-1", "fact-2"], [c["memory_id"] for c in artifact["candidates"]])
+        self.assertEqual(["fact-1"], artifact["relevant_memory_ids"])
         self.assertTrue(all(set(c) == {"memory_id", "rank", "similarity", "fact_text"} for c in artifact["candidates"]))
         self.assertNotIn("canonical_answer", projected)
         self.assertNotIn("source_train_task_id", projected)
@@ -245,6 +339,21 @@ class TriviaQAFactMemoryRuntimeTests(unittest.IsolatedAsyncioTestCase):
             parametric_fallback_after_coverage_failure=True,
         )
         self.assertIn("original rank order", issue or "")
+
+        for ranks in ([2, 1], [1, 1], [3]):
+            with self.subTest(relevant_ranks=ranks):
+                _, issue = QARetrievalReactExecutionAdapter._qa_memory_completion_receipt_projection(
+                    original_question="Who wrote the first published algorithm?",
+                    selection_artifact=json.dumps(
+                        {
+                            "retrieval_status": "evidence_found",
+                            "relevant_ranks": ranks,
+                        }
+                    ),
+                    tool_receipts=receipts,
+                    parametric_fallback_after_coverage_failure=True,
+                )
+                self.assertIsNotNone(issue)
 
     def test_ranked_action_domain_reads_every_fact_before_completion(self) -> None:
         registry = build_qa_tool_registry(FactIndex())
@@ -276,6 +385,14 @@ class TriviaQAFactMemoryRuntimeTests(unittest.IsolatedAsyncioTestCase):
             phase=ExecutionPhase.SINGLE,
             semantic_protocol=QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
         )
+        completion_schema = adapter._completion_arguments_schema(request)
+        value_schema = completion_schema["properties"]["value"]
+        self.assertEqual(
+            ["retrieval_status", "relevant_ranks"],
+            value_schema["required"],
+        )
+        self.assertNotIn("memory_ids", value_schema["properties"])
+        self.assertNotIn("relevant_memory_ids", value_schema["properties"])
         receipts = _fact_receipts()
         observations = []
         for receipt in receipts:
@@ -368,9 +485,8 @@ class TriviaQAFactMemoryRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 original_question="Who wrote the first published algorithm?",
                 selection_artifact=json.dumps(
                     {
-                        "memory_ids": ["fact-1", "fact-2"],
                         "retrieval_status": "evidence_found",
-                        "relevant_memory_ids": ["fact-1"],
+                        "relevant_ranks": [1],
                     }
                 ),
                 tool_receipts=_fact_receipts(),
@@ -729,9 +845,8 @@ class TriviaQAFactMemoryRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 original_question="Who wrote the first published algorithm?",
                 selection_artifact=json.dumps(
                     {
-                        "memory_ids": ["fact-1", "fact-2"],
                         "retrieval_status": "evidence_found",
-                        "relevant_memory_ids": ["fact-1"],
+                        "relevant_ranks": [1],
                     }
                 ),
                 tool_receipts=_fact_receipts(),

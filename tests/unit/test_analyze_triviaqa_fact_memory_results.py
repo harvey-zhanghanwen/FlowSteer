@@ -72,9 +72,7 @@ def _fact_receipts(
                         "operation": "read",
                         "memory_id": memory_id,
                         "memory": {
-                            "schema_version": "flowsteer.fact-memory.record.v1",
                             "memory_id": memory_id,
-                            "tool_id": analysis.FACT_MEMORY_TOOL_ID,
                             "fact_text": hit["fact_text"],
                         },
                     },
@@ -474,6 +472,22 @@ def test_agent_facing_private_field_leak_withholds_formal_metrics(
         item["marker"] == "Question/Answer mapping"
         for item in task["data_plane_violations"]
     )
+
+
+def test_semantic_agent_answer_wrapper_is_not_a_fact_memory_leak(
+    tmp_path: Path,
+) -> None:
+    args, trajectories = _fixture(tmp_path)
+    semantic_output = copy.deepcopy(trajectories)
+    first_turn = semantic_output[0]["turns"][0]  # type: ignore[index]
+    reasoner = first_turn["executions"][1]  # type: ignore[index]
+    reasoner["output"] = "Answer: model-authored semantic candidate"
+    _write_jsonl(Path(args.trajectories), semantic_output)
+
+    report = analysis.build_report(args)
+
+    task = report["per_task_protocol"]["triviaqa:validation:0"]
+    assert task["data_plane_violation_count"] == 0
 
 
 def test_read_before_search_and_incomplete_top_k_fail_closed(tmp_path: Path) -> None:

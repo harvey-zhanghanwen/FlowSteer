@@ -1,8 +1,9 @@
 # TriviaQA fact-memory v16 source map
 
 This note records implementation provenance and the frozen inference protocol
-for `evaluation_triviaqa_fact_memory_unified_v4_v16_full_native_transductive.yaml`.
-It does not report or imply an evaluation score.
+for the v16 fact-memory profiles, including the preserved v16.4 diagnostic
+checkpoint.  It does not promote a protocol-invalid diagnostic score to a
+formal result.
 
 ## Source mapping
 
@@ -41,5 +42,8 @@ It does not report or imply an evaluation score.
 - Original questions, canonical answers, accepted aliases, source IDs, and
   evaluator metadata remain in the database-external provenance projection.
   No provenance path is configured in the runtime profile.
-- The v16 profile does not claim a completed formal result until the fact
-  corpus/index exists and a separate 128-task evaluation has fully converged.
+- The v16.4 fixed-128 batch completed with diagnostic EM 82.81% and F1 84.94%,
+  but only 123/128 outputs had admitted terminal lineage.  A subsequent corpus
+  audit also found at least one fact with unresolved reference (for example,
+  ``The company called it Frosted food.``).  The checkpoint is therefore kept
+  as a recoverable diagnostic baseline, not a formal protocol-valid result.

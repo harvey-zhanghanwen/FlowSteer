@@ -70,9 +70,7 @@ ZERO_FALLBACK_COUNT_FIELDS = (
     "pending_gap_fallback_count",
     "legacy_fallback_regeneration_count",
 )
-FACT_RECORD_FIELDS = frozenset(
-    {"schema_version", "memory_id", "tool_id", "fact_text"}
-)
+FACT_RECORD_FIELDS = frozenset({"memory_id", "fact_text"})
 FACT_HIT_FIELDS = frozenset(
     {"memory_id", "rank", "similarity", "fact_text"}
 )
@@ -177,7 +175,13 @@ def _all_tool_receipts(
 def _data_plane_payloads(
     trajectory: Mapping[str, Any],
 ) -> Iterable[tuple[str, object]]:
-    """Yield Tool and communication payloads, excluding task/evaluator state."""
+    """Yield retrieval-worker output and Tool payloads.
+
+    The fact-memory isolation contract applies to the Agent-facing database wire,
+    not to semantic artifacts authored later by reasoning, verification, repair,
+    or output workers. Tool receipts remain authoritative for every role; only
+    the evidence retriever's model output is additionally inspected here.
+    """
 
     for round_index, execution_position, execution in qa.base._iter_executions(
         trajectory
@@ -185,10 +189,12 @@ def _data_plane_payloads(
         metadata = qa.base._mapping(execution.get("metadata"))
         request = qa.base._mapping(metadata.get("request"))
         response = qa.base._mapping(metadata.get("response"))
+        agent = qa.base._mapping(request.get("agent"))
         prefix = f"turn[{round_index}].execution[{execution_position}]"
-        yield prefix + ".output", execution.get("output", response.get("text"))
-        yield prefix + ".request.upstream", request.get("upstream")
-        yield prefix + ".request.peer_draft", request.get("peer_draft")
+        if agent.get("role_family") == "evidence_retriever":
+            yield prefix + ".output", execution.get(
+                "output", response.get("text")
+            )
         yield prefix + ".response.tool_receipts", response.get("tool_receipts")
         yield prefix + ".response.react_trace", response.get("react_trace")
     for turn_position, raw_turn in enumerate(qa.base._list(trajectory.get("turns"))):

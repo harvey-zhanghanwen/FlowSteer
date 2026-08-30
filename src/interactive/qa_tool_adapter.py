@@ -2482,6 +2482,82 @@ def _question_entity_anchor_tokens(original_question: str) -> tuple[str, ...]:
     return generic[-2:]
 
 
+def _question_coordinated_entity_anchor_alternatives(
+    original_question: str,
+) -> tuple[tuple[str, ...], ...]:
+    """Return public named-entity mentions joined by question coordination.
+
+    This is query decomposition only. Each mention can seed an embedding
+    search, while completion and downstream semantic validation continue to
+    use the complete original question.
+    """
+
+    matches = tuple(
+        re.finditer(
+            r"[^\W\d_]+(?:[-'’][^\W\d_]+)*",
+            _normalize_abnormal_possessive_surface(original_question),
+            flags=re.UNICODE,
+        )
+    )
+    if not matches:
+        return ()
+    raw_tokens = tuple(match.group(0) for match in matches)
+    normalized = tuple(token.casefold() for token in raw_tokens)
+    groups: list[tuple[int, int, tuple[str, ...]]] = []
+    index = 0
+    while index < len(raw_tokens):
+        if (
+            not raw_tokens[index][:1].isupper()
+            or normalized[index] in _QUESTION_ANCHOR_WH_WORDS
+        ):
+            index += 1
+            continue
+        end = index + 1
+        while (
+            end < len(raw_tokens)
+            and raw_tokens[end][:1].isupper()
+            and normalized[end] not in _QUESTION_ANCHOR_WH_WORDS
+        ):
+            end += 1
+        mention = list(normalized[index:end])
+        while len(mention) > 1 and mention[0] in {"a", "an", "the"}:
+            mention.pop(0)
+        if mention:
+            groups.append((index, end, tuple(mention)))
+        index = end
+    if len(groups) < 2:
+        return ()
+
+    participating: set[int] = set()
+    for left_index, (_, left_end, _) in enumerate(groups[:-1]):
+        for right_index in range(left_index + 1, len(groups)):
+            right_start = groups[right_index][0]
+            if any(
+                token in {"and", "or"}
+                for token in normalized[left_end:right_start]
+            ):
+                participating.update((left_index, right_index))
+    if len(participating) < 2:
+        return ()
+    return tuple(
+        dict.fromkeys(groups[index][2] for index in sorted(participating))
+    )
+
+
+def _question_retrieval_entity_anchor_alternatives(
+    original_question: str,
+) -> tuple[tuple[str, ...], ...]:
+    """Return entity-anchor alternatives admitted for query decomposition."""
+
+    coordinated = _question_coordinated_entity_anchor_alternatives(
+        original_question
+    )
+    if coordinated:
+        return coordinated
+    anchor = _question_entity_anchor_tokens(original_question)
+    return (anchor,) if anchor else ()
+
+
 def _question_has_proper_entity_anchor(original_question: str) -> bool:
     """Return whether the question publishes an explicit proper-name anchor."""
 
@@ -2551,6 +2627,20 @@ def _surface_binds_entity_anchor(
             )
         )
         for offset in range(max(0, len(surface_tokens) - width + 1))
+    )
+
+
+def _surface_binds_retrieval_entity_anchor(
+    original_question: str,
+    surface: str,
+) -> bool:
+    """Return whether a query binds one complete public entity alternative."""
+
+    return any(
+        _surface_binds_entity_anchor(surface, alternative)
+        for alternative in _question_retrieval_entity_anchor_alternatives(
+            original_question
+        )
     )
 
 
@@ -2972,7 +3062,9 @@ def _question_retrieval_relation_context_tokens(
     """Project answer-free relation/scope content from the public question."""
 
     question_tokens = _scope_tokens(original_question)
-    entity_anchor = _question_entity_anchor_tokens(original_question)
+    entity_anchors = _question_retrieval_entity_anchor_alternatives(
+        original_question
+    )
     content = tuple(
         token
         for token in question_tokens
@@ -2981,6 +3073,7 @@ def _question_retrieval_relation_context_tokens(
         and not any(
             _relation_token_variants(token)
             & _relation_token_variants(anchor)
+            for entity_anchor in entity_anchors
             for anchor in entity_anchor
         )
     )
@@ -3086,6 +3179,52 @@ def _missing_question_named_constraints(
     original_question: str,
     candidate_surface: str,
 ) -> tuple[str, ...]:
+    return _missing_named_constraints(
+        _question_named_constraint_tokens(original_question),
+        candidate_surface,
+    )
+
+
+def _question_retrieval_named_constraint_tokens(
+    original_question: str,
+) -> frozenset[str]:
+    """Return actual named scope constraints after query decomposition."""
+
+    constraints = _question_named_constraint_tokens(original_question)
+    coordinated = _question_coordinated_entity_anchor_alternatives(
+        original_question
+    )
+    if not coordinated:
+        return constraints
+    entity_tokens = tuple(
+        token for alternative in coordinated for token in alternative
+    )
+    return frozenset(
+        constraint
+        for constraint in constraints
+        if not any(
+            _relation_token_variants(component)
+            & _relation_token_variants(entity_token)
+            for component in _scope_tokens(constraint)
+            for entity_token in entity_tokens
+        )
+    )
+
+
+def _missing_question_retrieval_named_constraints(
+    original_question: str,
+    candidate_surface: str,
+) -> tuple[str, ...]:
+    return _missing_named_constraints(
+        _question_retrieval_named_constraint_tokens(original_question),
+        candidate_surface,
+    )
+
+
+def _missing_named_constraints(
+    constraints: Sequence[str],
+    candidate_surface: str,
+) -> tuple[str, ...]:
     candidate_tokens = _scope_tokens(candidate_surface)
 
     def constraint_preserved(constraint: str) -> bool:
@@ -3107,7 +3246,7 @@ def _missing_question_named_constraints(
     return tuple(
         constraint
         for constraint in sorted(
-            _question_named_constraint_tokens(original_question)
+            constraints
         )
         if not constraint_preserved(constraint)
     )
@@ -3188,7 +3327,9 @@ def _public_title_transition_support(
         return False, ()
     query_tokens = _scope_tokens(query)
     previous_query_tokens = _scope_tokens(previous_query)
-    entity_anchor = _question_entity_anchor_tokens(original_question)
+    entity_anchors = _question_retrieval_entity_anchor_alternatives(
+        original_question
+    )
     relation_context_tokens = _question_retrieval_relation_context_tokens(
         original_question
     )
@@ -3233,8 +3374,11 @@ def _public_title_transition_support(
                 )
             )
             and (
-                not entity_anchor
-                or _surface_binds_entity_anchor(public_surface, entity_anchor)
+                not entity_anchors
+                or any(
+                    _surface_binds_entity_anchor(public_surface, anchor)
+                    for anchor in entity_anchors
+                )
             )
             and any(
                 _relation_token_variants(public_token)
@@ -3250,7 +3394,7 @@ def _public_title_transition_support(
                 original_question,
                 public_surface,
             )
-            and not _missing_question_named_constraints(
+            and not _missing_question_retrieval_named_constraints(
                 original_question,
                 public_surface,
             )
@@ -3286,7 +3430,9 @@ def _public_title_entity_anchor_support(
         else ()
     )
     query_tokens = _scope_tokens(query)
-    entity_anchor = _question_entity_anchor_tokens(original_question)
+    entity_anchors = _question_retrieval_entity_anchor_alternatives(
+        original_question
+    )
     source_ids: list[str] = []
     for observation in reversed(prior_observations):
         prior_verified, verified_passage_ids = (
@@ -3326,10 +3472,10 @@ def _public_title_entity_anchor_support(
             if (
                 title_in_query
                 and (
-                    not entity_anchor
-                    or _surface_binds_entity_anchor(
-                        public_surface,
-                        entity_anchor,
+                    not entity_anchors
+                    or any(
+                        _surface_binds_entity_anchor(public_surface, anchor)
+                        for anchor in entity_anchors
                     )
                 )
                 and not _missing_required_relation_classes(
@@ -3340,7 +3486,7 @@ def _public_title_entity_anchor_support(
                     original_question,
                     public_surface,
                 )
-                and not _missing_question_named_constraints(
+                and not _missing_question_retrieval_named_constraints(
                     original_question,
                     public_surface,
                 )
@@ -3374,18 +3520,18 @@ def _query_rewriting_transition_support(
         return False, ()
     if (
         not entity_anchor_verified
-        and not _surface_binds_entity_anchor(
+        and not _surface_binds_retrieval_entity_anchor(
+            original_question,
             query,
-            _question_entity_anchor_tokens(original_question),
         )
         or _missing_required_relation_classes(original_question, query)
         or _missing_question_scope_modifiers(original_question, query)
         or (
-            not _missing_question_named_constraints(
+            not _missing_question_retrieval_named_constraints(
                 original_question,
                 previous_query,
             )
-            and _missing_question_named_constraints(
+            and _missing_question_retrieval_named_constraints(
                 original_question,
                 query,
             )
@@ -3408,7 +3554,7 @@ def _query_rewriting_transition_support(
     relation_context_tokens = _question_retrieval_relation_context_tokens(
         original_question
     )
-    named_constraint_tokens = _question_named_constraint_tokens(
+    named_constraint_tokens = _question_retrieval_named_constraint_tokens(
         original_question
     )
     content_removed_tokens = tuple(
@@ -3463,7 +3609,6 @@ def _query_rewriting_transition_support(
     raw_hits = result.get("hits") if isinstance(result, Mapping) else None
     if not isinstance(raw_hits, list):
         return False, ()
-    entity_anchor = _question_entity_anchor_tokens(original_question)
     source_ids: list[str] = []
     for hit in raw_hits:
         if not isinstance(hit, Mapping):
@@ -3475,7 +3620,10 @@ def _query_rewriting_transition_support(
             or passage_id.strip() not in verified_passage_ids
             or not isinstance(snippet, str)
             or not snippet.strip()
-            or not _surface_binds_entity_anchor(snippet, entity_anchor)
+            or not _surface_binds_retrieval_entity_anchor(
+                original_question,
+                snippet,
+            )
             or _missing_required_relation_classes(original_question, snippet)
             or _missing_question_scope_modifiers(original_question, snippet)
         ):
@@ -3504,9 +3652,9 @@ def _factual_transition_strategy_identification(
     ordinal position.
     """
 
-    direct_entity_preserved = _surface_binds_entity_anchor(
+    direct_entity_preserved = _surface_binds_retrieval_entity_anchor(
+        original_question,
         query,
-        _question_entity_anchor_tokens(original_question),
     )
     if direct_entity_preserved:
         title_entity_supported, title_entity_source_ids = False, ()
@@ -3532,7 +3680,7 @@ def _factual_transition_strategy_identification(
     # constraint in the first query as permission to keep omitting it, so an
     # initial query could be marked verified after dropping nationality or
     # another explicit scope restriction.
-    named_scope_preserved = not _missing_question_named_constraints(
+    named_scope_preserved = not _missing_question_retrieval_named_constraints(
         original_question,
         query,
     )
@@ -5982,9 +6130,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             return (
                 "Preserve all successful Tool receipts, every named and ordinal "
                 "scope constraint, and every already-realized requested-relation "
-                "class and surface. Restore the complete "
-                "ordered question-derived entity anchor, including an adjacent "
-                "question-side type noun, or use an exact prior-hit title only "
+                "class and surface. Restore one complete ordered "
+                "question_entity_anchor_alternatives entry from the public "
+                "continuation state, including an adjacent question-side type "
+                "noun, or use an exact prior-hit title only "
                 "when that mirror-valid search Observation's title and snippet "
                 "jointly bind the original entity, relation, and scope. Do not "
                 "use an unrelated returned subtype, guess an alias, or add an "
@@ -7481,6 +7630,61 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             and semantic_protocol == QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL
             and self._retrieval_tool_id == TRIVIAQA_QA_MEMORY_TOOL_ID
         ):
+            if self._fact_memory:
+                required_fields = (
+                    ["retrieval_status", "relevant_ranks"]
+                    if self._parametric_fallback_after_coverage_failure
+                    else []
+                )
+                return {
+                    "type": "object",
+                    "required": ["value"],
+                    "properties": {
+                        "value": {
+                            "type": "object",
+                            "required": required_fields,
+                            "properties": (
+                                {
+                                    "retrieval_status": {
+                                        "type": "string",
+                                        "enum": [
+                                            "evidence_found",
+                                            "knowledge_base_coverage_failure",
+                                        ],
+                                        "description": (
+                                            "After reading every ranked fact, use "
+                                            "evidence_found only when at least one "
+                                            "fact supplies the requested relation. "
+                                            "Otherwise use "
+                                            "knowledge_base_coverage_failure."
+                                        ),
+                                    },
+                                    "relevant_ranks": {
+                                        "type": "array",
+                                        "uniqueItems": True,
+                                        "items": {
+                                            "type": "integer",
+                                            "minimum": 1,
+                                        },
+                                        "description": (
+                                            "For evidence_found, list the 1-based "
+                                            "embedding ranks of matching facts in "
+                                            "ascending order. For "
+                                            "knowledge_base_coverage_failure, use "
+                                            "an empty list. The runtime derives "
+                                            "opaque memory_id values from exact "
+                                            "search/read receipts."
+                                        ),
+                                    },
+                                }
+                                if self._parametric_fallback_after_coverage_failure
+                                else {}
+                            ),
+                            "additionalProperties": False,
+                        }
+                    },
+                    "additionalProperties": False,
+                }
             retrieved_record_label = (
                 "self-contained declarative fact"
                 if self._fact_memory
@@ -8894,8 +9098,19 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             "question_entity_anchor_tokens": list(
                 _question_entity_anchor_tokens(original_question)
             ),
+            "question_entity_anchor_alternatives": [
+                list(alternative)
+                for alternative
+                in _question_retrieval_entity_anchor_alternatives(
+                    original_question
+                )
+            ],
             "required_named_constraints": list(
-                sorted(_question_named_constraint_tokens(original_question))
+                sorted(
+                    _question_retrieval_named_constraint_tokens(
+                        original_question
+                    )
+                )
             ),
             "required_relation_classes": list(
                 required_relation_alternatives
@@ -10346,31 +10561,16 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
         try:
             selection = json.loads(selection_artifact)
         except (TypeError, ValueError, json.JSONDecodeError):
-            return None, "TriviaQA fact-memory completion must select memory_ids"
+            return None, "TriviaQA fact-memory completion must select fact ranks"
         if not isinstance(selection, Mapping):
-            return None, "TriviaQA fact-memory completion must select memory_ids"
-        selected_ids = selection.get("memory_ids")
-        if (
-            not isinstance(selected_ids, list)
-            or not selected_ids
-            or any(
-                not isinstance(memory_id, str)
-                or not memory_id.strip()
-                or memory_id != memory_id.strip()
-                for memory_id in selected_ids
-            )
-            or len(selected_ids) != len(set(selected_ids))
-        ):
-            return None, (
-                "TriviaQA fact-memory memory_ids must be unique non-empty "
-                "trimmed strings in embedding rank order"
-            )
+            return None, "TriviaQA fact-memory completion must select fact ranks"
 
         retrieval_status: str | None = None
         relevant_memory_ids: list[str] | None = None
+        relevant_ranks: list[int] | None = None
         if parametric_fallback_after_coverage_failure:
             retrieval_status = selection.get("retrieval_status")
-            raw_relevant_ids = selection.get("relevant_memory_ids")
+            raw_relevant_ranks = selection.get("relevant_ranks")
             if retrieval_status not in {
                 "evidence_found",
                 _KNOWLEDGE_BASE_COVERAGE_FAILURE,
@@ -10379,44 +10579,38 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                     "TriviaQA fact-memory retrieval_status must be "
                     "evidence_found or knowledge_base_coverage_failure"
                 )
-            if (
-                not isinstance(raw_relevant_ids, list)
-                or any(
-                    not isinstance(memory_id, str)
-                    or not memory_id.strip()
-                    or memory_id != memory_id.strip()
-                    for memory_id in raw_relevant_ids
-                )
-                or len(raw_relevant_ids) != len(set(raw_relevant_ids))
+            if not isinstance(raw_relevant_ranks, list) or any(
+                type(rank) is not int or rank < 1
+                for rank in raw_relevant_ranks
             ):
                 return None, (
-                    "TriviaQA fact-memory relevant_memory_ids must be unique "
-                    "non-empty trimmed strings"
+                    "TriviaQA fact-memory relevant_ranks must be positive "
+                    "1-based integers"
                 )
-            relevant_set = set(raw_relevant_ids)
-            if raw_relevant_ids != [
-                memory_id
-                for memory_id in selected_ids
-                if memory_id in relevant_set
-            ]:
+            if raw_relevant_ranks != sorted(set(raw_relevant_ranks)):
                 return None, (
-                    "TriviaQA fact-memory relevant_memory_ids must be a subset "
-                    "of memory_ids in embedding rank order"
+                    "TriviaQA fact-memory relevant_ranks must be unique and "
+                    "strictly ascending"
                 )
-            if retrieval_status == "evidence_found" and not raw_relevant_ids:
+            if retrieval_status == "evidence_found" and not raw_relevant_ranks:
                 return None, (
                     "TriviaQA fact-memory evidence_found requires at least one "
-                    "relevant_memory_id"
+                    "relevant_rank"
                 )
             if (
                 retrieval_status == _KNOWLEDGE_BASE_COVERAGE_FAILURE
-                and raw_relevant_ids
+                and raw_relevant_ranks
             ):
                 return None, (
                     "TriviaQA fact-memory knowledge_base_coverage_failure "
-                    "requires an empty relevant_memory_ids list"
+                    "requires an empty relevant_ranks list"
                 )
-            relevant_memory_ids = list(raw_relevant_ids)
+            relevant_ranks = list(raw_relevant_ranks)
+        elif selection:
+            return None, (
+                "TriviaQA fact-memory completion without coverage fallback "
+                "requires an empty value object"
+            )
 
         latest_search: tuple[int, Mapping[str, object], Mapping[str, object]] | None = None
         for receipt_index, receipt in enumerate(tool_receipts):
@@ -10465,15 +10659,35 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             latest_search = (receipt_index, arguments, value)
         if latest_search is None:
             return None, (
-                "TriviaQA fact-memory memory_ids do not equal one successful "
+                "TriviaQA fact-memory completion requires one successful "
                 "embedding search top-k result"
             )
         search_index, search_arguments, search_value = latest_search
-        if search_value.get("memory_ids") != selected_ids:
-            return None, (
-                "TriviaQA fact-memory memory_ids must exactly equal the latest "
-                "successful embedding search result"
+        selected_ids = search_value.get("memory_ids")
+        if (
+            not isinstance(selected_ids, list)
+            or not selected_ids
+            or any(
+                not isinstance(memory_id, str)
+                or not memory_id.strip()
+                or memory_id != memory_id.strip()
+                for memory_id in selected_ids
             )
+            or len(selected_ids) != len(set(selected_ids))
+        ):
+            return None, (
+                "TriviaQA fact-memory latest search memory_ids must be unique "
+                "non-empty trimmed strings in embedding rank order"
+            )
+        if relevant_ranks is not None:
+            if any(rank > len(selected_ids) for rank in relevant_ranks):
+                return None, (
+                    "TriviaQA fact-memory relevant_ranks must fall within the "
+                    "latest successful embedding search top-k"
+                )
+            relevant_memory_ids = [
+                selected_ids[rank - 1] for rank in relevant_ranks
+            ]
 
         hits = search_value["hits"]
         assert isinstance(hits, list)
@@ -10719,19 +10933,41 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
             QARetrievalReactExecutionAdapter._qa_memory_completion_receipt_projection(
                 original_question=original_question,
                 selection_artifact=json.dumps(
-                    {
-                        "memory_ids": memory_ids,
-                        **(
-                            {
-                                "retrieval_status": fields["retrieval_status"],
-                                "relevant_memory_ids": fields[
-                                    "relevant_memory_ids"
-                                ],
-                            }
-                            if parametric_fallback_after_coverage_failure
-                            else {}
-                        ),
-                    },
+                    (
+                        {
+                            **(
+                                {
+                                    "retrieval_status": fields[
+                                        "retrieval_status"
+                                    ],
+                                    "relevant_ranks": [
+                                        memory_ids.index(memory_id) + 1
+                                        for memory_id in fields[
+                                            "relevant_memory_ids"
+                                        ]
+                                    ],
+                                }
+                                if parametric_fallback_after_coverage_failure
+                                else {}
+                            )
+                        }
+                        if fact_memory
+                        else {
+                            "memory_ids": memory_ids,
+                            **(
+                                {
+                                    "retrieval_status": fields[
+                                        "retrieval_status"
+                                    ],
+                                    "relevant_memory_ids": fields[
+                                        "relevant_memory_ids"
+                                    ],
+                                }
+                                if parametric_fallback_after_coverage_failure
+                                else {}
+                            ),
+                        }
+                    ),
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ),
@@ -12360,8 +12596,10 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                         if location_query_issue is not None:
                             return location_query_issue
                     else:
-                        entity_anchor_tokens = _question_entity_anchor_tokens(
-                            original_question
+                        entity_anchor_alternatives = (
+                            _question_retrieval_entity_anchor_alternatives(
+                                original_question
+                            )
                         )
                         prior_entity_observations = tuple(
                             observation
@@ -12378,7 +12616,7 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                             )
                         )
                         if (
-                            entity_anchor_tokens
+                            entity_anchor_alternatives
                             and (
                                 _question_has_proper_entity_anchor(
                                     original_question
@@ -12390,14 +12628,14 @@ class QARetrievalReactExecutionAdapter(ToolReactExecutionAdapter):
                                 )
                             )
                             and not receipt_title_entity_supported
-                            and not _surface_binds_entity_anchor(
+                            and not _surface_binds_retrieval_entity_anchor(
+                                original_question,
                                 query,
-                                entity_anchor_tokens,
                             )
                         ):
                             return _RETRIEVAL_QUERY_ENTITY_ANCHOR_LOSS
                         missing_named_constraints = (
-                            _missing_question_named_constraints(
+                            _missing_question_retrieval_named_constraints(
                                 original_question,
                                 query,
                             )
