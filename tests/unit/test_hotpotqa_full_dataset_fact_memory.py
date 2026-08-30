@@ -733,6 +733,21 @@ def test_bare_entity_source_question_allows_entity_in_new_fact_relation() -> Non
     assert fact_index.validate_hotpotqa_fact_statement(source, fact) == fact
 
 
+def test_canonical_alias_accepts_unicode_left_quote_equivalence() -> None:
+    source = HotpotQATrainQASource(
+        source_train_task_id="hotpotqa:unicode-left-quote-alias",
+        base_task_id="hotpotqa:unicode-left-quote-alias",
+        cycled=False,
+        question="Where did the 2011 KHL Junior Draft take place?",
+        canonical_answer="Арена Мытищи, Arena Mi‘tishchi",
+    )
+    fact = (
+        "The 2011 KHL Junior Draft took place in Mytishchi Arena, also known "
+        "as Арена Мытищи or Arena Mi'tishchi."
+    )
+    assert fact_index.validate_hotpotqa_fact_statement(source, fact) == fact
+
+
 def test_title_case_internal_is_where_is_not_an_unbound_answer_slot() -> None:
     source = HotpotQATrainQASource(
         source_train_task_id="hotpotqa:title-is-where",

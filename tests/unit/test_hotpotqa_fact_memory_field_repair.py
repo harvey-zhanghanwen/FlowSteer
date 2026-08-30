@@ -564,6 +564,71 @@ def test_source_qa_semantics_defined_detects_bare_and_numeric_mismatch() -> None
     )
 
 
+def test_tail_repairs_preserve_source_relations_without_qa_wire_format() -> None:
+    copular = _source(
+        96,
+        question="Which hotel belongs to JW Marriott Hotels?",
+        answer=(
+            "The JW Marriott Hotel Hong Kong is a hotel of JW Marriott Hotels."
+        ),
+    )
+    assert materializer._copular_of_clause_rewrite(copular) == (
+        "The JW Marriott Hotel Hong Kong belongs to JW Marriott Hotels as a hotel."
+    )
+
+    nominal_role = _source(
+        97,
+        question="secretary of Australian Council of Trade Unions",
+        answer="Greg Combet",
+    )
+    assert materializer._nominal_role_source_fact(nominal_role) == (
+        "Greg Combet served as secretary for Australian Council of Trade Unions."
+    )
+
+    bare_entity = _source(
+        98,
+        question="Juan Manuel Mata García",
+        answer="Juan Manuel Mata García",
+    )
+    assert materializer._bare_entity_question_rewrite(bare_entity) == (
+        "Provide an identification for Juan Manuel Mata García."
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "fact", "forbidden"),
+    (
+        (
+            _source(99, question="Which film starred Liev?", answer="Liev Schreiber"),
+            "Liev Schreiber appeared in Scream 2.",
+            ("2",),
+        ),
+        (
+            _source(100, question="Which peak was climbed?", answer="Broad Peak"),
+            "Broad Peak is the 12th highest mountain at 8051 m.",
+            ("12", "8051"),
+        ),
+        (
+            _source(
+                101,
+                question="In what year was the statue constructed?",
+                answer="Tian Tan Buddha",
+            ),
+            "Tian Tan Buddha was completed in 1993.",
+            ("1993",),
+        ),
+    ),
+)
+def test_public_context_fact_repair_identifies_unsupported_numeric_surfaces(
+    source: HotpotQATrainQASource,
+    fact: str,
+    forbidden: tuple[str, ...],
+) -> None:
+    assert materializer._forbidden_fact_number_or_date_surfaces(
+        source, fact
+    ) == forbidden
+
+
 def test_question_synonym_only_repair_rewrites_authoritative_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

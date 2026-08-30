@@ -219,6 +219,15 @@ _BINARY_AFFIRMATIVE_BOTH = re.compile(
     r"(?P<predicate>.+?)\?\s*$",
     re.IGNORECASE,
 )
+_COPULAR_OF_CLAUSE = re.compile(
+    r"^(?P<subject>.+?)\s+is\s+(?P<article>a|an|the)\s+"
+    r"(?P<role>.+?)\s+of\s+(?P<group>.+?)[.!]?\s*$",
+    re.IGNORECASE,
+)
+_NOMINAL_ROLE_OF_SOURCE = re.compile(
+    r"^(?:the\s+)?(?P<role>[^?]+?)\s+of\s+(?P<organization>[^?]+?)\s*$",
+    re.IGNORECASE,
+)
 
 
 class FactMaterializationRejected(RuntimeError):
@@ -628,6 +637,11 @@ def _source_qa_semantics_are_defined(
     )
     if question_tokens == answer_tokens:
         return False
+    if (
+        _binary_answer_label(source.canonical_answer) is not None
+        and _FINITE_CLAUSE_VERB.search(source.question) is None
+    ):
+        return False
     if _NUMERIC_ANSWER_SLOT.search(source.question) and not (
         _immutable_number_or_date_surfaces(source.canonical_answer)
     ):
@@ -648,6 +662,66 @@ def _binary_affirmative_fronted_fact(
     subjects = " ".join(match.group("subjects").split())
     predicate = " ".join(match.group("predicate").split())
     return f"Both {subjects} are {predicate}."
+
+
+def _copular_of_clause_rewrite(source: HotpotQATrainQASource) -> str | None:
+    """Paraphrase ``X is a Y of Z`` without adding factual material."""
+
+    match = _COPULAR_OF_CLAUSE.fullmatch(source.canonical_answer.strip())
+    if match is None:
+        return None
+    subject = " ".join(match.group("subject").split())
+    role = " ".join(match.group("role").split())
+    group = " ".join(match.group("group").split())
+    return f"{subject} belongs to {group} as a {role}."
+
+
+def _nominal_role_source_fact(source: HotpotQATrainQASource) -> str | None:
+    """Bind a non-interrogative ``role of organization`` source fragment."""
+
+    if "?" in source.question:
+        return None
+    match = _NOMINAL_ROLE_OF_SOURCE.fullmatch(source.question.strip())
+    if match is None:
+        return None
+    role = " ".join(match.group("role").split())
+    organization = " ".join(match.group("organization").split())
+    answer = " ".join(source.canonical_answer.split())
+    if not answer or answer.casefold() == source.question.casefold():
+        return None
+    return f"{answer} served as {role} for {organization}."
+
+
+def _bare_entity_question_rewrite(source: HotpotQATrainQASource) -> str | None:
+    question_tokens = tuple(
+        token.casefold() for token in _lexical_tokens(source.question)
+    )
+    answer_tokens = tuple(
+        token.casefold() for token in _lexical_tokens(source.canonical_answer)
+    )
+    if not question_tokens or question_tokens != answer_tokens:
+        return None
+    return f"Provide an identification for {' '.join(source.question.split())}."
+
+
+def _forbidden_fact_number_or_date_surfaces(
+    source: HotpotQATrainQASource,
+    fact: str,
+) -> tuple[str, ...]:
+    def key(value: str) -> str:
+        return re.sub(r"[^0-9a-z]", "", value.casefold())
+
+    allowed = {
+        key(value)
+        for value in _immutable_number_or_date_surfaces(
+            f"{source.question} {source.canonical_answer}"
+        )
+    }
+    return tuple(
+        value
+        for value in _immutable_number_or_date_surfaces(fact)
+        if key(value) not in allowed
+    )
 
 
 def _binary_answer_label(answer: str) -> str | None:
@@ -956,12 +1030,27 @@ async def _materialize_one(
                             required_source_token
                         )
                     except Exception as exc:
-                        question_trace["generation_error"] = (
-                            f"{type(exc).__name__}: {' '.join(str(exc).split())}"
+                        bare_entity_rewrite = _bare_entity_question_rewrite(
+                            source
                         )
-                        question_rejection = str(
-                            question_trace["generation_error"]
-                        )
+                        if bare_entity_rewrite is not None:
+                            question = bare_entity_rewrite
+                            question_trace["repair_mode"] = (
+                                "bare_entity_identification_rewrite"
+                            )
+                            question_trace["generation_response"] = {
+                                "local_semantic_rewrite": (
+                                    "bare_entity_identification"
+                                )
+                            }
+                        else:
+                            question_trace["generation_error"] = (
+                                f"{type(exc).__name__}: "
+                                f"{' '.join(str(exc).split())}"
+                            )
+                            question_rejection = str(
+                                question_trace["generation_error"]
+                            )
                 if not fact_admitted:
                     try:
                         terminal_punctuation_repair = (
@@ -977,6 +1066,21 @@ async def _materialize_one(
                                 and _RAW_SURFACE_REJECTION_MARKER
                                 in fact_rejection.casefold()
                             )
+                            else None
+                        )
+                        copular_clause_repair = (
+                            _copular_of_clause_rewrite(source)
+                            if (
+                                binding_mode == "declarative_clause_paraphrase"
+                                and "is identical to the canonical answer"
+                                in fact_rejection.casefold()
+                            )
+                            else None
+                        )
+                        nominal_role_repair = (
+                            _nominal_role_source_fact(source)
+                            if _RAW_SURFACE_REJECTION_MARKER
+                            in fact_rejection.casefold()
                             else None
                         )
                         clause_synonym_repair = (
@@ -1023,21 +1127,29 @@ async def _materialize_one(
                                 "binary_affirmative_declarative_fronting"
                                 if binary_surface_repair is not None
                                 else (
-                                    "public_context_fact_repair"
-                                    if fact_from_public_context
+                                    "copular_of_clause_paraphrase"
+                                    if copular_clause_repair is not None
                                     else (
-                                        "public_context_fact_reconstruction"
-                                        if public_context_reconstruction
+                                        "nominal_role_relation_paraphrase"
+                                        if nominal_role_repair is not None
                                         else (
-                                            "binary_polarity_reconstruction"
-                                            if binding_mode == "binary_polarity_binding"
+                                            "public_context_fact_repair"
+                                            if fact_from_public_context
                                             else (
-                                                "clause_synonym_only"
-                                                if clause_synonym_repair
+                                                "public_context_fact_reconstruction"
+                                                if public_context_reconstruction
                                                 else (
-                                                    "authoritative_answer_slot_reconstruction"
-                                                    if force_fact_reconstruction
-                                                    else _fact_repair_strategy(fact_rejection)
+                                                    "binary_polarity_reconstruction"
+                                                    if binding_mode == "binary_polarity_binding"
+                                                    else (
+                                                        "clause_synonym_only"
+                                                        if clause_synonym_repair
+                                                        else (
+                                                            "authoritative_answer_slot_reconstruction"
+                                                            if force_fact_reconstruction
+                                                            else _fact_repair_strategy(fact_rejection)
+                                                        )
+                                                    )
                                                 )
                                             )
                                         )
@@ -1081,6 +1193,22 @@ async def _materialize_one(
                             response = {
                                 "local_semantic_surface_repair": (
                                     "binary_affirmative_declarative_fronting"
+                                )
+                            }
+                            fact_repair_temperature = 0.0
+                        elif copular_clause_repair is not None:
+                            fact = copular_clause_repair
+                            response = {
+                                "local_semantic_surface_repair": (
+                                    "copular_of_clause_paraphrase"
+                                )
+                            }
+                            fact_repair_temperature = 0.0
+                        elif nominal_role_repair is not None:
+                            fact = nominal_role_repair
+                            response = {
+                                "local_semantic_surface_repair": (
+                                    "nominal_role_relation_paraphrase"
                                 )
                             }
                             fact_repair_temperature = 0.0
@@ -1233,6 +1361,12 @@ async def _materialize_one(
                                         "fact. Paraphrase any complete original-question "
                                         "surface and remove any unsupported name, number, "
                                         "or date while restoring omitted canonical spans. "
+                                        "Every item in forbidden_fact_number_or_date_tokens "
+                                        "must be absent from the repaired fact; delete the "
+                                        "entire optional detail containing it rather than "
+                                        "changing it into another value. Copy the complete "
+                                        "canonical_training_answer name/alias surface when "
+                                        "the prior failure reports omitted answer tokens. "
                                         if fact_repair_strategy
                                         == "public_context_fact_repair"
                                         else ""
@@ -1306,6 +1440,12 @@ async def _materialize_one(
                                                 "source_qa_semantics_are_defined": (
                                                     _source_qa_semantics_are_defined(
                                                         source
+                                                    )
+                                                ),
+                                                "forbidden_fact_number_or_date_tokens": list(
+                                                    _forbidden_fact_number_or_date_surfaces(
+                                                        source,
+                                                        fact or "",
                                                     )
                                                 ),
                                             }

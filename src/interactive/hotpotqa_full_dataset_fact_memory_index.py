@@ -219,9 +219,10 @@ def _identity_token_preserved(
 ) -> bool:
     """DIRECT_REUSE of TriviaQA's case-insensitive identity check."""
 
-    normalized_required = required.replace("’", "'")
+    normalized_required = required.replace("’", "'").replace("‘", "'")
     normalized_observed = frozenset(
-        token.replace("’", "'") for token in observed_tokens
+        token.replace("’", "'").replace("‘", "'")
+        for token in observed_tokens
     )
     if normalized_required in normalized_observed:
         return True
@@ -229,6 +230,7 @@ def _identity_token_preserved(
     # okina are equivalent proper-name typography, not entity deletion.
     if any(
         token.startswith(f"{normalized_required}-")
+        or token.startswith(f"{normalized_required}'")
         or (
             normalized_required.endswith("ʻ")
             and token.startswith(normalized_required)
@@ -315,14 +317,18 @@ def _contains_ordered_tokens(text: str, required: Sequence[str]) -> bool:
         return True
     observed = iter(
         token.casefold().replace("’", "'")
+        .replace("‘", "'")
         for token in _lexical_tokens(text)
     )
     for required_token in required:
-        folded = required_token.casefold().replace("’", "'")
+        folded = (
+            required_token.casefold().replace("’", "'").replace("‘", "'")
+        )
         if not any(
             token == folded
             or token.startswith(f"{folded}-")
             or token.removesuffix("'s") == folded
+            or token.startswith(f"{folded}'")
             or (folded.endswith("ʻ") and token.startswith(folded))
             for token in observed
         ):
