@@ -12,6 +12,7 @@ from src.interactive.task_evaluator import (
     GRADER_TEMPLATE,
     HOTPOTQA_ANSWER_EVALUATOR_VERSION,
     TRIVIAQA_ANSWER_EVALUATOR_VERSION,
+    _parse_environment_action,
     _webshop_instruction_matches,
     _load_ragen_module,
     evaluate_task,
@@ -43,6 +44,51 @@ def task(
 
 
 class StaticEvaluatorTests(unittest.IsolatedAsyncioTestCase):
+    def test_alfworld_action_parser_accepts_only_exact_json_envelope(self) -> None:
+        legal_actions = ["look", "go to cabinet 1"]
+        self.assertEqual(
+            "go to cabinet 1",
+            _parse_environment_action(
+                '{"action":"go to cabinet 1"}',
+                dataset="alfworld",
+                legal_actions=legal_actions,
+                webshop_has_search_bar=False,
+            ),
+        )
+        self.assertIsNone(
+            _parse_environment_action(
+                '{"action":"go to cabinet 1","reason":"nearby"}',
+                dataset="alfworld",
+                legal_actions=legal_actions,
+                webshop_has_search_bar=False,
+            )
+        )
+        self.assertIsNone(
+            _parse_environment_action(
+                '{"action":"go to drawer 9"}',
+                dataset="alfworld",
+                legal_actions=legal_actions,
+                webshop_has_search_bar=False,
+            )
+        )
+        for invalid in ('{"action":1}', '{"action":"look"', '["look"]'):
+            self.assertIsNone(
+                _parse_environment_action(
+                    invalid,
+                    dataset="alfworld",
+                    legal_actions=legal_actions,
+                    webshop_has_search_bar=False,
+                )
+            )
+        self.assertIsNone(
+            _parse_environment_action(
+                '{"action":"click[P1]"}',
+                dataset="webshop",
+                legal_actions=["click[P1]"],
+                webshop_has_search_bar=False,
+            )
+        )
+
     async def test_hotpot_and_trivia_use_their_official_answer_metrics(self) -> None:
         hotpot = await evaluate_task(task("HotpotQA", ground_truth="the red fox"), "red fox")
         trivia = await evaluate_task(
@@ -883,9 +929,12 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertFalse(callback_called)
 
-    async def test_alfworld_replayed_legal_terminal_zero_remains_valid(self) -> None:
+    async def test_alfworld_replayed_json_envelope_terminal_zero_remains_valid(
+        self,
+    ) -> None:
         target = "/games/game-a.tw-pddl"
         callback_called = False
+        stepped_actions: list[str] = []
 
         class AlfredEnvConfig:
             config_file = ""
@@ -904,6 +953,7 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
                 return "Room"
 
             def step(self, action):
+                stepped_actions.append(action)
                 return "Finished", 0.0, True, {"won": False}
 
         async def run_graph(problem):
@@ -930,7 +980,7 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
                 "observation": "Room",
                 "legal_actions": ["look"],
                 "action": "look",
-                "raw_graph_output": "look",
+                "raw_graph_output": '{"action":"look"}',
                 "next_observation": "Finished",
                 "reward": 0.0,
                 "done": True,
@@ -953,6 +1003,7 @@ class EnvironmentEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0.0, outcome.metrics["success"])
         self.assertEqual("evaluated", outcome.reason)
         self.assertEqual(1, outcome.details["replayed_environment_steps"])
+        self.assertEqual(["look"], stepped_actions)
         self.assertFalse(callback_called)
 
     async def test_alfworld_complete_partial_replay_closes_without_new_action(

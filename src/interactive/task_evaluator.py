@@ -1045,6 +1045,23 @@ def _parse_environment_action(
     if not isinstance(output, str) or not output.strip():
         return None
     raw = output.strip()
+    # ALFWorld v5+ constrains the model boundary to an exact one-field JSON
+    # object, then unwraps it before calling SkillFlow's unchanged native
+    # environment Tool.  Terminal replay must apply the same strict projection
+    # when it verifies raw_graph_output -> native action; otherwise a transition
+    # that the runtime already executed successfully is rejected as invalid.
+    if dataset == "alfworld":
+        try:
+            structured = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            structured = None
+        if isinstance(structured, Mapping):
+            if set(structured) != {"action"} or not isinstance(
+                structured.get("action"), str
+            ):
+                return None
+            candidate = str(structured["action"]).strip()
+            return candidate if candidate in legal_actions else None
     tagged = re.findall(r"<action>\s*(.*?)\s*</action>", raw, re.IGNORECASE | re.DOTALL)
     if len(tagged) > 1:
         return None

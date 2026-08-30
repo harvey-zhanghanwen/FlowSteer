@@ -494,6 +494,68 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertEqual(0, config["skills"]["retrieval_top_k"])
         self.assertFalse(config["gpu"]["training_enabled"])
 
+    def test_alfworld_stepwise_recovery_v6_changes_only_versioned_receipts(
+        self,
+    ) -> None:
+        baseline = load_yaml(
+            "config/evaluation_alfworld_stepwise_recovery_v5.yaml"
+        )
+        config = load_yaml(
+            "config/evaluation_alfworld_stepwise_recovery_v6.yaml"
+        )
+        validate_agent_graph_config(config)
+
+        self.assertEqual(
+            "alfworld_stepwise_recovery_v6",
+            config["experiment"]["condition_id"],
+        )
+        self.assertEqual(
+            "flowsteer.alfworld.stepwise-recovery.v6",
+            config["storage"]["schema_version"],
+        )
+        self.assertEqual(
+            baseline["environment_runtime"]["tool_version"],
+            config["environment_runtime"]["tool_version"],
+        )
+        for section in (
+            "alfworld_evaluation",
+            "agent_graph",
+            "evaluation",
+            "grpo",
+            "exploration",
+            "skills",
+            "gpu",
+        ):
+            with self.subTest(section=section):
+                self.assertEqual(baseline[section], config[section])
+        for field in (
+            "base_model",
+            "tokenizer_path",
+            "backend",
+            "api_base",
+            "served_model_name",
+            "prompt_profile",
+            "max_context_tokens",
+            "max_action_tokens",
+            "sampling_schema_version",
+            "max_rounds",
+            "execute_on_edit",
+            "history_window",
+            "lora",
+        ):
+            with self.subTest(section="director", field=field):
+                self.assertEqual(
+                    baseline["director"][field], config["director"][field]
+                )
+        self.assertFalse(config["experiment"]["training_enabled"])
+        self.assertFalse(config["grpo"]["enabled"])
+        self.assertFalse(config["skills"]["enabled"])
+        self.assertTrue(
+            config["experiment"]["output_dir"].startswith(
+                "artifacts/alfworld_stepwise_recovery_v6/"
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
