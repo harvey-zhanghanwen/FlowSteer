@@ -56,6 +56,7 @@ from scripts.generate_triviaqa_qa_memory_paraphrases import (
     _clausal_canonical_relation_statement,
     _capitalized_identity_tokens,
     _unresolved_fact_reference_tokens,
+    _bounded_span_depronominalization_candidate,
     _bounded_subject_wh_pair,
     _latin_translation_analogue_pair,
     _circle_line_name_analogue_pair,
@@ -234,6 +235,242 @@ def test_fact_reference_gate_rejects_unbound_ambiguous_or_mismatched_references(
         native_split="train",
     )
     assert _unresolved_fact_reference_tokens(source, fact, canonical) == unresolved
+
+
+@pytest.mark.parametrize(
+    ("question", "canonical", "fact", "expected"),
+    (
+        (
+            "Which office did Ronald Reagan hold when he became president?",
+            "Governor",
+            (
+                "Ronald Reagan held the office of Governor when he became "
+                "president."
+            ),
+            (
+                "Ronald Reagan held the office of Governor when Ronald Reagan "
+                "became president."
+            ),
+        ),
+        (
+            "Which label did David Bowie create for his records?",
+            "ISO Records",
+            "David Bowie created ISO Records for his records.",
+            "David Bowie created ISO Records for David Bowie's records.",
+        ),
+        (
+            "Which chapter did Rotary Clubs establish when they expanded?",
+            "Chicago chapter",
+            "Rotary Clubs established Chicago chapter when they expanded.",
+            (
+                "Rotary Clubs established Chicago chapter when Rotary Clubs "
+                "expanded."
+            ),
+        ),
+    ),
+)
+def test_bounded_span_depronominalization_replaces_one_source_certified_span(
+    question: str,
+    canonical: str,
+    fact: str,
+    expected: str,
+) -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:depronoun_positive",
+        base_task_id="triviaqa:depronoun_positive",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=question,
+        canonical_answer=canonical,
+        native_split="train",
+    )
+
+    assert _bounded_span_depronominalization_candidate(source, fact) == expected
+    assert _unresolved_fact_reference_tokens(source, expected, canonical) == ()
+
+
+def test_bounded_span_depronominalization_changes_only_reference_span() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:depronoun_span_only",
+        base_task_id="triviaqa:depronoun_span_only",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=(
+            "Which office did Ronald Reagan hold when he became president?"
+        ),
+        canonical_answer="Governor",
+        native_split="train",
+    )
+    fact = (
+        "Ronald Reagan  held the office of Governor when he became president."
+    )
+    candidate = _bounded_span_depronominalization_candidate(source, fact)
+    assert candidate is not None
+    reference_start = fact.index("he", fact.index("when") + len("when"))
+    reference_end = reference_start + len("he")
+    replacement = "Ronald Reagan"
+
+    assert candidate[:reference_start] == fact[:reference_start]
+    assert candidate[reference_start : reference_start + len(replacement)] == (
+        replacement
+    )
+    assert candidate[reference_start + len(replacement) :] == fact[reference_end:]
+    assert "Ronald Reagan  held" in candidate
+
+
+def test_bounded_span_depronominalization_is_idempotent_after_repair() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:depronoun_idempotent",
+        base_task_id="triviaqa:depronoun_idempotent",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=(
+            "Which office did Ronald Reagan hold when he became president?"
+        ),
+        canonical_answer="Governor",
+        native_split="train",
+    )
+    fact = (
+        "Ronald Reagan held the office of Governor when he became president."
+    )
+    candidate = _bounded_span_depronominalization_candidate(source, fact)
+
+    assert candidate is not None
+    assert _bounded_span_depronominalization_candidate(source, candidate) is None
+
+
+@pytest.mark.parametrize(
+    ("question", "canonical", "fact"),
+    (
+        (
+            "Which office did Acme hold when it expanded?",
+            "headquarters",
+            "Acme held the office of headquarters when it expanded.",
+        ),
+        (
+            "Which office did Acme hold when this expanded?",
+            "headquarters",
+            "Acme held the office of headquarters when this expanded.",
+        ),
+        (
+            (
+                "Who did Barbara Walters interview when discussing Dudley Moore "
+                "and his illness?"
+            ),
+            "Dudley Moore",
+            (
+                "Barbara Walters interviewed Dudley Moore regarding his "
+                "illness."
+            ),
+        ),
+        (
+            "Which office did he hold after Ronald Reagan retired?",
+            "Governor",
+            "He held the office of Governor after Ronald Reagan retired.",
+        ),
+        (
+            "Which prize did Rotary Clubs win when he expanded?",
+            "Civic Prize",
+            "Rotary Clubs won the Civic Prize when he expanded.",
+        ),
+        (
+            "Which office did Ronald Reagan hold upon becoming president?",
+            "Governor",
+            (
+                "Ronald Reagan held the office of Governor when he became "
+                "president."
+            ),
+        ),
+        (
+            "Which office did Angela Merkel hold when her term began?",
+            "Chancellor",
+            "Angela Merkel held the office of Chancellor when her term began.",
+        ),
+        (
+            "Which office did Ronald Reagan hold when he and him retired?",
+            "Governor",
+            (
+                "Ronald Reagan held the office of Governor when he and him "
+                "retired."
+            ),
+        ),
+        (
+            'Which title quoted the word "He" after Ronald Reagan retired?',
+            "Governor",
+            'Ronald Reagan used the title Governor after quoting "He".',
+        ),
+        (
+            "Which pronoun did Ronald Reagan use?",
+            "He",
+            "Ronald Reagan used He.",
+        ),
+    ),
+)
+def test_bounded_span_depronominalization_rejects_unsafe_bindings(
+    question: str,
+    canonical: str,
+    fact: str,
+) -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:depronoun_negative",
+        base_task_id="triviaqa:depronoun_negative",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=question,
+        canonical_answer=canonical,
+        native_split="train",
+    )
+
+    assert _bounded_span_depronominalization_candidate(source, fact) is None
+
+
+def test_answer_repair_reenters_full_parser_after_bounded_depronominalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:depronoun_repair_boundary",
+        base_task_id="triviaqa:depronoun_repair_boundary",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=(
+            "Which office did Ronald Reagan hold when he became president?"
+        ),
+        canonical_answer="Governor",
+        native_split="train",
+    )
+    client = object.__new__(LocalQwen35Paraphraser)
+    monkeypatch.setattr(
+        client,
+        "_complete",
+        lambda **_: pytest.fail(
+            "bounded local de-pronominalization must precede model repair"
+        ),
+    )
+
+    repaired = client._repair_answer_statement(
+        source,
+        question=(
+            "Identify the office Ronald Reagan held when he became president."
+        ),
+        rejected_statement=(
+            "Ronald Reagan held the office of Governor when he became president."
+        ),
+        seed=73,
+        admission_failure_reason=(
+            "fact_text contains an external anaphoric reference; replace it "
+            "with an explicit noun phrase"
+        ),
+    )
+
+    assert repaired == (
+        "Ronald Reagan held the office of Governor when Ronald Reagan became "
+        "president."
+    )
 
 
 @pytest.mark.parametrize(
@@ -681,7 +918,7 @@ def test_repair_payload_preserves_numeric_token_multiplicity() -> None:
 
 
 def test_prompt_v14_keeps_strictly_admitted_v12_v13_rows_supported() -> None:
-    assert PROMPT_TEMPLATE_VERSION == "triviaqa.qa_memory.qa_paraphrase.v18"
+    assert PROMPT_TEMPLATE_VERSION == "triviaqa.qa_memory.qa_paraphrase.v19"
     assert {
         "triviaqa.qa_memory.qa_paraphrase.v12",
         "triviaqa.qa_memory.qa_paraphrase.v13",

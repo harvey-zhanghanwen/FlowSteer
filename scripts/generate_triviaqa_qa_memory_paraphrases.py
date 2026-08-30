@@ -55,7 +55,7 @@ from scripts.materialize_triviaqa_full_train_qa_memory import (  # noqa: E402
 )
 
 
-PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v18"
+PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v19"
 SUPPORTED_PROMPT_TEMPLATE_VERSIONS = frozenset(
     {
         "triviaqa.qa_memory.qa_paraphrase.v12",
@@ -64,6 +64,7 @@ SUPPORTED_PROMPT_TEMPLATE_VERSIONS = frozenset(
         "triviaqa.qa_memory.qa_paraphrase.v15",
         "triviaqa.qa_memory.qa_paraphrase.v16",
         "triviaqa.qa_memory.qa_paraphrase.v17",
+        "triviaqa.qa_memory.qa_paraphrase.v18",
         PROMPT_TEMPLATE_VERSION,
     }
 )
@@ -2766,6 +2767,133 @@ def _unresolved_fact_reference_tokens(
             continue
         unresolved.append(token)
     return tuple(unresolved)
+
+
+def _bounded_span_depronominalization_candidate(
+    source: TriviaQATrainSource,
+    fact_text: str,
+) -> str | None:
+    """Replace one source-certified personal reference, or fail closed.
+
+    This is a local repair candidate, not a coreference resolver.  It accepts
+    only a single unresolved reference whose same-clause antecedent is the
+    sole explicit source-anchored noun phrase before that reference.  The
+    source question must independently contain the same reference after the
+    same sole antecedent; that source binding supplies the person/number
+    certificate instead of an inferred entity type.  Quotes, the canonical
+    answer span, ambiguous ``her``, non-person ``it``/``its``, demonstratives,
+    cataphora, and multiple antecedents remain untouched.
+
+    The returned text differs from ``fact_text`` only at the reference span.
+    Full parser admission is deliberately left to the caller's existing
+    ``validated_local_candidate`` boundary.
+    """
+
+    source = source_transport_view(source)
+    statement = str(fact_text)
+    canonical = source.canonical_answer
+    unresolved = _unresolved_fact_reference_tokens(
+        source,
+        statement,
+        canonical,
+    )
+    if len(unresolved) != 1:
+        return None
+    token = unresolved[0]
+    excluded = frozenset({"it", "its", "this", "these", "those", "her"})
+    singular_person = frozenset({"he", "him", "his", "she", "hers"})
+    plural_person = frozenset({"they", "them", "their", "theirs"})
+    if token in excluded or token not in singular_person | plural_person:
+        return None
+
+    def protected_ranges(text: str) -> tuple[tuple[int, int], ...]:
+        ranges = [match.span() for match in _ORDERED_QUOTED_SLOT.finditer(text)]
+        ranges.extend(
+            match.span()
+            for match in re.finditer(re.escape(canonical), text)
+            if canonical
+        )
+        return tuple(ranges)
+
+    def unprotected_reference_matches(text: str) -> tuple[re.Match[str], ...]:
+        protected = protected_ranges(text)
+        return tuple(
+            match
+            for match in _FACT_EXTERNAL_REFERENCE.finditer(text)
+            if not any(
+                match.start() < end and start < match.end()
+                for start, end in protected
+            )
+        )
+
+    references = unprotected_reference_matches(statement)
+    if len(references) != 1 or references[0].group(0).casefold() != token:
+        return None
+    reference = references[0]
+    clause_boundary = re.compile(r"[.!?;:\u2014]")
+    prefix = statement[: reference.start()]
+    boundaries = tuple(clause_boundary.finditer(prefix))
+    clause_start = boundaries[-1].end() if boundaries else 0
+    clause_prefix = statement[clause_start : reference.start()]
+    groups = _source_anchor_groups_before_reference(source, clause_prefix)
+    if len(groups) != 1:
+        return None
+    _, _, anchor_surface = groups[0]
+    anchor_is_plural = _anchor_group_is_explicit_plural(anchor_surface)
+    if (token in plural_person) != anchor_is_plural:
+        return None
+
+    # Require the authoritative source question to expose the exact same
+    # local binding.  This certifies personal reference type and prevents a
+    # capitalization-only heuristic from treating places or products as
+    # people.
+    source_references = tuple(
+        match
+        for match in unprotected_reference_matches(source.original_question)
+        if match.group(0).casefold() == token
+    )
+    if len(source_references) != 1:
+        return None
+    source_reference = source_references[0]
+    source_prefix = source.original_question[: source_reference.start()]
+    source_boundaries = tuple(clause_boundary.finditer(source_prefix))
+    source_clause_start = (
+        source_boundaries[-1].end() if source_boundaries else 0
+    )
+    source_groups = _source_anchor_groups_before_reference(
+        source,
+        source.original_question[
+            source_clause_start : source_reference.start()
+        ],
+    )
+    if len(source_groups) != 1:
+        return None
+    _, _, source_anchor = source_groups[0]
+    if " ".join(source_anchor.split()).casefold() != (
+        " ".join(anchor_surface.split()).casefold()
+    ):
+        return None
+    if _anchor_group_is_explicit_plural(source_anchor) != anchor_is_plural:
+        return None
+
+    possessive = token in {"his", "hers", "their", "theirs"}
+    if possessive:
+        if anchor_surface.endswith(("'s", "\u2019s", "'", "\u2019")):
+            replacement = anchor_surface
+        elif anchor_is_plural and anchor_surface.casefold().endswith("s"):
+            replacement = anchor_surface + "'"
+        else:
+            replacement = anchor_surface + "'s"
+    else:
+        replacement = anchor_surface
+    candidate = (
+        statement[: reference.start()]
+        + replacement
+        + statement[reference.end() :]
+    )
+    if _unresolved_fact_reference_tokens(source, candidate, canonical):
+        return None
+    return candidate
 
 
 def _fact_admission_diagnostics(
@@ -6540,6 +6668,15 @@ class LocalQwen35Paraphraser:
         )
         if punctuated_statement != " ".join(rejected_statement.split()).strip():
             admitted = validated_local_candidate(punctuated_statement)
+            if admitted is not None:
+                return admitted
+
+        depronominalized_statement = _bounded_span_depronominalization_candidate(
+            source,
+            punctuated_statement,
+        )
+        if depronominalized_statement is not None:
+            admitted = validated_local_candidate(depronominalized_statement)
             if admitted is not None:
                 return admitted
 
