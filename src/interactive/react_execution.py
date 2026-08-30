@@ -592,7 +592,18 @@ class ToolReactExecutionAdapter:
             model_metadata = {
                 **dict(request.model.metadata),
                 "max_tokens": str(self._max_action_tokens),
+                # DIRECT_REUSE: SkillFlow's structured Supervisor has no
+                # thinking action types, and its executor/tokenizer render
+                # structured actions with ``enable_thinking=False``.  Keep
+                # this override local to the bounded StructuredAction request
+                # so ordinary reasoning Agents retain the catalog setting.
+                "chat_template_enable_thinking": "false",
             }
+            # ``thinking_budget`` is only valid when thinking is enabled. A
+            # catalog-level bounded-thinking profile is intentionally retained
+            # for semantic Agents, but must not leak into this request-local
+            # SkillFlow structured-action override.
+            model_metadata.pop("chat_template_thinking_budget", None)
             absolute_step_index = continuation_step_offset + turn
             scientific_sampling_receipt: dict[str, object] | None = None
             requested_sampling: dict[str, object] = {
@@ -665,6 +676,7 @@ class ToolReactExecutionAdapter:
                 "request_id": turn_request.request_id,
                 "requested_sampling": dict(requested_sampling),
                 "request_status": "requested",
+                "effective_chat_template_enable_thinking": False,
                 **(
                     {
                         "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,

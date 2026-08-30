@@ -1183,6 +1183,7 @@ class OpenAICompatibleGateway:
                     )
                 payload["top_k"] = top_k
         thinking = metadata.get("chat_template_enable_thinking")
+        thinking_budget = metadata.get("chat_template_thinking_budget")
         if thinking is not None:
             normalized = thinking.strip().lower()
             if normalized not in {"true", "false"}:
@@ -1196,6 +1197,25 @@ class OpenAICompatibleGateway:
             payload["chat_template_kwargs"] = {
                 "enable_thinking": normalized == "true"
             }
+            if thinking_budget is not None:
+                if normalized != "true":
+                    raise OpenAICompatibleGatewayError(
+                        "model metadata chat_template_thinking_budget requires "
+                        "chat_template_enable_thinking=true"
+                    )
+                # DIRECT_REUSE: SkillFlow's Supervisor places its bounded
+                # thinking budget beside ``enable_thinking`` in SGLang's
+                # ``chat_template_kwargs`` request body.
+                payload["chat_template_kwargs"]["thinking_budget"] = _integer(
+                    metadata,
+                    "chat_template_thinking_budget",
+                    1,
+                )
+        elif thinking_budget is not None:
+            raise OpenAICompatibleGatewayError(
+                "model metadata chat_template_thinking_budget requires "
+                "chat_template_enable_thinking=true"
+            )
         response_schema_text = metadata.get("response_json_schema")
         response_schema: Mapping[str, object] | None = None
         if response_schema_text is not None:
@@ -1248,6 +1268,16 @@ class OpenAICompatibleGateway:
                     f"{request.provider.api_key_env}"
                 )
         payload = self.request_payload(request)
+        chat_template_kwargs = payload.get("chat_template_kwargs")
+        effective_thinking: bool | None = None
+        effective_thinking_budget: int | None = None
+        if isinstance(chat_template_kwargs, Mapping):
+            raw_effective_thinking = chat_template_kwargs.get("enable_thinking")
+            if isinstance(raw_effective_thinking, bool):
+                effective_thinking = raw_effective_thinking
+            raw_effective_budget = chat_template_kwargs.get("thinking_budget")
+            if isinstance(raw_effective_budget, int):
+                effective_thinking_budget = raw_effective_budget
         scientific_generation_seed = _non_negative_integer(
             request.model.metadata,
             "generation_seed",
@@ -1279,6 +1309,12 @@ class OpenAICompatibleGateway:
                         "generation_seed": scientific_generation_seed,
                         "backend_sampling_seed": payload.get("seed"),
                         "requested_sampling": requested_sampling,
+                        "effective_chat_template_enable_thinking": (
+                            effective_thinking
+                        ),
+                        "effective_chat_template_thinking_budget": (
+                            effective_thinking_budget
+                        ),
                         "request_status": "completed",
                     }
                 )

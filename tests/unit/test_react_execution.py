@@ -112,6 +112,57 @@ class SequenceGateway:
 
 
 class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_structured_action_generation_disables_thinking_locally(self) -> None:
+        completed = action(
+            "complete",
+            name="complete",
+            arguments={"value": "answer"},
+            resource_id=None,
+        )
+        gateway = SequenceGateway([completed])
+        item = request()
+        item = replace(
+            item,
+            model=replace(
+                item.model,
+                metadata={
+                    **dict(item.model.metadata),
+                    "chat_template_enable_thinking": "true",
+                    "chat_template_thinking_budget": "512",
+                },
+            ),
+        )
+
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=1,
+            max_tool_calls=1,
+        ).execute(item)
+
+        self.assertEqual(
+            "false",
+            gateway.requests[0].model.metadata["chat_template_enable_thinking"],
+        )
+        self.assertNotIn(
+            "chat_template_thinking_budget",
+            gateway.requests[0].model.metadata,
+        )
+        self.assertEqual(
+            "true",
+            item.model.metadata["chat_template_enable_thinking"],
+        )
+        self.assertEqual(
+            "512",
+            item.model.metadata["chat_template_thinking_budget"],
+        )
+        self.assertIs(
+            False,
+            response.metadata["model_calls"][0][
+                "effective_chat_template_enable_thinking"
+            ],
+        )
+
     async def test_empty_action_domain_fails_before_any_model_call(self) -> None:
         class ExhaustedAdapter(ToolReactExecutionAdapter):
             def _state_conditioned_action_domain(

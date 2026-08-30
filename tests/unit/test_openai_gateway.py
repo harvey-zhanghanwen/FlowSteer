@@ -732,6 +732,103 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             {"enable_thinking": False},
         )
 
+    async def test_qwen_chat_template_thinking_budget_is_forwarded_and_receipted(
+        self,
+    ) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={
+                    "chat_template_enable_thinking": "true",
+                    "chat_template_thinking_budget": "512",
+                },
+            ),
+        )
+        gateway = OpenAICompatibleGateway(max_retries=0)
+        captured = {}
+
+        def fake_post(url, api_key, payload):
+            captured["payload"] = payload
+            return {
+                "id": "req-thinking-budget",
+                "model": "supervisor_theta",
+                "choices": [
+                    {"message": {"content": "answer"}, "finish_reason": "stop"}
+                ],
+                "usage": {},
+            }
+
+        gateway._post_json = fake_post  # type: ignore[method-assign]
+        response = await gateway.generate(item)
+
+        self.assertEqual(
+            {"enable_thinking": True, "thinking_budget": 512},
+            captured["payload"]["chat_template_kwargs"],
+        )
+        self.assertIs(
+            True,
+            response.metadata["effective_chat_template_enable_thinking"],
+        )
+        self.assertEqual(
+            512,
+            response.metadata["effective_chat_template_thinking_budget"],
+        )
+
+    def test_qwen_chat_template_thinking_budget_requires_enabled_thinking(
+        self,
+    ) -> None:
+        for metadata in (
+            {"chat_template_thinking_budget": "512"},
+            {
+                "chat_template_enable_thinking": "false",
+                "chat_template_thinking_budget": "512",
+            },
+        ):
+            with self.subTest(metadata=metadata):
+                item = request()
+                object.__setattr__(
+                    item,
+                    "model",
+                    ModelSpec(
+                        "model",
+                        "provider",
+                        model_name="supervisor_theta",
+                        metadata=metadata,
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    OpenAICompatibleGatewayError,
+                    "requires chat_template_enable_thinking=true",
+                ):
+                    OpenAICompatibleGateway().request_payload(item)
+
+    def test_qwen_chat_template_thinking_budget_must_be_positive_integer(
+        self,
+    ) -> None:
+        for invalid_budget in ("0", "-1", "512.0", "invalid"):
+            with self.subTest(invalid_budget=invalid_budget):
+                item = request()
+                object.__setattr__(
+                    item,
+                    "model",
+                    ModelSpec(
+                        "model",
+                        "provider",
+                        model_name="supervisor_theta",
+                        metadata={
+                            "chat_template_enable_thinking": "true",
+                            "chat_template_thinking_budget": invalid_budget,
+                        },
+                    ),
+                )
+                with self.assertRaises(OpenAICompatibleGatewayError):
+                    OpenAICompatibleGateway().request_payload(item)
+
     def test_skillflow_response_schema_is_forwarded(self) -> None:
         item = request()
         schema = {

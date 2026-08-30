@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from types import MappingProxyType
 from typing import Awaitable, Collection, Dict, List, Mapping, Optional, Protocol, Set, Tuple, Union
@@ -252,12 +252,51 @@ class AgentExecutionAdapter(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ReasoningExecutionAdapter:
-    """Thin adapter retaining the existing provider-gateway execution path."""
+    """Thin adapter retaining the existing provider-gateway execution path.
+
+    SkillFlow applies Qwen thinking as a request-scoped chat-template option.
+    Keep the frozen Model Catalog as the source of truth while allowing its
+    semantic-role overrides to project onto one reasoning request.  Structured
+    ReAct actions retain their stricter non-thinking override in their own
+    adapter.
+    """
 
     gateway: AgentGateway
 
     async def execute(self, request: AgentRequest) -> GatewayResponse:
-        return await self.gateway.generate(request)
+        role_family = (request.agent.role_family or "").strip().lower()
+        override_key = {
+            "reasoner": "chat_template_enable_thinking_reasoner",
+            "verifier": "chat_template_enable_thinking_verifier",
+            "format": "chat_template_enable_thinking_format",
+        }.get(role_family)
+        if override_key is None or override_key not in request.model.metadata:
+            return await self.gateway.generate(request)
+
+        raw_override = request.model.metadata[override_key].strip().lower()
+        if raw_override not in {"true", "false"}:
+            raise AgentRuntimeError(
+                f"{override_key} must be the string 'true' or 'false'"
+            )
+        model_metadata = {
+            **dict(request.model.metadata),
+            "chat_template_enable_thinking": raw_override,
+        }
+        if raw_override == "false":
+            model_metadata.pop("chat_template_thinking_budget", None)
+        else:
+            role_budget_key = (
+                f"chat_template_thinking_budget_{role_family}"
+            )
+            if role_budget_key in request.model.metadata:
+                model_metadata["chat_template_thinking_budget"] = (
+                    request.model.metadata[role_budget_key]
+                )
+        projected_request = replace(
+            request,
+            model=replace(request.model, metadata=model_metadata),
+        )
+        return await self.gateway.generate(projected_request)
 
 
 def _tool_receipts_from_metadata(

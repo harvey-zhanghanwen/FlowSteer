@@ -18,6 +18,7 @@ from src.interactive.environment_execution import (
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
 from src.interactive.react_execution import ReactExecutionError
+from src.interactive.rollout_collector import execution_record_from_call
 from src.interactive.tool_runtime import (
     FakeTool,
     ToolCapability,
@@ -99,6 +100,114 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("answer", routed.request_or_dependency)
         self.assertEqual(routed.content, routed.artifact)
         self.assertEqual(snapshot.to_dict(), graph.snapshot().to_dict())
+
+    async def test_reasoning_adapter_projects_catalog_thinking_by_role(self) -> None:
+        catalog = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [
+                ModelSpec(
+                    "m1",
+                    "fake",
+                    metadata={
+                        "chat_template_enable_thinking": "false",
+                        "chat_template_enable_thinking_reasoner": "true",
+                        "chat_template_thinking_budget_reasoner": "512",
+                        "chat_template_enable_thinking_verifier": "false",
+                        "chat_template_enable_thinking_format": "false",
+                    },
+                )
+            ],
+        )
+        gateway = RecordingGateway()
+        runtime = AgentRuntime(catalog, gateway)
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "m1",
+                    "derive a candidate",
+                    role_family="reasoner",
+                ),
+                AgentNode(
+                    "verifier",
+                    "m1",
+                    "verify the candidate",
+                    role_family="verifier",
+                ),
+                AgentNode(
+                    "format",
+                    "m1",
+                    "format the candidate",
+                    role_family="format",
+                ),
+            ],
+            [
+                AgentRelation("reasoner", "verifier", True, False),
+                AgentRelation("verifier", "format", True, False),
+            ],
+            output_agent_id="format",
+        )
+
+        await runtime.execute(graph, "question")
+
+        by_role = {
+            item.agent.role_family: item.model.metadata for item in gateway.requests
+        }
+        self.assertEqual(
+            "true",
+            by_role["reasoner"]["chat_template_enable_thinking"],
+        )
+        self.assertEqual(
+            "512",
+            by_role["reasoner"]["chat_template_thinking_budget"],
+        )
+        for role_family in ("verifier", "format"):
+            self.assertEqual(
+                "false",
+                by_role[role_family]["chat_template_enable_thinking"],
+            )
+            self.assertNotIn(
+                "chat_template_thinking_budget",
+                by_role[role_family],
+            )
+        frozen = catalog.require_model("m1").metadata
+        self.assertEqual("false", frozen["chat_template_enable_thinking"])
+        self.assertNotIn("chat_template_thinking_budget", frozen)
+        self.assertEqual("512", frozen["chat_template_thinking_budget_reasoner"])
+
+    async def test_execution_receipt_persists_effective_thinking_metadata(
+        self,
+    ) -> None:
+        class ThinkingReceiptGateway:
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(
+                    "answer",
+                    {
+                        "effective_chat_template_enable_thinking": True,
+                        "effective_chat_template_thinking_budget": 512,
+                    },
+                )
+
+        runtime = AgentRuntime(registry(), ThinkingReceiptGateway())
+        graph = AgentGraph(
+            [AgentNode("reasoner", "m1", "answer", role_family="reasoner")],
+            output_agent_id="reasoner",
+        )
+
+        result = await runtime.execute(graph, "question")
+        response_receipt = execution_record_from_call(
+            result.calls[0]
+        ).metadata["response"]
+
+        self.assertIs(
+            True,
+            response_receipt["effective_chat_template_enable_thinking"],
+        )
+        self.assertEqual(
+            512,
+            response_receipt["effective_chat_template_thinking_budget"],
+        )
 
     async def test_runtime_routes_target_keyed_public_failure_continuation(
         self,

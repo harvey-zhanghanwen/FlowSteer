@@ -1,24 +1,25 @@
-# TriviaQA fixed128 in-database fact-memory v17 profile on unified_architecture_v2.
+# Role-specific canary: non-thinking Flow-Director/ReAct/Verifier/Formatter;
+# SkillFlow request-scoped thinking is enabled only for the Reasoner.
+# TriviaQA fixed128 in-database fact-memory v16.4 profile on unified_architecture_v2.
 # The Qwen3.5-9B Director receives control-plane receipts only. A worker Agent
-# owns local fact-memory search/read, and routes strict v2 fact_text evidence
-# through an explicit AgentGraph relation. This profile is evaluation-only and
-# Skill-free.
+# owns local fact-memory search/read, and routes fact_text evidence through an
+# explicit AgentGraph relation. This profile is evaluation-only and Skill-free.
 
 schema_version: "flowsteer.agentgraph.config.v1"
 execution_timeout: 600.0
 experiment:
-  name: "triviaqa_fact_memory_unified_v4_v17_full_native_transductive"
+  name: "triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary"
   phase: "triviaqa_evaluation"
   baseline_id: "triviaqa_round_01_stable_zero"
-  step_id: "unified_v2_full_native_fact_memory_in_database_tool_first_v17"
+  step_id: "unified_v2_full_native_fact_memory_in_database_tool_first_v16_4"
   training_enabled: false
   seed: 20260827
-  condition_id: "triviaqa_fact_memory_unified_v4_v17_full_native_worker_frozen_topk_tool_first_fallback_reasoner_only_thinking"
-  sampling_schedule_purpose: "triviaqa_fixed128_full_native_in_database_fact_memory_v17_reasoner_only_thinking"
+  condition_id: "triviaqa_fact_memory_unified_v4_v16_4_full_native_worker_frozen_topk_tool_first_fallback_reasoner_only_thinking_canary"
+  sampling_schedule_purpose: "triviaqa_fixed3_full_native_in_database_fact_memory_v16_4_reasoner_only_thinking"
   catalog_order_namespace: "triviaqa_fact_memory_unified_v4"
   prompt_version: "agentgraph.director.qa-semantic-recovery.v6"
-  tool_version: "skillflow.search-read+flowsteer.v79+triviaqa-full-native-fact-memory-bge.v17+query-decomposition+rank-selection"
-  output_dir: "artifacts/triviaqa_fact_memory_unified_v4_v17_full_native_transductive"
+  tool_version: "skillflow.search-read+flowsteer.v79+triviaqa-full-native-fact-memory-bge.v16.4+query-decomposition+rank-selection"
+  output_dir: "artifacts/triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary"
 
 data:
   catalog_path: "config/joint_qa_partitions_v2.yaml"
@@ -35,8 +36,8 @@ triviaqa_evaluation:
   stage: "development"
   split: "validation"
   selection: "sequential"
-  sample_count: 128
-  stable_zero_sample_count: 19
+  sample_count: 3
+  stable_zero_sample_count: 3
   rollouts_per_task: 1
   concurrency: 4
   task_timeout_seconds: 7200.0
@@ -48,19 +49,19 @@ triviaqa_evaluation:
   direct_context_mode: "question_only"
   direct_reused_from: "reports/triviaqa_qa_memory_v1_baseline/direct_question_only_predictions.jsonl"
   legacy_deterministic_prefetch_enabled: false
-  evaluation_scope: "in_database_transductive_fact_only"
-  agentgraph_protocol: "question_plus_worker_dynamic_full_native_fact_memory_in_database_tool_first_parametric_fallback_v17"
+  evaluation_scope: "in_database_transductive_fact_only_v1_diagnostic_reasoner_only_thinking_canary"
+  agentgraph_protocol: "question_plus_worker_dynamic_full_native_fact_memory_in_database_tool_first_parametric_fallback_v16_4_reasoner_only_thinking_canary"
   protocol_equivalent_to_direct: false
 
 qa_tool_runtime:
   enabled: true
-  condition_id: "triviaqa_fact_memory_unified_v4_v17_full_native_worker_frozen_topk_tool_first_fallback_reasoner_only_thinking"
+  condition_id: "triviaqa_fact_memory_unified_v4_v16_4_full_native_worker_frozen_topk_tool_first_fallback_reasoner_only_thinking_canary"
   mode: "model_driven_search_read"
   passage_source: "external_corpus"
   corpus_kind: "fact_memory"
   dataset_scope: ["triviaqa"]
   skillflow_source: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src"
-  index_path: "data/triviaqa_fact_memory_full_native_v2/index"
+  index_path: "data/triviaqa_fact_memory_full_native_v1/index"
   max_turns_per_agent_call: 7
   max_tool_calls_per_agent_call: 6
   tool_timeout_seconds: 30.0
@@ -69,21 +70,21 @@ qa_tool_runtime:
 
 storage:
   schema_version: "flowsteer.completion_benchmark.round.v1"
-  root: "artifacts/triviaqa_fact_memory_unified_v4_v17_full_native_transductive/evidence"
+  root: "artifacts/triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary/evidence"
   expected_fact_memory_count: 76523
-  materialization_manifest_path: "data/triviaqa_fact_memory_full_native_v2/materialization_manifest.json"
-  top_k_selection_receipt_path: "data/triviaqa_fact_memory_full_native_v2/top_k_selection_receipt.json"
-  final_index_manifest_path: "data/triviaqa_fact_memory_full_native_v2/index/manifest.json"
-  selected_tasks_path: "artifacts/triviaqa_fact_memory_unified_v4_v17_full_native_transductive/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/triviaqa_fact_memory_unified_v4_v17_full_native_transductive/direct_question_only_predictions.jsonl"
-  trajectories_path: "artifacts/triviaqa_fact_memory_unified_v4_v17_full_native_transductive/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/triviaqa_fact_memory_unified_v4_v17_full_native_transductive/collection_failures.jsonl"
-  paired_results_path: "artifacts/triviaqa_fact_memory_unified_v4_v17_full_native_transductive/paired_results.jsonl"
-  wrong_demos_path: "artifacts/triviaqa_fact_memory_unified_v4_v17_full_native_transductive/wrong_demos.jsonl"
-  manifest_path: "artifacts/triviaqa_fact_memory_unified_v4_v17_full_native_transductive/run_manifest.json"
-  preflight_receipt_path: "artifacts/triviaqa_fact_memory_unified_v4_v17_full_native_transductive/preflight_receipt.json"
-  report_json_path: "reports/triviaqa_fact_memory_unified_v4_v17_full_native_transductive/report.json"
-  report_markdown_path: "reports/triviaqa_fact_memory_unified_v4_v17_full_native_transductive/report.md"
+  materialization_manifest_path: "data/triviaqa_fact_memory_full_native_v1/materialization_manifest.json"
+  top_k_selection_receipt_path: "data/triviaqa_fact_memory_full_native_v1/top_k_selection_receipt.json"
+  final_index_manifest_path: "data/triviaqa_fact_memory_full_native_v1/index/manifest.json"
+  selected_tasks_path: "artifacts/triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary/direct_question_only_predictions.jsonl"
+  trajectories_path: "artifacts/triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary/collection_failures.jsonl"
+  paired_results_path: "artifacts/triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary/paired_results.jsonl"
+  wrong_demos_path: "artifacts/triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary/wrong_demos.jsonl"
+  manifest_path: "artifacts/triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary/run_manifest.json"
+  preflight_receipt_path: "artifacts/triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary/preflight_receipt.json"
+  report_json_path: "reports/triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary/report.json"
+  report_markdown_path: "reports/triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary/report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/ssd1/iclr/gpf/models/Qwen3.5-9B}"
@@ -91,7 +92,7 @@ director:
   backend: "sglang"
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
   served_model_name: "supervisor_theta"
-  behavior_policy_version: "qwen35-9b-base-reasoner-only-thinking-triviaqa-fact-memory-unified-v4-v17-full-native-transductive"
+  behavior_policy_version: "qwen35-9b-base-nonthinking-director-triviaqa-fact-memory-unified-v4-v16-4-reasoner-only-thinking-canary"
   behavior_adapter_name: null
   behavior_adapter_checkpoint: null
   updated_policy_version: "unused-evaluation-only"
@@ -168,7 +169,7 @@ grpo:
 policy_sync:
   enabled: false
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
-  adapter_name_prefix: "theta_triviaqa_fact_memory_unified_v4_v17_full_native_transductive_unused_"
+  adapter_name_prefix: "theta_triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_canary_unused_"
   request_timeout_seconds: 120
   max_retries: 0
   retry_backoff_seconds: 1

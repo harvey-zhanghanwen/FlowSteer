@@ -2858,6 +2858,8 @@ _PROVIDER_RESPONSE_METADATA_FIELDS: Tuple[str, ...] = (
     "temperature",
     "top_p",
     "max_tokens",
+    "effective_chat_template_enable_thinking",
+    "effective_chat_template_thinking_budget",
 )
 
 _UNIFIED_EXECUTION_METADATA_FIELDS: Tuple[str, ...] = (
