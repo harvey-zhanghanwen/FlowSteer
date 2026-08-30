@@ -235,12 +235,14 @@ _FACT_QA_WRAPPER = re.compile(
     re.IGNORECASE,
 )
 _FACT_ANAPHORIC_SUBJECT = re.compile(
-    r"^(?:it|he|she|they|this|that|these|those)\b",
+    r"^(?:it|he|she|they|this|that|these|those)(?![\w\-\u2010\u2011])",
     re.IGNORECASE,
 )
 _FACT_EXTERNAL_REFERENCE = re.compile(
-    r"\b(?:it|he|she|they|this|these|those|him|her|them|his|hers|its|"
-    r"their|theirs|itself|himself|herself|themselves)\b",
+    r"(?<![\w\-\u2010\u2011])"
+    r"(?:it|he|she|they|this|these|those|him|her|them|his|hers|its|"
+    r"their|theirs|itself|himself|herself|themselves)"
+    r"(?![\w\-\u2010\u2011])",
     re.IGNORECASE,
 )
 _FACT_INTERROGATIVE_HEAD = re.compile(
@@ -262,6 +264,13 @@ _OBSERVED_RESPONSE_KEY_TYPOS = {
     ".paraphrase_answer_statement": "paraphrase_answer_statement",
     "parphrase_question": "paraphrase_question",
 }
+_OBSERVED_ANSWER_REPAIR_KEY_TYPOS = frozenset(
+    {
+        ")paraphrase_answer_statement",
+        ">paraphrase_answer_statement",
+        ",paraphrase_answer_statement",
+    }
+)
 _QUESTION_SLOT_TOKEN = re.compile(
     r"\b(?:what|which|who|whom|whose|where|when|why|how)\b",
     re.IGNORECASE,
@@ -1703,7 +1712,11 @@ def _deterministic_answer_slot_statement(
         protected_span=canonical,
     )
     source_quotes = _quoted_spans(source.original_question)
-    if source_quotes and not source_quotes.issubset(_quoted_spans(candidate)):
+    candidate_quotes = _quoted_spans(candidate)
+    if source_quotes and not all(
+        _quoted_span_is_present(span, candidate_quotes)
+        for span in source_quotes
+    ):
         return None
     if not exact_canonical_span_preserved(candidate, canonical):
         return None
@@ -2172,6 +2185,32 @@ def _quoted_spans(text: str) -> frozenset[str]:
     return frozenset(span for span in spans if span)
 
 
+def _quoted_scope_equivalence_key(content: str) -> str:
+    """Normalize only Unicode-equivalent quote and apostrophe code points."""
+
+    return content.translate(
+        str.maketrans(
+            {
+                "\u2018": "'",
+                "\u2019": "'",
+                "\u201c": '"',
+                "\u201d": '"',
+            }
+        )
+    )
+
+
+def _quoted_span_is_present(
+    source_span: str,
+    candidate_spans: frozenset[str],
+) -> bool:
+    source_key = _quoted_scope_equivalence_key(source_span)
+    return any(
+        _quoted_scope_equivalence_key(candidate_span) == source_key
+        for candidate_span in candidate_spans
+    )
+
+
 def _ordered_quoted_slots(
     text: str,
     *,
@@ -2357,10 +2396,24 @@ def _quoted_scope_preserved(original: str, paraphrase: str) -> bool:
 
     original_spans = _quoted_spans(original)
     paraphrase_spans = _quoted_spans(paraphrase)
-    if not original_spans.issubset(paraphrase_spans):
+    if not all(
+        _quoted_span_is_present(span, paraphrase_spans)
+        for span in original_spans
+    ):
         return False
-    newly_quoted = paraphrase_spans - original_spans
-    return all(span in original for span in newly_quoted)
+    original_keys = {
+        _quoted_scope_equivalence_key(span) for span in original_spans
+    }
+    normalized_original = _quoted_scope_equivalence_key(original)
+    newly_quoted = tuple(
+        span
+        for span in paraphrase_spans
+        if _quoted_scope_equivalence_key(span) not in original_keys
+    )
+    return all(
+        _quoted_scope_equivalence_key(span) in normalized_original
+        for span in newly_quoted
+    )
 
 
 def _quoted_attribution_qa(
@@ -2704,6 +2757,24 @@ def _unresolved_fact_reference_tokens(
     reference_surface = _ORDERED_QUOTED_SLOT.sub(
         " immutable quoted material ", fact_text
     ).replace(canonical_answer, " canonical fact value ")
+    # A source-certified proper-name surface may contain a token that is also
+    # an English pronoun (for example, He-Man). Record those immutable spans so
+    # the token-level scan can skip only the in-name match while retaining the
+    # entity as a possible antecedent for a later, genuine reference.
+    immutable_identity_spans: list[tuple[int, int]] = []
+    for identity_surface in sorted(
+        _capitalized_identity_surfaces(source.original_question),
+        key=len,
+        reverse=True,
+    ):
+        immutable_identity_spans.extend(
+            (match.start(), match.end())
+            for match in re.finditer(
+            rf"(?<!\w){re.escape(identity_surface)}(?!\w)",
+            reference_surface,
+            flags=re.IGNORECASE,
+            )
+        )
     unresolved: list[str] = []
     clause_boundary = re.compile(r"[.!?;:\u2014]")
     relative_marker = re.compile(r"\b(who|which|that)\b", re.IGNORECASE)
@@ -2720,6 +2791,11 @@ def _unresolved_fact_reference_tokens(
     }
 
     for reference in _FACT_EXTERNAL_REFERENCE.finditer(reference_surface):
+        if any(
+            start <= reference.start() and reference.end() <= end
+            for start, end in immutable_identity_spans
+        ):
+            continue
         token = reference.group(0).casefold()
         prefix_surface = reference_surface[: reference.start()]
         boundaries = tuple(clause_boundary.finditer(prefix_surface))
@@ -2939,8 +3015,11 @@ def _fact_admission_diagnostics(
     missing_quotes = sorted(
         span
         for span in source_quotes
-        if span not in statement_quotes
-        and quoted_answer_slot.sub(canonical, span) not in statement_quotes
+        if not _quoted_span_is_present(span, statement_quotes)
+        and not _quoted_span_is_present(
+            quoted_answer_slot.sub(canonical, span),
+            statement_quotes,
+        )
     )
     external_references = sorted(
         set(_unresolved_fact_reference_tokens(source, statement, canonical))
@@ -3051,7 +3130,14 @@ def _normalize_observed_response_keys(
         )
         if (
             singleton_expected_field is not None
-            and raw_field == f"/{singleton_expected_field}"
+            and (
+                raw_field == f"/{singleton_expected_field}"
+                or (
+                    singleton_expected_field
+                    == "paraphrase_answer_statement"
+                    and raw_field in _OBSERVED_ANSWER_REPAIR_KEY_TYPOS
+                )
+            )
         ):
             normalized_field = singleton_expected_field
         if normalized_field not in expected_fields:
@@ -3079,9 +3165,27 @@ def _normalize_observed_response_keys(
     return normalized
 
 
+def _reject_duplicate_response_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    """Keep singleton repair JSON fail-closed on repeated raw keys."""
+
+    value: dict[str, object] = {}
+    for field, field_value in pairs:
+        if field in value:
+            raise ValueError(
+                f"duplicate JSON key in structured response: {field!r}"
+            )
+        value[field] = field_value
+    return value
+
+
 def parse_answer_repair_response(text: str) -> str:
     try:
-        value = json.loads(str(text).strip())
+        value = json.loads(
+            str(text).strip(),
+            object_pairs_hook=_reject_duplicate_response_keys,
+        )
     except json.JSONDecodeError as exc:
         raise ValueError("answer repair response is not strict JSON") from exc
     value = _normalize_observed_response_keys(
@@ -3537,8 +3641,11 @@ def validate_self_contained_declarative_fact(
     missing_quoted_spans = frozenset(
         span
         for span in source_quoted_spans
-        if span not in fact_quoted_spans
-        and quoted_answer_slot.sub(canonical, span) not in fact_quoted_spans
+        if not _quoted_span_is_present(span, fact_quoted_spans)
+        and not _quoted_span_is_present(
+            quoted_answer_slot.sub(canonical, span),
+            fact_quoted_spans,
+        )
     )
     if missing_quoted_spans:
         raise FactProjectionAdmissionError(
@@ -6731,21 +6838,23 @@ class LocalQwen35Paraphraser:
             except ValueError:
                 pass
         preserved_statement = rejected_statement
-        current_reason = admission_failure_reason
+        latest_rejected_statement = preserved_statement
+        latest_rejection_reason = admission_failure_reason
         last_repair_error: ValueError | None = None
         for repair_attempt in range(FACT_ONLY_REPAIR_ATTEMPTS):
+            model_authored_statement: str | None = None
             try:
-                repaired_statement = parse_answer_repair_response(
+                model_authored_statement = parse_answer_repair_response(
                     self._complete(
                         messages=build_answer_repair_messages(
                             source,
-                            # FlowSteer-style recovery is non-destructive:
-                            # diagnose each failed candidate through the
-                            # current reason, but always repair from the same
-                            # preserved execution artifact instead of feeding
-                            # semantic drift into the next retry.
-                            rejected_answer_statement=preserved_statement,
-                            admission_failure_reason=current_reason,
+                            # FlowSteer preserves the latest model-authored
+                            # rejected completion, while SkillFlow continues
+                            # from the Action and its matching Observation.
+                            # Keep the initial artifact only until a newer
+                            # parsed repair candidate fails admission.
+                            rejected_answer_statement=latest_rejected_statement,
+                            admission_failure_reason=latest_rejection_reason,
                             repair_attempt=repair_attempt,
                         ),
                         seed=seed + repair_attempt,
@@ -6755,6 +6864,7 @@ class LocalQwen35Paraphraser:
                         ),
                     )
                 )
+                repaired_statement = model_authored_statement
                 canonicalized = _canonicalize_answer_statement_from_accepted_alias(
                     source,
                     repaired_statement,
@@ -6794,7 +6904,9 @@ class LocalQwen35Paraphraser:
                 return repaired_statement
             except ValueError as exc:
                 last_repair_error = exc
-                current_reason = str(exc)
+                if model_authored_statement is not None:
+                    latest_rejected_statement = model_authored_statement
+                    latest_rejection_reason = str(exc)
         assert last_repair_error is not None
         raise RuntimeError(
             "bounded fact-only repair exhausted for an already generated "

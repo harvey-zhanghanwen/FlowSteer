@@ -175,6 +175,59 @@ def test_fact_reference_gate_certifies_only_local_auditable_bindings() -> None:
     ) == currency_fact
 
 
+def test_fact_reference_gate_does_not_split_pronoun_like_proper_name() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:qz_1859",
+        base_task_id="triviaqa:qz_1859",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="Who is the twin sister of the cartoon hero He-Man?",
+        canonical_answer="She-Ra",
+        native_split="train",
+    )
+    fact = "The twin sister of the animated hero He-Man is She-Ra."
+
+    assert _unresolved_fact_reference_tokens(source, fact, "She-Ra") == ()
+    assert validate_self_contained_declarative_fact(source, fact) == fact
+
+    canonical_subject_fact = (
+        "She-Ra is the twin sister of the animated hero He-Man."
+    )
+    assert validate_self_contained_declarative_fact(
+        source,
+        canonical_subject_fact,
+    ) == canonical_subject_fact
+
+
+def test_fact_reference_gate_does_not_split_hyphenated_lexical_token() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:hyphenated_lexical_token",
+        base_task_id="triviaqa:hyphenated_lexical_token",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="What term refers to the do-it-yourself method?",
+        canonical_answer="DIY",
+        native_split="train",
+    )
+    fact = "The do-it-yourself method is referred to as DIY."
+
+    assert _unresolved_fact_reference_tokens(source, fact, "DIY") == ()
+    assert validate_self_contained_declarative_fact(source, fact) == fact
+
+
+@pytest.mark.parametrize("pronoun", ("She", "He", "It", "This"))
+def test_fact_reference_gate_still_rejects_true_anaphoric_subject(
+    pronoun: str,
+) -> None:
+    with pytest.raises(FactProjectionAdmissionError, match="anaphoric subject"):
+        validate_self_contained_declarative_fact(
+            _source(),
+            f"{pronoun} identifies Zambezi.",
+        )
+
+
 @pytest.mark.parametrize(
     ("question", "canonical", "fact", "unresolved"),
     (
@@ -1653,13 +1706,122 @@ def test_answer_repair_retries_only_fact_non_destructively_with_gate_feedback(
     assert "external anaphoric" in str(
         repair_payloads[1]["admission_failure_reason"]
     )
+    assert repair_payloads[0]["rejected_answer_statement"] == (
+        "It began in Japan in 1988."
+    )
+    assert repair_payloads[1]["rejected_answer_statement"] == (
+        "Japan is the country where he widespread use of ISDN began in 1988."
+    )
+    assert repair_payloads[1]["admission_diagnostics"][
+        "external_reference_tokens"
+    ] == ["he"]
     assert {
-        payload["rejected_answer_statement"] for payload in repair_payloads
-    } == {"It began in Japan in 1988."}
+        str(payload["original_question"]) for payload in repair_payloads
+    } == {source.original_question}
     assert paraphrase_question not in {
         str(payload["rejected_answer_statement"])
         for payload in repair_payloads
     }
+
+
+def test_answer_repair_second_turn_pairs_latest_candidate_and_diagnosis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import generate_triviaqa_qa_memory_paraphrases as generation
+
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:latest_rejected_pair",
+        base_task_id="triviaqa:latest_rejected_pair",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question=(
+            "In which country did he widespread use of ISDN begin in 1988?"
+        ),
+        canonical_answer="Japan",
+        native_split="train",
+    )
+    paraphrase_question = (
+        "In what nation did the widespread use of ISDN commence in 1988?"
+    )
+    first_rejected_candidate = "Japan saw widespread adoption in 1988."
+    admitted_candidate = (
+        "The widespread use of ISDN began in Japan in 1988."
+    )
+    responses = iter(
+        (
+            json.dumps(
+                {
+                    "paraphrase_answer_statement": first_rejected_candidate,
+                }
+            ),
+            json.dumps(
+                {
+                    "paraphrase_answer_statement": admitted_candidate,
+                }
+            ),
+        )
+    )
+    repair_payloads: list[dict[str, object]] = []
+    parsed_questions: list[str] = []
+    client = object.__new__(LocalQwen35Paraphraser)
+    original_parser = generation.parse_paraphrase_response
+
+    def complete(**kwargs: object) -> str:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        repair_payloads.append(json.loads(messages[1]["content"]))
+        return next(responses)
+
+    def parse_with_typed_failure(
+        text: str,
+        parse_source: TriviaQATrainSource,
+    ) -> tuple[str, str]:
+        payload = json.loads(text)
+        parsed_questions.append(str(payload["paraphrase_question"]))
+        if payload["paraphrase_answer_statement"] != admitted_candidate:
+            raise ValueError(
+                "fact_text does not preserve immutable source entity token: "
+                "ISDN"
+            )
+        return original_parser(text, parse_source)
+
+    monkeypatch.setattr(client, "_complete", complete)
+    monkeypatch.setattr(
+        client,
+        "_answer_statement_verified",
+        lambda *_, **__: True,
+    )
+    monkeypatch.setattr(
+        generation,
+        "parse_paraphrase_response",
+        parse_with_typed_failure,
+    )
+
+    repaired = client._repair_answer_statement(
+        source,
+        question=paraphrase_question,
+        rejected_statement="It began in Japan in 1988.",
+        seed=79,
+        admission_failure_reason=(
+            "fact_text contains an external anaphoric reference; replace it "
+            "with an explicit noun phrase"
+        ),
+    )
+
+    assert repaired == admitted_candidate
+    assert len(repair_payloads) == 2
+    second_payload = repair_payloads[1]
+    assert second_payload["rejected_answer_statement"] == first_rejected_candidate
+    assert second_payload["admission_failure_category"] == "missing_entity_anchor"
+    assert second_payload["admission_failure_reason"] == (
+        "fact_text does not preserve immutable source entity token: ISDN"
+    )
+    assert second_payload["admission_diagnostics"]["missing_entity_tokens"] == [
+        "isdn"
+    ]
+    assert parsed_questions
+    assert set(parsed_questions) == {paraphrase_question}
 
 
 def test_fact_repair_exhaustion_does_not_regenerate_valid_question(
@@ -2344,6 +2506,12 @@ def test_generate_repairs_schema_failure_with_existing_repair_paths(
                 "The Kariba Dam was built on the Zambezi river."
             ),
         },
+        {
+            "paraphrase_question": "Name the river holding the Kariba Dam.",
+            ")paraphrase_answer_statement": (
+                "The Kariba Dam was built on the Zambezi river."
+            ),
+        },
     ),
 )
 def test_response_parser_rejects_unobserved_key_variants(fields: object) -> None:
@@ -2619,16 +2787,17 @@ def test_two_token_leading_slot_question_does_not_index_past_tokens() -> None:
 
 
 def test_v12_answer_repair_normalizes_bounded_single_field_key_typos() -> None:
-    assert parse_answer_repair_response(
-        json.dumps(
-            {".paraphrase_answer_statement": "Steinem co-founded Ms magazine."}
-        )
-    ) == "Steinem co-founded Ms magazine."
-    assert parse_answer_repair_response(
-        json.dumps(
-            {"/paraphrase_answer_statement": "Steinem co-founded Ms magazine."}
-        )
-    ) == "Steinem co-founded Ms magazine."
+    statement = "Steinem co-founded Ms magazine."
+    for raw_field in (
+        ".paraphrase_answer_statement",
+        "/paraphrase_answer_statement",
+        ")paraphrase_answer_statement",
+        ">paraphrase_answer_statement",
+        ",paraphrase_answer_statement",
+    ):
+        assert parse_answer_repair_response(
+            json.dumps({raw_field: statement})
+        ) == statement
     with pytest.raises(ValueError, match="fields are incompatible"):
         parse_answer_repair_response(
             json.dumps(
@@ -2662,6 +2831,33 @@ def test_v12_answer_repair_normalizes_bounded_single_field_key_typos() -> None:
                     "extra": True,
                 }
             )
+        )
+    for raw_field in (
+        "))paraphrase_answer_statement",
+        ")paraphrase_answer_statemen",
+        "!paraphrase_answer_statement",
+    ):
+        with pytest.raises(ValueError, match="unexpected_fields"):
+            parse_answer_repair_response(
+                json.dumps({raw_field: statement})
+            )
+    with pytest.raises(ValueError, match="collision_fields"):
+        parse_answer_repair_response(
+            json.dumps(
+                {
+                    ")paraphrase_answer_statement": statement,
+                    ">paraphrase_answer_statement": statement,
+                }
+            )
+        )
+    with pytest.raises(ValueError, match="must be non-empty text"):
+        parse_answer_repair_response(
+            json.dumps({")paraphrase_answer_statement": [statement]})
+        )
+    with pytest.raises(ValueError, match="duplicate JSON key"):
+        parse_answer_repair_response(
+            '{"paraphrase_answer_statement":"first",'
+            '"paraphrase_answer_statement":"second"}'
         )
 
 
@@ -2839,6 +3035,38 @@ def test_quoted_scope_supports_curly_quotes_and_preserves_exact_content() -> Non
         "Who wrote “The Left Hand”?",
         'Name the author of "The Right Hand".',
     )
+
+
+def test_quoted_scope_normalizes_only_equivalent_unicode_punctuation() -> None:
+    assert _quoted_scope_preserved(
+        "Who coined the phrase ‘don’t “panic”’ ?",
+        "Identify who coined the phrase 'don't \"panic\"'.",
+    )
+    assert not _quoted_scope_preserved(
+        "Who coined the phrase ‘don’t “panic”’ ?",
+        'Identify who coined the phrase "don\'t".',
+    )
+
+
+def test_fact_validator_accepts_equivalent_apostrophe_but_not_omission() -> None:
+    source = TriviaQATrainSource(
+        source_train_task_id="triviaqa:unicode_quote_equivalence",
+        base_task_id="triviaqa:unicode_quote_equivalence",
+        selection_index=0,
+        cycled_training_sample=False,
+        cycle_index=None,
+        original_question="Who coined the phrase ‘don’t panic’?",
+        canonical_answer="Douglas Adams",
+        native_split="train",
+    )
+    fact = 'Douglas Adams coined the phrase "don\'t panic".'
+
+    assert validate_self_contained_declarative_fact(source, fact) == fact
+    with pytest.raises(FactProjectionAdmissionError, match="quoted scope"):
+        validate_self_contained_declarative_fact(
+            source,
+            'Douglas Adams coined the phrase "don\'t".',
+        )
 
 
 def test_parser_enforces_exact_curly_quoted_content() -> None:
