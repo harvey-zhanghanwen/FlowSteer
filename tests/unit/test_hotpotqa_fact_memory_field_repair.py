@@ -494,7 +494,7 @@ def test_bounded_tail_recovery_uses_unlabeled_public_context_only(
     assert candidate["fact_statement"] == "Ada Lovelace wrote Atlas."
     final_fact = receipt["attempt_receipts"][-1]["fact"]
     assert final_fact["repair_strategy"] == (
-        "public_context_fact_reconstruction"
+        "extractive_public_context_projection"
     )
     assert final_fact["verification_mode"] == "public_context"
     assert receipt["fact_generation_source"] == "public_context"
@@ -504,9 +504,9 @@ def test_bounded_tail_recovery_uses_unlabeled_public_context_only(
         call
         for call in calls
         if (
-            "repair-fact" in str(call["request_id"])
-            and json.loads(str(call["problem"]))["fact_repair_strategy"]
-            == "public_context_fact_reconstruction"
+            "verify-fact" in str(call["request_id"])
+            and "unlabeled_public_context_passages"
+            in json.loads(str(call["problem"]))
         )
     )
     context_problem = json.loads(str(context_call["problem"]))
@@ -648,6 +648,45 @@ def test_public_context_fact_repair_identifies_unsupported_numeric_surfaces(
     assert materializer._forbidden_fact_number_or_date_surfaces(
         source, fact
     ) == forbidden
+
+
+def test_extractive_context_projection_deletes_only_forbidden_numeric_adjuncts() -> None:
+    liev = _source(
+        103,
+        question=(
+            "What actress born in 1967 stars in a 1997 film directed by Wes Craven?"
+        ),
+        answer="Liev Schreiber",
+    )
+    assert materializer._extract_number_safe_public_context_fact(
+        liev,
+        (
+            "[Liev Schreiber] Isaac Liev Schreiber ( ; born October 4, 1967), "
+            "better known as Liev Schreiber, is an American actor, director, "
+            "screenwriter, and producer.",
+        ),
+    ) == (
+        "Isaac Liev Schreiber, better known as Liev Schreiber, is an American "
+        "actor, director, screenwriter, and producer."
+    )
+
+    buddha = _source(
+        104,
+        question="In what year was the most famous statue at Po Lin Monastery built?",
+        answer="Tian Tan Buddha",
+    )
+    assert materializer._extract_number_safe_public_context_fact(
+        buddha,
+        (
+            "[Tian Tan Buddha] Tian Tan Buddha, also known as the Big Buddha, "
+            "is a large bronze statue of Buddha Shakyamuni, completed in 1993, "
+            "and located at Ngong Ping, Lantau Island, in Hong Kong.",
+        ),
+    ) == (
+        "Tian Tan Buddha, also known as the Big Buddha, is a large bronze statue "
+        "of Buddha Shakyamuni, and is located at Ngong Ping, Lantau Island, in "
+        "Hong Kong."
+    )
 
 
 def test_question_synonym_only_repair_rewrites_authoritative_source(

@@ -754,6 +754,63 @@ def _forbidden_fact_number_or_date_surfaces(
     )
 
 
+def _extract_number_safe_public_context_fact(
+    source: HotpotQATrainQASource,
+    passages: Sequence[str],
+) -> str | None:
+    """Project one passage sentence by deleting only forbidden numeric adjuncts."""
+
+    canonical_tokens = tuple(
+        token.casefold() for token in _lexical_tokens(source.canonical_answer)
+    )
+    if not canonical_tokens:
+        return None
+    candidates: list[str] = []
+    for passage in passages:
+        for raw_sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z\[])\s*", passage):
+            sentence = re.sub(r"^\[[^\]]+\]\s*", "", raw_sentence).strip()
+            folded_sentence = sentence.casefold()
+            if not all(token in folded_sentence for token in canonical_tokens):
+                continue
+            forbidden = _forbidden_fact_number_or_date_surfaces(source, sentence)
+            if forbidden:
+                sentence = re.sub(
+                    r"\([^()]*\)",
+                    lambda match: ""
+                    if _forbidden_fact_number_or_date_surfaces(
+                        source, match.group(0)
+                    )
+                    else match.group(0),
+                    sentence,
+                )
+                comma_parts = [part.strip() for part in sentence.split(",")]
+                sentence = ", ".join(
+                    part
+                    for part in comma_parts
+                    if part
+                    and not _forbidden_fact_number_or_date_surfaces(source, part)
+                )
+                sentence = re.sub(
+                    r",\s+and\s+(located|based|situated|headquartered)\b",
+                    r", and is \1",
+                    sentence,
+                    flags=re.IGNORECASE,
+                )
+            sentence = re.sub(r"\s+([,.;!?])", r"\1", sentence)
+            sentence = re.sub(r",\s*,+", ", ", sentence).strip()
+            if not sentence:
+                continue
+            if not sentence.endswith((".", "!")):
+                sentence = f"{sentence.rstrip(' ?')} .".replace(" .", ".")
+            if _forbidden_fact_number_or_date_surfaces(source, sentence):
+                continue
+            try:
+                candidates.append(validate_hotpotqa_fact_statement(source, sentence))
+            except (TypeError, ValueError):
+                continue
+    return min(candidates, key=lambda value: (len(value), value)) if candidates else None
+
+
 def _restore_complete_canonical_surface(
     source: HotpotQATrainQASource,
     fact: str,
@@ -1177,6 +1234,23 @@ async def _materialize_one(
                             and fact_candidate_count >= 6
                             and terminal_punctuation_repair is None
                         )
+                        extractive_context_repair = (
+                            _extract_number_safe_public_context_fact(
+                                source,
+                                selected_public_context,
+                            )
+                            if (
+                                public_context_reconstruction
+                                or fact_from_public_context
+                            )
+                            else None
+                        )
+                        if (
+                            extractive_context_repair is not None
+                            and extractive_context_repair.casefold()
+                            in fact_candidate_keys
+                        ):
+                            extractive_context_repair = None
                         if public_context_reconstruction:
                             clause_synonym_repair = False
                         fact_repair_strategy = (
@@ -1195,21 +1269,25 @@ async def _materialize_one(
                                             "restore_complete_canonical_surface"
                                             if canonical_surface_repair is not None
                                             else (
-                                                "public_context_fact_repair"
-                                                if fact_from_public_context
+                                                "extractive_public_context_projection"
+                                                if extractive_context_repair is not None
                                                 else (
-                                                    "public_context_fact_reconstruction"
-                                                    if public_context_reconstruction
+                                                    "public_context_fact_repair"
+                                                    if fact_from_public_context
                                                     else (
-                                                        "binary_polarity_reconstruction"
-                                                        if binding_mode == "binary_polarity_binding"
+                                                        "public_context_fact_reconstruction"
+                                                        if public_context_reconstruction
                                                         else (
-                                                            "clause_synonym_only"
-                                                            if clause_synonym_repair
+                                                            "binary_polarity_reconstruction"
+                                                            if binding_mode == "binary_polarity_binding"
                                                             else (
-                                                                "authoritative_answer_slot_reconstruction"
-                                                                if force_fact_reconstruction
-                                                                else _fact_repair_strategy(fact_rejection)
+                                                                "clause_synonym_only"
+                                                                if clause_synonym_repair
+                                                                else (
+                                                                    "authoritative_answer_slot_reconstruction"
+                                                                    if force_fact_reconstruction
+                                                                    else _fact_repair_strategy(fact_rejection)
+                                                                )
                                                             )
                                                         )
                                                     )
@@ -1280,6 +1358,14 @@ async def _materialize_one(
                             response = {
                                 "local_semantic_surface_repair": (
                                     "restore_complete_canonical_surface"
+                                )
+                            }
+                            fact_repair_temperature = 0.0
+                        elif extractive_context_repair is not None:
+                            fact = extractive_context_repair
+                            response = {
+                                "local_public_context_projection": (
+                                    "delete_forbidden_numeric_adjuncts"
                                 )
                             }
                             fact_repair_temperature = 0.0
@@ -1573,6 +1659,7 @@ async def _materialize_one(
                             )
                             fact = _generated_text(repaired, "fact_statement")
                         if fact_repair_strategy in {
+                            "extractive_public_context_projection",
                             "public_context_fact_reconstruction",
                             "public_context_fact_repair",
                         }:
