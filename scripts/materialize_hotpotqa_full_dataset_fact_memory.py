@@ -601,7 +601,7 @@ def _select_public_context_passages(
     source: HotpotQATrainQASource,
     passages: Sequence[str],
     *,
-    limit: int = 4,
+    limit: int = 10,
 ) -> tuple[str, ...]:
     """Select unlabeled public passages for generation-only tail recovery."""
 
@@ -784,12 +784,17 @@ def _extract_number_safe_public_context_fact(
                     sentence,
                 )
                 comma_parts = [part.strip() for part in sentence.split(",")]
-                sentence = ", ".join(
-                    part
-                    for part in comma_parts
-                    if part
-                    and not _forbidden_fact_number_or_date_surfaces(source, part)
-                )
+                kept_parts: list[str] = []
+                for part in comma_parts:
+                    if not part:
+                        continue
+                    if _forbidden_fact_number_or_date_surfaces(source, part):
+                        prefix = ", ".join(kept_parts)
+                        if _FINITE_CLAUSE_VERB.search(prefix):
+                            break
+                        continue
+                    kept_parts.append(part)
+                sentence = ", ".join(kept_parts)
                 sentence = re.sub(
                     r",\s+and\s+(located|based|situated|headquartered)\b",
                     r", and is \1",
@@ -801,7 +806,7 @@ def _extract_number_safe_public_context_fact(
             if not sentence:
                 continue
             if not sentence.endswith((".", "!")):
-                sentence = f"{sentence.rstrip(' ?')} .".replace(" .", ".")
+                sentence = f"{sentence.rstrip(' ?')}."
             if _forbidden_fact_number_or_date_surfaces(source, sentence):
                 continue
             try:
@@ -1909,6 +1914,17 @@ async def _materialize_one(
                         seed=request_seed + 3,
                         temperature=0.0,
                     )
+                    if (
+                        public_context_verification
+                        and not _source_qa_semantics_are_defined(
+                            source,
+                            selected_public_context,
+                        )
+                    ):
+                        verified = dict(verified)
+                        verified[
+                            "source_qa_semantics_preserved_when_defined"
+                        ] = True
                     failed = [
                         name
                         for name in required_fact_verification_fields

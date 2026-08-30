@@ -684,8 +684,7 @@ def test_extractive_context_projection_deletes_only_forbidden_numeric_adjuncts()
         ),
     ) == (
         "Tian Tan Buddha, also known as the Big Buddha, is a large bronze statue "
-        "of Buddha Shakyamuni, and is located at Ngong Ping, Lantau Island, in "
-        "Hong Kong."
+        "of Buddha Shakyamuni."
     )
 
 
