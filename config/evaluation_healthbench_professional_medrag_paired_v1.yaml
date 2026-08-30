@@ -1,0 +1,219 @@
+# HealthBench Professional public-test paired evaluation with one frozen
+# MedRAG textbook Tool condition.  This is separate from every official
+# no-Tool run: Direct is a single-Agent ReAct episode and AgentGraph retains
+# the unified free Canvas search space.  Both arms use the same samples,
+# Qwen3.5-9B model catalog, Tool resource, decoding condition, and evaluator.
+# No training, GRPO, LoRA, MACE, Bayesian update, or Skill is enabled.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+execution_timeout: 900.0
+experiment:
+  name: "healthbench_professional_medrag_paired_v1"
+  phase: "healthbench_professional_evaluation"
+  training_enabled: false
+  seed: 20260830
+  condition_id: "healthbench_professional_medrag_paired_v1"
+  sampling_schedule_purpose: "healthbench_professional_public_test_paired_medrag_evaluation"
+  catalog_order_namespace: "healthbench_professional_medrag_paired_v1"
+  prompt_version: "agentgraph.director.minimal-neutral-scalar.v2"
+  tool_version: "skillflow.medrag-textbooks-bm25-react.state-conditioned.v3"
+  output_dir: "artifacts/healthbench_professional_medrag_paired_v1/evaluation"
+
+data:
+  catalog_path: "config/datasets_healthbench_professional_official_v1.yaml"
+  registry_path: "config/datasets_runtime_healthbench_professional_official_v1.yaml"
+  registry_dataset_key: "healthbench_professional"
+  train_path: "data/healthbench_professional_official_v1/train.jsonl"
+  validation_path: "data/healthbench_professional_official_v1/validation.jsonl"
+  test_path: "data/healthbench_professional_official_v1/test.jsonl"
+  enforce_split_isolation: true
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+
+healthbench_professional_evaluation:
+  dataset_key: "healthbench_professional"
+  stage: "final_evaluation"
+  split: "test"
+  benchmark_slice: "public_test"
+  selection: "sequential"
+  sample_count: 525
+  stable_zero_sample_count: 2
+  rollouts_per_task: 1
+  concurrency: 4
+  direct_model_id: "qwen3.5-9b-local"
+  direct_protocol: "healthbench_professional_single_agent_react_medrag_v1"
+  protocol_equivalent_to_direct: true
+  direct_execution_mode: "react"
+  direct_allowed_tools: ["healthbench-medrag.search"]
+  direct_tool_runtime_ref: "healthbench_tool_runtime"
+  direct_completion_condition: >-
+    Return one complete assistant response that directly addresses the supplied
+    conversation after any useful Tool observations have been incorporated.
+  direct_contract: >-
+    Continue the supplied conversation with one complete assistant response.
+    Use the available textbook search tool when it is useful; if a search is
+    empty, reformulate it with a standard synonym or expanded abbreviation
+    instead of repeating the same query.
+  direct_generation_seed: 20260830
+
+healthbench_tool_runtime:
+  enabled: true
+  condition_id: "healthbench_professional_medrag_paired_v1"
+  mode: "model_driven_medrag_search"
+  dataset_scope: ["healthbench_professional"]
+  resource_dir: "/ssd1/iclr/.private/skillflow-resources/medrag-textbooks-runtime"
+  source_identity: "MedRAG/textbooks"
+  source_revision: "9c72838920a1323ffa867467d3f7aa7b36b0f994"
+  expected_rows: 125847
+  max_turns_per_agent_call: 6
+  max_tool_calls_per_agent_call: 3
+  tool_timeout_seconds: 10.0
+
+storage:
+  schema_version: "flowsteer.completion_benchmark.round.v1"
+  root: "artifacts/healthbench_professional_medrag_paired_v1/evaluation/evidence"
+  selected_tasks_path: "artifacts/healthbench_professional_medrag_paired_v1/evaluation/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/healthbench_professional_medrag_paired_v1/evaluation/single_agent_react_predictions.jsonl"
+  trajectories_path: "artifacts/healthbench_professional_medrag_paired_v1/evaluation/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/healthbench_professional_medrag_paired_v1/evaluation/collection_failures.jsonl"
+  paired_results_path: "artifacts/healthbench_professional_medrag_paired_v1/evaluation/paired_results.jsonl"
+  wrong_demos_path: "artifacts/healthbench_professional_medrag_paired_v1/evaluation/wrong_demos.jsonl"
+  manifest_path: "artifacts/healthbench_professional_medrag_paired_v1/evaluation/run_manifest.json"
+  preflight_receipt_path: "artifacts/healthbench_professional_medrag_paired_v1/evaluation/preflight_receipt.json"
+  report_json_path: "reports/healthbench_professional_medrag_paired_v1/evaluation_report.json"
+  report_markdown_path: "reports/healthbench_professional_medrag_paired_v1/evaluation_report.md"
+
+director:
+  base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "qwen35-9b-base-healthbench-professional-medrag-paired-v1"
+  behavior_adapter_name: null
+  behavior_adapter_checkpoint: null
+  updated_policy_version: "unused-evaluation-only"
+  expected_server_weight_version: "default"
+  prompt_profile: "minimal"
+  dtype: "bfloat16"
+  max_context_tokens: 32768
+  max_action_tokens: 1024
+  action_decoding: "json_schema"
+  action_schema_version: "agentgraph.canvas-action-json-schema.v1"
+  sampling_schema_version: "agentgraph.model-admissible-action-mask.v3"
+  sampling_action_profile: "model_admissible_canvas_actions"
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 20
+  execute_on_edit: true
+  history_window: 4
+  lora:
+    enabled: false
+
+agent_graph:
+  max_agents: 8
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_agent, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "director_catalog_choice"
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  require_format_agent: false
+  finish_only_when_admissible: true
+  require_informative_contracts: true
+  reuse_unchanged_agent_inputs: true
+  artifact_communication_profile: "producer_context_exact_dedup_v1"
+  semantic_protocol_by_source:
+    healthbench_professional: "none"
+  recovery_policy: "preserve_diagnose_repair_augment"
+  terminal_protocol_by_source:
+    healthbench_professional: "none"
+  model_catalog_path: "config/model_catalog_healthbench_professional_qwen35_medrag_v1.yaml"
+
+evaluation:
+  allow_sglang_backend_default_max_running_requests: true
+  healthbench_grader_mode: "openai_simple_evals_healthbench_professional_reference"
+  healthbench_judge_model: "healthbench-professional-reference-grader"
+  healthbench_judge_catalog_path: "config/model_catalog_healthbench_professional_grader_v1.yaml"
+  healthbench_private_cases_path: "data/healthbench_professional_official_v1/private_cases.jsonl"
+  healthbench_official_source_root: "/ssd1/iclr/1/.tmp/openai-simple-evals-healthbench-professional"
+  healthbench_official_source_revision: "652c89d"
+  healthbench_worker_interpreter: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/.venv-serve311/bin/python"
+  healthbench_reasoning_effort: "low"
+  healthbench_length_adjustment_center: 2000.0
+  healthbench_length_adjustment_penalty_per_500_chars: 0.0147
+  healthbench_request_timeout_seconds: 180.0
+  healthbench_worker_timeout_seconds: 600.0
+  healthbench_max_parse_attempts: 2
+  healthbench_max_provider_attempts: 3
+  max_environment_steps: 20
+  swebench_harness_enabled: false
+  invalid_evaluator_action: "persist_and_exclude"
+
+grpo:
+  enabled: false
+  objective: "action_masked_one_pass"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 1
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 0
+  max_optimizer_updates: 0
+  learning_rate: 0.0
+  gradient_checkpointing: false
+  max_grad_norm: 0.0
+
+policy_sync:
+  enabled: false
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
+  adapter_name_prefix: "unused_healthbench_professional_medrag_paired_v1_"
+  request_timeout_seconds: 120
+  max_retries: 0
+  retry_backoff_seconds: 1
+
+exploration:
+  enabled: false
+  strategy: "none"
+  forced_probe_rollouts: 0
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+  library_version: "none"
+
+gpu:
+  learner_physical: 3
+  rollout_physical: 0
+  gradient_replica_physical: 5
+  learner_device: "cuda:3"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:5"
+  supervisor_gpu_id: 0
+  supervisor_api_base: "http://127.0.0.1:8015/v1"
+  training_enabled: false
+  oom_policy:
+    status: "inactive-evaluation-only"
+    micro_batch_size: 1
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [1]
+    retry_on_cuda_oom: false
+    split_items_across_learner_and_replica: false
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: false
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: false
+  require_version_compatible_skills: true

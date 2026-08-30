@@ -60,6 +60,7 @@ from src.interactive.environment_execution import (
 )
 from src.interactive.grpo_objective import same_condition_advantages
 from src.interactive.healthbench_tool_adapter import (
+    HealthBenchMedRAGReactExecutionAdapter,
     open_healthbench_medrag_tool_registry,
 )
 from src.interactive.hotpot_training_schedule import (
@@ -2209,7 +2210,7 @@ class LiveSmokeBackend:
                 ),
             )
             try:
-                adapter = ToolReactExecutionAdapter(
+                adapter = HealthBenchMedRAGReactExecutionAdapter(
                     gateway=self.runtime.gateway,
                     tool_registry=opened.registry,
                     max_turns=int(healthbench_settings["max_turns"]),

@@ -1133,6 +1133,8 @@ class HealthBenchMedRAGRuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
             source_revision=cls.SOURCE_REVISION,
             corpus_rows=len(documents),
             _corpus=documents,
+            _document_ids=("fixture-0", "fixture-1"),
+            _titles=("Fixture Textbook 0", "Fixture Textbook 1"),
             _index={
                 "avg_dl": 7.0,
                 "doc_lens": [8, 7],

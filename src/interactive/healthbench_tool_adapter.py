@@ -28,7 +28,10 @@ import re
 from threading import RLock
 from typing import Mapping
 
+from .agent_runtime import AgentRequest
+from .react_execution import ToolReactExecutionAdapter
 from .tool_runtime import (
+    StructuredAction,
     ToolCapability,
     ToolRegistration,
     ToolRegistry,
@@ -70,6 +73,8 @@ class FrozenMedRAGBM25Corpus:
     source_revision: str
     corpus_rows: int
     _corpus: tuple[str, ...] = field(repr=False)
+    _document_ids: tuple[str, ...] = field(repr=False)
+    _titles: tuple[str, ...] = field(repr=False)
     _index: Mapping[str, object] = field(repr=False)
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
@@ -117,6 +122,8 @@ class FrozenMedRAGBM25Corpus:
             raise RuntimeError("MedRAG textbook snippet count differs")
 
         corpus: list[str] = []
+        document_ids: list[str] = []
+        titles: list[str] = []
         with corpus_path.open(encoding="utf-8") as corpus_handle:
             for line in corpus_handle:
                 line = line.strip()
@@ -131,7 +138,13 @@ class FrozenMedRAGBM25Corpus:
                 contents = record.get("contents", record.get("content", ""))
                 if not isinstance(contents, str):
                     raise RuntimeError("MedRAG textbook corpus contents are invalid")
+                document_id = record.get("id", "")
+                title = record.get("title", "")
+                if not isinstance(document_id, str) or not isinstance(title, str):
+                    raise RuntimeError("MedRAG textbook source metadata are invalid")
                 corpus.append(contents)
+                document_ids.append(document_id)
+                titles.append(title)
         if len(corpus) != expected_rows:
             raise RuntimeError("MedRAG textbook parsed snippet count differs")
 
@@ -148,6 +161,8 @@ class FrozenMedRAGBM25Corpus:
             source_revision=source_revision,
             corpus_rows=expected_rows,
             _corpus=tuple(corpus),
+            _document_ids=tuple(document_ids),
+            _titles=tuple(titles),
             _index=index,
         )
 
@@ -230,6 +245,8 @@ class FrozenMedRAGBM25Corpus:
                 ranked_chunks.append(
                     {
                         "chunk_id": str(document_id),
+                        "document_id": self._document_ids[document_id],
+                        "title": self._titles[document_id],
                         "rank": rank,
                         "score": float(score),
                         "matched_terms": matched_terms,
@@ -243,6 +260,8 @@ class FrozenMedRAGBM25Corpus:
             if self._closed:
                 return
             self._corpus = ()
+            self._document_ids = ()
+            self._titles = ()
             self._index = {}
             self._closed = True
 
@@ -272,6 +291,104 @@ class HealthBenchMedRAGSearchToolBackend:
                 "ranked_chunks": self.corpus.search(query),
             }
         )
+
+
+class HealthBenchMedRAGReactExecutionAdapter(ToolReactExecutionAdapter):
+    """Bound HealthBench search continuation to evidence or a new query.
+
+    This is the same state-conditioned Action-domain boundary used by the
+    existing QA ReAct adapter, specialized only for MedRAG's one ``search``
+    operation.  A non-empty successful observation makes completion the sole
+    next action.  An empty/error observation may be followed by a different
+    query, while the fixed Tool budget always transitions to completion.
+    """
+
+    @staticmethod
+    def _normalized_query(value: object) -> str:
+        return " ".join(value.casefold().split()) if isinstance(value, str) else ""
+
+    @staticmethod
+    def _executed_search(
+        observation: Mapping[str, object],
+    ) -> Mapping[str, object] | None:
+        action = observation.get("executed_action")
+        if not isinstance(action, Mapping):
+            return None
+        if (
+            action.get("kind") != "tool"
+            or action.get("name") != "search"
+            or action.get("resource_id") != HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID
+        ):
+            return None
+        return action
+
+    def _state_conditioned_action_domain(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> tuple[frozenset[tuple[str, str]], bool]:
+        """Mask no-op search loops after measured MedRAG observations."""
+
+        del request
+        dispatched_searches = 0
+        for observation in observations:
+            action = self._executed_search(observation)
+            if action is None:
+                continue
+            status = observation.get("observation_status")
+            if status in {"success", "tool_error"}:
+                dispatched_searches += 1
+            if status != "success":
+                continue
+            result = observation.get("result")
+            ranked_chunks = (
+                result.get("ranked_chunks")
+                if isinstance(result, Mapping)
+                else None
+            )
+            if (
+                isinstance(ranked_chunks, list)
+                and bool(ranked_chunks)
+                and all(isinstance(item, Mapping) for item in ranked_chunks)
+            ):
+                return frozenset(), True
+
+        if dispatched_searches >= self._max_tool_calls:
+            return frozenset(), True
+        return frozenset(
+            {(HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID, "search")}
+        ), True
+
+    def _tool_action_error(
+        self,
+        *,
+        request: AgentRequest,
+        action: StructuredAction,
+        observations: list[Mapping[str, object]],
+    ) -> str | None:
+        """Reject any repeated MedRAG query within one Agent execution."""
+
+        del request
+        if (
+            action.resource_id != HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID
+            or action.name != "search"
+            or not isinstance(action.arguments, dict)
+        ):
+            return None
+        query = self._normalized_query(action.arguments.get("query"))
+        if not query:
+            return None
+        for observation in observations:
+            prior = self._executed_search(observation)
+            if prior is None:
+                continue
+            arguments = prior.get("arguments")
+            if (
+                isinstance(arguments, Mapping)
+                and self._normalized_query(arguments.get("query")) == query
+            ):
+                return "duplicate_tool_request"
+        return None
 
 
 def build_healthbench_medrag_tool_registry(
@@ -307,7 +424,17 @@ def build_healthbench_medrag_tool_registry(
         "additionalProperties": False,
         "required": ["query"],
         "properties": {
-            "query": {"type": "string", "minLength": 1},
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "Use specific clinical entities and concepts rather than the "
+                    "full conversation. Include a standard medical synonym or "
+                    "expanded abbreviation when useful. If an earlier search "
+                    "returned no ranked chunks, reformulate the query with "
+                    "different medical terminology instead of repeating it."
+                ),
+            },
         },
     }
     capability = ToolCapability(
@@ -332,7 +459,31 @@ def build_healthbench_medrag_tool_registry(
                 "top_k": {"const": MEDRAG_BM25_TOP_K},
                 "ranked_chunks": {
                     "type": "array",
-                    "items": {"type": "object"},
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "chunk_id",
+                            "document_id",
+                            "title",
+                            "rank",
+                            "score",
+                            "matched_terms",
+                            "text",
+                        ],
+                        "properties": {
+                            "chunk_id": {"type": "string"},
+                            "document_id": {"type": "string"},
+                            "title": {"type": "string"},
+                            "rank": {"type": "integer"},
+                            "score": {"type": "number"},
+                            "matched_terms": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "text": {"type": "string"},
+                        },
+                    },
                 },
             },
         },
@@ -417,6 +568,7 @@ def open_healthbench_medrag_tool_registry(
 
 __all__ = [
     "FrozenMedRAGBM25Corpus",
+    "HealthBenchMedRAGReactExecutionAdapter",
     "HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID",
     "HEALTHBENCH_PROFESSIONAL_DATASET_SCOPE",
     "HealthBenchMedRAGSearchToolBackend",

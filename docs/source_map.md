@@ -404,3 +404,58 @@ pinned grader returned HTTP 403 `insufficient_quota` on all three bounded
 provider attempts. Therefore v3 has no valid official score yet. The completed
 v1 result remains the only full-denominator comparison; v2 remains explicitly
 partial-evaluator evidence.
+
+### HealthBench Professional retrieval-enabled paired condition source map
+
+This is an explicitly separate **retrieval-enabled diagnostic protocol**. It
+does not alter or replace the official/reference-compatible no-tool conditions
+above, and it must not be described as an official HealthBench Professional
+baseline. A repository search found no callable Web-search backend in the
+checked FlowSteer or SkillFlow runtime. Consequently, the current executable
+fallback is the already provisioned, frozen SkillFlow MedRAG textbook BM25
+corpus, not a simulated Web service:
+
+- runtime root:
+  `/ssd1/iclr/.private/skillflow-resources/medrag-textbooks-runtime`;
+- corpus identity: `MedRAG/textbooks`, recorded source revision
+  `9c72838920a1323ffa867467d3f7aa7b36b0f994`;
+- frozen files: `all_chunks.jsonl` and `bm25_index.pkl`; and
+- checked corpus size: 125,847 chunks.
+
+The corpus records contain public `id`, `title`, and text fields but no source
+URL. The adapter therefore persists `document_id`, `title`, `chunk_id`, rank,
+BM25 score, matched terms, and returned text in the Tool result/receipt; it
+does not fabricate URLs or bibliographic provenance that the corpus does not
+provide.
+
+| Source | Reused boundary | Local retrieval-enabled boundary |
+| --- | --- | --- |
+| `/ssd1/iclr/2/SkillFlow/training/task_prompts.py::MULTI_HOP_QA` | Search with specific entities; after `[NO_MATCH]` or `[REPEATED]`, reformulate the query with synonyms. | **Direct semantic reuse** as model-driven ReAct query reformulation guidance. A standard synonym or expanded abbreviation may be authored by the acting model, but the adapter does not invent an automatic medical synonym table. |
+| `/ssd1/iclr/2/SkillFlow/training/environment.py::{_search_passages,_search_external_corpus}` | BM25-backed retrieval, explicit no-match/repeated observations, and ranked evidence returned to the acting Agent. | **Thin compatibility reuse** through `src/interactive/healthbench_tool_adapter.py::{FrozenMedRAGBM25Corpus,open_healthbench_medrag_tool_registry}` and the existing Tool registry. |
+| FlowSteer revision `1c9f2ab`, `workflow_env.py::{InteractiveWorkflowEnv.step,InteractiveWorkflowEnv._execute_workflow}` | One admitted Canvas edit followed by execution and observable feedback. | **Direct reuse** through the existing AgentGraph Canvas/runtime; enabling a Tool does not add a medical topology, role class, or alternate orchestration core. |
+| Existing `src/interactive/react_execution.py::ToolReactExecutionAdapter` and `src/interactive/tool_runtime.py::{ToolRegistry.ainvoke_with_receipt,ToolReceipt}` | Per-Agent `Thought -> Action(tool) -> Observation -> Thought -> Final`, exact schema validation, and measured Tool receipts. | **Direct reuse**. ReAct remains an Agent execution mode, not an Agent role. |
+| Existing `src/interactive/records.py::{TurnRecord,TrajectoryRecord}` and v3 Artifact communication | Canvas actions, Agent outputs, communication, Tool evidence, terminal state, and evaluator receipts remain reconstructible. | **Direct reuse**; retrieved chunks travel as receipt-backed Artifacts rather than an unrecorded knowledge channel. |
+| `src/interactive/healthbench_tool_adapter.py` public corpus projection | Preserve existing search output and corpus provenance. | **Necessary adapter change**: carry source `id` and `title` into every ranked chunk and describe entity-specific/synonym-pivot query behavior in the Tool schema. |
+| Existing `QARetrievalReactExecutionAdapter._state_conditioned_action_domain` | Mask Tool actions that cannot advance the measured public state and constrain the next generation to completion when evidence admission is satisfied. | **Thin HealthBench adaptation** in `HealthBenchMedRAGReactExecutionAdapter`: a successful non-empty textbook result makes `complete` the sole next action; an empty/error result admits a distinct reformulated query; the exhausted Tool budget also makes completion sole. Exact prior queries are rejected within the same Agent execution. This changes only ReAct action admission, not Agent roles, topology, medical content, or answer selection. |
+
+No synonym/abbreviation lexicon exists in the checked MedRAG resource or the
+referenced SkillFlow BM25 implementation. This condition therefore does not
+claim deterministic automatic synonym expansion, construct paraphrased
+HealthBench examples, or modify benchmark conversations. Any later curated
+lexicon would require its own identified source and versioned receipts.
+
+The paired comparison must expose exactly the same frozen MedRAG Tool catalog,
+corpus revision, model catalog, generation settings, task IDs, and reference
+evaluator to both arms. Since a plain one-shot Direct call cannot invoke the
+Tool, the retrieval-enabled comparator is labelled **Single-Agent
+ReAct+MedRAG**, compared with **free AgentGraph+MedRAG**; it is not silently
+reported as the no-tool Direct baseline. The existing no-tool Direct versus
+AgentGraph evidence remains a distinct protocol and artifact directory.
+
+The HealthBench public test conversation may supply the clinical query to an
+Agent, but `rubric_items`, `physician_response`, `canary_string`, grader output,
+and reference responses remain evaluator-only. Neither those fields nor a
+HealthBench case/answer database may enter a Tool query, corpus, Observation,
+Director feedback, Agent Artifact, or trajectory visible to a model. This
+retrieval condition adds no training, GRPO, LoRA, MACE, Bayesian update, Skill
+retrieval/injection/evolution, or learned medical memory.

@@ -90,6 +90,51 @@ def _evaluation_config(dataset_key: str) -> dict:
     return config
 
 
+def _healthbench_react_config() -> dict:
+    config = _evaluation_config("healthbench_professional")
+    condition_id = "healthbench-professional-paired-medrag-test"
+    config["experiment"].update(
+        {
+            "condition_id": condition_id,
+            "tool_version": "skillflow.medrag-textbooks-bm25-react.v1",
+        }
+    )
+    config["healthbench_professional_evaluation"].update(
+        {
+            "direct_execution_mode": "react",
+            "direct_completion_condition": (
+                "Return one complete assistant response after any useful "
+                "medical textbook retrieval."
+            ),
+            "direct_allowed_tools": ["healthbench-medrag.search"],
+            "protocol_equivalent_to_direct": True,
+        }
+    )
+    config["healthbench_tool_runtime"] = {
+        "enabled": True,
+        "condition_id": condition_id,
+        "mode": "model_driven_medrag_search",
+        "dataset_scope": ["healthbench_professional"],
+        "resource_dir": "/tmp/frozen-medrag-fixture",
+        "source_identity": "MedRAG/textbooks",
+        "source_revision": "fixture-revision",
+        "expected_rows": 2,
+        "max_turns_per_agent_call": 3,
+        "max_tool_calls_per_agent_call": 2,
+        "tool_timeout_seconds": 1.0,
+    }
+    return config
+
+
+def _assert_config_rejected(config: dict, expected_check: str) -> None:
+    try:
+        _MODULE.validate_completion_benchmark_config(config)
+    except Exception as exc:
+        assert expected_check in str(exc)
+    else:  # pragma: no cover - fail-closed guard
+        raise AssertionError(f"invalid config was accepted: {expected_check}")
+
+
 def test_runner_reuses_hotpot_graph_and_stable_zero_boundaries():
     assert _MODULE._collect_graph is _MODULE.hotpot_round._collect_graph
     assert _MODULE._stable_zero_check is _MODULE.hotpot_round._stable_zero_check
@@ -119,6 +164,70 @@ def test_supported_configs_are_evaluation_only():
             assert "optimizer_updates" in str(exc)
         else:  # pragma: no cover - fail-closed guard
             raise AssertionError("an optimizer-enabled evaluation config was accepted")
+
+
+def test_healthbench_reasoning_direct_requires_tool_runtime_disabled():
+    config = _evaluation_config("healthbench_professional")
+    _MODULE.validate_completion_benchmark_config(config)
+
+    invalid = deepcopy(config)
+    invalid["healthbench_tool_runtime"] = deepcopy(
+        _healthbench_react_config()["healthbench_tool_runtime"]
+    )
+    _assert_config_rejected(invalid, "healthbench_tool_runtime.disabled")
+
+
+def test_healthbench_react_direct_requires_paired_medrag_condition_binding():
+    config = _healthbench_react_config()
+    _MODULE.validate_completion_benchmark_config(config)
+
+    invalid_cases = (
+        (
+            "healthbench_tool_runtime.enabled",
+            {"healthbench_tool_runtime": {"enabled": False}},
+        ),
+        (
+            "healthbench.direct_completion_condition",
+            {
+                "healthbench_professional_evaluation": {
+                    "direct_completion_condition": ""
+                }
+            },
+        ),
+        (
+            "healthbench.protocol_equivalent_to_direct",
+            {
+                "healthbench_professional_evaluation": {
+                    "protocol_equivalent_to_direct": False
+                }
+            },
+        ),
+        (
+            "healthbench.direct_allowed_tools",
+            {
+                "healthbench_professional_evaluation": {
+                    "direct_allowed_tools": []
+                }
+            },
+        ),
+        (
+            "healthbench_tool_runtime.mode",
+            {"healthbench_tool_runtime": {"mode": "unsupported_mode"}},
+        ),
+        (
+            "healthbench_tool_runtime.dataset_scope",
+            {"healthbench_tool_runtime": {"dataset_scope": ["hotpotqa"]}},
+        ),
+        (
+            "healthbench_tool_runtime.condition_id",
+            {"healthbench_tool_runtime": {"condition_id": "other-condition"}},
+        ),
+    )
+    for expected_check, overrides in invalid_cases:
+        invalid = deepcopy(config)
+        for section_name, section_overrides in overrides.items():
+            invalid[section_name].update(section_overrides)
+        _assert_config_rejected(invalid, expected_check)
 
 
 def test_evaluation_config_allows_base_director_without_lora_adapter():
@@ -1866,6 +1975,161 @@ def test_interactive_direct_condition_records_every_environment_policy_call():
     assert len(result["executions"]) == 2
     assert result["final_answer"] == "click[action-2]"
     assert result["evaluation"]["metrics"]["success"] == 1.0
+
+
+def test_healthbench_direct_react_is_one_agent_with_same_medrag_registry():
+    registry = load_model_registry(
+        _ROOT / "config" / "model_catalog_hotpotqa_deep_v6.yaml"
+    )
+    config = _healthbench_react_config()
+    condition_id = config["experiment"]["condition_id"]
+    completion_condition = config["healthbench_professional_evaluation"][
+        "direct_completion_condition"
+    ]
+    observed = {}
+    closed = []
+    tool_registry = SimpleNamespace(
+        resource_ids=("healthbench-medrag.search",),
+    )
+
+    class Runtime:
+        async def execute(self, graph, problem, *, run_id):
+            node = graph.nodes[0]
+            observed.update(
+                problem=problem,
+                run_id=run_id,
+                node=node,
+                node_count=len(graph.nodes),
+                output_agent_id=graph.output_agent_id,
+            )
+            call = SimpleNamespace(
+                response=SimpleNamespace(
+                    metadata={
+                        "model_calls": [
+                            {"metadata": {"generation_seed": 29}}
+                        ],
+                        "react_trace": [
+                            {
+                                "turn": 1,
+                                "action_name": "healthbench-medrag.search",
+                                "observation_status": "completed",
+                            }
+                        ],
+                        "tool_receipts": [
+                            {
+                                "resource_id": "healthbench-medrag.search",
+                                "status": "completed",
+                            }
+                        ],
+                    }
+                )
+            )
+            return SimpleNamespace(
+                final_answer="This is the complete assistant response.",
+                calls=(call,),
+                run_id=run_id,
+                output_agent_id=node.id,
+                block_completion_order=((node.id,),),
+                executed_agent_ids=(node.id,),
+            )
+
+    def runtime_for_task(runtime_task, *, condition_id):
+        observed["runtime_task"] = runtime_task
+        observed["runtime_condition_id"] = condition_id
+        return (
+            Runtime(),
+            tool_registry,
+            lambda: closed.append(True),
+        )
+
+    backend = SimpleNamespace(
+        registry=registry,
+        config=config,
+        _runtime_for_task=runtime_for_task,
+    )
+    task = _MODULE.TaskRecord(
+        task_id="healthbench-professional:one",
+        question=(
+            "Conversation:\n\n[user] What should I discuss with my clinician?"
+            "\n\n[assistant]"
+        ),
+        ground_truth="evaluator-private",
+        split="validation",
+        metadata={"dataset_key": "healthbench_professional"},
+    )
+
+    async def fake_evaluate(_backend, evaluated_task, prediction, *, run_graph=None):
+        assert evaluated_task is task
+        assert prediction == "This is the complete assistant response."
+        assert run_graph is None
+        return EvaluationOutcome(
+            valid=True,
+            reward=0.75,
+            metrics={"overall_score_length_adjusted": 0.75},
+            reason="synthetic test evaluator",
+            evaluator_version="healthbench.fake.v1",
+        )
+
+    execution = SimpleNamespace(
+        metadata={"response": {"generation_seed": 29}},
+        to_dict=lambda: {
+            "output": "This is the complete assistant response.",
+            "metadata": {
+                "response": {
+                    "generation_seed": 29,
+                    "react_trace": [
+                        {
+                            "turn": 1,
+                            "action_name": "healthbench-medrag.search",
+                            "observation_status": "completed",
+                        }
+                    ],
+                    "tool_receipts": [
+                        {
+                            "resource_id": "healthbench-medrag.search",
+                            "status": "completed",
+                        }
+                    ],
+                }
+            },
+        },
+    )
+    with patch.object(
+        _MODULE,
+        "execution_record_from_call",
+        return_value=execution,
+    ), patch.object(_MODULE, "_evaluate_prediction", new=fake_evaluate):
+        result = asyncio.run(
+            _MODULE._direct_one(
+                backend,
+                task,
+                0,
+                model_id="qwen3.5-9b-local",
+                protocol="single_react_agent_medrag_v1",
+                contract="Use retrieval when useful and answer the conversation.",
+                seed=29,
+                run_label="healthbench-medrag-test",
+            )
+        )
+
+    node = observed["node"]
+    assert observed["node_count"] == 1
+    assert node.execution_mode.value == "react"
+    assert node.allowed_tools == ("healthbench-medrag.search",)
+    assert node.completion_condition == completion_condition
+    assert observed["output_agent_id"] == node.id
+    assert observed["runtime_task"] is task
+    assert observed["runtime_condition_id"] == condition_id
+    assert task.question in observed["problem"]
+    assert task.ground_truth not in observed["problem"]
+    assert result["simple_baseline_topology"] == "single_react_agent"
+    assert result["runtime_condition_id"] == condition_id
+    assert result["tool_version"] == config["experiment"]["tool_version"]
+    assert result["tool_resource_ids"] == ["healthbench-medrag.search"]
+    assert result["runtime"]["output_agent_id"] == node.id
+    assert result["execution"]["metadata"]["response"]["react_trace"]
+    assert result["execution"]["metadata"]["response"]["tool_receipts"]
+    assert closed == [True]
 
 
 def test_swe_direct_condition_is_one_coding_agent_with_repository_tools():

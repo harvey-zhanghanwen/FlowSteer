@@ -64,6 +64,9 @@ from src.interactive.healthbench_professional_grader import (
     HEALTHBENCH_PROFESSIONAL_EVALUATOR_VERSION,
     HealthBenchProfessionalGrader,
 )
+from src.interactive.healthbench_tool_adapter import (
+    HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+)
 from src.interactive.records import TaskRecord
 from src.interactive.rollout_collector import execution_record_from_call
 from src.interactive.swebench_adapter import OfficialSWEbenchHarness
@@ -308,9 +311,45 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
             type(max_provider_attempts) is int and max_provider_attempts > 0
         )
         tool_runtime = config.get("healthbench_tool_runtime")
-        checks["healthbench_tool_runtime.disabled"] = not isinstance(
-            tool_runtime, Mapping
-        ) or tool_runtime.get("enabled") is False
+        direct_execution_mode = bounded.get("direct_execution_mode", "reasoning")
+        checks["healthbench.direct_execution_mode"] = direct_execution_mode in {
+            "reasoning",
+            "react",
+        }
+        if direct_execution_mode == "react":
+            experiment = _mapping(config.get("experiment"), "experiment")
+            checks["healthbench.direct_completion_condition"] = bool(
+                str(bounded.get("direct_completion_condition", "")).strip()
+            )
+            checks["healthbench.protocol_equivalent_to_direct"] = (
+                bounded.get("protocol_equivalent_to_direct") is True
+            )
+            checks["healthbench.direct_allowed_tools"] = (
+                bounded.get("direct_allowed_tools")
+                == [HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID]
+            )
+            checks["healthbench_tool_runtime.enabled"] = bool(
+                isinstance(tool_runtime, Mapping)
+                and tool_runtime.get("enabled") is True
+            )
+            checks["healthbench_tool_runtime.mode"] = bool(
+                isinstance(tool_runtime, Mapping)
+                and tool_runtime.get("mode") == "model_driven_medrag_search"
+            )
+            checks["healthbench_tool_runtime.dataset_scope"] = bool(
+                isinstance(tool_runtime, Mapping)
+                and tool_runtime.get("dataset_scope")
+                == ["healthbench_professional"]
+            )
+            checks["healthbench_tool_runtime.condition_id"] = bool(
+                isinstance(tool_runtime, Mapping)
+                and tool_runtime.get("condition_id")
+                == experiment.get("condition_id")
+            )
+        else:
+            checks["healthbench_tool_runtime.disabled"] = not isinstance(
+                tool_runtime, Mapping
+            ) or tool_runtime.get("enabled") is False
     if dataset_key in _INTERACTIVE_BENCHMARKS:
         evaluation = _mapping(config.get("evaluation"), "evaluation")
         per_source = evaluation.get("max_environment_steps_by_source")
@@ -1239,6 +1278,111 @@ async def _direct_one(
     dataset_key = _dataset_key(task)
     started_at = _utc_now()
 
+    if (
+        dataset_key == "healthbench_professional"
+        and _evaluation_section(backend.config)[1].get("direct_execution_mode")
+        == "react"
+    ):
+        bounded = _evaluation_section(backend.config)[1]
+        condition_id = str(backend.config["experiment"]["condition_id"])
+        expected_tools = tuple(bounded["direct_allowed_tools"])
+        task_runtime, tool_registry, close_runtime = backend._runtime_for_task(
+            task,
+            condition_id=condition_id,
+        )
+        try:
+            if tool_registry is None:
+                raise CompletionBenchmarkRoundError(
+                    "HealthBench Direct ReAct Agent has no MedRAG ToolRegistry"
+                )
+            if tuple(tool_registry.resource_ids) != expected_tools:
+                raise CompletionBenchmarkRoundError(
+                    "HealthBench Direct ReAct Tool resources differ from config"
+                )
+            node = AgentNode(
+                "direct_react_agent",
+                model_id,
+                contract,
+                allowed_tools=expected_tools,
+                execution_mode="react",
+                completion_condition=str(
+                    bounded["direct_completion_condition"]
+                ),
+            )
+            graph = AgentGraph(nodes=(node,), output_agent_id=node.id)
+            runtime_result = await task_runtime.execute(
+                graph,
+                _workflow_problem(task, backend.config),
+                run_id=run_id,
+            )
+            if not runtime_result.final_answer:
+                raise CompletionBenchmarkRoundError(
+                    "HealthBench Direct ReAct Agent produced no assistant response"
+                )
+            calls = tuple(runtime_result.calls)
+            if len(calls) != 1:
+                raise CompletionBenchmarkRoundError(
+                    "HealthBench single ReAct Agent produced an invalid outer call count"
+                )
+            raw_model_calls = calls[0].response.metadata.get("model_calls", ())
+            model_call_seeds = [
+                item.get("metadata", {}).get("generation_seed")
+                for item in raw_model_calls
+                if isinstance(item, Mapping)
+                and isinstance(item.get("metadata"), Mapping)
+            ]
+            if not model_call_seeds or any(
+                actual_seed != seed for actual_seed in model_call_seeds
+            ):
+                raise CompletionBenchmarkRoundError(
+                    "Direct ReAct Agent generation seed receipts differ from config"
+                )
+            executions = [
+                execution_record_from_call(call).to_dict() for call in calls
+            ]
+            evaluation = await _evaluate_prediction(
+                backend,
+                task,
+                runtime_result.final_answer,
+            )
+            return {
+                "schema_version": "flowsteer.completion_benchmark.direct_prediction.v1",
+                "dataset_key": dataset_key,
+                "task_id": task.task_id,
+                "task": task.to_dict(),
+                "condition": "direct_local_qwen35_9b",
+                "protocol": protocol,
+                "simple_baseline_topology": "single_react_agent",
+                "runtime_condition_id": condition_id,
+                "tool_version": str(
+                    backend.config["experiment"]["tool_version"]
+                ),
+                "tool_resource_ids": list(tool_registry.resource_ids),
+                "model_id": model_id,
+                "provider_id": provider.provider_id,
+                "provider_model": model.model_name,
+                "generation_seed": seed,
+                "final_answer": runtime_result.final_answer,
+                "evaluation": asdict(evaluation),
+                "execution": executions[-1],
+                "executions": executions,
+                "runtime": {
+                    "run_id": runtime_result.run_id,
+                    "output_agent_id": runtime_result.output_agent_id,
+                    "block_completion_order": [
+                        list(block)
+                        for block in runtime_result.block_completion_order
+                    ],
+                    "executed_agent_ids": list(
+                        runtime_result.executed_agent_ids
+                    ),
+                },
+                "started_at": started_at,
+                "completed_at": _utc_now(),
+            }
+        finally:
+            close_runtime()
+
     if dataset_key == "swe_bench":
         bounded = _evaluation_section(backend.config)[1]
         condition_id = str(backend.config["experiment"]["condition_id"])
@@ -1493,6 +1637,20 @@ async def _collect_direct(
     seed = int(bounded.get("direct_generation_seed", experiment["seed"]))
     run_label = str(experiment["name"])
     concurrency = int(bounded["concurrency"])
+    direct_execution_mode = str(
+        bounded.get("direct_execution_mode", "reasoning")
+    )
+    retrieval_direct = bool(
+        str(bounded.get("dataset_key", "")) == "healthbench_professional"
+        and direct_execution_mode == "react"
+    )
+    expected_tool_resource_ids = (
+        list(bounded.get("direct_allowed_tools", ()))
+        if retrieval_direct
+        else []
+    )
+    expected_runtime_condition_id = str(experiment.get("condition_id", ""))
+    expected_tool_version = str(experiment.get("tool_version", ""))
     direct_candidates = _read_jsonl(path)
     reuse_source = bounded.get("direct_reused_from")
     reuse_path: Optional[Path] = None
@@ -1523,6 +1681,19 @@ async def _collect_direct(
             and candidate.get("generation_seed") == seed
             and isinstance(candidate.get("final_answer"), str)
             and (
+                not retrieval_direct
+                or (
+                    candidate.get("simple_baseline_topology")
+                    == "single_react_agent"
+                    and candidate.get("runtime_condition_id")
+                    == expected_runtime_condition_id
+                    and candidate.get("tool_version")
+                    == expected_tool_version
+                    and candidate.get("tool_resource_ids")
+                    == expected_tool_resource_ids
+                )
+            )
+            and (
                 not isinstance(evaluation, Mapping)
                 or evaluation.get("evaluator_version") != evaluator_version_for(task)
                 or (
@@ -1552,7 +1723,7 @@ async def _collect_direct(
         value: Mapping[str, Any],
         task: TaskRecord,
     ) -> bool:
-        if hotpot_round._direct_resume_matches(
+        if not retrieval_direct and hotpot_round._direct_resume_matches(
             value,
             task=task,
             model_id=model_id,
@@ -1567,6 +1738,18 @@ async def _collect_direct(
             and value.get("model_id") == model_id
             and value.get("protocol") == protocol
             and value.get("generation_seed") == seed
+            and (
+                not retrieval_direct
+                or (
+                    value.get("simple_baseline_topology")
+                    == "single_react_agent"
+                    and value.get("runtime_condition_id")
+                    == expected_runtime_condition_id
+                    and value.get("tool_version") == expected_tool_version
+                    and value.get("tool_resource_ids")
+                    == expected_tool_resource_ids
+                )
+            )
             and isinstance(value.get("final_answer"), str)
             and isinstance(value.get("execution"), Mapping)
             and isinstance(evaluation, Mapping)
@@ -2786,6 +2969,15 @@ def _report(
         ),
         "sample_count": len(rows),
         "primary_metric": metric_name,
+        "direct_execution_mode": str(
+            bounded.get("direct_execution_mode", "reasoning")
+        ),
+        "tool_condition": (
+            str(config["experiment"].get("tool_version", "none"))
+            if isinstance(config.get("healthbench_tool_runtime"), Mapping)
+            and config["healthbench_tool_runtime"].get("enabled") is True
+            else "none"
+        ),
         "protocol_equivalent_to_direct": bool(
             bounded.get("protocol_equivalent_to_direct", False)
         ),
@@ -2937,6 +3129,17 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         if report.get("protocol_equivalent_to_direct") is True
         else "Direct and AgentGraph are separate protocols; their delta is descriptive, not a paired causal estimate."
     )
+    retrieval_pair = bool(
+        report.get("dataset_key") == "healthbench_professional"
+        and report.get("direct_execution_mode") == "react"
+        and report.get("tool_condition") not in {None, "", "none"}
+    )
+    direct_label = (
+        "Single-Agent ReAct + MedRAG"
+        if retrieval_pair
+        else "Qwen3.5-9B Direct Local Baseline"
+    )
+    graph_label = "Free AgentGraph + MedRAG" if retrieval_pair else "AgentGraph"
     if tuple(report["agentgraph_minus_direct"]) == ("exact_match", "token_f1"):
         return f"""# {report['dataset']} Architecture Validation
 
@@ -2948,8 +3151,8 @@ Terminal-output parsing failures: **Direct {report['direct_parsing_failure_count
 
 | Condition | Completed | Evaluator valid | Strict EM | Strict F1 |
 |---|---:|---:|---:|---:|
-| Qwen3.5-9B Direct Local Baseline | {direct['completed']} | {direct['evaluator_valid']} | {100 * float(direct['strict_exact_match']):.2f}% | {100 * float(direct['strict_token_f1']):.2f}% |
-| AgentGraph | {graph['completed']} | {graph['evaluator_valid']} | {100 * float(graph['strict_exact_match']):.2f}% | {100 * float(graph['strict_token_f1']):.2f}% |
+| {direct_label} | {direct['completed']} | {direct['evaluator_valid']} | {100 * float(direct['strict_exact_match']):.2f}% | {100 * float(direct['strict_token_f1']):.2f}% |
+| {graph_label} | {graph['completed']} | {graph['evaluator_valid']} | {100 * float(graph['strict_exact_match']):.2f}% | {100 * float(graph['strict_token_f1']):.2f}% |
 
 AgentGraph - Direct: **{100 * float(report['agentgraph_minus_direct']['exact_match']):+.2f} EM**, **{100 * float(report['agentgraph_minus_direct']['token_f1']):+.2f} F1**.
 
@@ -2987,8 +3190,8 @@ Primary metric: **overall_score_length_adjusted** using the OpenAI simple-evals 
 
 | Condition | Completed | Evaluator valid | Strict raw score | Strict length-adjusted score | Valid-only length-adjusted score |
 |---|---:|---:|---:|---:|---:|
-| Qwen3.5-9B Direct Local Baseline | {direct['completed']} | {direct['evaluator_valid']} | {100 * float(direct['strict_overall_score']):.2f}% | {100 * float(direct['strict_overall_score_length_adjusted']):.2f}% | {direct_valid_text} |
-| AgentGraph | {graph['completed']} | {graph['evaluator_valid']} | {100 * float(graph['strict_overall_score']):.2f}% | {100 * float(graph['strict_overall_score_length_adjusted']):.2f}% | {graph_valid_text} |
+| {direct_label} | {direct['completed']} | {direct['evaluator_valid']} | {100 * float(direct['strict_overall_score']):.2f}% | {100 * float(direct['strict_overall_score_length_adjusted']):.2f}% | {direct_valid_text} |
+| {graph_label} | {graph['completed']} | {graph['evaluator_valid']} | {100 * float(graph['strict_overall_score']):.2f}% | {100 * float(graph['strict_overall_score_length_adjusted']):.2f}% | {graph_valid_text} |
 
 AgentGraph - Direct (strict length-adjusted): **{100 * float(report['agentgraph_minus_direct']['overall_score_length_adjusted']):+.2f} percentage points**.
 
@@ -3008,8 +3211,8 @@ Terminal-output parsing failures: **Direct {report['direct_parsing_failure_count
 
 | Condition | Completed | Evaluator valid | Strict {metric_name} |
 |---|---:|---:|---:|
-| Qwen3.5-9B Direct Local Baseline | {direct['completed']} | {direct['evaluator_valid']} | {100 * float(direct[strict_key]):.2f}% |
-| AgentGraph | {graph['completed']} | {graph['evaluator_valid']} | {100 * float(graph[strict_key]):.2f}% |
+| {direct_label} | {direct['completed']} | {direct['evaluator_valid']} | {100 * float(direct[strict_key]):.2f}% |
+| {graph_label} | {graph['completed']} | {graph['evaluator_valid']} | {100 * float(graph[strict_key]):.2f}% |
 
 AgentGraph - Direct: **{100 * float(delta):+.2f} percentage points**.
 

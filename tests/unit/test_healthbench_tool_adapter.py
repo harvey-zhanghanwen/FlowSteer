@@ -12,10 +12,11 @@ import unittest
 from src.interactive.healthbench_tool_adapter import (
     HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
     HEALTHBENCH_PROFESSIONAL_DATASET_SCOPE,
+    HealthBenchMedRAGReactExecutionAdapter,
     MEDRAG_BM25_TOP_K,
     open_healthbench_medrag_tool_registry,
 )
-from src.interactive.tool_runtime import ToolRequest
+from src.interactive.tool_runtime import StructuredAction, ToolRequest
 
 
 FIXTURE_SOURCE_REVISION = "1" * 40
@@ -52,8 +53,17 @@ def _write_bm25_fixture(root: Path) -> tuple[str, ...]:
     with (root / "bm25_index.pkl").open("wb") as output:
         pickle.dump(index, output)
     with (root / "all_chunks.jsonl").open("w", encoding="utf-8") as output:
-        for contents in documents:
-            output.write(json.dumps({"contents": contents}) + "\n")
+        for document_id, contents in enumerate(documents):
+            output.write(
+                json.dumps(
+                    {
+                        "contents": contents,
+                        "id": f"fixture-{document_id}",
+                        "title": f"Fixture Textbook {document_id}",
+                    }
+                )
+                + "\n"
+            )
     (root / ".source_revision").write_text(
         FIXTURE_SOURCE_REVISION + "\n", encoding="utf-8"
     )
@@ -103,6 +113,8 @@ class HealthBenchToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         ranked = result.value["ranked_chunks"]
         self.assertEqual("2", ranked[0]["chunk_id"])
+        self.assertEqual("fixture-2", ranked[0]["document_id"])
+        self.assertEqual("Fixture Textbook 2", ranked[0]["title"])
         self.assertEqual(1, ranked[0]["rank"])
         self.assertIn("gastrointestinal bleeding", ranked[0]["text"].lower())
         self.assertGreaterEqual(ranked[0]["score"], 1.0)
@@ -152,11 +164,109 @@ class HealthBenchToolAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(capability.supports_dataset("hotpotqa"))
         self.assertEqual(["query"], capability.input_schema["required"])
         self.assertNotIn("top_k", capability.input_schema["properties"])
+        query_description = capability.input_schema["properties"]["query"][
+            "description"
+        ]
+        self.assertIn("synonym", query_description)
+        self.assertIn("expanded abbreviation", query_description)
         self.assertEqual(
             MEDRAG_BM25_TOP_K,
             capability.output_schema["properties"]["top_k"]["const"],
         )
         self.assertEqual("none", capability.side_effect)
+
+    def test_react_domain_finishes_after_evidence_and_blocks_repeated_query(
+        self,
+    ) -> None:
+        gateway = type("Gateway", (), {"generate": lambda *_: None})()
+        with self._open() as opened:
+            adapter = HealthBenchMedRAGReactExecutionAdapter(
+                gateway=gateway,
+                tool_registry=opened.registry,
+                max_turns=6,
+                max_tool_calls=3,
+            )
+            initial = adapter._state_conditioned_action_domain(None, [])
+            successful = {
+                "observation_status": "success",
+                "executed_action": {
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                    "skill_id": None,
+                    "arguments": {"query": "acute kidney injury"},
+                },
+                "result": {"ranked_chunks": [{"text": "evidence"}]},
+            }
+            after_evidence = adapter._state_conditioned_action_domain(
+                None,
+                [successful],
+            )
+            repeated = StructuredAction.from_value(
+                {
+                    "kind": "tool",
+                    "name": "search",
+                    "resource_id": HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                    "skill_id": None,
+                    "arguments": {"query": "  ACUTE   kidney injury  "},
+                }
+            )
+            repeated_error = adapter._tool_action_error(
+                request=None,
+                action=repeated,
+                observations=[successful],
+            )
+
+        self.assertEqual(
+            (
+                frozenset({(HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID, "search")}),
+                True,
+            ),
+            initial,
+        )
+        self.assertEqual((frozenset(), True), after_evidence)
+        self.assertEqual("duplicate_tool_request", repeated_error)
+
+    def test_react_domain_allows_query_pivot_only_until_tool_budget(self) -> None:
+        gateway = type("Gateway", (), {"generate": lambda *_: None})()
+        with self._open() as opened:
+            adapter = HealthBenchMedRAGReactExecutionAdapter(
+                gateway=gateway,
+                tool_registry=opened.registry,
+                max_turns=6,
+                max_tool_calls=2,
+            )
+            empty_observations = [
+                {
+                    "observation_status": "success",
+                    "executed_action": {
+                        "kind": "tool",
+                        "name": "search",
+                        "resource_id": HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID,
+                        "skill_id": None,
+                        "arguments": {"query": query},
+                    },
+                    "result": {"ranked_chunks": []},
+                }
+                for query in ("AKI", "acute kidney injury")
+            ]
+            after_first = adapter._state_conditioned_action_domain(
+                None,
+                empty_observations[:1],
+            )
+            at_budget = adapter._state_conditioned_action_domain(
+                None,
+                empty_observations,
+            )
+
+        self.assertEqual(
+            (
+                frozenset({(HEALTHBENCH_MEDRAG_SEARCH_TOOL_ID, "search")}),
+                True,
+            ),
+            after_first,
+        )
+        self.assertEqual((frozenset(), True), at_budget)
 
     async def test_close_is_idempotent_and_fails_closed_on_later_search(self) -> None:
         opened = self._open()

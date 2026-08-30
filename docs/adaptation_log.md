@@ -724,3 +724,52 @@ change was made during profile selection.
   provider diagnostics; it contains no benchmark conversation, rubric, or
   reference response. The failed preflight remains terminal and cannot fall
   through into benchmark generation.
+
+## 2026-08-30: HealthBench Professional retrieval-enabled paired condition
+
+- Preserved the official/reference-compatible no-tool conditions unchanged.
+  Medical retrieval is a new versioned diagnostic protocol and is not labelled
+  an official HealthBench Professional baseline.
+- Confirmed that the checked FlowSteer and SkillFlow source trees do not expose
+  a callable Web-search backend to runtime Agents. The executable fallback is
+  the existing frozen SkillFlow MedRAG textbook BM25 resource at
+  `/ssd1/iclr/.private/skillflow-resources/medrag-textbooks-runtime`; no Web
+  result, URL, or freshness claim is synthesized.
+- Reused SkillFlow's `MULTI_HOP_QA` query policy: search for specific entities
+  and, after a no-match/repeated Observation, reformulate with a standard
+  synonym or expanded abbreviation. Reused its external-corpus BM25 boundary
+  instead of implementing another retrieval engine.
+- Kept query reformulation model-driven inside each Agent's ReAct execution
+  mode. No automatic synonym dictionary was added because neither the checked
+  SkillFlow implementation nor the frozen MedRAG resource contains a sourced
+  synonym/abbreviation lexicon.
+- Extended the HealthBench MedRAG adapter's ranked result with the corpus's
+  existing `document_id` and `title`. This is a necessary provenance/Tool
+  receipt adaptation; it does not create new evidence, alter BM25 ranking, or
+  fabricate source URLs.
+- The first synthetic ReAct canary produced one valid search result but kept
+  selecting search until its turn budget was exhausted. Added the same
+  state-conditioned Action-domain boundary used by the existing QA adapter:
+  non-empty evidence forces the next action to `complete`; empty/error results
+  retain one distinct-query pivot; Tool-budget exhaustion also forces
+  completion. An exact normalized query cannot be dispatched twice in one
+  Agent execution. This is an inference-time action mask, not a reward,
+  medical workflow template, hidden answer recovery, or weight update.
+- Reused the existing FlowSteer-derived incremental Canvas execution,
+  AgentGraph runtime, Artifact communication, trajectory serialization, and
+  explicit terminal boundary. Reused the current `ToolRegistry`,
+  `ToolReactExecutionAdapter`, and `ToolReceipt`; no medical Agent role,
+  workflow template, fixed topology, or second orchestration core was added.
+- Defined the fair retrieval-enabled pair as **Single-Agent ReAct+MedRAG**
+  versus **free AgentGraph+MedRAG**, with the same frozen corpus, Tool catalog,
+  model/generation condition, task IDs, and evaluator. Plain no-tool Direct is
+  retained only in its separate official condition and is not mixed into this
+  Tool-enabled comparison.
+- Prohibited use of public-test rubrics, physician/reference responses,
+  canary strings, grader output, benchmark answers, or HealthBench cases as
+  retrieval documents or query-expansion material. No benchmark row is
+  rewritten and no paraphrased dataset is constructed.
+- No training, backward pass, optimizer update, LoRA publication, GRPO, MACE,
+  Bayesian update, Skill retrieval/injection/evolution, or learned medical
+  memory was enabled. Retrieval smoke/evaluation metrics remain evidence-gated
+  until an actually completed, receipt-backed run exists.
