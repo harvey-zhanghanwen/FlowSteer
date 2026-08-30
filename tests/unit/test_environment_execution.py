@@ -24,6 +24,7 @@ from src.interactive.director import (
     director_system_prompt_for_version,
 )
 from src.interactive.environment_execution import (
+    _alfworld_public_goal_progress,
     build_environment_execution_resources,
     EnvironmentExecutionError,
     evaluator_locked_ragen_session_factory,
@@ -217,6 +218,42 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reward", receipts[0])
         self.assertNotIn("info", receipts[1])
         self.assertNotIn("won", str(receipts))
+
+    async def test_alfworld_dynamic_action_schema_unwraps_native_action(self) -> None:
+        session = FakeSession()
+        gateway = SequenceGateway(
+            [
+                json.dumps({"action": "look"}),
+                json.dumps({"action": "finish"}),
+            ]
+        )
+        runtime = resources(session=session, gateway=gateway, max_turns=2)
+
+        response = await runtime.execution_adapter.execute(make_request())
+
+        self.assertEqual(["look", "finish"], session.actions)
+        schemas = [
+            json.loads(item.model.metadata["response_json_schema"])
+            for item in gateway.requests
+        ]
+        self.assertEqual(
+            ["look", "finish"],
+            schemas[0]["properties"]["action"]["enum"],
+        )
+        self.assertEqual(
+            ["finish"],
+            schemas[1]["properties"]["action"]["enum"],
+        )
+        self.assertEqual(
+            "alfworld.native-action-enum.v1",
+            gateway.requests[0].model.metadata[
+                "response_json_schema_version"
+            ],
+        )
+        self.assertIn("Constrained response envelope", gateway.requests[0].problem)
+        receipts = response.metadata["environment_receipts"]
+        self.assertEqual("look", receipts[0]["action"])
+        self.assertEqual(json.dumps({"action": "look"}), receipts[0]["raw_model_output"])
 
     async def test_provider_failure_retries_same_rollout_episode_and_budget(self) -> None:
         class RetryGateway(SequenceGateway):
@@ -503,6 +540,87 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             second_prompt,
         )
 
+    async def test_alfworld_open_and_examine_update_persistent_scene_memory(
+        self,
+    ) -> None:
+        class InspectSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = ("go to cabinet 1",)
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                if action == "go to cabinet 1":
+                    self._available = ("open cabinet 1",)
+                    return (
+                        "You arrive at cabinet 1. The cabinet 1 is closed.",
+                        0.0,
+                        False,
+                        {"won": False},
+                    )
+                if action == "open cabinet 1":
+                    self._available = ("examine cabinet 1",)
+                    return (
+                        "You open the cabinet 1. The cabinet 1 is open. "
+                        "In it, you see a mug 1.",
+                        0.0,
+                        False,
+                        {"won": False},
+                    )
+                if action == "examine cabinet 1":
+                    self._available = ("go to shelf 1",)
+                    return (
+                        "The cabinet 1 is open. In it, you see nothing.",
+                        0.0,
+                        False,
+                        {"won": False},
+                    )
+                self._available = ("finish",)
+                return "You arrive at shelf 1.", 0.0, False, {"won": False}
+
+        base = make_request()
+        request = AgentRequest(
+            request_id=base.request_id,
+            run_id=base.run_id,
+            graph_revision=base.graph_revision,
+            problem="Put some soapbar in cabinet.",
+            agent=base.agent,
+            model=base.model,
+            provider=base.provider,
+            phase=base.phase,
+            communication_condition=base.communication_condition,
+        )
+        session = InspectSession()
+        gateway = SequenceGateway(
+            [
+                "go to cabinet 1",
+                "open cabinet 1",
+                "examine cabinet 1",
+                "go to shelf 1",
+            ]
+        )
+        runtime = resources(session=session, gateway=gateway, max_turns=4)
+
+        response = await runtime.execution_adapter.execute(request)
+
+        after_open = response.metadata["model_calls"][2]["public_state"]
+        after_examine = response.metadata["model_calls"][3]["public_state"]
+        self.assertIn("open_state=open; contents=[\"mug 1\"]", after_open)
+        self.assertIn("target_evidence=absent", after_open)
+        self.assertIn("target_negative_evidence_turns=[2]", after_open)
+        self.assertIn("open_state=open; contents=[]", after_examine)
+        self.assertIn("target_negative_evidence_turns=[2, 3]", after_examine)
+        scene_memory = response.metadata["environment_current_state"][
+            "public_scene_memory"
+        ]
+        cabinet = next(
+            entry for entry in scene_memory if entry["location"] == "cabinet 1"
+        )
+        self.assertEqual("open", cabinet["open_state"])
+        self.assertEqual([], cabinet["contents"])
+        self.assertEqual("absent", cabinet["target_evidence"])
+        self.assertEqual([2, 3], cabinet["target_negative_evidence_turns"])
+
     async def test_alfworld_visible_memory_retains_visited_destination_action(
         self,
     ) -> None:
@@ -663,9 +781,162 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
         runtime = resources(session=session, gateway=gateway, max_turns=4)
 
-        await runtime.execution_adapter.execute(make_request())
+        response = await runtime.execution_adapter.execute(make_request())
 
         self.assertNotIn("No-progress signal", gateway.requests[3].problem)
+        diagnostic = response.metadata["environment_current_state"][
+            "stall_diagnostic"
+        ]
+        self.assertTrue(diagnostic["stalled"])
+        self.assertIn("alternating_action_loop", diagnostic["signals"])
+        self.assertIn("no_goal_predicate_progress", diagnostic["signals"])
+        self.assertEqual(
+            ["go to cart 1", "go to shelf 1"],
+            diagnostic["alternating_actions"],
+        )
+
+    async def test_alfworld_stall_diagnostic_detects_repeated_public_state(
+        self,
+    ) -> None:
+        class RepeatedStateSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = ("look",)
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                return "room zero", 0.0, False, {"won": False}
+
+        session = RepeatedStateSession()
+        gateway = SequenceGateway(["look", "look"])
+        runtime = resources(session=session, gateway=gateway, max_turns=2)
+
+        response = await runtime.execution_adapter.execute(make_request())
+
+        diagnostic = response.metadata["environment_current_state"][
+            "stall_diagnostic"
+        ]
+        self.assertTrue(diagnostic["stalled"])
+        self.assertEqual(2, diagnostic["repeated_state_count"])
+        self.assertIn("repeated_public_state", diagnostic["signals"])
+        self.assertEqual("alfworld.public-stall.v1", diagnostic["schema_version"])
+        self.assertNotIn("reward", str(diagnostic))
+        self.assertNotIn("won", str(diagnostic))
+
+    async def test_alfworld_distinct_exploration_is_warning_not_hard_stall(
+        self,
+    ) -> None:
+        class DistinctExplorationSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self._step = 0
+                self._available = ("go to cabinet 1",)
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                self._step += 1
+                self._available = (f"go to cabinet {self._step + 1}",)
+                return (
+                    f"at cabinet {self._step}; this location has distinct contents",
+                    0.0,
+                    False,
+                    {"won": False},
+                )
+
+        session = DistinctExplorationSession()
+        gateway = SequenceGateway(
+            [f"go to cabinet {index}" for index in range(1, 7)]
+        )
+        runtime = resources(session=session, gateway=gateway, max_turns=6)
+
+        response = await runtime.execution_adapter.execute(make_request())
+
+        diagnostic = response.metadata["environment_current_state"][
+            "stall_diagnostic"
+        ]
+        self.assertFalse(diagnostic["stalled"])
+        self.assertEqual(6, diagnostic["turns_since_goal_progress"])
+        self.assertIn("no_goal_predicate_progress", diagnostic["signals"])
+        self.assertNotIn("repeated_public_state", diagnostic["signals"])
+        self.assertEqual([], diagnostic["alternating_actions"])
+
+    def test_alfworld_public_goal_progress_requires_exact_lamp_use_while_held(
+        self,
+    ) -> None:
+        facts = {
+            "target_class": "apple",
+            "destination_class": "",
+            "required_transform": "",
+            "examine_with_desklamp": True,
+        }
+        unrelated = _alfworld_public_goal_progress(
+            facts,
+            (
+                {
+                    "turn": 1,
+                    "state_advanced": True,
+                    "action": "use faucet 1",
+                },
+            ),
+        )
+        without_target = _alfworld_public_goal_progress(
+            facts,
+            (
+                {
+                    "turn": 1,
+                    "state_advanced": True,
+                    "action": "use desklamp 1",
+                },
+            ),
+        )
+        completed = _alfworld_public_goal_progress(
+            facts,
+            (
+                {
+                    "turn": 1,
+                    "state_advanced": True,
+                    "action": "take apple 1 from countertop 1",
+                },
+                {
+                    "turn": 2,
+                    "state_advanced": True,
+                    "action": "use desklamp 1",
+                },
+            ),
+        )
+
+        self.assertFalse(unrelated["lamp_use_completed"])
+        self.assertFalse(without_target["lamp_use_completed"])
+        self.assertTrue(completed["lamp_use_completed"])
+
+    def test_alfworld_opposite_temperature_retracts_public_transform(self) -> None:
+        progress = _alfworld_public_goal_progress(
+            {
+                "target_class": "apple",
+                "destination_class": "fridge",
+                "required_transform": "heat",
+                "examine_with_desklamp": False,
+            },
+            (
+                {
+                    "turn": 1,
+                    "state_advanced": True,
+                    "action": "take apple 1 from countertop 1",
+                },
+                {
+                    "turn": 2,
+                    "state_advanced": True,
+                    "action": "heat apple 1 with microwave 1",
+                },
+                {
+                    "turn": 3,
+                    "state_advanced": True,
+                    "action": "cool apple 1 with fridge 1",
+                },
+            ),
+        )
+
+        self.assertEqual([], progress["transformed_target_instances"])
 
     async def test_alfworld_public_progress_retracts_taken_placement(self) -> None:
         class PlacementSession(FakeSession):
@@ -1062,6 +1333,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("look", first_state["last_action"])
         self.assertEqual(["finish"], first_state["admissible_actions"])
         self.assertEqual(1, first_state["remaining_action_budget"])
+        self.assertEqual(2, first_state["total_action_budget"])
         self.assertFalse(first_state["environment_terminal"])
         self.assertEqual(1, len(first_state["action_observation_history"]))
         self.assertEqual(
@@ -1071,6 +1343,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("finish", second_state["last_action"])
         self.assertEqual([], second_state["admissible_actions"])
         self.assertEqual(0, second_state["remaining_action_budget"])
+        self.assertEqual(2, second_state["total_action_budget"])
         self.assertTrue(second_state["environment_terminal"])
         self.assertEqual(2, len(second_state["action_observation_history"]))
         self.assertEqual(
@@ -1083,6 +1356,26 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "Recent executed actions: look.",
             gateway.requests[1].problem,
+        )
+        self.assertIn(
+            "remaining_action_budget=2; total_action_budget=2; turns_used=0",
+            gateway.requests[0].problem,
+        )
+        self.assertIn(
+            "remaining_action_budget=1; total_action_budget=2; turns_used=1",
+            gateway.requests[1].problem,
+        )
+        self.assertEqual(
+            "2",
+            gateway.requests[0].model.metadata[
+                "environment_remaining_action_budget"
+            ],
+        )
+        self.assertEqual(
+            "1",
+            gateway.requests[1].model.metadata[
+                "environment_remaining_action_budget"
+            ],
         )
         for public_value in (first_state, second_state):
             self.assertNotIn("reward", str(public_value))

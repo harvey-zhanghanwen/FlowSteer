@@ -3673,7 +3673,7 @@ class AgentGraphOrchestrator:
             return encode_director_transcript(
                 tuple(self._compact_historical_messages(redacted))
             )
-        continuation = list(messages[2:])
+        continuation = list(messages[1:])
         continuation.extend(
             (
                 {"role": "assistant", "content": assistant_content},
@@ -3683,13 +3683,34 @@ class AgentGraphOrchestrator:
                 },
             )
         )
-        # Keep the immutable task/catalog context, exact sampled assistant
-        # actions, compact public feedback for prior observations, and the full
-        # current Canvas state with its revision-local legal action domain.
-        continuation = continuation[-2 * self.history_window :]
-        messages_to_encode = self._compact_historical_messages(
-            (messages[0], messages[1], *continuation)
+        expected_roles = tuple(
+            "user" if index % 2 == 0 else "assistant"
+            for index in range(len(continuation))
         )
+        if tuple(message["role"] for message in continuation) != expected_roles:
+            raise DirectorError(
+                "Director continuation must contain complete Observation--Action turns"
+            )
+
+        # Window complete Observation--Action turns, not trailing
+        # Action--Observation message pairs.  U0 carries immutable task/catalog
+        # context, so retain its sampled A0 as well; otherwise a later Ak would
+        # be attached to U0 after truncation.  The final Un remains the exact
+        # current Canvas state with its revision-local legal action domain.
+        complete_turns = [
+            continuation[index : index + 2]
+            for index in range(0, len(continuation) - 1, 2)
+        ]
+        retained_turns = complete_turns[:1]
+        if self.history_window > 1:
+            retained_turns.extend(
+                complete_turns[1:][-(self.history_window - 1) :]
+            )
+        windowed: list[Mapping[str, str]] = [messages[0]]
+        for observation_action in retained_turns:
+            windowed.extend(observation_action)
+        windowed.append(continuation[-1])
+        messages_to_encode = self._compact_historical_messages(windowed)
         return encode_director_transcript(tuple(messages_to_encode))
 
     @staticmethod

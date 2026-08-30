@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 import inspect
+import json
 from pathlib import Path
 import random
 import re
@@ -558,6 +559,26 @@ def _parse_action(
     if not isinstance(output, str) or not output.strip():
         return None
     raw = output.strip()
+    # ``OpenAICompatibleGateway`` forwards request-scoped JSON Schema through
+    # ``response_format``. ALFWorld uses a one-field envelope at that model
+    # boundary so the schema can enumerate the current native actions; unwrap
+    # it here before the unchanged native environment protocol and parser.
+    try:
+        structured = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        structured = None
+    if isinstance(structured, Mapping):
+        if set(structured) != {"action"} or not isinstance(
+            structured.get("action"), str
+        ):
+            return None
+        candidate = str(structured["action"]).strip()
+        return (
+            candidate
+            if candidate in admissible_actions
+            and candidate != "search[<your query>]"
+            else None
+        )
     tagged = re.findall(
         r"<action>\s*(.*?)\s*</action>", raw, re.IGNORECASE | re.DOTALL
     )
@@ -719,6 +740,467 @@ def _alfworld_action_object(action: object) -> str:
     return ""
 
 
+def _alfworld_action_response_schema(
+    admissible_actions: Sequence[str],
+) -> dict[str, object]:
+    """Constrain one model turn to the current public native action domain."""
+
+    return {
+        "type": "object",
+        "required": ["action"],
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": list(admissible_actions),
+            }
+        },
+        "additionalProperties": False,
+    }
+
+
+def _alfworld_observation_mentions_class(
+    observation: object,
+    object_class: object,
+) -> bool:
+    """Match one visible ALFWorld class without substring aliases."""
+
+    normalized = _alfworld_object_class(object_class)
+    if not normalized:
+        return False
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(normalized)}(?:\s+\d+)?(?![a-z0-9])",
+            str(observation or "").lower(),
+        )
+    )
+
+
+def _alfworld_visible_contents(
+    observation: object,
+) -> Optional[tuple[str, ...]]:
+    """Extract only explicitly visible receptacle contents from observation."""
+
+    compact = " ".join(str(observation or "").split())
+    if not compact:
+        return None
+    match = re.search(
+        r"\b(?:in|on)\s+(?:it|the\s+[^,.;]+),\s*you\s+see\s+"
+        r"(.+?)(?:[.!]|$)",
+        compact,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(
+            r"\byou\s+see\s+(.+?)(?:[.!]|$)",
+            compact,
+            flags=re.IGNORECASE,
+        )
+    if not match:
+        return None
+    visible = match.group(1).strip(" ,")
+    if re.fullmatch(r"(?:nothing|no(?:thing| objects?)?)", visible, re.IGNORECASE):
+        return ()
+    visible = re.sub(r"\s*,?\s+and\s+", ",", visible, flags=re.IGNORECASE)
+    items: list[str] = []
+    for item in visible.split(","):
+        normalized = re.sub(
+            r"^(?:a|an|the|some)\s+", "", item.strip(), flags=re.IGNORECASE
+        ).strip()
+        if normalized and normalized.casefold() not in {
+            value.casefold() for value in items
+        }:
+            items.append(normalized)
+    return tuple(items) if items else None
+
+
+def _alfworld_public_scene_memory(
+    receipts: Sequence[Mapping[str, object]],
+    *,
+    target_class: object = None,
+) -> list[dict[str, object]]:
+    """Rebuild persistent scene memory from public Action--Observation edges.
+
+    A ``go to`` arrival creates location memory. Later public ``open``,
+    ``close`` and ``examine`` observations update the same entry rather than
+    leaving stale arrival text authoritative. No simulator state, reward,
+    terminal evaluator field or hidden inventory is consulted.
+    """
+
+    memory: dict[str, dict[str, object]] = {}
+
+    def ensure(location: str) -> dict[str, object]:
+        key = location.casefold()
+        return memory.setdefault(
+            key,
+            {
+                "location": location,
+                "visit_turns": [],
+                "evidence_turns": [],
+                "open_state": "unknown",
+                "contents": None,
+                "contents_observed_turn": None,
+                "target_evidence": "unknown",
+                "target_negative_evidence_turns": [],
+                "last_observation": "",
+            },
+        )
+
+    def update_from_observation(
+        entry: dict[str, object],
+        observation: object,
+        turn: object,
+    ) -> None:
+        compact = " ".join(str(observation or "").split())
+        if not compact:
+            return
+        location = str(entry["location"])
+        location_pattern = re.escape(location)
+        if re.search(
+            rf"\b(?:the\s+)?{location_pattern}\s+is\s+open\b",
+            compact,
+            flags=re.IGNORECASE,
+        ) or re.search(
+            rf"\byou\s+open\s+(?:the\s+)?{location_pattern}\b",
+            compact,
+            flags=re.IGNORECASE,
+        ):
+            entry["open_state"] = "open"
+        elif re.search(
+            rf"\b(?:the\s+)?{location_pattern}\s+is\s+closed\b",
+            compact,
+            flags=re.IGNORECASE,
+        ) or re.search(
+            rf"\byou\s+close\s+(?:the\s+)?{location_pattern}\b",
+            compact,
+            flags=re.IGNORECASE,
+        ):
+            entry["open_state"] = "closed"
+
+        contents = _alfworld_visible_contents(compact)
+        if contents is not None:
+            entry["contents"] = list(contents)
+            entry["contents_observed_turn"] = turn
+            if _alfworld_object_class(target_class):
+                target_visible = _alfworld_observation_mentions_class(
+                    compact, target_class
+                )
+                entry["target_evidence"] = (
+                    "present" if target_visible else "absent"
+                )
+                if not target_visible:
+                    negative_turns = entry["target_negative_evidence_turns"]
+                    if isinstance(negative_turns, list) and turn not in negative_turns:
+                        negative_turns.append(turn)
+        evidence_turns = entry["evidence_turns"]
+        if isinstance(evidence_turns, list) and turn not in evidence_turns:
+            evidence_turns.append(turn)
+        entry["last_observation"] = compact[:300]
+
+    for index, item in enumerate(receipts, start=1):
+        if item.get("state_advanced") is not True:
+            continue
+        action = item.get("action")
+        if not isinstance(action, str):
+            continue
+        turn = item.get("turn")
+        if type(turn) is not int:
+            turn = index
+        result = item.get("next_observation", "")
+        go = re.match(r"^\s*go\s+to\s+(.+?)\s*$", action, re.IGNORECASE)
+        if go:
+            location = go.group(1).strip()
+            entry = ensure(location)
+            visits = entry["visit_turns"]
+            if isinstance(visits, list):
+                visits.append(turn)
+            update_from_observation(entry, result, turn)
+            continue
+
+        inspect = re.match(
+            r"^\s*(open|close|examine)\s+(.+?)\s*$",
+            action,
+            re.IGNORECASE,
+        )
+        if inspect:
+            operation, location = inspect.groups()
+            existing = memory.get(location.casefold())
+            visible_contents = _alfworld_visible_contents(result)
+            visible_receptacle_state = bool(
+                re.search(r"\bis\s+(?:open|closed)\b", str(result), re.IGNORECASE)
+            )
+            if (
+                operation.casefold() != "examine"
+                or existing is not None
+                or visible_contents is not None
+                or visible_receptacle_state
+            ):
+                update_from_observation(
+                    existing if existing is not None else ensure(location),
+                    result,
+                    turn,
+                )
+            continue
+
+        take = re.match(
+            r"^\s*take\s+(.+?)\s+from\s+(.+?)\s*$", action, re.IGNORECASE
+        )
+        move = re.match(
+            r"^\s*move\s+(.+?)\s+to\s+(.+?)\s*$", action, re.IGNORECASE
+        )
+        object_id = ""
+        location = ""
+        add_object = False
+        if take:
+            object_id, location = take.groups()
+        elif move:
+            object_id, location = move.groups()
+            add_object = True
+        entry = memory.get(location.strip().casefold()) if location else None
+        if entry is None or not isinstance(entry.get("contents"), list):
+            continue
+        contents_list = entry["contents"]
+        assert isinstance(contents_list, list)
+        if add_object:
+            if object_id.casefold() not in {
+                str(value).casefold() for value in contents_list
+            }:
+                contents_list.append(object_id.strip())
+        else:
+            entry["contents"] = [
+                value
+                for value in contents_list
+                if str(value).casefold() != object_id.strip().casefold()
+            ]
+        entry["contents_observed_turn"] = turn
+        if _alfworld_object_class(target_class):
+            latest_contents = entry["contents"]
+            assert isinstance(latest_contents, list)
+            target_visible = any(
+                _alfworld_object_class(value)
+                == _alfworld_object_class(target_class)
+                for value in latest_contents
+            )
+            entry["target_evidence"] = "present" if target_visible else "absent"
+            if not target_visible:
+                negative_turns = entry["target_negative_evidence_turns"]
+                if isinstance(negative_turns, list) and turn not in negative_turns:
+                    negative_turns.append(turn)
+
+    return [dict(entry) for entry in memory.values()]
+
+
+def _alfworld_public_goal_progress(
+    facts: Mapping[str, object],
+    receipts: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Project public goal milestones and turns since the latest new one."""
+
+    target_class = _alfworld_object_class(facts.get("target_class"))
+    destination_class = _alfworld_object_class(facts.get("destination_class"))
+    required_transform = str(facts.get("required_transform") or "")
+    acquired: dict[str, str] = {}
+    held: dict[str, str] = {}
+    transformed: dict[str, str] = {}
+    placed: dict[str, str] = {}
+    ever_placed: dict[str, str] = {}
+    lamp_use_completed = False
+    last_progress_turn = 0
+    turns_used = 0
+
+    for index, item in enumerate(receipts, start=1):
+        raw_turn = item.get("turn")
+        turn = raw_turn if type(raw_turn) is int else index
+        turns_used = max(turns_used, turn)
+        if item.get("state_advanced") is not True:
+            continue
+        action = item.get("action")
+        if not isinstance(action, str):
+            continue
+        take = re.match(
+            r"^take\s+(.+?)\s+from\s+(.+)$", action, flags=re.IGNORECASE
+        )
+        if take and _alfworld_object_class(take.group(1)) == target_class:
+            object_id = take.group(1).strip()
+            key = object_id.casefold()
+            if key not in acquired:
+                acquired[key] = object_id
+                last_progress_turn = turn
+            held[key] = object_id
+            placed.pop(key, None)
+            continue
+        move = re.match(
+            r"^move\s+(.+?)\s+to\s+(.+)$", action, flags=re.IGNORECASE
+        )
+        if move and _alfworld_object_class(move.group(1)) == target_class:
+            object_id = move.group(1).strip()
+            key = object_id.casefold()
+            held.pop(key, None)
+            if _alfworld_object_class(move.group(2)) == destination_class:
+                placed[key] = object_id
+                if key not in ever_placed:
+                    ever_placed[key] = object_id
+                    last_progress_turn = turn
+            else:
+                placed.pop(key, None)
+            continue
+        transform = re.match(
+            r"^(clean|cool|heat)\s+(.+?)\s+with\s+",
+            action,
+            flags=re.IGNORECASE,
+        )
+        if transform and _alfworld_object_class(transform.group(2)) == target_class:
+            operation = transform.group(1).casefold()
+            object_id = transform.group(2).strip()
+            key = object_id.casefold()
+            held[key] = object_id
+            if operation == required_transform.casefold():
+                if key not in transformed:
+                    transformed[key] = object_id
+                    last_progress_turn = turn
+            elif required_transform.casefold() in {"heat", "cool"} and operation in {
+                "heat",
+                "cool",
+            }:
+                # Temperature is a single public state dimension: a later
+                # opposite action invalidates the earlier required state for
+                # that instance. Cleaning has no corresponding public inverse.
+                transformed.pop(key, None)
+            continue
+        if (
+            facts.get("examine_with_desklamp")
+            and re.fullmatch(
+                r"use\s+desklamp\s+\d+",
+                action.strip(),
+                flags=re.IGNORECASE,
+            )
+            and bool(held)
+            and not lamp_use_completed
+        ):
+            lamp_use_completed = True
+            last_progress_turn = turn
+
+    transformed_and_placed = [
+        object_id for key, object_id in placed.items() if key in transformed
+    ]
+    return {
+        "acquired_target_instances": list(acquired.values()),
+        "held_target_instances": list(held.values()),
+        "transformed_target_instances": list(transformed.values()),
+        "placed_target_instances": list(placed.values()),
+        "transformed_and_placed_target_instances": transformed_and_placed,
+        "lamp_use_completed": lamp_use_completed,
+        "last_goal_progress_turn": last_progress_turn,
+        "turns_since_goal_progress": max(turns_used - last_progress_turn, 0),
+    }
+
+
+def _alfworld_public_stall_diagnostic(
+    request: AgentRequest,
+    *,
+    observation: str,
+    admissible_actions: Sequence[str],
+    receipts: Sequence[Mapping[str, object]],
+    environment_terminal: bool = False,
+) -> dict[str, object]:
+    """Build a neutral structured stall receipt from public state only."""
+
+    facts = _alfworld_task_facts(request.problem)
+    progress = _alfworld_public_goal_progress(facts, receipts)
+
+    def state_signature(
+        visible_observation: object,
+        actions: object,
+    ) -> tuple[str, tuple[str, ...]]:
+        normalized_observation = " ".join(
+            str(visible_observation or "").casefold().split()
+        )
+        normalized_actions = tuple(
+            sorted(
+                str(action).casefold()
+                for action in (
+                    actions
+                    if isinstance(actions, Sequence)
+                    and not isinstance(actions, (str, bytes))
+                    else ()
+                )
+            )
+        )
+        return normalized_observation, normalized_actions
+
+    public_states: list[tuple[str, tuple[str, ...]]] = []
+    if receipts:
+        first = receipts[0]
+        public_states.append(
+            state_signature(
+                first.get("observation", ""),
+                first.get("admissible_actions", ()),
+            )
+        )
+        for index, item in enumerate(receipts):
+            next_actions: object = admissible_actions
+            if index + 1 < len(receipts):
+                next_actions = receipts[index + 1].get("admissible_actions", ())
+            public_states.append(
+                state_signature(item.get("next_observation", ""), next_actions)
+            )
+    else:
+        public_states.append(state_signature(observation, admissible_actions))
+
+    repeated_state_count = 0
+    for index in range(len(public_states) - 1, 0, -1):
+        if public_states[index] != public_states[index - 1]:
+            break
+        repeated_state_count += 1
+
+    completed_actions = [
+        str(item["action"])
+        for item in receipts
+        if item.get("state_advanced") is True
+        and isinstance(item.get("action"), str)
+    ]
+    alternating_actions: list[str] = []
+    if (
+        len(completed_actions) >= 4
+        and completed_actions[-4] == completed_actions[-2]
+        and completed_actions[-3] == completed_actions[-1]
+        and completed_actions[-4] != completed_actions[-3]
+    ):
+        alternating_actions = completed_actions[-2:]
+
+    turns_since_progress = int(progress["turns_since_goal_progress"])
+    signals: list[str] = []
+    if repeated_state_count:
+        signals.append("repeated_public_state")
+    if alternating_actions:
+        signals.append("alternating_action_loop")
+    if turns_since_progress >= 4:
+        signals.append("no_goal_predicate_progress")
+
+    latest_advanced = bool(
+        receipts and receipts[-1].get("state_advanced") is True
+    )
+    repeated_state_stall = repeated_state_count >= 2 or (
+        repeated_state_count >= 1 and latest_advanced
+    )
+    # ALFWorld exploration often needs more than six distinct, valid
+    # transitions before the first task predicate changes.  Lack of predicate
+    # progress is therefore diagnostic context, not by itself a hard stall.
+    # Only an observed repeated public state or an A-B-A-B action loop blocks
+    # another bare ``continue`` at the Canvas boundary.
+    stalled = (
+        repeated_state_stall or bool(alternating_actions)
+    ) and not environment_terminal
+    return {
+        "schema_version": "alfworld.public-stall.v1",
+        "stalled": stalled,
+        "signals": signals,
+        "repeated_state_count": repeated_state_count,
+        "alternating_actions": alternating_actions,
+        "turns_since_goal_progress": turns_since_progress,
+        "goal_predicates": progress,
+    }
+
+
 def _webshop_task_constraints(task: str) -> tuple[str, ...]:
     """Project SkillFlow's visible WebShop price/attribute fields only."""
 
@@ -774,6 +1256,9 @@ def _public_state_feedback(
     observation: str,
     admissible_actions: Sequence[str],
     receipts: Sequence[Mapping[str, object]],
+    total_action_budget: Optional[int] = None,
+    remaining_action_budget: Optional[int] = None,
+    environment_terminal: bool = False,
 ) -> str:
     """Summarize public task/environment state without evaluator leakage.
 
@@ -787,6 +1272,13 @@ def _public_state_feedback(
         "Derived only from the task, current observation, admissible actions, "
         "and completed public Action--Observation history.",
     ]
+    if total_action_budget is not None and remaining_action_budget is not None:
+        lines.append(
+            "Action budget: "
+            f"remaining_action_budget={max(remaining_action_budget, 0)}; "
+            f"total_action_budget={max(total_action_budget, 0)}; "
+            f"turns_used={len(receipts)}."
+        )
     completed_actions = [
         str(item.get("action"))
         for item in receipts
@@ -1087,36 +1579,38 @@ def _public_state_feedback(
                     + "."
                 )
 
-        # Thin adaptation of SkillFlow ``_extract_visited_receptacles`` and
-        # ``_build_alfworld_progress_block``: retain deterministic public
-        # exploration memory while omitting its prescriptive next-action rule.
-        visited: dict[str, dict[str, object]] = {}
-        for item in receipts:
-            if item.get("state_advanced") is not True:
-                continue
-            action = item.get("action")
-            if not isinstance(action, str):
-                continue
-            match = re.match(r"^\s*go\s+to\s+(.+?)\s*$", action, re.IGNORECASE)
-            if not match:
-                continue
-            location = match.group(1).strip()
-            key = location.casefold()
-            entry = visited.setdefault(
-                key,
-                {"location": location, "turns": [], "last_observation": ""},
+        # Thin adaptation of SkillFlow visible memory. In addition to arrival
+        # observations, retain later public open/examine evidence so a known
+        # open or empty receptacle cannot silently regress to stale "closed"
+        # arrival text. No prescriptive next-action rule is copied.
+        scene_memory = _alfworld_public_scene_memory(
+            receipts,
+            target_class=target_class,
+        )
+        visited = {
+            str(entry["location"]).casefold(): entry for entry in scene_memory
+        }
+        if scene_memory:
+            lines.append(
+                "Visited receptacles from public Action--Observation history "
+                "(persistent scene memory):"
             )
-            turns = entry["turns"]
-            if isinstance(turns, list):
-                turns.append(item.get("turn"))
-            result = str(item.get("next_observation", "")).replace("\n", " ")
-            entry["last_observation"] = result[:300]
-        if visited:
-            lines.append("Visited receptacles from public Action--Observation history:")
-            for entry in visited.values():
-                turns = entry["turns"] if isinstance(entry["turns"], list) else []
+            for entry in scene_memory:
+                visit_turns = entry.get("visit_turns", [])
+                evidence_turns = entry.get("evidence_turns", [])
+                contents = entry.get("contents")
+                contents_text = (
+                    "unknown"
+                    if contents is None
+                    else json.dumps(contents, ensure_ascii=False)
+                )
                 lines.append(
-                    f"- {entry['location']}: turns={turns[-6:]}; "
+                    f"- {entry['location']}: turns={visit_turns[-6:]}; "
+                    f"evidence_turns={evidence_turns[-6:]}; "
+                    f"open_state={entry['open_state']}; contents={contents_text}; "
+                    f"target_evidence={entry['target_evidence']}; "
+                    "target_negative_evidence_turns="
+                    f"{entry['target_negative_evidence_turns'][-6:]}; "
                     f"last_observation={entry['last_observation']}"
                 )
             current_locations = []
@@ -1137,6 +1631,22 @@ def _public_state_feedback(
                     + ", ".join(unvisited[:25])
                     + "."
                 )
+        stall_diagnostic = _alfworld_public_stall_diagnostic(
+            request,
+            observation=observation,
+            admissible_actions=admissible_actions,
+            receipts=receipts,
+            environment_terminal=environment_terminal,
+        )
+        lines.append(
+            "[PUBLIC STALL DIAGNOSTIC] "
+            + json.dumps(
+                stall_diagnostic,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
     elif task_family.lower() == "webshop":
         constraints = _webshop_task_constraints(request.problem)
         if constraints:
@@ -1255,6 +1765,7 @@ def _action_prompt(
     receipts: Sequence[Mapping[str, object]],
     turn: int,
     max_observation_chars: int = 0,
+    total_action_budget: Optional[int] = None,
 ) -> str:
     """Render the same SkillFlow ReAct prompt used by the Direct condition.
 
@@ -1268,6 +1779,11 @@ def _action_prompt(
     visible_observation, _ = _prompt_observation(
         observation, max_observation_chars
     )
+    remaining_action_budget = (
+        None
+        if total_action_budget is None
+        else max(total_action_budget - len(receipts), 0)
+    )
     if task_family.lower() != "alfworld":
         actions = "\n".join(admissible_actions)
         public_state = _public_state_feedback(
@@ -1276,6 +1792,8 @@ def _action_prompt(
             observation=observation,
             admissible_actions=admissible_actions,
             receipts=receipts,
+            total_action_budget=total_action_budget,
+            remaining_action_budget=remaining_action_budget,
         )
         return (
             f"Task:\n{request.problem}\n\n"
@@ -1319,8 +1837,10 @@ def _action_prompt(
         observation=observation,
         admissible_actions=admissible_actions,
         receipts=receipts,
+        total_action_budget=total_action_budget,
+        remaining_action_budget=remaining_action_budget,
     )
-    return _environment_prompt(
+    prompt = _environment_prompt(
         dataset=task_family.lower(),
         task_description=instruction,
         observation=visible_observation,
@@ -1328,6 +1848,13 @@ def _action_prompt(
         trace=trace,
         step_index=turn - 1,
         public_state=public_state,
+    )
+    return (
+        prompt
+        + "\n\nConstrained response envelope: return one JSON object with "
+        "exactly the field `action`; its value must be one exact string from "
+        "the current admissible-actions list. The runtime unwraps that field "
+        "to the unchanged native ALFWorld action before environment execution."
     )
 
 
@@ -1426,6 +1953,7 @@ class EnvironmentExecutionAdapter:
             )
         last = episode.receipts[-1] if episode.receipts else None
         turns_used = len(episode.receipts)
+        remaining_action_budget = max(self._max_turns - turns_used, 0)
         action_observation_history = _public_action_observation_history(
             episode.receipts
         )
@@ -1435,7 +1963,26 @@ class EnvironmentExecutionAdapter:
             observation=episode.observation,
             admissible_actions=admissible_actions,
             receipts=episode.receipts,
+            total_action_budget=self._max_turns,
+            remaining_action_budget=remaining_action_budget,
+            environment_terminal=episode.terminal,
         )
+        alfworld_state: dict[str, object] = {}
+        if episode.session.task_family.lower() == "alfworld":
+            facts = _alfworld_task_facts(request.problem)
+            alfworld_state = {
+                "public_scene_memory": _alfworld_public_scene_memory(
+                    episode.receipts,
+                    target_class=facts.get("target_class"),
+                ),
+                "stall_diagnostic": _alfworld_public_stall_diagnostic(
+                    request,
+                    observation=episode.observation,
+                    admissible_actions=admissible_actions,
+                    receipts=episode.receipts,
+                    environment_terminal=episode.terminal,
+                ),
+            }
         return {
             "environment_episode_id": episode.episode_id,
             "environment_id": episode.session.environment_id,
@@ -1458,11 +2005,13 @@ class EnvironmentExecutionAdapter:
             ),
             "action_observation_history": action_observation_history,
             "turns_used": turns_used,
-            "remaining_action_budget": max(self._max_turns - turns_used, 0),
+            "remaining_action_budget": remaining_action_budget,
+            "total_action_budget": self._max_turns,
             "environment_terminal": episode.terminal,
             "environment_truncated": (
                 not episode.terminal and turns_used >= self._max_turns
             ),
+            **alfworld_state,
         }
 
     async def execute(self, request: AgentRequest) -> GatewayResponse:
@@ -1504,6 +2053,10 @@ class EnvironmentExecutionAdapter:
                     receipts=receipts,
                     turn=turn,
                     max_observation_chars=self._max_observation_chars,
+                    total_action_budget=self._max_turns,
+                )
+                remaining_action_budget = max(
+                    self._max_turns - len(receipts), 0
                 )
                 public_state = _public_state_feedback(
                     request,
@@ -1511,28 +2064,49 @@ class EnvironmentExecutionAdapter:
                     observation=observation,
                     admissible_actions=admissible_actions,
                     receipts=receipts,
+                    total_action_budget=self._max_turns,
+                    remaining_action_budget=remaining_action_budget,
                 )
                 _, observation_clipped = _prompt_observation(
                     observation, self._max_observation_chars
                 )
+                model_metadata = {
+                    **dict(request.model.metadata),
+                    "max_tokens": str(self._max_action_tokens),
+                    "environment_total_action_budget": str(self._max_turns),
+                    "environment_remaining_action_budget": str(
+                        remaining_action_budget
+                    ),
+                }
+                if session.task_family.lower() == "alfworld":
+                    model_metadata.update(
+                        {
+                            "response_json_schema": json.dumps(
+                                _alfworld_action_response_schema(
+                                    admissible_actions
+                                ),
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            "response_json_schema_version": (
+                                "alfworld.native-action-enum.v1"
+                            ),
+                        }
+                    )
                 model_request = replace(
                     request,
                     request_id=f"{request.request_id}:environment:{turn}",
                     problem=prompt,
-                    # RAGEN exposes native admissible actions rather than the
-                    # generic StructuredAction protocol.  Preserve the
-                    # Director-authored free-text contract; the prompt above
-                    # appends only SkillFlow's state-dependent action grammar.
+                    # RAGEN still receives one native action. The model-only
+                    # response envelope is unwrapped by ``_parse_action``.
                     agent=replace(
                         request.agent,
                         execution_mode="reasoning",
                     ),
                     model=replace(
                         request.model,
-                        metadata={
-                            **dict(request.model.metadata),
-                            "max_tokens": str(self._max_action_tokens),
-                        },
+                        metadata=model_metadata,
                     ),
                 )
                 generated = await self._gateway.generate(model_request)
@@ -1548,6 +2122,22 @@ class EnvironmentExecutionAdapter:
                         "request_id": model_request.request_id,
                         "metadata": dict(response.metadata),
                         "public_state": public_state,
+                        "remaining_action_budget": remaining_action_budget,
+                        "total_action_budget": self._max_turns,
+                        **(
+                            {
+                                "stall_diagnostic": (
+                                    _alfworld_public_stall_diagnostic(
+                                        request,
+                                        observation=observation,
+                                        admissible_actions=admissible_actions,
+                                        receipts=receipts,
+                                    )
+                                )
+                            }
+                            if session.task_family.lower() == "alfworld"
+                            else {}
+                        ),
                         "observation_clipped": observation_clipped,
                     }
                 )

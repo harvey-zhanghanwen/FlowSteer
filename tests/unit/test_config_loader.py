@@ -380,6 +380,120 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertFalse(config["grpo"]["enabled"])
         self.assertFalse(config["skills"]["enabled"])
 
+    def test_alfworld_stepwise_recovery_v5_preserves_paired_protocol(self) -> None:
+        baseline = load_yaml(
+            "config/evaluation_alfworld_stepwise_feedback_v4.yaml"
+        )
+        config = load_yaml(
+            "config/evaluation_alfworld_stepwise_recovery_v5.yaml"
+        )
+        validate_agent_graph_config(config)
+
+        self.assertEqual(
+            "alfworld_stepwise_recovery_v5",
+            config["experiment"]["condition_id"],
+        )
+        self.assertEqual(
+            "skillflow.alfworld.native-stepwise-recovery.v5",
+            config["environment_runtime"]["tool_version"],
+        )
+        self.assertEqual(
+            "flowsteer.alfworld.stepwise-recovery.v5",
+            config["storage"]["schema_version"],
+        )
+
+        # The v5 comparison changes only the adapter/recovery condition. The
+        # formal split, pairing, budget, seed, and orchestration bounds remain
+        # identical to the completed v4 condition.
+        for field in (
+            "dataset_key",
+            "stage",
+            "split",
+            "official_split",
+            "selection",
+            "sample_count",
+            "stable_zero_sample_count",
+            "rollouts_per_task",
+            "concurrency",
+            "task_timeout_seconds",
+            "direct_model_id",
+            "direct_protocol",
+            "direct_contract",
+            "direct_generation_seed",
+        ):
+            with self.subTest(section="alfworld_evaluation", field=field):
+                self.assertEqual(
+                    baseline["alfworld_evaluation"][field],
+                    config["alfworld_evaluation"][field],
+                )
+        self.assertEqual(
+            baseline["experiment"]["seed"],
+            config["experiment"]["seed"],
+        )
+        self.assertEqual(140, config["alfworld_evaluation"]["sample_count"])
+        self.assertEqual(
+            "valid_seen",
+            config["alfworld_evaluation"]["official_split"],
+        )
+        self.assertEqual("sequential", config["alfworld_evaluation"]["selection"])
+        self.assertFalse(
+            config["alfworld_evaluation"]["protocol_equivalent_to_direct"]
+        )
+        self.assertEqual(1, config["alfworld_evaluation"]["concurrency"])
+        self.assertEqual(20, config["evaluation"]["max_environment_steps"])
+        self.assertEqual(
+            20,
+            config["environment_runtime"]["max_environment_steps_by_source"][
+                "alfworld"
+            ],
+        )
+        self.assertEqual(32, config["director"]["max_rounds"])
+        self.assertEqual(3, config["gpu"]["rollout_physical"])
+        self.assertEqual(3, config["gpu"]["supervisor_gpu_id"])
+        self.assertEqual(
+            "http://127.0.0.1:8023/v1",
+            config["gpu"]["supervisor_api_base"],
+        )
+        self.assertEqual(
+            baseline["agent_graph"]["model_catalog_path"],
+            config["agent_graph"]["model_catalog_path"],
+        )
+
+        expected_artifact_prefix = (
+            "artifacts/alfworld_stepwise_recovery_v5/valid_seen"
+        )
+        self.assertEqual(
+            expected_artifact_prefix,
+            config["experiment"]["output_dir"],
+        )
+        for field, value in config["storage"].items():
+            if not field.endswith("_path") and field != "root":
+                continue
+            with self.subTest(section="storage", field=field):
+                expected_prefix = (
+                    "reports/alfworld_stepwise_recovery_v5"
+                    if field.startswith("report_")
+                    else expected_artifact_prefix
+                )
+                self.assertTrue(value.startswith(expected_prefix), value)
+                self.assertNotIn("alfworld_stepwise_feedback_v4", value)
+
+        self.assertFalse(config["experiment"]["training_enabled"])
+        self.assertFalse(config["director"]["lora"]["enabled"])
+        self.assertFalse(config["grpo"]["enabled"])
+        self.assertEqual(
+            0,
+            config["grpo"]["optimization_passes_per_rollout_batch"],
+        )
+        self.assertEqual(0, config["grpo"]["max_optimizer_updates"])
+        self.assertEqual(0.0, config["grpo"]["learning_rate"])
+        self.assertFalse(config["policy_sync"]["enabled"])
+        self.assertFalse(config["exploration"]["enabled"])
+        self.assertFalse(config["skills"]["enabled"])
+        self.assertEqual([], config["skills"]["initial_library"])
+        self.assertEqual(0, config["skills"]["retrieval_top_k"])
+        self.assertFalse(config["gpu"]["training_enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

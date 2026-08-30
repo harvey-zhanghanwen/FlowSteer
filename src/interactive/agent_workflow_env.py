@@ -534,6 +534,16 @@ class AgentWorkflowEnv:
         self._react_exhausted_agent_ids: set[str] = set()
         self._repair_exhausted_agent_ids: set[str] = set()
         self._latest_failure_record_by_agent: dict[str, AgentFailureRecord] = {}
+        # A task-scoped environment adapter publishes a typed
+        # ``EnvironmentExecutionError`` when a ReAct node does not own its exact
+        # request-scoped Tool capability.  Keep a bounded, public signature
+        # counter across an admitted repair edit so reproducing the same
+        # structured fault cannot reopen arbitrary contract/artifact edits.
+        self._environment_failure_signature_by_agent: dict[
+            str, tuple[str, str, str]
+        ] = {}
+        self._environment_failure_repeat_count_by_agent: dict[str, int] = {}
+        self._environment_failure_circuit_breaker_agent_ids: set[str] = set()
         self._pending_repair_receipt_count_by_agent: dict[str, int] = {}
         # Frozen catalog membership remains unchanged during a trajectory.
         # Permanent provider/model failures add only a trajectory-scoped
@@ -817,6 +827,29 @@ class AgentWorkflowEnv:
                     )
         return None
 
+    def _required_tool_auxiliary_profile_issue(
+        self,
+        graph: AgentGraph,
+    ) -> Optional[str]:
+        """Keep every non-owner off the task-scoped environment adapter."""
+
+        if self.required_tool_id is None:
+            return None
+        owners = self._required_tool_actor_ids_for_graph(graph)
+        if len(owners) != 1:
+            return None
+        owner_id = owners[0]
+        for node in graph.nodes:
+            if node.id == owner_id:
+                continue
+            if node.execution_mode.value != "reasoning" or node.allowed_tools:
+                return (
+                    f"task-scoped environment auxiliary {node.id!r} must use "
+                    "execution_mode='reasoning' with allowed_tools=[]; only "
+                    f"environment actor {owner_id!r} may use the stateful adapter"
+                )
+        return None
+
     def public_environment_state(self) -> Optional[dict[str, object]]:
         """Return the latest public state for one stateful environment actor.
 
@@ -847,16 +880,65 @@ class AgentWorkflowEnv:
             "admissible_actions",
             "public_state",
             "latest_action_observation",
+            "action_observation_history",
+            "public_scene_memory",
             "turns_used",
             "remaining_action_budget",
+            "total_action_budget",
             "environment_terminal",
             "environment_truncated",
+            "stall_diagnostic",
         )
         result = {
             key: raw_state[key]
             for key in allowed_fields
             if key in raw_state
         }
+        history = raw_state.get("action_observation_history")
+        if isinstance(history, (list, tuple)):
+            public_transition_fields = (
+                "turn",
+                "environment_revision_before",
+                "environment_revision_after",
+                "raw_action",
+                "action",
+                "observation_result",
+                "observation_result_clipped",
+                "observation_status",
+                "state_advanced",
+                "environment_terminal",
+            )
+            result["action_observation_history"] = [
+                {
+                    field: item[field]
+                    for field in public_transition_fields
+                    if field in item
+                }
+                for item in history
+                if isinstance(item, Mapping)
+            ]
+        scene_memory = raw_state.get("public_scene_memory")
+        if isinstance(scene_memory, (list, tuple)):
+            public_scene_fields = (
+                "location",
+                "visit_turns",
+                "evidence_turns",
+                "open_state",
+                "contents",
+                "contents_observed_turn",
+                "target_evidence",
+                "target_negative_evidence_turns",
+                "last_observation",
+            )
+            result["public_scene_memory"] = [
+                {
+                    field: item[field]
+                    for field in public_scene_fields
+                    if field in item
+                }
+                for item in scene_memory
+                if isinstance(item, Mapping)
+            ]
         result.update(
             {
                 "task_instruction": self._problem,
@@ -894,6 +976,26 @@ class AgentWorkflowEnv:
             return (
                 "the same non-admissible environment action was repeated; "
                 "repair the existing environment Agent contract before continuing"
+            )
+        stall_diagnostic = state.get("stall_diagnostic")
+        if (
+            isinstance(stall_diagnostic, Mapping)
+            and stall_diagnostic.get("stalled") is True
+        ):
+            raw_signals = stall_diagnostic.get("signals", ())
+            signals = (
+                tuple(
+                    signal
+                    for signal in raw_signals
+                    if isinstance(signal, str) and signal
+                )
+                if isinstance(raw_signals, (list, tuple))
+                else ()
+            )
+            return (
+                "the public environment state is stalled; repair or augment "
+                "the current Canvas before another environment transition"
+                + (f" (signals={list(signals)!r})" if signals else "")
             )
         return None
 
@@ -942,43 +1044,164 @@ class AgentWorkflowEnv:
     def _required_tool_capability_repair_domains(
         self,
     ) -> dict[str, dict[str, object]]:
-        """Project atomic repairs for the unique stateful Tool owner."""
+        """Project one-field triggers for atomic stateful execution profiles.
+
+        Director v3 deliberately samples one mutable Agent field per Canvas
+        action.  Each trigger below is non-no-op; authoritative mutation couples
+        it to the complete target profile so one accepted edit establishes
+        ``react + [required_tool]`` for a missing owner or ``reasoning + []`` for
+        a failed non-owner.  No contract, artifact, model, role, or topology is
+        selected here.
+        """
 
         if self.required_tool_id is None:
             return {}
         owners = self._required_tool_actor_ids()
+        target_profiles: dict[str, tuple[str, tuple[str, ...]]] = {}
         if len(owners) == 1:
-            return {}
+            owner_id = owners[0]
+            target_profiles = {
+                agent_id: ("reasoning", ())
+                for agent_id in self._required_tool_capability_failure_agent_ids()
+                if agent_id != owner_id
+            }
         if len(owners) > 1:
-            return {
-                agent_id: {"allowed_tools": []}
-                for agent_id in owners
+            # Construction/admission normally prevents this state.  If a legacy
+            # snapshot reaches recovery, preserve the first declared owner and
+            # demote every additional holder atomically.
+            target_profiles = {
+                agent_id: ("reasoning", ()) for agent_id in owners[1:]
             }
-        nodes = tuple(self._graph.nodes)
-        if not nodes:
-            return {}
-        exact_tool_nodes = tuple(
-            node
-            for node in nodes
-            if node.allowed_tools == (self.required_tool_id,)
+        elif not owners:
+            target_profiles = {
+                node.id: ("react", (self.required_tool_id,))
+                for node in self._graph.nodes
+            }
+
+        result: dict[str, dict[str, object]] = {}
+        for agent_id, (execution_mode, allowed_tools) in target_profiles.items():
+            if not self._graph.has_node(agent_id):
+                continue
+            node = self._graph.get_node(agent_id)
+            if node.execution_mode.value != execution_mode:
+                result[agent_id] = {"execution_mode": execution_mode}
+            elif node.allowed_tools != allowed_tools:
+                result[agent_id] = {"allowed_tools": list(allowed_tools)}
+            # An already canonical profile has no executable repair.  Omitting
+            # it is the circuit breaker's fail-closed boundary, not a no-op arm.
+        return result
+
+    def _required_tool_capability_target_profile(
+        self,
+        agent_id: str,
+    ) -> Optional[tuple[str, tuple[str, ...]]]:
+        """Return the complete profile coupled to one live repair trigger."""
+
+        if self.required_tool_id is None or not self._graph.has_node(agent_id):
+            return None
+        owners = self._required_tool_actor_ids()
+        if not owners:
+            return "react", (self.required_tool_id,)
+        if len(owners) == 1 and agent_id != owners[0] and (
+            agent_id in self._required_tool_capability_failure_agent_ids()
+        ):
+            return "reasoning", ()
+        if len(owners) > 1 and agent_id in owners[1:]:
+            return "reasoning", ()
+        return None
+
+    @staticmethod
+    def _structured_environment_failure_signature(
+        record: AgentFailureRecord,
+    ) -> Optional[tuple[str, str, str]]:
+        """Return a stable public signature for EnvironmentExecutionError."""
+
+        if record.error_type != "EnvironmentExecutionError":
+            return None
+        cause_error_type = record.metadata.get("cause_error_type")
+        return (
+            record.error_type,
+            " ".join(record.message.casefold().split()),
+            (
+                cause_error_type.casefold()
+                if isinstance(cause_error_type, str)
+                else ""
+            ),
         )
-        if exact_tool_nodes:
-            return {
-                node.id: {"execution_mode": "react"}
-                for node in exact_tool_nodes
-            }
-        react_nodes = tuple(
-            node for node in nodes if node.execution_mode.value == "react"
+
+    @staticmethod
+    def _is_required_tool_capability_failure(
+        record: AgentFailureRecord,
+    ) -> bool:
+        """Recognize the adapter's exact request-scoped Tool profile fault."""
+
+        signature = AgentWorkflowEnv._structured_environment_failure_signature(
+            record
         )
-        if react_nodes:
-            return {
-                node.id: {"allowed_tools": [self.required_tool_id]}
-                for node in react_nodes
-            }
-        return {
-            node.id: {"execution_mode": "react"}
-            for node in nodes
+        if signature is None:
+            return False
+        return (
+            "environment agent must allow exactly its request-scoped "
+            "environment tool" in signature[1]
+        )
+
+    def _required_tool_capability_failure_agent_ids(self) -> Tuple[str, ...]:
+        """Return current failed nodes whose complete profile is repairable."""
+
+        return tuple(
+            node.id
+            for node in self._graph.nodes
+            if (
+                record := self._latest_failure_record_by_agent.get(node.id)
+            )
+            is not None
+            and self._is_required_tool_capability_failure(record)
+        )
+
+    def _required_tool_capability_repair_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Keep authoritative mutation equal to the atomic live repair domain."""
+
+        repairs = self._required_tool_capability_repair_domains()
+        if not repairs or action.action_type is AgentActionType.FINISH:
+            # FINISH retains its dedicated terminal receipt and feedback path;
+            # it will report the missing required actor without mutating state.
+            return None
+        if (
+            action.action_type is not AgentActionType.MODIFY_AGENT
+            or action.agent_id not in repairs
+        ):
+            return (
+                "repair the required stateful Tool execution profile before "
+                "other Canvas edits; admissible_modify_agent_ids="
+                f"{list(repairs)!r}"
+            )
+        expected = repairs[action.agent_id]
+        supplied = {
+            field_name: (
+                list(value) if isinstance(value, tuple) else value
+            )
+            for field_name in (
+                "model_id",
+                "contract",
+                "role_family",
+                "allowed_tools",
+                "execution_mode",
+                "artifact_type",
+                "completion_condition",
+            )
+            if (value := getattr(action, field_name)) is not None
         }
+        if supplied != expected:
+            return (
+                "required Tool capability repair must use exactly one live "
+                "non-no-op profile trigger and preserve contract/model/role/"
+                "artifact/completion fields; expected="
+                f"{expected!r}"
+            )
+        return None
 
     def model_admissible_action_types(self) -> Tuple[str, ...]:
         """Project state-conditioned Canvas actions for the Flow-Director.
@@ -1011,6 +1234,24 @@ class AgentWorkflowEnv:
                 or environment_state.get("environment_truncated") is True
             )
         ):
+            owner_ids = set(self._required_tool_actor_ids())
+            post_terminal_repair_ids = tuple(
+                agent_id
+                for agent_id in self._model_admissible_modify_agent_ids()
+                if agent_id not in owner_ids
+                and agent_id in self._failed_agent_ids
+                and agent_id not in self._repair_exhausted_agent_ids
+            )
+            if (
+                post_terminal_repair_ids
+                and AgentActionType.MODIFY_AGENT.value
+                in self._allowed_action_type_set
+            ):
+                # The official environment receipt is immutable at this point,
+                # but a downstream stateless Agent may still need one bounded
+                # repair before the Canvas can emit explicit FINISH.  Never
+                # reopen the environment owner or another native action.
+                return (AgentActionType.MODIFY_AGENT.value,)
             # A real terminal receipt or a measured fixed-budget exhaustion
             # closes the mutable environment.  Do not reopen execution or grow
             # the graph after that boundary.  If the Canvas still lacks a
@@ -1041,6 +1282,7 @@ class AgentWorkflowEnv:
                     closure_actions.append(action_type)
             return tuple(closure_actions)
 
+        capability_repairs = self._required_tool_capability_repair_domains()
         if self.required_tool_issue() is not None:
             # Establish exactly one typed stateful Tool owner before admitting
             # topology or Output edits. Agent identity, model and free-text
@@ -1050,8 +1292,19 @@ class AgentWorkflowEnv:
                     return (AgentActionType.ADD_AGENT.value,)
                 return ()
             if (
-                self._required_tool_capability_repair_domains()
+                capability_repairs
                 and AgentActionType.MODIFY_AGENT.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.MODIFY_AGENT.value,)
+            return ()
+
+        if capability_repairs:
+            # A typed environment-adapter profile fault is narrower than a
+            # generic failed-Agent contract repair.  Expose only its executable
+            # coupled profile edit; augmentation resumes after that execution.
+            if (
+                AgentActionType.MODIFY_AGENT.value
                 in self._allowed_action_type_set
             ):
                 return (AgentActionType.MODIFY_AGENT.value,)
@@ -2223,10 +2476,17 @@ class AgentWorkflowEnv:
 
         node_ids = tuple(node.id for node in self._graph.nodes)
         capability_repairs = self._required_tool_capability_repair_domains()
-        if self.required_tool_issue() is not None and capability_repairs:
+        if capability_repairs:
             return tuple(
                 node_id for node_id in node_ids if node_id in capability_repairs
             )
+        if self._environment_failure_circuit_breaker_agent_ids.intersection(
+            node_ids
+        ):
+            # The same typed capability fault has already repeated and no
+            # canonical profile delta remains.  Do not reopen free-text/no-op
+            # MODIFY arms; the collector receives a bounded exhausted domain.
+            return ()
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return node_ids
 
@@ -3532,13 +3792,13 @@ class AgentWorkflowEnv:
                 owner_profile = ("react", (self.required_tool_id,))
                 if owners:
                     # The current stateful owner is the sole writer.  New
-                    # Agents remain free in contract/model/role/topology, but
-                    # their live execution domain cannot advertise the same
-                    # state-mutating capability.
+                    # Agents remain free in contract/model/role/topology, while
+                    # every auxiliary executes through the stateless reasoning
+                    # adapter rather than the environment ReAct adapter.
                     execution_profiles = tuple(
                         profile
                         for profile in execution_profiles
-                        if profile != owner_profile
+                        if profile == ("reasoning", ())
                     )
                 elif self.required_tool_issue() is not None:
                     # Establish the missing capability without fixing an Agent
@@ -3818,9 +4078,16 @@ class AgentWorkflowEnv:
             )
             capability_repairs = (
                 self._required_tool_capability_repair_domains()
-                if self.required_tool_issue() is not None
-                else {}
             )
+            capability_target_profiles = {
+                agent_id: target_profile
+                for agent_id in capability_repairs
+                if (
+                    target_profile
+                    := self._required_tool_capability_target_profile(agent_id)
+                )
+                is not None
+            }
             if environment_parse_repair_id is not None:
                 base_mutable_fields = ["contract"]
             elif capability_repairs:
@@ -3938,16 +4205,11 @@ class AgentWorkflowEnv:
             }
             stateful_owners = self._required_tool_actor_ids()
             if len(stateful_owners) == 1 and not capability_repairs:
-                stateful_owner_id = stateful_owners[0]
                 for agent_id, fields in per_agent_mutable_fields.items():
                     per_agent_mutable_fields[agent_id] = [
                         field
                         for field in fields
-                        if field != "allowed_tools"
-                        and not (
-                            agent_id == stateful_owner_id
-                            and field == "execution_mode"
-                        )
+                        if field not in {"allowed_tools", "execution_mode"}
                     ]
             per_agent_current_values: dict[str, dict[str, object]] = {}
             for agent_id, fields in per_agent_mutable_fields.items():
@@ -4036,6 +4298,24 @@ class AgentWorkflowEnv:
                         "discrete_value_domains": per_agent_discrete_domains[
                             agent_id
                         ],
+                        **(
+                            {
+                                "atomic_execution_profile": {
+                                    "execution_mode": capability_target_profiles[
+                                        agent_id
+                                    ][0],
+                                    "allowed_tools": list(
+                                        capability_target_profiles[agent_id][1]
+                                    ),
+                                },
+                                "circuit_breaker_active": (
+                                    agent_id
+                                    in self._environment_failure_circuit_breaker_agent_ids
+                                ),
+                            }
+                            if agent_id in capability_target_profiles
+                            else {}
+                        ),
                         **(
                             {"avoid_provider_id": avoid_provider_id}
                             if (
@@ -4225,6 +4505,17 @@ class AgentWorkflowEnv:
                 action,
                 "action rejected: action type is outside the configured Canvas "
                 f"action set {list(self.allowed_action_types)!r}",
+            )
+        # Capability/profile recovery is the narrowest Runtime boundary.  Apply
+        # its exact live MODIFY domain before generic provider/semantic repair
+        # so a raw action cannot reproduce the same environment adapter fault.
+        capability_repair_issue = (
+            self._required_tool_capability_repair_admission_issue(action)
+        )
+        if capability_repair_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + capability_repair_issue,
             )
         # Provider/model availability is a Runtime boundary shared by generic
         # FlowSteer Canvas tasks and semantic QA tasks.  Apply its exact live
@@ -4524,6 +4815,14 @@ class AgentWorkflowEnv:
             return self._reject_after_count(
                 action,
                 "edit rejected: " + required_tool_candidate_issue,
+            )
+        auxiliary_profile_issue = (
+            self._required_tool_auxiliary_profile_issue(candidate)
+        )
+        if auxiliary_profile_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + auxiliary_profile_issue,
             )
         if (
             len(self._required_tool_actor_ids()) == 1
@@ -5486,6 +5785,23 @@ class AgentWorkflowEnv:
             for agent_id, record in self._latest_failure_record_by_agent.items()
             if agent_id in current_agent_ids
         }
+        self._environment_failure_signature_by_agent = {
+            agent_id: signature
+            for agent_id, signature in (
+                self._environment_failure_signature_by_agent.items()
+            )
+            if agent_id in current_agent_ids
+        }
+        self._environment_failure_repeat_count_by_agent = {
+            agent_id: count
+            for agent_id, count in (
+                self._environment_failure_repeat_count_by_agent.items()
+            )
+            if agent_id in current_agent_ids
+        }
+        self._environment_failure_circuit_breaker_agent_ids.intersection_update(
+            current_agent_ids
+        )
         self._pending_repair_receipt_count_by_agent = {
             agent_id: receipt_count
             for agent_id, receipt_count in (
@@ -5710,6 +6026,9 @@ class AgentWorkflowEnv:
         for agent_id in recovered:
             self._failure_continuations.pop(agent_id, None)
             self._latest_failure_record_by_agent.pop(agent_id, None)
+            self._environment_failure_signature_by_agent.pop(agent_id, None)
+            self._environment_failure_repeat_count_by_agent.pop(agent_id, None)
+            self._environment_failure_circuit_breaker_agent_ids.discard(agent_id)
             self._pending_repair_receipt_count_by_agent.pop(agent_id, None)
 
     def _record_failure_state(
@@ -5733,6 +6052,49 @@ class AgentWorkflowEnv:
         for record in records:
             if record.agent_id not in current_agent_ids:
                 continue
+            environment_signature = (
+                self._structured_environment_failure_signature(record)
+            )
+            if (
+                environment_signature is not None
+                and self._is_required_tool_capability_failure(record)
+            ):
+                previous_signature = (
+                    self._environment_failure_signature_by_agent.get(
+                        record.agent_id
+                    )
+                )
+                repeat_count = (
+                    self._environment_failure_repeat_count_by_agent.get(
+                        record.agent_id,
+                        0,
+                    )
+                    + 1
+                    if previous_signature == environment_signature
+                    else 1
+                )
+                self._environment_failure_signature_by_agent[
+                    record.agent_id
+                ] = environment_signature
+                self._environment_failure_repeat_count_by_agent[
+                    record.agent_id
+                ] = repeat_count
+                if repeat_count >= 2:
+                    self._environment_failure_circuit_breaker_agent_ids.add(
+                        record.agent_id
+                    )
+            else:
+                self._environment_failure_signature_by_agent.pop(
+                    record.agent_id,
+                    None,
+                )
+                self._environment_failure_repeat_count_by_agent.pop(
+                    record.agent_id,
+                    None,
+                )
+                self._environment_failure_circuit_breaker_agent_ids.discard(
+                    record.agent_id
+                )
             category, retryability, status_code = (
                 self._execution_failure_diagnosis(record)
             )
@@ -5852,6 +6214,9 @@ class AgentWorkflowEnv:
         self._repair_exhausted_agent_ids.clear()
         self._failure_continuations.clear()
         self._latest_failure_record_by_agent.clear()
+        self._environment_failure_signature_by_agent.clear()
+        self._environment_failure_repeat_count_by_agent.clear()
+        self._environment_failure_circuit_breaker_agent_ids.clear()
         self._pending_repair_receipt_count_by_agent.clear()
 
     def _invalidate_progressive_outputs(
@@ -10879,13 +11244,29 @@ class AgentWorkflowEnv:
                     "modify_agent model_id is unavailable for the current "
                     f"trajectory: {action.model_id!r}"
                 )
+            capability_target_profile = (
+                self._required_tool_capability_target_profile(action.agent_id)
+                if action.agent_id
+                in self._required_tool_capability_repair_domains()
+                else None
+            )
+            resolved_execution_mode = (
+                capability_target_profile[0]
+                if capability_target_profile is not None
+                else action.execution_mode
+            )
+            resolved_allowed_tools = (
+                capability_target_profile[1]
+                if capability_target_profile is not None
+                else action.allowed_tools
+            )
             graph.modify_agent(
                 action.agent_id,
                 model_id=action.model_id,
                 contract=action.contract,
                 role_family=action.role_family,
-                allowed_tools=action.allowed_tools,
-                execution_mode=action.execution_mode,
+                allowed_tools=resolved_allowed_tools,
+                execution_mode=resolved_execution_mode,
                 artifact_type=action.artifact_type,
                 completion_condition=action.completion_condition,
             )

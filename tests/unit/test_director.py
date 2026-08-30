@@ -1091,7 +1091,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertNotIn(prohibited.casefold(), DIRECTOR_SYSTEM_PROMPT.casefold())
 
-    async def test_history_window_keeps_actions_and_full_prior_observations_for_neutral_v10(
+    async def test_history_window_keeps_complete_observation_action_pairs_for_neutral_v10(
         self,
     ) -> None:
         model_registry = registry()
@@ -1116,10 +1116,25 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             ["system", "user", "assistant", "user", "assistant", "user"],
             [item["role"] for item in messages],
         )
-        self.assertEqual(actions[1], messages[2]["content"])
+        self.assertEqual(actions[0], messages[2]["content"])
         self.assertEqual(actions[2], messages[4]["content"])
-        self.assertNotIn(actions[0], [item["content"] for item in messages[2:]])
+        self.assertNotIn(actions[1], [item["content"] for item in messages[2:]])
         self.assertNotIn("recent_canvas_history", client.prompts[3])
+        for retained_index, original_prompt_index in ((1, 0), (3, 2)):
+            preceding_observation = transcript_messages(
+                client.prompts[original_prompt_index]
+            )[-1]
+            self.assertEqual(
+                preceding_observation["content"],
+                messages[retained_index]["content"],
+            )
+            sampled_action = json.loads(messages[retained_index + 1]["content"])
+            self.assertIn(
+                sampled_action["action"],
+                observation_payload(messages[retained_index])[
+                    "admissible_action_types"
+                ],
+            )
         historical_state = observation_payload(messages[3])
         current_state = observation_payload(messages[5])
         self.assertIn("current_graph", historical_state)

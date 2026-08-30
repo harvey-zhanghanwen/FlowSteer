@@ -717,6 +717,40 @@ class _CountingRuntime(AgentRuntime):
         return await super().execute(*args, **kwargs)  # type: ignore[arg-type]
 
 
+class _StepwiseNoopAdapter:
+    stepwise_director = True
+
+    async def execute(self, request: AgentRequest) -> AgentResponse:
+        return AgentResponse(f"environment:{request.agent.id}")
+
+
+class _StatefulProfileRuntime(AgentRuntime):
+    """Execution-contract fixture for Canvas-only environment profile tests."""
+
+    def __init__(self, model_registry: ModelRegistry) -> None:
+        super().__init__(
+            model_registry,
+            _ImmediateGateway(),
+            execution_adapters={"react": _StepwiseNoopAdapter()},
+            dataset_id="alfworld",
+        )
+
+    def registered_execution_profiles(
+        self,
+    ) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        return (
+            ("reasoning", ()),
+            ("react", ()),
+            ("react", ("alfworld.environment",)),
+        )
+
+    def validate_execution_contracts(self, nodes: tuple[AgentNode, ...]) -> None:
+        # These tests exercise AgentWorkflowEnv's authoritative profile gate and
+        # never execute the synthetic Tool.  The real Runtime/Tool integration
+        # remains covered by test_environment_execution.py.
+        return None
+
+
 def _hotpot_semantic_graph(*, format_predecessor: str = "verifier") -> AgentGraph:
     return AgentGraph(
         [
@@ -1958,6 +1992,412 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(env.finished)
         self.assertIn("exactly one ReAct environment actor", rejected.feedback)
         self.assertIn("alfworld.environment", rejected.feedback)
+
+    async def test_stateful_add_agent_exposes_only_reasoning_auxiliary_profile(
+        self,
+    ) -> None:
+        registry = make_registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "actor",
+                    "balanced",
+                    "act in the environment",
+                    allowed_tools=("alfworld.environment",),
+                    execution_mode="react",
+                )
+            ]
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_StatefulProfileRuntime(registry),
+            problem="complete the interactive task",
+            graph=graph,
+            execute_on_edit=False,
+            required_tool_id="alfworld.environment",
+            allowed_actions=("add_agent", "modify_agent", "finish"),
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+
+        targets = env.model_admissible_action_targets()
+
+        self.assertEqual(
+            [
+                {
+                    "execution_mode": "reasoning",
+                    "allowed_tools": [],
+                }
+            ],
+            targets["add_agent"]["execution_profiles"],
+        )
+        rejected = await env.step(
+            '{"action":"add_agent","agent_id":"bad","model_id":"cheap",'
+            '"contract":"assist","execution_mode":"react",'
+            '"allowed_tools":[]}'
+        )
+        self.assertFalse(rejected.accepted)
+        self.assertIn("reasoning", rejected.feedback)
+        self.assertFalse(env.graph.has_node("bad"))
+
+        added = await env.step(
+            '{"action":"add_agent","agent_id":"helper","model_id":"cheap",'
+            '"contract":"assist","execution_mode":"reasoning",'
+            '"allowed_tools":[]}'
+        )
+        self.assertTrue(added.accepted)
+        targets = env.model_admissible_action_targets()
+        helper_domain = next(
+            item
+            for item in targets["modify_agent"]["per_agent_candidates"]
+            if item["agent_id"] == "helper"
+        )
+        self.assertNotIn("execution_mode", helper_domain["mutable_fields"])
+        self.assertNotIn("allowed_tools", helper_domain["mutable_fields"])
+
+        invalid_modify = await env.step(
+            '{"action":"modify_agent","agent_id":"helper",'
+            '"execution_mode":"react"}'
+        )
+        self.assertFalse(invalid_modify.accepted)
+        self.assertEqual(
+            "reasoning",
+            env.graph.get_node("helper").execution_mode.value,
+        )
+
+    def test_public_environment_state_preserves_bounded_transition_history(
+        self,
+    ) -> None:
+        registry = make_registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "actor",
+                    "balanced",
+                    "act in the environment",
+                    allowed_tools=("alfworld.environment",),
+                    execution_mode="react",
+                )
+            ]
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_StatefulProfileRuntime(registry),
+            problem="complete the interactive task",
+            graph=graph,
+            execute_on_edit=False,
+            required_tool_id="alfworld.environment",
+        )
+        env._progressive_output_metadata["actor"] = {
+            "environment_current_state": {
+                "environment_revision": 2,
+                "current_observation": "at cabinet 2",
+                "remaining_action_budget": 18,
+                "total_action_budget": 20,
+                "environment_terminal": False,
+                "environment_truncated": False,
+                "action_observation_history": [
+                    {
+                        "turn": 1,
+                        "action": "go to cabinet 1",
+                        "observation_result": "at cabinet 1",
+                        "state_advanced": True,
+                        "reward": 1.0,
+                        "info": {"won": True},
+                    },
+                    {
+                        "turn": 2,
+                        "action": "go to cabinet 2",
+                        "observation_result": "at cabinet 2",
+                        "state_advanced": True,
+                        "hidden_state": "must-not-project",
+                    },
+                ],
+                "public_scene_memory": [
+                    {
+                        "location": "cabinet 1",
+                        "target_evidence": "absent",
+                        "last_observation": "at cabinet 1",
+                        "reward": 1.0,
+                    }
+                ],
+            }
+        }
+
+        state = env.public_environment_state()
+
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(2, len(state["action_observation_history"]))
+        self.assertEqual(20, state["total_action_budget"])
+        self.assertEqual(
+            ["go to cabinet 1", "go to cabinet 2"],
+            [item["action"] for item in state["action_observation_history"]],
+        )
+        self.assertNotIn("reward", str(state))
+        self.assertNotIn("won", str(state))
+        self.assertNotIn("hidden_state", str(state))
+
+    async def test_missing_environment_holder_repair_couples_complete_profile(
+        self,
+    ) -> None:
+        registry = make_registry()
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_StatefulProfileRuntime(registry),
+            problem="complete the interactive task",
+            graph=AgentGraph(
+                [AgentNode("candidate", "balanced", "act or assist")]
+            ),
+            execute_on_edit=False,
+            required_tool_id="alfworld.environment",
+            allowed_actions=("modify_agent", "finish"),
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        targets = env.model_admissible_action_targets()
+        director_validate_live_action_target_domains(
+            env.model_admissible_action_types(),
+            targets,
+        )
+        candidate = targets["modify_agent"]["per_agent_candidates"][0]
+        self.assertEqual(["execution_mode"], candidate["mutable_fields"])
+        self.assertEqual(
+            {"execution_mode": ["react"]},
+            candidate["discrete_value_domains"],
+        )
+        self.assertEqual(
+            {
+                "execution_mode": "react",
+                "allowed_tools": ["alfworld.environment"],
+            },
+            candidate["atomic_execution_profile"],
+        )
+
+        repaired = await env.step(
+            '{"action":"modify_agent","agent_id":"candidate",'
+            '"execution_mode":"react"}'
+        )
+
+        self.assertTrue(repaired.accepted)
+        node = env.graph.get_node("candidate")
+        self.assertEqual("react", node.execution_mode.value)
+        self.assertEqual(("alfworld.environment",), node.allowed_tools)
+
+    async def test_environment_capability_failure_forces_atomic_aux_repair(
+        self,
+    ) -> None:
+        registry = make_registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "actor",
+                    "balanced",
+                    "act in the environment",
+                    allowed_tools=("alfworld.environment",),
+                    execution_mode="react",
+                ),
+                AgentNode(
+                    "helper",
+                    "cheap",
+                    "assist the actor",
+                    execution_mode="react",
+                ),
+            ]
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_StatefulProfileRuntime(registry),
+            problem="complete the interactive task",
+            graph=graph,
+            execute_on_edit=False,
+            required_tool_id="alfworld.environment",
+            allowed_actions=("add_agent", "modify_agent", "set_relation", "finish"),
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        failure = AgentFailureRecord(
+            request_id="request:helper",
+            agent_id="helper",
+            phase=ExecutionPhase.SINGLE,
+            graph_revision=env.revision,
+            error_type="EnvironmentExecutionError",
+            message=(
+                "environment Agent must allow exactly its request-scoped "
+                "environment tool"
+            ),
+            metadata={"cause_error_type": "EnvironmentExecutionError"},
+        )
+        env._record_failure_state(
+            (failure,),
+            current_agent_ids={"actor", "helper"},
+        )
+        env._record_failure_state(
+            (failure,),
+            current_agent_ids={"actor", "helper"},
+        )
+
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        targets = env.model_admissible_action_targets()
+        director_validate_live_action_target_domains(
+            env.model_admissible_action_types(),
+            targets,
+        )
+        modify_domain = targets["modify_agent"]
+        self.assertEqual(["helper"], modify_domain["agent_ids"])
+        candidate = modify_domain["per_agent_candidates"][0]
+        self.assertEqual(["execution_mode"], candidate["mutable_fields"])
+        self.assertEqual(
+            {"execution_mode": ["reasoning"]},
+            candidate["discrete_value_domains"],
+        )
+        self.assertTrue(candidate["circuit_breaker_active"])
+        self.assertNotIn("contract", modify_domain["mutable_fields"])
+        self.assertNotIn("artifact_type", modify_domain["mutable_fields"])
+
+        unrelated = await env.step(
+            '{"action":"modify_agent","agent_id":"helper",'
+            '"contract":"try the same task again"}'
+        )
+        self.assertFalse(unrelated.accepted)
+        self.assertIn("profile trigger", unrelated.feedback)
+
+        repaired = await env.step(
+            '{"action":"modify_agent","agent_id":"helper",'
+            '"execution_mode":"reasoning"}'
+        )
+        self.assertTrue(repaired.accepted)
+        helper = env.graph.get_node("helper")
+        self.assertEqual("reasoning", helper.execution_mode.value)
+        self.assertEqual((), helper.allowed_tools)
+        self.assertEqual(("actor",), env._required_tool_actor_ids())
+
+    def test_structured_environment_stall_masks_continue_and_keeps_recovery_edits(
+        self,
+    ) -> None:
+        registry = make_registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "actor",
+                    "balanced",
+                    "act in the environment",
+                    allowed_tools=("alfworld.environment",),
+                    execution_mode="react",
+                ),
+                AgentNode("helper", "cheap", "reason about recovery"),
+            ]
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_StatefulProfileRuntime(registry),
+            problem="complete the interactive task",
+            graph=graph,
+            execute_on_edit=False,
+            max_agents=4,
+            required_tool_id="alfworld.environment",
+            allowed_actions=(
+                "add_agent",
+                "modify_agent",
+                "set_relation",
+                "continue",
+                "finish",
+            ),
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        env._progressive_output_metadata["actor"] = {
+            "environment_current_state": {
+                "environment_revision": 8,
+                "remaining_action_budget": 12,
+                "environment_terminal": False,
+                "environment_truncated": False,
+                "stall_diagnostic": {
+                    "schema_version": "alfworld.public-stall.v1",
+                    "stalled": True,
+                    "signals": ["alternating_action_loop"],
+                },
+            }
+        }
+
+        actions = env.model_admissible_action_types()
+
+        self.assertNotIn("continue", actions)
+        self.assertIn("add_agent", actions)
+        self.assertIn("modify_agent", actions)
+        self.assertIn("set_relation", actions)
+        targets = env.model_admissible_action_targets()
+        self.assertEqual(
+            [{"execution_mode": "reasoning", "allowed_tools": []}],
+            targets["add_agent"]["execution_profiles"],
+        )
+        director_validate_live_action_target_domains(actions, targets)
+
+    async def test_terminal_environment_retains_isolated_auxiliary_repair(
+        self,
+    ) -> None:
+        registry = make_registry()
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "actor",
+                    "balanced",
+                    "act in the environment",
+                    allowed_tools=("alfworld.environment",),
+                    execution_mode="react",
+                ),
+                AgentNode("helper", "cheap", "summarize public observations"),
+            ]
+        )
+        env = AgentWorkflowEnv(
+            registry,
+            runtime=_StatefulProfileRuntime(registry),
+            problem="complete the interactive task",
+            graph=graph,
+            execute_on_edit=False,
+            required_tool_id="alfworld.environment",
+            allowed_actions=("modify_agent", "set_relation", "set_output", "finish"),
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        env._progressive_output_metadata["actor"] = {
+            "environment_current_state": {
+                "environment_revision": 7,
+                "remaining_action_budget": 13,
+                "total_action_budget": 20,
+                "environment_terminal": True,
+                "environment_truncated": False,
+                "action_observation_history": [
+                    {
+                        "turn": 7,
+                        "action": "move apple 1 to fridge 1",
+                        "observation_result": "task terminal observation",
+                        "state_advanced": True,
+                        "environment_terminal": True,
+                    }
+                ],
+            }
+        }
+        env._record_failure_state(
+            (
+                AgentFailureRecord(
+                    request_id="request:helper",
+                    agent_id="helper",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=env.revision,
+                    error_type="AgentExecutionError",
+                    message="downstream formatting failed",
+                ),
+            ),
+            current_agent_ids={"actor", "helper"},
+        )
+
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        targets = env.model_admissible_action_targets()
+        self.assertEqual(["helper"], targets["modify_agent"]["agent_ids"])
+        repaired = await env.step(
+            '{"action":"modify_agent","agent_id":"helper",'
+            '"contract":"summarize the retained public observations"}'
+        )
+        self.assertTrue(repaired.accepted)
+        self.assertEqual(7, env.public_environment_state()["environment_revision"])
 
     async def test_canvas_rejects_actions_outside_configured_search_space(self) -> None:
         registry = make_registry()
