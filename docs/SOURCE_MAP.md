@@ -162,3 +162,11 @@ source anomaly in the aligned manifest.  A future formal run must use a
 separately versioned evaluation condition that points to the isolated freeze;
 the previously recorded metrics remain historical results of their original
 source condition.
+
+## Qwen3.5 worker thinking profile (HotpotQA v23)
+
+| Local boundary | Reused source | Adaptation and status |
+| --- | --- | --- |
+| `model_catalog_hotpotqa_qa_memory_v11_thinking.yaml`; `openai_gateway.py` | SkillFlow `training/batch_inference.py::supervisor_call`, which forwards `chat_template_kwargs.enable_thinking`, sets `thinking_budget=512`, and adds the same 512-token completion allowance | Directly reuses the per-request Qwen3.5 thinking toggle and bounded reasoning budget for free-text reasoning/output worker requests. The completed v22 catalog stays immutable. |
+| strict-schema branch in `OpenAICompatibleGateway.request_payload` | SkillFlow's per-request `enable_thinking` selection and FlowSteer's existing strict `response_json_schema` ReAct action boundary | Necessary compatibility adaptation verified against the local GPU0 SGLang service: thinking plus strict JSON Schema exhausted 4,608 tokens in `reasoning_content` without emitting `message.content`. Therefore only schema-constrained `search/read/complete` action requests use non-thinking; free-text worker requests retain thinking. The effective mode and schema suppression flag are recorded in the response receipt. |
+| Director generation | FlowSteer `SGLangReceiptDirectorClient` exact token/log-prob receipt and state-conditioned JSON Schema action decoding | Unchanged. Qwen3.5 thinking would open a `<think>` block before the JSON grammar and break the exact action/token/log-prob span contract. A genuine thinking Director would require a separately specified two-stage deliberation/action policy and corresponding GRPO receipt accounting; no such unverified path is claimed here. |

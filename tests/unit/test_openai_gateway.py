@@ -224,6 +224,79 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             {"enable_thinking": False},
         )
 
+    def test_qwen_chat_template_thinking_true_is_forwarded_explicitly(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={
+                    "chat_template_enable_thinking": "true",
+                    "chat_template_thinking_budget": "512",
+                    "max_tokens": "4608",
+                },
+            ),
+        )
+        payload = OpenAICompatibleGateway().request_payload(item)
+        self.assertEqual(
+            payload["chat_template_kwargs"],
+            {"enable_thinking": True, "thinking_budget": 512},
+        )
+        self.assertEqual(4608, payload["max_tokens"])
+
+    def test_thinking_budget_requires_thinking_mode(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={
+                    "chat_template_enable_thinking": "false",
+                    "chat_template_thinking_budget": "512",
+                },
+            ),
+        )
+        with self.assertRaisesRegex(
+            OpenAICompatibleGatewayError,
+            "chat_template_thinking_budget requires",
+        ):
+            OpenAICompatibleGateway().request_payload(item)
+
+    def test_thinking_is_suppressed_for_strict_schema_action(self) -> None:
+        item = request()
+        schema = {
+            "type": "object",
+            "required": ["kind"],
+            "properties": {"kind": {"const": "complete"}},
+            "additionalProperties": False,
+        }
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={
+                    "chat_template_enable_thinking": "true",
+                    "chat_template_thinking_budget": "512",
+                    "response_json_schema": json.dumps(schema),
+                },
+            ),
+        )
+        payload = OpenAICompatibleGateway().request_payload(item)
+        self.assertEqual(
+            {"enable_thinking": False},
+            payload["chat_template_kwargs"],
+        )
+        self.assertEqual("json_schema", payload["response_format"]["type"])
+
     def test_skillflow_response_schema_is_forwarded_strictly(self) -> None:
         item = request()
         schema = {

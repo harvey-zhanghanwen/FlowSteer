@@ -474,6 +474,21 @@ class OpenAICompatibleGateway:
             payload["chat_template_kwargs"] = {
                 "enable_thinking": normalized == "true"
             }
+            thinking_budget = metadata.get("chat_template_thinking_budget")
+            if thinking_budget is not None:
+                if normalized != "true":
+                    raise OpenAICompatibleGatewayError(
+                        "model metadata chat_template_thinking_budget requires "
+                        "chat_template_enable_thinking=true"
+                    )
+                # DIRECT_REUSE: SkillFlow bounds Qwen3.5 Supervisor reasoning
+                # through chat_template_kwargs.thinking_budget and adds the
+                # same allowance to the completion-token budget.
+                payload["chat_template_kwargs"]["thinking_budget"] = _integer(
+                    metadata,
+                    "chat_template_thinking_budget",
+                    512,
+                )
         response_schema_text = metadata.get("response_json_schema")
         if response_schema_text is not None:
             if (
@@ -511,6 +526,17 @@ class OpenAICompatibleGateway:
                 },
                 "type": "json_schema",
             }
+            if (
+                payload.get("chat_template_kwargs", {}).get("enable_thinking")
+                is True
+            ):
+                # NECESSARY_ADAPTATION: Qwen3.5 can spend the entire completion
+                # inside reasoning_content when strict JSON Schema decoding is
+                # active, leaving no Agent action in message.content. SkillFlow
+                # already selects thinking per request; retain thinking for
+                # free-text reasoning/output requests and suppress it only for
+                # schema-constrained ReAct action requests.
+                payload["chat_template_kwargs"] = {"enable_thinking": False}
         return payload
 
     async def generate(self, request: AgentRequest) -> AgentResponse:
@@ -551,6 +577,29 @@ class OpenAICompatibleGateway:
                         "attempt_count": attempt + 1,
                         "generation_seed": scientific_generation_seed,
                         "backend_generation_seed": payload.get("seed"),
+                        "chat_template_enable_thinking_requested": (
+                            request.model.metadata.get(
+                                "chat_template_enable_thinking"
+                            )
+                            == "true"
+                        ),
+                        "chat_template_enable_thinking_effective": bool(
+                            payload.get("chat_template_kwargs", {}).get(
+                                "enable_thinking",
+                                False,
+                            )
+                        ),
+                        "thinking_suppressed_for_response_schema": bool(
+                            request.model.metadata.get(
+                                "chat_template_enable_thinking"
+                            )
+                            == "true"
+                            and "response_format" in payload
+                            and not payload.get("chat_template_kwargs", {}).get(
+                                "enable_thinking",
+                                False,
+                            )
+                        ),
                     }
                 )
                 return AgentResponse(parsed.text, metadata)
