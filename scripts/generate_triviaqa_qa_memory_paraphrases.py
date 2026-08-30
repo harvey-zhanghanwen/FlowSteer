@@ -55,7 +55,7 @@ from scripts.materialize_triviaqa_full_train_qa_memory import (  # noqa: E402
 )
 
 
-PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v17"
+PROMPT_TEMPLATE_VERSION = "triviaqa.qa_memory.qa_paraphrase.v18"
 SUPPORTED_PROMPT_TEMPLATE_VERSIONS = frozenset(
     {
         "triviaqa.qa_memory.qa_paraphrase.v12",
@@ -63,6 +63,7 @@ SUPPORTED_PROMPT_TEMPLATE_VERSIONS = frozenset(
         "triviaqa.qa_memory.qa_paraphrase.v14",
         "triviaqa.qa_memory.qa_paraphrase.v15",
         "triviaqa.qa_memory.qa_paraphrase.v16",
+        "triviaqa.qa_memory.qa_paraphrase.v17",
         PROMPT_TEMPLATE_VERSION,
     }
 )
@@ -6590,7 +6591,7 @@ class LocalQwen35Paraphraser:
                     return augmented_statement
             except ValueError:
                 pass
-        current_statement = rejected_statement
+        preserved_statement = rejected_statement
         current_reason = admission_failure_reason
         last_repair_error: ValueError | None = None
         for repair_attempt in range(FACT_ONLY_REPAIR_ATTEMPTS):
@@ -6599,7 +6600,12 @@ class LocalQwen35Paraphraser:
                     self._complete(
                         messages=build_answer_repair_messages(
                             source,
-                            rejected_answer_statement=current_statement,
+                            # FlowSteer-style recovery is non-destructive:
+                            # diagnose each failed candidate through the
+                            # current reason, but always repair from the same
+                            # preserved execution artifact instead of feeding
+                            # semantic drift into the next retry.
+                            rejected_answer_statement=preserved_statement,
                             admission_failure_reason=current_reason,
                             repair_attempt=repair_attempt,
                         ),
@@ -6612,14 +6618,12 @@ class LocalQwen35Paraphraser:
                         ),
                     )
                 )
-                current_statement = repaired_statement
                 canonicalized = _canonicalize_answer_statement_from_accepted_alias(
                     source,
                     repaired_statement,
                 )
                 if canonicalized is not None:
                     repaired_statement = canonicalized
-                    current_statement = canonicalized
                     admitted_alias = validated_local_candidate(canonicalized)
                     if admitted_alias is not None:
                         return admitted_alias

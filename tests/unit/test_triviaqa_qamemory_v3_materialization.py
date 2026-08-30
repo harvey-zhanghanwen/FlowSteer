@@ -681,7 +681,7 @@ def test_repair_payload_preserves_numeric_token_multiplicity() -> None:
 
 
 def test_prompt_v14_keeps_strictly_admitted_v12_v13_rows_supported() -> None:
-    assert PROMPT_TEMPLATE_VERSION == "triviaqa.qa_memory.qa_paraphrase.v17"
+    assert PROMPT_TEMPLATE_VERSION == "triviaqa.qa_memory.qa_paraphrase.v18"
     assert {
         "triviaqa.qa_memory.qa_paraphrase.v12",
         "triviaqa.qa_memory.qa_paraphrase.v13",
@@ -1339,7 +1339,7 @@ def test_answer_repair_canonicalizes_and_verifies_model_statement_alias(
     )
 
 
-def test_answer_repair_retries_only_fact_with_exact_gate_feedback(
+def test_answer_repair_retries_only_fact_non_destructively_with_gate_feedback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = TriviaQATrainSource(
@@ -1413,9 +1413,9 @@ def test_answer_repair_retries_only_fact_with_exact_gate_feedback(
     assert "external anaphoric" in str(
         repair_payloads[1]["admission_failure_reason"]
     )
-    assert repair_payloads[1]["rejected_answer_statement"].startswith(
-        "Japan is the country where he"
-    )
+    assert {
+        payload["rejected_answer_statement"] for payload in repair_payloads
+    } == {"It began in Japan in 1988."}
     assert paraphrase_question not in {
         str(payload["rejected_answer_statement"])
         for payload in repair_payloads
