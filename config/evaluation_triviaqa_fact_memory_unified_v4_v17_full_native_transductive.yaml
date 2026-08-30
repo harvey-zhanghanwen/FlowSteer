@@ -49,6 +49,9 @@ triviaqa_evaluation:
   direct_reused_from: "reports/triviaqa_qa_memory_v1_baseline/direct_question_only_predictions.jsonl"
   legacy_deterministic_prefetch_enabled: false
   evaluation_scope: "in_database_transductive_fact_only"
+  in_database_transductive: true
+  fixed_evaluation_overlap_expected: 128
+  official_heldout_comparable: false
   agentgraph_protocol: "question_plus_worker_dynamic_full_native_fact_memory_in_database_tool_first_parametric_fallback_v17"
   protocol_equivalent_to_direct: false
 
