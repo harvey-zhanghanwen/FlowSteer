@@ -1,0 +1,92 @@
+# HealthBench Professional heterogeneous Executor catalog.  The local entry is
+# kept byte-for-byte equivalent to the v2.4 Direct arm so the runner can reuse
+# its verified Direct receipts.  The three remote IDs were returned by the
+# VectorEngine /v1/models endpoint and produced observable reasoning_content in
+# the 2026-08-31 capability receipts.  The Director receives neutral capability
+# facts and may choose any entry for any free-text Agent contract.
+providers:
+  - provider_id: "local-qwen35-healthbench-thinking-8192-v2"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+    max_concurrency: 8
+
+  - provider_id: "vectorengine-healthbench-mixed-thinking-v1"
+    kind: "openai-compatible"
+    endpoint: "${VECTOR_ENGINE_BASE_URL:-https://api.vectorengine.ai/v1}"
+    max_concurrency: 8
+    api_key_env: "VECTOR_ENGINE_API_KEY"
+
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-qwen35-healthbench-thinking-8192-v2"
+    model_name: "supervisor_theta"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    context_window: 32768
+    metadata:
+      family: "qwen"
+      profile: "provider=local;instruction=chat;thinking=enabled;capabilities=text;version=healthbench-v2"
+      text_capable: "true"
+      tool_capable: "false"
+      coding_capable: "false"
+      chat_template_enable_thinking: "true"
+      max_tokens: "4096"
+      thinking_budget: "4096"
+      sampling_backend: "sglang"
+      deployment_locality: "local"
+      supports_top_k: "true"
+      top_k: "-1"
+      supports_repetition_penalty: "true"
+      repetition_penalty: "1.10"
+
+  - model_id: "qwen3.5-flash"
+    provider_id: "vectorengine-healthbench-mixed-thinking-v1"
+    model_name: "qwen3.5-flash"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "qwen"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;reasoning=provider-thinking;capabilities=text;availability=current-list-and-thinking-canary"
+      capability_canary: "passed_thinking_2026-08-31"
+      canary_source: "artifacts/model_capability_canary/healthbench_mixed_all_thinking_v1.json"
+      text_capable: "true"
+      tool_capable: "false"
+      coding_capable: "false"
+      chat_template_enable_thinking: "true"
+      max_tokens: "8192"
+
+  - model_id: "deepseek-v4-flash"
+    provider_id: "vectorengine-healthbench-mixed-thinking-v1"
+    model_name: "deepseek-v4-flash"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "deepseek"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;reasoning=provider-thinking;capabilities=text;availability=current-list-and-thinking-canary"
+      capability_canary: "passed_thinking_2026-08-31"
+      canary_source: "artifacts/model_capability_canary/healthbench_mixed_all_thinking_v1.json"
+      text_capable: "true"
+      tool_capable: "false"
+      coding_capable: "false"
+      chat_template_enable_thinking: "true"
+      max_tokens: "8192"
+
+  - model_id: "MiniMax-M3"
+    provider_id: "vectorengine-healthbench-mixed-thinking-v1"
+    model_name: "MiniMax-M3"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    metadata:
+      family: "minimax"
+      profile: "provider=vectorengine;locality=remote;instruction=chat;reasoning=provider-thinking;capabilities=text;availability=current-list-and-thinking-canary"
+      capability_canary: "passed_thinking_2026-08-31"
+      canary_source: "artifacts/model_capability_canary/healthbench_mixed_all_thinking_v1.json"
+      text_capable: "true"
+      tool_capable: "false"
+      coding_capable: "false"
+      chat_template_enable_thinking: "true"
+      max_tokens: "8192"

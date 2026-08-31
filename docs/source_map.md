@@ -657,3 +657,26 @@ length-adjusted score was `0.5936383333`; the same-condition Direct scores were
 `0.2000000000` and `0.2389844000`.  These two samples validate the execution
 chain only and are not a 525-task estimate.  Full evaluation remains required
 before changing the best-profile pointer.
+
+### HealthBench heterogeneous all-thinking Executor condition v2.5
+
+The v2.5 condition changes only the Workflow Executor model search space and
+its versioned storage namespace.  The Flow-Director remains the same local
+Qwen3.5-9B policy, prompt v14, two-phase Canvas client, and action mask.  It
+does not add a role-to-model mapping, medical role inventory, fixed Agent
+count, relation, topology, Tool, memory, Skill, or training objective.
+
+| v2.5 boundary | Source and classification |
+| --- | --- |
+| Per-node heterogeneous `model_id` selection | **Direct reuse** of the existing `ModelRegistry -> Director model catalog -> Canvas action.model_id -> AgentGraphValidator -> AgentRuntime provider dispatch` chain. `executor_selection=director_catalog_choice` is unchanged; no second router or random model assignment is added. |
+| Four-entry thinking catalog | **Thin HealthBench configuration adaptation** of the receipt-backed AIME v15 heterogeneous catalog. The exact entries are local `qwen3.5-9b-local` plus remote `qwen3.5-flash`, `deepseek-v4-flash`, and `MiniMax-M3`; all have equal selection/cheap/fast weights and neutral text capability descriptions. |
+| Remote thinking compatibility | **Direct reuse of existing capability receipts** in `artifacts/model_capability_canary/aime_all_thinking_remote_pool_20260831.json`. Every admitted remote returned `reasoning_content_present=true` with the gateway thinking toggle; candidates that returned HTTP 429 or timed out are not admitted. The current `/v1/models` endpoint was checked again before freezing the catalog. |
+| Thinking request and receipt | **Direct SkillFlow/provider-boundary reuse** through `OpenAICompatibleGateway`. Every admitted ModelSpec sets `chat_template_enable_thinking=true`; the gateway stores the requested toggle and provider reasoning presence/token fields without routing hidden reasoning as an Artifact. Local SGLang alone keeps its supported `top_k` and repetition-penalty metadata; those fields are not invented for remote providers. |
+| Direct checkpoint reuse | **Direct reuse** of `evaluate_completion_benchmark_round.py::_collect_direct`. The new condition declares `direct_reused_from` for the stopped v2.4 checkpoint; the runner verifies task/model/protocol/seed/evaluator/judge identity, records a reuse receipt, and only evaluates missing Direct tasks. Graph trajectories are never reused across the catalog/version boundary. |
+| Comparison label | **Necessary evaluation provenance distinction**. Because Workflow Agents may use heterogeneous remote models while Direct remains local Qwen3.5-9B, `protocol_equivalent_to_direct=false`; the final Direct-versus-AgentGraph delta is a descriptive composite-system comparison, not an isolated causal estimate of orchestration. |
+
+The Director REASONING phase keeps thinking enabled.  Its JSON-Schema ACTION
+phase remains a constrained serialization phase with thinking disabled, as in
+the existing SkillFlow two-phase boundary; it is not an Executor or a semantic
+answer-generation turn.  Training, GRPO, backward, optimizer update, LoRA,
+MACE, Bayesian update, and Skill evolution remain disabled.

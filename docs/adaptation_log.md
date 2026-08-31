@@ -1120,3 +1120,33 @@ change was made during profile selection.
 - No training, backward pass, optimizer update, LoRA, GRPO, MACE, Bayesian
   update, Skill retrieval/evolution, memory, Web search, or benchmark-answer
   retrieval ran.
+
+## 2026-08-31: HealthBench heterogeneous all-thinking Executor v2.5
+
+- Safely stopped the incomplete v2.4 formal runner at 208/525 valid Direct
+  records, two old canary Graph trajectories, and zero collection failures.
+  The immutable v2.4 namespace remains an explicitly incomplete condition and
+  is not reported as a 525-task AgentGraph result.
+- Created an independent v2.5 condition, catalog namespace, policy version,
+  artifact directory, and report directory.  No v2.4 Graph trajectory is
+  admissible under the new catalog version.
+- Reused the existing per-node Director catalog selection path rather than
+  adding a ModelRouter.  The four equal-weight Executor choices are local
+  Qwen3.5-9B, Qwen3.5 Flash, DeepSeek V4 Flash, and MiniMax M3.  Models are not
+  bound to roles or topology positions.
+- Rechecked the current VectorEngine `/v1/models` endpoint and reused the
+  2026-08-31 capability receipts.  Every admitted remote model returned
+  observable reasoning content under `chat_template_enable_thinking=true`.
+  GPT-4o-mini, MiniMax M2.5, and GLM 4.5 Flash were excluded from this frozen
+  pool because their existing probe ended in HTTP 429 or timeout; no guessed
+  alias or unverified fallback was added.
+- Preserved the v2.4 local Qwen Direct entry, protocol, contract, seed, empty
+  Tool condition, official evaluator revision, and grader model.  Declared
+  `direct_reused_from` so the runner verifies and reuses the 208 successful
+  Direct receipts, then generates only the missing 317.
+- Marked `protocol_equivalent_to_direct=false`: a heterogeneous AgentGraph
+  versus local-Qwen Direct delta measures the composite orchestration/model
+  selection system and cannot isolate architecture alone.
+- No training, backward pass, optimizer update, LoRA, GRPO, MACE, Bayesian
+  update, Skill injection/evolution, medical memory, Web search, or benchmark
+  answer retrieval was enabled.

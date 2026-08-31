@@ -1,0 +1,67 @@
+{
+  "schema_version": "flowsteer.model_catalog.selection_receipt.v1",
+  "created_at": "2026-08-31T15:21:44+08:00",
+  "purpose": "healthbench_professional_mixed_executor_all_thinking_v1",
+  "director_model": "qwen3.5-9b-local",
+  "director_remains_fixed": true,
+  "executor_selection": "director_catalog_choice",
+  "selection_policy": "equal_weight_no_role_binding",
+  "models_endpoint_checked": true,
+  "models_endpoint_checked_at": "2026-08-31T15:18:00+08:00",
+  "source_receipts": [
+    "/ssd1/iclr/1/FlowSteer/artifacts/model_capability_canary/local_qwen35_9b_20260820.json",
+    "/ssd1/iclr/1/FlowSteer/artifacts/model_capability_canary/aime_all_thinking_remote_pool_20260831.json"
+  ],
+  "admitted_models": [
+    {
+      "model_id": "qwen3.5-9b-local",
+      "provider_model": "supervisor_theta",
+      "reasoning_protocol": "local_sglang_chat_template_thinking",
+      "requested_thinking": true,
+      "reasoning_receipt_observed": true
+    },
+    {
+      "model_id": "qwen3.5-flash",
+      "provider_model": "qwen3.5-flash",
+      "reasoning_protocol": "provider_thinking",
+      "requested_thinking": true,
+      "reasoning_content_present": true,
+      "text_response_observed": "Paris",
+      "structured_action_probe": "passed"
+    },
+    {
+      "model_id": "deepseek-v4-flash",
+      "provider_model": "deepseek-v4-flash",
+      "reasoning_protocol": "provider_thinking",
+      "requested_thinking": true,
+      "reasoning_content_present": true,
+      "text_response_observed": "Paris",
+      "structured_action_probe": "passed"
+    },
+    {
+      "model_id": "MiniMax-M3",
+      "provider_model": "MiniMax-M3",
+      "reasoning_protocol": "provider_thinking",
+      "requested_thinking": true,
+      "reasoning_content_present": true,
+      "text_response_observed": "Paris",
+      "structured_action_probe": "passed"
+    }
+  ],
+  "not_admitted_from_probe": [
+    {
+      "model_id": "gpt-4o-mini",
+      "reason": "HTTP 429 in the frozen 2026-08-31 probe"
+    },
+    {
+      "model_id": "MiniMax-M2.5",
+      "reason": "HTTP 429 in the frozen 2026-08-31 probe"
+    },
+    {
+      "model_id": "glm-4.5-flash",
+      "reason": "timeout in the frozen 2026-08-31 probe"
+    }
+  ],
+  "no_provider_fallback": true,
+  "training_enabled": false
+}
