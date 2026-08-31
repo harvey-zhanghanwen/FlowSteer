@@ -3558,6 +3558,12 @@ _PROVIDER_RESPONSE_METADATA_FIELDS: Tuple[str, ...] = (
     "temperature",
     "top_p",
     "max_tokens",
+    "requested_sampling",
+    "request_status",
+    "backend_sampling_seed",
+    "reasoning_content_present",
+    "reasoning_content_characters",
+    "reasoning_tokens",
 )
 
 _UNIFIED_EXECUTION_METADATA_FIELDS: Tuple[str, ...] = (
@@ -3728,9 +3734,18 @@ def _execution_record(call: AgentCallRecord) -> ExecutionRecord:
         _sampling_value(metadata, request.model.metadata, "temperature", 0.0)
     )
     top_p = float(_sampling_value(metadata, request.model.metadata, "top_p", 1.0))
-    max_tokens = int(
-        _sampling_value(metadata, request.model.metadata, "max_tokens", 4096)
+    requested_sampling = metadata.get("requested_sampling")
+    provider_max_tokens = (
+        requested_sampling.get("max_tokens")
+        if isinstance(requested_sampling, Mapping)
+        else None
     )
+    try:
+        max_tokens = int(provider_max_tokens)
+    except (TypeError, ValueError):
+        max_tokens = int(
+            _sampling_value(metadata, request.model.metadata, "max_tokens", 4096)
+        )
     if temperature < 0:
         temperature = 0.0
     if not 0 < top_p <= 1:

@@ -285,25 +285,24 @@ class MessageTests(unittest.TestCase):
         self.assertIn("source_agent: source", text)
         self.assertIn("target_agent: agent", text)
         self.assertIn("request_or_dependency: verify carefully", text)
-        self.assertIn(
-            "original task is immutable and authoritative",
-            messages[0]["content"],
-        )
+        self.assertIn("unique Output Agent", messages[0]["content"])
+        self.assertIn("return the final task answer", messages[0]["content"])
         self.assertNotIn("<answer>", messages[0]["content"])
-        self.assertIn("Output pointer selects an existing artifact", messages[0]["content"])
 
-    def test_generic_contract_preserves_task_scope_without_output_prompt_drift(self) -> None:
+    def test_generic_contract_separates_intermediate_and_output_protocols(self) -> None:
         messages = build_agent_messages(request(is_output_agent=False))
         system = messages[0]["content"]
         output_system = build_agent_messages(
             request(is_output_agent=True)
         )[0]["content"]
-        self.assertIn("original task is immutable and authoritative", system)
-        self.assertIn("cannot add, replace, or narrow", system)
-        self.assertIn("Output pointer selects an existing artifact", system)
+        self.assertIn("intermediate AgentGraph node", system)
+        self.assertIn("Preserve the task's original relation", system)
+        self.assertIn("unique Output Agent", output_system)
+        self.assertIn("return the final task answer", output_system)
+        self.assertIn("Do not expose AgentGraph identifiers", output_system)
         self.assertNotIn("direct semantic predecessor", system)
         self.assertNotIn("unique Output Agent", system)
-        self.assertEqual(system, output_system)
+        self.assertNotEqual(system, output_system)
 
     def test_format_predecessor_has_explicit_semantic_handoff_contract(self) -> None:
         messages = build_agent_messages(
@@ -913,6 +912,53 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             payload["chat_template_kwargs"],
             {"enable_thinking": True},
         )
+
+    def test_qwen_thinking_budget_is_added_to_visible_budget(
+        self,
+    ) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={
+                    "chat_template_enable_thinking": "true",
+                    "max_tokens": "4096",
+                    "thinking_budget": "4096",
+                },
+            ),
+        )
+        payload = OpenAICompatibleGateway().request_payload(item)
+
+        self.assertEqual(8192, payload["max_tokens"])
+        self.assertEqual(
+            {"enable_thinking": True},
+            payload["chat_template_kwargs"],
+        )
+
+    def test_qwen_thinking_budget_requires_thinking(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={
+                    "chat_template_enable_thinking": "false",
+                    "thinking_budget": "1024",
+                },
+            ),
+        )
+        with self.assertRaisesRegex(
+            OpenAICompatibleGatewayError,
+            "thinking_budget requires",
+        ):
+            OpenAICompatibleGateway().request_payload(item)
 
     async def test_qwen_thinking_response_records_counts_not_reasoning_body(self) -> None:
         item = request()

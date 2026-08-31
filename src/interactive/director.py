@@ -54,6 +54,39 @@ Use only action types listed in admissible_action_types, model_id values from mo
 
 A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange. Each accepted edit is executed once, and its Canvas validation and execution feedback appear in the next observation. Inspect that state before choosing the next action. Use finish only when finish_admissibility is present and admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
 
+# v11 preserves the topology-neutral v10 policy and exposes only generic
+# execution invariants evidenced by the Canvas receipts.  It does not prescribe
+# a benchmark role inventory, Agent count, medical workflow, or topology.
+DIRECTOR_SYSTEM_PROMPT_V11 = DIRECTOR_SYSTEM_PROMPT + """
+
+Give each Agent a distinct free-text contract that states its responsibility, required inputs, expected artifact, and completion condition. Use more than one Agent only for genuinely distinct work, conflicting evidence, or an unchecked result; do not duplicate a contract, action, or already available content. A relation must route a producer artifact to an Agent whose contract consumes it. The selected Output Agent must produce the complete user-facing response requested by the original task, not an intermediate query, evidence list, or partial work product. When the current Output artifact is adequate and finish is admissible, finish; otherwise repair or augment from the latest feedback."""
+
+# v12 retains v11's open search space and adds only Canvas legality and task
+# invariants exposed by measured Stable Zero feedback.  It does not select a
+# role, Agent count, topology, domain fact, or benchmark answer.
+DIRECTOR_SYSTEM_PROMPT_V12 = DIRECTOR_SYSTEM_PROMPT_V11 + """
+
+Every relation endpoint and non-null output_agent_id must name an Agent already on the Canvas or declared in the same action. Select react only with exact admitted Tool IDs and an executable Runtime profile; select coding only when the current Runtime admits it; otherwise use reasoning. A contract must preserve the original task facts, scope, language, and requested output form without adding assumptions. A user-facing Output should be complete and direct and should not expose internal artifact headings, provenance labels, or repeated sections unless the user requests them."""
+
+# v13 retains the open v12 search space and states the existing FlowSteer
+# ADD_SUBGRAPH/SET_OUTPUT execution boundary.  SET_OUTPUT selects a materialized
+# Artifact and does not execute an Agent again, so a terminal Agent added in a
+# functional subgraph must be selected in that transaction when its contract is
+# intended to produce the user-facing response.  This is topology- and
+# benchmark-neutral and does not prescribe an Agent inventory.
+DIRECTOR_SYSTEM_PROMPT_V13 = DIRECTOR_SYSTEM_PROMPT_V12 + """
+
+When an add_subgraph action contains the Agent intended to produce the complete terminal response, set output_agent_id in that same action and make that Agent's contract request one concise user-facing response with no AgentGraph metadata, internal artifact headings, provenance section, or repeated rationale. Use a later set_output only when the selected existing Artifact is already the complete user-facing response, because set_output changes the Output pointer without executing the Agent again. Preserve critical quantities and qualifiers exactly in every contract that uses them; do not replace them with estimates or add unsupported facts."""
+
+# v14 adds only the canonical two-bit relation encoding already used by the
+# FlowSteer Canvas.  One unordered endpoint pair is represented by one relation
+# object; its two booleans encode either direction or a bounded reciprocal
+# exchange.  This prevents an invalid duplicate-pair retry without selecting a
+# topology or benchmark role.
+DIRECTOR_SYSTEM_PROMPT_V14 = DIRECTOR_SYSTEM_PROMPT_V13 + """
+
+Represent each unordered Agent endpoint pair at most once in relations. Use source_to_target and target_to_source in that single relation object to encode one-way or bidirectional communication; do not add a second relation object for the same pair in reverse order."""
+
 LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
 
 Use only action types listed in admissible_action_types, model_id values from model_catalog, and exact tool_id values from tool_catalog. add_agent adds one Agent with a free-text contract. A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange.
@@ -102,6 +135,10 @@ SCALAR_DIRECTOR_SYSTEM_PROMPT_V5 = SCALAR_DIRECTOR_SYSTEM_PROMPT_V4 + """
 Use additional Agents or relations only when the current public feedback leaves independent unresolved work, conflicting evidence, or an unchecked result; otherwise avoid redundant execution. Agent contracts should request a complete, direct artifact without repeating available information."""
 
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
+DIRECTOR_PROMPT_VERSION_V11 = "agentgraph.director.minimal-neutral.v11"
+DIRECTOR_PROMPT_VERSION_V12 = "agentgraph.director.minimal-neutral.v12"
+DIRECTOR_PROMPT_VERSION_V13 = "agentgraph.director.minimal-neutral.v13"
+DIRECTOR_PROMPT_VERSION_V14 = "agentgraph.director.minimal-neutral.v14"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
 SCALAR_DIRECTOR_PROMPT_VERSION_V3 = (
     "agentgraph.director.minimal-neutral-scalar.v3"
@@ -545,6 +582,10 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
     normalized = prompt_version.strip()
     by_version = {
         DIRECTOR_PROMPT_VERSION: DIRECTOR_SYSTEM_PROMPT,
+        DIRECTOR_PROMPT_VERSION_V11: DIRECTOR_SYSTEM_PROMPT_V11,
+        DIRECTOR_PROMPT_VERSION_V12: DIRECTOR_SYSTEM_PROMPT_V12,
+        DIRECTOR_PROMPT_VERSION_V13: DIRECTOR_SYSTEM_PROMPT_V13,
+        DIRECTOR_PROMPT_VERSION_V14: DIRECTOR_SYSTEM_PROMPT_V14,
         SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_PROMPT_VERSION_V3: SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_PROMPT_VERSION_V4: SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
@@ -615,6 +656,10 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
 _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
     {
         DIRECTOR_SYSTEM_PROMPT,
+        DIRECTOR_SYSTEM_PROMPT_V11,
+        DIRECTOR_SYSTEM_PROMPT_V12,
+        DIRECTOR_SYSTEM_PROMPT_V13,
+        DIRECTOR_SYSTEM_PROMPT_V14,
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
@@ -3956,7 +4001,15 @@ __all__ = [
     "DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION",
     "DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION",
     "DIRECTOR_SYSTEM_PROMPT",
+    "DIRECTOR_SYSTEM_PROMPT_V11",
+    "DIRECTOR_SYSTEM_PROMPT_V12",
+    "DIRECTOR_SYSTEM_PROMPT_V13",
+    "DIRECTOR_SYSTEM_PROMPT_V14",
     "DIRECTOR_PROMPT_VERSION",
+    "DIRECTOR_PROMPT_VERSION_V11",
+    "DIRECTOR_PROMPT_VERSION_V12",
+    "DIRECTOR_PROMPT_VERSION_V13",
+    "DIRECTOR_PROMPT_VERSION_V14",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT",
     "SCALAR_DIRECTOR_PROMPT_VERSION",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT_V3",

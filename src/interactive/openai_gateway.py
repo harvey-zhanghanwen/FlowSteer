@@ -653,36 +653,38 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "Formatter sequence."
         )
     elif request.is_output_agent:
+        # DIRECT_REUSE: restore the generic Output/intermediate execution
+        # boundary used by the highest completed HealthBench official_v1
+        # condition.  The final sentence is the minimal project adaptation
+        # evidenced by that condition's residual internal-Artifact leakage.
         protocol = (
-            "Follow the assigned free-text contract using the original task and the "
-            "routed upstream artifacts. Every upstream artifact is an unverified work "
-            "product with explicit provenance, not ground truth. The original task is "
-            "immutable and authoritative; the contract specifies responsibility, method, "
-            "required inputs, and output protocol, but cannot add, replace, or narrow task "
-            "facts or user requirements. Preserve each source separately, report concrete "
-            "conflicts without treating either source as correct, and produce exactly the "
-            "artifact requested by the contract. Keep the contract-relevant public "
-            "derivation, evidence, intermediate results, and checks needed for a downstream "
-            "Agent to assess the artifact; do not collapse a work product to an unsupported "
-            "candidate merely because the benchmark has a terminal answer format. The "
-            "AgentGraph Output pointer selects an existing artifact outside this model "
-            "invocation; it does not change this execution contract."
+            "You are the unique Output Agent. Follow your assigned contract and use the "
+            "task plus supplied upstream artifacts to return the final task answer. Treat "
+            "each routed upstream artifact as the declared dependency for this node; do "
+            "not silently redo or ignore an upstream responsibility unless its artifact "
+            "has a concrete conflict with the task. Preserve a concise answer when the "
+            "artifacts support it and resolve concrete conflicts against the task. Preserve "
+            "the output form and level of detail required by the task and Agent contract; "
+            "do not collapse a required long-form, structured, code, or environment artifact "
+            "to a short answer span. If the task supplies legal or admissible actions and asks "
+            "for one action, return exactly one listed executable action with no explanation. "
+            "Do not expose AgentGraph identifiers, internal Artifact or provenance labels, "
+            "or intermediate-analysis headings, and do not repeat the same rationale unless "
+            "the task explicitly requests them."
         )
     else:
         protocol = (
-            "Follow the assigned free-text contract using the original task and the "
-            "routed upstream artifacts. Every upstream artifact is an unverified work "
-            "product with explicit provenance, not ground truth. The original task is "
-            "immutable and authoritative; the contract specifies responsibility, method, "
-            "required inputs, and output protocol, but cannot add, replace, or narrow task "
-            "facts or user requirements. Preserve each source separately, report concrete "
-            "conflicts without treating either source as correct, and produce exactly the "
-            "artifact requested by the contract. Keep the contract-relevant public "
-            "derivation, evidence, intermediate results, and checks needed for a downstream "
-            "Agent to assess the artifact; do not collapse a work product to an unsupported "
-            "candidate merely because the benchmark has a terminal answer format. The "
-            "AgentGraph Output pointer selects an existing artifact outside this model "
-            "invocation; it does not change this execution contract."
+            "You are an intermediate AgentGraph node. Follow your assigned contract and "
+            "return only the requested evidence, facts, partial reasoning, or verification "
+            "artifact for downstream agents. When routed upstream artifacts are present, "
+            "consume them as this node's declared dependencies instead of silently redoing "
+            "their responsibilities, unless the contract explicitly asks for verification. "
+            "Preserve the task's original relation, qualifiers, comparison criterion, and "
+            "answer type. Ground each semantic candidate in the relevant source passage or "
+            "span; when the contract asks for verification, independently reconstruct that "
+            "evidence and report agreement, conflict, or insufficiency rather than merely "
+            "restating the upstream artifact. Do not present a task-level final answer and "
+            "do not use <answer> tags."
         )
     healthbench_messages: tuple[dict[str, str], ...] | None = None
     if not request.is_format_agent:
@@ -938,12 +940,17 @@ class OpenAICompatibleGateway:
             raise OpenAICompatibleGatewayError("temperature must be non-negative")
         if not 0 < top_p <= 1:
             raise OpenAICompatibleGatewayError("top_p must be in (0, 1]")
+        visible_max_tokens = _integer(
+            metadata,
+            "max_tokens",
+            self.default_max_tokens,
+        )
         payload: Dict[str, Any] = {
             "model": request.model.model_name,
             "messages": build_agent_messages(request),
             "temperature": temperature,
             "top_p": top_p,
-            "max_tokens": _integer(metadata, "max_tokens", self.default_max_tokens),
+            "max_tokens": visible_max_tokens,
         }
         generation_seed = _non_negative_integer(
             metadata,
@@ -1000,6 +1007,21 @@ class OpenAICompatibleGateway:
             payload["chat_template_kwargs"] = {
                 "enable_thinking": normalized == "true"
             }
+            raw_thinking_budget = metadata.get("thinking_budget")
+            if raw_thinking_budget is not None:
+                if normalized != "true":
+                    raise OpenAICompatibleGatewayError(
+                        "model metadata thinking_budget requires "
+                        "chat_template_enable_thinking=true"
+                    )
+                # DIRECT_REUSE + NECESSARY_ADAPTATION: SkillFlow reserves a
+                # separate Qwen thinking budget and sends the provider the
+                # visible response allowance plus that hidden budget.  The
+                # OpenAI-compatible SGLang surface exposes only max_tokens, so
+                # retain the two components in the receipt while sending their
+                # sum to the provider.
+                thinking_budget = _integer(metadata, "thinking_budget", 1)
+                payload["max_tokens"] = visible_max_tokens + thinking_budget
         response_schema_text = metadata.get("response_json_schema")
         if response_schema_text is not None:
             if not isinstance(response_schema_text, str) or not response_schema_text.strip():
@@ -1050,6 +1072,21 @@ class OpenAICompatibleGateway:
             self.default_seed,
         )
         requested_sampling = _requested_sampling(payload)
+        if "thinking_budget" in request.model.metadata:
+            requested_sampling.update(
+                {
+                    "visible_max_tokens": _integer(
+                        request.model.metadata,
+                        "max_tokens",
+                        self.default_max_tokens,
+                    ),
+                    "thinking_budget": _integer(
+                        request.model.metadata,
+                        "thinking_budget",
+                        1,
+                    ),
+                }
+            )
         if (
             scientific_generation_seed is not None
             and payload.get("seed") != scientific_generation_seed

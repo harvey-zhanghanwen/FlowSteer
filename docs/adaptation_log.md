@@ -1041,3 +1041,82 @@ change was made during profile selection.
   Git and model input.
 - No training, backward pass, optimizer update, LoRA, GRPO, MACE, Bayesian
   update, Skill injection/evolution, or benchmark-answer retrieval ran.
+
+## 2026-08-31: HealthBench official-reference thinking/subgraph v2.1
+
+- Selected `healthbench_professional_official_v1` as the only fully completed
+  same-split, same-525-denominator, exact-reference-evaluator AgentGraph base.
+  Its strict length-adjusted score is `0.2023946457`; v6 was not relabelled as
+  the base because it used a different Tool/generation condition and permitted
+  a non-reference grader alias.
+- Added `agentgraph.director.minimal-neutral.v11`, a short topology-neutral
+  extension of v10. It requires distinct free-text contracts, correct
+  producer-to-consumer relation direction, and a complete user-facing Output
+  artifact. It does not prescribe Doctor, Researcher, Verifier, Formatter, a
+  minimum Agent count, graph depth, direction, or fixed workflow.
+- Reused the existing FlowSteer `ADD_SUBGRAPH` transaction so one accepted
+  Canvas edit can add and execute a functional unit of one to three Agents.
+  Multi-Agent structure remains selected by the Director from live feedback;
+  no structural reward or forced topology was added.
+- Added the SkillFlow-compatible `thinking_budget` boundary to the existing
+  OpenAI-compatible SGLang gateway. The new catalog gives Direct and every
+  Executor a 4,096-token visible budget plus a 4,096-token hidden reasoning
+  budget; both components and the 8,192 provider total are persisted in the
+  sampling receipt. Director REASONING is 1,024 tokens and structured ACTION is
+  independently capped at 2,048 tokens.
+- Retained exact Artifact deduplication and no-change Agent-input reuse, and
+  applied the versioned SGLang decoding condition `repetition_penalty=1.10`.
+  No hard character cap, semantic sentence deletion, post-hoc summarizer, or
+  repetition reward was introduced. The official length-adjusted evaluator is
+  unchanged.
+- Prepare-only fixed the same ordered 525 public-test tasks. The first v2
+  canary preserved two Direct results but rejected both Graphs before execution
+  because role-conditional action-mask v3 was incompatible with
+  `semantic_protocol=none`. Those failed artifacts remain immutable. v2.1
+  switched to the existing v2 model-admissible action mask with the complete
+  `ADD_SUBGRAPH` schema; no sample, seed, model, Tool, or evaluator field was
+  changed.
+- No training, backward pass, optimizer update, LoRA, GRPO, MACE, Bayesian
+  update, Skill retrieval/evolution, medical memory, Web search, or benchmark
+  answer database is enabled.
+
+## 2026-08-31: HealthBench official-reference thinking/subgraph v2.2-v2.4
+
+- Completed the v2.2 two-task Stable Zero chain with 2/2 explicit `FINISH` and
+  no terminal failure, but rejected it for formal evaluation because its
+  AgentGraph raw/length-adjusted scores (`0.2875`/`0.2427531333`) trailed the
+  same-condition Direct scores (`0.3000`/`0.3358974`). The first causal issues
+  were duplicate relation endpoint pairs, a contract that changed a task
+  quantity, and an internal `Treatment Planning Artifact / Source Provenance`
+  response promoted by pointer-only `SET_OUTPUT`.
+- Compared the current terminal path with the exact source revision used by
+  the highest completed official-reference condition. Reused that revision's
+  generic Output-versus-intermediate execution protocols rather than adding a
+  HealthBench-specific response template. Added only a generic exclusion of
+  AgentGraph identifiers, internal Artifact/provenance labels, repeated
+  rationale, and intermediate-analysis headings from the user-facing Output.
+- Kept standalone `SET_OUTPUT` pointer-only so it cannot repeat a Tool call or
+  overwrite an evidence Artifact. Director v14 instead uses the existing
+  atomic `ADD_SUBGRAPH(..., output_agent_id=...)` when a functional subgraph
+  contains the terminal response node; relation and Output identity are then
+  present before its single incremental execution.
+- Added the existing two-bit relation invariant to the neutral Director prompt:
+  one unordered endpoint pair is represented by one relation object. This is
+  an action-legality rule, not a topology preference.
+- Increased the two-phase Director limits from 1,024/2,048 to 2,048 REASONING
+  and 4,096 ACTION tokens. Direct and every Executor retain thinking enabled,
+  4,096 visible plus 4,096 hidden tokens, and `repetition_penalty=1.10`; the
+  structured ACTION serialization phase remains thinking-off.
+- A v2.3 diagnostic was stopped before AgentGraph collection after the source
+  comparison showed that its contract-only workaround did not restore the
+  evaluated Output execution protocol. Its partial records remain under the
+  independent v2.3 namespace and are not reported as a score.
+- v2.4 passed the two-task Stable Zero chain: Direct 2/2, AgentGraph 2/2,
+  explicit `FINISH` 2/2, terminal/collection failures 0. AgentGraph raw and
+  length-adjusted scores were `0.6208333333` and `0.5936383333`; Direct was
+  `0.2000000000` and `0.2389844000`. Mean Graph response length fell from
+  3,522 characters in rejected v2.2 to 2,925 in v2.4. The two-task result is a
+  gate only and does not replace the completed 525-task best profile.
+- No training, backward pass, optimizer update, LoRA, GRPO, MACE, Bayesian
+  update, Skill retrieval/evolution, memory, Web search, or benchmark-answer
+  retrieval ran.

@@ -604,3 +604,56 @@ MACE, Bayesian updates, and Skill retrieval/evolution remain disabled.
 The v3 failure report is generated entirely offline from the frozen 525-task
 evaluation. Its own manifest records zero model calls, zero Tool calls, zero
 grader calls, and no training.
+
+### HealthBench official-reference thinking/subgraph v2.1
+
+This condition is derived from the highest fully completed condition that is
+strictly comparable under the same 525-task public-test split and exact OpenAI
+simple-evals reference evaluator: `healthbench_professional_official_v1`
+(`overall_score_length_adjusted=0.2023946457`). It does not reuse the lower v6
+retrieval condition or its non-reference grader alias.
+
+| v2.1 boundary | Source and classification |
+| --- | --- |
+| Existing `ADD_SUBGRAPH` transaction, one-to-three free Agents, directed/reciprocal relations, incremental execute-on-edit, and next-turn Canvas feedback | **Direct FlowSteer/project reuse** from `src/interactive/agent_workflow_env.py::step`, `AgentWorkflowEnv.model_admissible_action_types`, and the existing `ADD_SUBGRAPH` parser/schema. No new graph builder, role inventory, or topology rule is added. |
+| Hidden Qwen reasoning budget separated from the visible response budget | **Direct SkillFlow reuse plus necessary OpenAI-compatible adaptation** from SkillFlow `training/batch_inference.py::_supervisor_call_unpaused`, which sends `visible_max_tokens + thinking_budget`. `src/interactive/openai_gateway.py` now accepts a versioned `thinking_budget`, sends the sum as SGLang `max_tokens`, and records the visible and hidden components in `requested_sampling`. |
+| Two-phase Director with thinking only in REASONING and JSON-Schema ACTION separately bounded | **Existing direct SkillFlow reuse** from `src/skillev/rollout/engine.py::RolloutEngine.run` through the already implemented `SGLangReceiptDirectorClient`. The public Canvas action remains schema constrained; the ACTION serialization phase is not a second reasoning Agent. |
+| `agentgraph.director.minimal-neutral.v11` | **Minimal generic compatibility adaptation** over neutral v10. It states only distinct contract fields, producer-to-consumer relation direction, complete user-facing Output artifact, non-duplicated work, and FINISH/repair behavior. It contains no medical role, rubric item, fixed Agent count, fixed relation, topology template, or benchmark answer. |
+| `require_informative_contracts`, `reuse_unchanged_agent_inputs`, and `producer_context_exact_dedup_v1` | **Direct reuse of existing project interfaces** derived from FlowSteer's Canvas admission/incremental execution and SkillFlow's bounded public Artifact boundary. Exact duplicate envelopes are removed; no semantic content is deleted or post-processed. |
+| `repetition_penalty=1.10` for Director, Direct, and Executor | **Versioned local SGLang decoding condition**, not a learned reward and not a claimed SkillFlow optimum. It is symmetric across Direct/AgentGraph and must be judged only by the new canary/formal receipts. |
+| Exact HealthBench reference evaluator, empty Tool condition, fixed public-test population, and evaluator-private rubrics | **Unchanged direct reuse** from `healthbench_professional_official_v1` and official OpenAI simple-evals revision `652c89d`. The grader's own reasoning setting remains fixed and is not part of the workflow model change. |
+
+The first `v2` Stable Zero attempt failed before Agent execution because
+hierarchical action-mask v3 requires a role-conditional semantic-lineage
+domain, while HealthBench deliberately uses `semantic_protocol=none` and free
+role metadata. Its failure receipts remain under the v2 namespace. The v2.1
+condition uses the existing model-admissible v2 live action mask plus the
+existing complete `ADD_SUBGRAPH` JSON schema; this is the free-AgentGraph
+boundary used by non-semantic tasks and does not introduce a HealthBench role
+template. No training, backward, optimizer update, LoRA, GRPO, MACE, Bayesian
+update, Skill injection, medical memory, or Tool retrieval is enabled.
+
+### HealthBench official-reference thinking/subgraph v2.4
+
+The v2.4 condition remains an inference-only derivative of
+`healthbench_professional_official_v1` on the same ordered 525-task public test,
+empty Tool condition, and exact OpenAI simple-evals reference evaluator.  It
+does not introduce a medical role inventory, fixed Agent count, topology,
+training objective, memory, or benchmark-specific answer rule.
+
+| v2.4 boundary | Source and classification |
+| --- | --- |
+| Generic Output Agent and intermediate-node execution protocols | **Direct project reuse** from the source revision evaluated by `healthbench_professional_official_v1` (`3f162564`), specifically `src/interactive/openai_gateway.py::build_agent_messages`. The only added sentence is a **necessary generic adaptation** that excludes AgentGraph identifiers, internal Artifact/provenance labels, repeated rationale, and intermediate-analysis headings from a user-facing response. |
+| Atomic terminal `ADD_SUBGRAPH(..., output_agent_id=...)` | **Direct FlowSteer/project reuse** of `AgentWorkflowEnv._apply_mutation`: the relation set and Output pointer are installed before the accepted Canvas revision is executed, so the terminal node runs once with `is_output_agent=true`. `FINISH` retains FlowSteer's existing reuse-only submission boundary. |
+| Pointer-only standalone `SET_OUTPUT` | **Current project compatibility boundary** retained to avoid repeating Tool or model work. Director v14 permits it only when the existing Artifact is already a complete user-facing response; otherwise the graph must be repaired or augmented before submission. |
+| One relation object per unordered endpoint pair | **Direct reuse** of the existing two-bit Canvas relation encoding. `source_to_target` and `target_to_source` jointly encode a directed or bounded reciprocal relation; no topology is selected by this constraint. |
+| Director budgets 2,048 REASONING / 4,096 ACTION | **Versioned SkillFlow two-phase generation parameter change**. REASONING uses Qwen thinking; JSON-Schema ACTION remains a non-reasoning serialization phase. Direct and Executor keep 4,096 visible plus 4,096 hidden tokens and `repetition_penalty=1.10`. |
+| Executor sampling and trajectory receipt | **Direct SkillFlow reuse plus necessary SGLang adaptation** already introduced in v2.1. Provider `max_tokens=8192`, visible/hidden components, repetition penalty, thinking presence, and request status are retained in each `ExecutionRecord`; hidden reasoning text is not routed between Agents. |
+
+The two-task v2.4 Stable Zero run completed 2/2 Direct and 2/2 AgentGraph
+responses, with two explicit AgentGraph `FINISH` actions and no terminal or
+collection failures.  AgentGraph raw score was `0.6208333333` and
+length-adjusted score was `0.5936383333`; the same-condition Direct scores were
+`0.2000000000` and `0.2389844000`.  These two samples validate the execution
+chain only and are not a 525-task estimate.  Full evaluation remains required
+before changing the best-profile pointer.
