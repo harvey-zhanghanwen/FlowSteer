@@ -1150,3 +1150,37 @@ change was made during profile selection.
 - No training, backward pass, optimizer update, LoRA, GRPO, MACE, Bayesian
   update, Skill injection/evolution, medical memory, Web search, or benchmark
   answer retrieval was enabled.
+
+## 2026-08-31: HealthBench heterogeneous action-mask v3 v2.6
+
+- Preserved the v2.5 Stable Zero evidence: 2/2 Direct and 2/2 AgentGraph
+  responses were evaluator-valid, with AgentGraph raw score 0.8875 and
+  length-adjusted score 0.909109; these are gate results, not a 525-task
+  estimate.
+- Diagnosed the second canary trajectory's twelve consecutive rejected
+  ADD_SUBGRAPH attempts. The v2 schema accepted arbitrary non-empty relation
+  endpoint strings, so the Director emitted input_data, user_message, task,
+  system_prompt, and similar pseudo-nodes. Canvas correctly rejected them, but
+  only after generation.
+- Reused FlowSteer commit 31b8c01's execution-profile-first hierarchical
+  ADD_SUBGRAPH path and generalized only its Tool-owner condition for
+  required_tool_id=null. The generated schema now admits one to three
+  role-free Agents, every available catalog model, Runtime-registered
+  execution profiles, free-text contracts, zero or one exact live relation,
+  and an optional live Output Agent.
+- Kept the unified search space open: no Doctor/Researcher/Verifier/Formatter
+  role inventory, fixed Agent count, topology, minimum depth, or medical
+  workflow was added. ReAct remains an Agent execution mode.
+- Added fail-closed profile-selection, declaration, final-action, regeneration,
+  endpoint, and trajectory-receipt validation. A task/message/context label
+  cannot enter the relation or Output endpoint enum.
+- Added independent v2.6 config, policy identity, storage/report namespaces,
+  and action-mask v3. Direct reuse remains subject to the runner's existing
+  task/model/protocol/seed/evaluator checks.
+- Added targeted tests for the four-model all-thinking catalog, disabled
+  training/Tool/Skill boundaries, heterogeneous per-node model declarations,
+  pseudo-node exclusion, one-relation limit, and complete profile-first
+  hierarchical receipt binding.
+- No API evaluation was started before these architecture tests. No training,
+  backward pass, optimizer update, LoRA, GRPO, MACE, Bayesian update, Skill,
+  memory, Web search, or benchmark-answer retrieval was enabled.

@@ -680,3 +680,25 @@ phase remains a constrained serialization phase with thinking disabled, as in
 the existing SkillFlow two-phase boundary; it is not an Executor or a semantic
 answer-generation turn.  Training, GRPO, backward, optimizer update, LoRA,
 MACE, Bayesian update, and Skill evolution remain disabled.
+
+### HealthBench heterogeneous all-thinking action-mask v3 condition v2.6
+
+The v2.5 Stable Zero run completed two evaluator-valid Direct and AgentGraph
+records, but its second task required twelve rejected ADD_SUBGRAPH attempts:
+the unconstrained v2 relation strings repeatedly named task text, user/system
+messages, and Output labels as if they were Canvas Agents. Prompt v14 already
+states the endpoint rule, so v2.6 changes the constrained action domain rather
+than adding a HealthBench workflow template.
+
+| v2.6 boundary | Source and classification |
+| --- | --- |
+| Execution-profile-first free-contract ADD_SUBGRAPH | **Direct FlowSteer reuse** from commit 31b8c01 (director execution-profile selection, declaration factorization, and exact hierarchical receipt validation). The Director samples Agent count, registered execution profile, model_id, and free-text contract; no role family is introduced. |
+| Tool-free Runtime profile admission | **Necessary HealthBench compatibility adaptation** over that FlowSteer source. The upstream stateful condition required one environment Tool owner; HealthBench has required_tool_id=null, so the live domain admits the Runtime's exact registered tool-free profiles and omits owner/count semantics. Stateful Tool conditions retain their prior path. |
+| Same-action/existing-Agent endpoint domain and one-relation edit boundary | **Direct FlowSteer reuse** of live Canvas target domains and incremental edit semantics. Task, conversation messages, context labels, and Output labels cannot be relation endpoints because they are absent from the generated JSON Schema. One accepted edit may still add one to three Agents, zero or one relation, and an optional Output pointer. |
+| Profile-first phase and trajectory receipts | **Direct FlowSteer reuse** from commit 31b8c01, including selection/declaration/parameter prompt binding, bounded serialization regeneration, action-schema identity, selected execution profiles, and fail-closed receipt validation. |
+| Four-model all-thinking Executor catalog | **Unchanged direct reuse** of v2.5. Each node may select local Qwen3.5-9B, Qwen3.5 Flash, DeepSeek V4 Flash, or MiniMax M3. Flow-Director remains local Qwen3.5-9B; its REASONING phase uses thinking and its JSON-Schema ACTION phase remains non-reasoning serialization. |
+
+The condition remains inference-only with the same 525-task public-test order,
+empty Tool condition, Direct identity, reference evaluator, grader, seed, and
+generation settings as v2.5. It uses an independent v2.6 artifact namespace;
+v2.5 trajectories are not resumed into v2.6.

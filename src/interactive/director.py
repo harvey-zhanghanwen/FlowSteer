@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from itertools import product
 import json
 import os
 import random
@@ -553,6 +554,26 @@ def verified_qa_semantic_protocol(value: object) -> bool:
     """Return whether the shared evidence-lineage Canvas policy is active."""
 
     return value in _VERIFIED_QA_SEMANTIC_PROTOCOLS
+
+
+def free_contract_execution_profile_mode(value: object) -> bool:
+    """Return whether ADD declarations use role-free execution profiles.
+
+    DIRECT_REUSE: this is the generic declaration-mode discriminator from
+    FlowSteer commit 31b8c01.  The HealthBench adaptation keeps free-text
+    contracts and removes only that source condition's stateful Tool-owner
+    requirement.
+    """
+
+    if not isinstance(value, Mapping):
+        return False
+    candidate = value.get("add_subgraph")
+    domain = candidate if isinstance(candidate, Mapping) else value
+    return (
+        domain.get("declaration_mode")
+        == "free_contract_execution_profile"
+        and domain.get("semantic_protocol", "none") == "none"
+    )
 
 
 def role_conditional_qa_protocol(value: object) -> bool:
@@ -1166,6 +1187,234 @@ def _live_execution_profiles(
     return tuple(profiles)
 
 
+def _live_free_contract_profile_domain(
+    domain: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Validate one role-free, execution-profile-first ADD domain.
+
+    DIRECT_REUSE + NECESSARY_ADAPTATION: this is the profile-first boundary
+    introduced in FlowSteer commit 31b8c01.  That source required one stateful
+    environment Tool owner.  The official HealthBench condition has no Tool,
+    so ``required_tool_id=None`` admits the Runtime's exact registered profile
+    set without owner/count semantics; all role, model and topology choices
+    remain with the Director.
+    """
+
+    if not free_contract_execution_profile_mode(domain):
+        raise ValueError(
+            "add_subgraph declaration mode is not free-contract execution-profile"
+        )
+    min_agents = domain.get("min_new_agents")
+    max_agents = domain.get("max_new_agents")
+    if (
+        type(min_agents) is not int
+        or type(max_agents) is not int
+        or not 1 <= min_agents <= max_agents <= 3
+    ):
+        raise ValueError("add_subgraph live Agent-count domain is invalid")
+    required_fields = domain.get("required_agent_fields")
+    expected_fields = {
+        "agent_id",
+        "model_id",
+        "contract",
+        "execution_mode",
+        "allowed_tools",
+    }
+    if (
+        not isinstance(required_fields, (list, tuple))
+        or set(required_fields) != expected_fields
+        or len(required_fields) != len(set(required_fields))
+    ):
+        raise ValueError(
+            "add_subgraph free-contract required Agent fields are invalid"
+        )
+    if domain.get("contract_type") != "free_text":
+        raise ValueError("add_subgraph contract type must remain free_text")
+    model_ids = _live_string_domain(
+        domain.get("model_ids"),
+        label="add_subgraph.model_ids",
+    )
+    execution_profiles = _live_execution_profiles(
+        domain.get("execution_profiles"),
+        label="add_subgraph.execution_profiles",
+    )
+    if domain.get("required_tool_id") is not None:
+        raise ValueError(
+            "tool-free free-contract ADD requires required_tool_id=null"
+        )
+
+    raw_existing_agents = domain.get("existing_agents")
+    if not isinstance(raw_existing_agents, (list, tuple)):
+        raise ValueError("add_subgraph existing Agent profiles are missing")
+    existing_agents: list[dict[str, Any]] = []
+    existing_ids: list[str] = []
+    for raw_agent in raw_existing_agents:
+        if not isinstance(raw_agent, Mapping) or set(raw_agent) != {
+            "agent_id",
+            "execution_mode",
+            "allowed_tools",
+        }:
+            raise ValueError(
+                "add_subgraph existing Agent profile entry is malformed"
+            )
+        agent_id = raw_agent.get("agent_id")
+        if (
+            not isinstance(agent_id, str)
+            or not agent_id
+            or agent_id != agent_id.strip()
+            or agent_id in existing_ids
+        ):
+            raise ValueError("add_subgraph existing Agent IDs are invalid")
+        profile = _live_execution_profiles(
+            (
+                {
+                    "execution_mode": raw_agent.get("execution_mode"),
+                    "allowed_tools": raw_agent.get("allowed_tools"),
+                },
+            ),
+            label="add_subgraph.existing_agents",
+        )[0]
+        if profile not in execution_profiles:
+            raise ValueError(
+                "add_subgraph existing Agent profile is outside the Runtime domain"
+            )
+        existing_ids.append(agent_id)
+        existing_agents.append(
+            {
+                "agent_id": agent_id,
+                "execution_mode": profile[0],
+                "allowed_tools": list(profile[1]),
+            }
+        )
+    explicit_existing_ids = domain.get("existing_agent_ids")
+    if (
+        not isinstance(explicit_existing_ids, (list, tuple))
+        or tuple(explicit_existing_ids) != tuple(existing_ids)
+    ):
+        raise ValueError("add_subgraph existing Agent IDs changed Canvas order")
+
+    endpoint_scope = domain.get("endpoint_scope")
+    expected_endpoint_sources = {
+        "existing_agent_ids",
+        "same_action_agent_ids",
+    }
+    if not isinstance(endpoint_scope, Mapping) or any(
+        set(endpoint_scope.get(key, ())) != expected_endpoint_sources
+        for key in ("relation_endpoint_sources", "output_agent_id_sources")
+    ):
+        raise ValueError("add_subgraph endpoint scope is incomplete")
+    min_relations = domain.get("min_relations")
+    max_relations = domain.get("max_relations")
+    if (
+        type(min_relations) is not int
+        or type(max_relations) is not int
+        or not 0 <= min_relations <= max_relations <= 1
+    ):
+        raise ValueError("add_subgraph live relation-count domain is invalid")
+    return {
+        "min_agents": min_agents,
+        "max_agents": max_agents,
+        "required_fields": tuple(required_fields),
+        "model_ids": model_ids,
+        "execution_profiles": execution_profiles,
+        "existing_agents": tuple(existing_agents),
+        "existing_agent_ids": tuple(existing_ids),
+        "min_relations": min_relations,
+        "max_relations": max_relations,
+    }
+
+
+def _live_add_subgraph_profile_sequences(
+    domain: Mapping[str, Any],
+) -> tuple[tuple[tuple[str, tuple[str, ...]], ...], ...]:
+    """Enumerate legal one-to-three-position Runtime profile tuples."""
+
+    state = _live_free_contract_profile_domain(domain)
+    sequences = tuple(
+        tuple(sequence)
+        for count in range(state["min_agents"], state["max_agents"] + 1)
+        for sequence in product(state["execution_profiles"], repeat=count)
+    )
+    if not sequences:
+        raise ValueError("add_subgraph execution profiles admit no declaration")
+    return sequences
+
+
+def _live_selected_add_subgraph_profiles(
+    domain: Mapping[str, Any],
+    selected_agent_profiles: Sequence[Mapping[str, Any]],
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Validate one sampled profile sequence against the live ADD domain."""
+
+    state = _live_free_contract_profile_domain(domain)
+    if not isinstance(selected_agent_profiles, (list, tuple)):
+        raise ValueError("add_subgraph selected Agent profiles are malformed")
+    expected_ids = _live_new_agent_ids(
+        state["existing_agent_ids"],
+        state["max_agents"],
+    )
+    normalized: list[tuple[str, tuple[str, ...]]] = []
+    for position, raw_profile in enumerate(selected_agent_profiles):
+        if not isinstance(raw_profile, Mapping) or set(raw_profile) != {
+            "agent_id",
+            "execution_mode",
+            "allowed_tools",
+        }:
+            raise ValueError("add_subgraph selected Agent profile is malformed")
+        if (
+            position >= len(expected_ids)
+            or raw_profile.get("agent_id") != expected_ids[position]
+        ):
+            raise ValueError(
+                "add_subgraph selected Agent profile changed its Canvas node ID"
+            )
+        normalized.append(
+            _live_execution_profiles(
+                (
+                    {
+                        "execution_mode": raw_profile.get("execution_mode"),
+                        "allowed_tools": raw_profile.get("allowed_tools"),
+                    },
+                ),
+                label="add_subgraph.selected_agent_profiles",
+            )[0]
+        )
+    result = tuple(normalized)
+    if result not in _live_add_subgraph_profile_sequences(domain):
+        raise ValueError(
+            "add_subgraph selected Agent profiles are outside the live domain"
+        )
+    return result
+
+
+def _live_free_contract_agent_schema(
+    required_fields: Sequence[str],
+    model_ids: Sequence[str],
+    *,
+    agent_id: str,
+    execution_profile: tuple[str, tuple[str, ...]],
+) -> Mapping[str, Any]:
+    """Render one role-free Agent declaration at one positional profile."""
+
+    execution_mode, allowed_tools = execution_profile
+    properties = {
+        field_name: json.loads(
+            json.dumps(_AGENT_SPEC_JSON_SCHEMA["properties"][field_name])
+        )
+        for field_name in required_fields
+    }
+    properties["agent_id"] = {"const": agent_id}
+    properties["model_id"] = {"enum": list(model_ids)}
+    properties["execution_mode"] = {"const": execution_mode}
+    properties["allowed_tools"] = {"const": list(allowed_tools)}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(required_fields),
+        "properties": properties,
+    }
+
+
 def _live_role_agent_schema(
     required_fields: Sequence[str],
     role_family: str,
@@ -1588,10 +1837,172 @@ def _live_add_subgraph_isolated_boundary(
     return True
 
 
+def _director_live_free_contract_declarations_schema(
+    domain: Mapping[str, Any],
+    *,
+    selected_agent_profiles: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Mapping[str, Any]:
+    """Render role-free Agent declarations from exact profile sequences."""
+
+    state = _live_free_contract_profile_domain(domain)
+    new_agent_ids = _live_new_agent_ids(
+        state["existing_agent_ids"],
+        state["max_agents"],
+    )
+    sequences = _live_add_subgraph_profile_sequences(domain)
+    if selected_agent_profiles is not None:
+        sequences = (
+            _live_selected_add_subgraph_profiles(
+                domain,
+                selected_agent_profiles,
+            ),
+        )
+    branches: list[Mapping[str, Any]] = []
+    for sequence in sequences:
+        positional_schemas = [
+            _live_free_contract_agent_schema(
+                state["required_fields"],
+                state["model_ids"],
+                agent_id=new_agent_ids[position],
+                execution_profile=profile,
+            )
+            for position, profile in enumerate(sequence)
+        ]
+        branches.append(
+            {
+                "type": "array",
+                "minItems": len(sequence),
+                "maxItems": len(sequence),
+                "prefixItems": positional_schemas,
+                "items": False,
+            }
+        )
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["action", "agents"],
+        "properties": {
+            "action": {"const": "add_subgraph"},
+            "agents": {"oneOf": branches},
+        },
+    }
+
+
+def director_live_add_subgraph_execution_profile_selection_json_schema_text(
+    action_target_domains: Mapping[str, Any],
+) -> str:
+    """Select ADD Agent count and Runtime profiles before free contracts."""
+
+    domain = action_target_domains.get("add_subgraph")
+    if not isinstance(domain, Mapping):
+        raise ValueError("add_subgraph live target domain is missing")
+    _live_add_subgraph_isolated_boundary(domain)
+    state = _live_free_contract_profile_domain(domain)
+    new_agent_ids = _live_new_agent_ids(
+        state["existing_agent_ids"],
+        state["max_agents"],
+    )
+    branches: list[Mapping[str, Any]] = []
+    for sequence in _live_add_subgraph_profile_sequences(domain):
+        prefix_items = [
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "agent_id",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+                "properties": {
+                    "agent_id": {"const": new_agent_ids[position]},
+                    "execution_mode": {"const": execution_mode},
+                    "allowed_tools": {"const": list(allowed_tools)},
+                },
+            }
+            for position, (execution_mode, allowed_tools) in enumerate(sequence)
+        ]
+        branches.append(
+            {
+                "type": "array",
+                "minItems": len(sequence),
+                "maxItems": len(sequence),
+                "prefixItems": prefix_items,
+                "items": False,
+            }
+        )
+    return json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action", "agents"],
+            "properties": {
+                "action": {"const": "add_subgraph"},
+                "agents": {"oneOf": branches},
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def director_live_add_subgraph_execution_profile_selection_from_text(
+    text: str,
+    action_target_domains: Mapping[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    """Parse one exact ADD count/profile phase without repairing text."""
+
+    if not isinstance(text, str):
+        raise ValueError("add_subgraph Agent profile selection must be text")
+    stripped = text.strip()
+    try:
+        payload, end = json.JSONDecoder().raw_decode(stripped)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "add_subgraph Agent profile selection is not JSON"
+        ) from exc
+    trailing = stripped[end:].strip()
+    if trailing and trailing != _QWEN_JSON_EOS_TEXT:
+        raise ValueError(
+            "add_subgraph Agent profile selection contains trailing text: "
+            f"{trailing[:80]!r}"
+        )
+    if not isinstance(payload, Mapping) or set(payload) != {"action", "agents"}:
+        raise ValueError("add_subgraph Agent profile selection fields are invalid")
+    if payload.get("action") != "add_subgraph":
+        raise ValueError("add_subgraph Agent profile selection changed its action")
+    domain = action_target_domains.get("add_subgraph")
+    if not isinstance(domain, Mapping):
+        raise ValueError("add_subgraph live target domain is missing")
+    director_live_add_subgraph_execution_profile_selection_json_schema_text(
+        action_target_domains
+    )
+    selected_profiles = _live_selected_add_subgraph_profiles(
+        domain,
+        payload.get("agents"),
+    )
+    state = _live_free_contract_profile_domain(domain)
+    expected_ids = _live_new_agent_ids(
+        state["existing_agent_ids"],
+        state["max_agents"],
+    )
+    return tuple(
+        {
+            "agent_id": expected_ids[position],
+            "execution_mode": execution_mode,
+            "allowed_tools": list(allowed_tools),
+        }
+        for position, (execution_mode, allowed_tools) in enumerate(
+            selected_profiles
+        )
+    )
+
+
 def director_live_add_subgraph_agent_declarations_json_schema_text(
     action_target_domains: Mapping[str, Any],
     *,
     selected_agent_roles: Optional[Sequence[Mapping[str, Any]]] = None,
+    selected_agent_profiles: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> str:
     """Render the first v3 ADD phase for exact Agent declarations.
 
@@ -1606,6 +2017,32 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
     if not isinstance(domain, Mapping):
         raise ValueError("add_subgraph live target domain is missing")
     _live_add_subgraph_isolated_boundary(domain)
+    if free_contract_execution_profile_mode(domain):
+        if (
+            selected_agent_roles is not None
+            and selected_agent_profiles is not None
+        ):
+            raise ValueError(
+                "add_subgraph profile selection was supplied more than once"
+            )
+        selected_profiles = (
+            selected_agent_profiles
+            if selected_agent_profiles is not None
+            else selected_agent_roles
+        )
+        return json.dumps(
+            _director_live_free_contract_declarations_schema(
+                domain,
+                selected_agent_profiles=selected_profiles,
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    if selected_agent_profiles is not None:
+        raise ValueError(
+            "add_subgraph execution profiles require the free-contract mode"
+        )
     min_agents = domain.get("min_new_agents")
     max_agents = domain.get("max_new_agents")
     if (
@@ -1789,6 +2226,15 @@ def director_live_add_subgraph_role_selection_json_schema_text(
     the Director write each free contract.
     """
 
+    domain = action_target_domains.get("add_subgraph")
+    if isinstance(domain, Mapping) and free_contract_execution_profile_mode(
+        domain
+    ):
+        return (
+            director_live_add_subgraph_execution_profile_selection_json_schema_text(
+                action_target_domains
+            )
+        )
     declaration_schema = json.loads(
         director_live_add_subgraph_agent_declarations_json_schema_text(
             action_target_domains
@@ -1853,9 +2299,17 @@ def director_live_add_subgraph_role_selection_json_schema_text(
 def director_live_add_subgraph_role_selection_from_text(
     text: str,
     action_target_domains: Mapping[str, Any],
-) -> tuple[dict[str, str], ...]:
+) -> tuple[dict[str, Any], ...]:
     """Parse one exact ADD count/role phase without repairing sampled text."""
 
+    domain = action_target_domains.get("add_subgraph")
+    if isinstance(domain, Mapping) and free_contract_execution_profile_mode(
+        domain
+    ):
+        return director_live_add_subgraph_execution_profile_selection_from_text(
+            text,
+            action_target_domains,
+        )
     if not isinstance(text, str):
         raise ValueError("add_subgraph Agent role selection must be text")
     stripped = text.strip()
@@ -1923,13 +2377,134 @@ def director_live_add_subgraph_role_selection_from_text(
     return tuple(normalized)
 
 
+def _live_free_contract_add_subgraph_agents(
+    action_target_domains: Mapping[str, Any],
+    agents: Sequence[Mapping[str, Any]],
+    *,
+    selected_agent_profiles: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> tuple[dict[str, Any], ...]:
+    """Validate role-free declarations against exact Runtime profiles."""
+
+    domain = action_target_domains.get("add_subgraph")
+    if not isinstance(domain, Mapping):
+        raise ValueError("add_subgraph live target domain is missing")
+    director_live_add_subgraph_agent_declarations_json_schema_text(
+        action_target_domains,
+        selected_agent_profiles=selected_agent_profiles,
+    )
+    state = _live_free_contract_profile_domain(domain)
+    if (
+        not isinstance(agents, (list, tuple))
+        or not state["min_agents"] <= len(agents) <= state["max_agents"]
+    ):
+        raise ValueError("add_subgraph sampled Agent declarations have invalid count")
+    expected_ids = _live_new_agent_ids(
+        state["existing_agent_ids"],
+        state["max_agents"],
+    )
+    required_fields = set(state["required_fields"])
+    model_ids = set(state["model_ids"])
+    normalized: list[dict[str, Any]] = []
+    sampled_profiles: list[tuple[str, tuple[str, ...]]] = []
+    for position, raw_agent in enumerate(agents):
+        if not isinstance(raw_agent, Mapping):
+            raise ValueError("add_subgraph Agent declaration must be an object")
+        agent = dict(raw_agent)
+        if set(agent) != required_fields or "role_family" in agent:
+            raise ValueError(
+                "add_subgraph free-contract Agent declaration fields are invalid"
+            )
+        agent_id = agent.get("agent_id")
+        model_id = agent.get("model_id")
+        contract = agent.get("contract")
+        execution_mode = agent.get("execution_mode")
+        allowed_tools = agent.get("allowed_tools")
+        if not isinstance(agent_id, str) or agent_id != expected_ids[position]:
+            raise ValueError(
+                "add_subgraph new Agent IDs must match the unique neutral IDs "
+                "assigned by the current Canvas"
+            )
+        if (
+            not isinstance(model_id, str)
+            or model_id != model_id.strip()
+            or model_id not in model_ids
+        ):
+            raise ValueError("add_subgraph Agent model_id is outside the live catalog")
+        if (
+            not isinstance(contract, str)
+            or not contract
+            or contract != contract.strip()
+        ):
+            raise ValueError("add_subgraph Agent contract must be non-empty")
+        if (
+            execution_mode not in {"reasoning", "react", "coding"}
+            or not isinstance(allowed_tools, list)
+            or any(
+                not isinstance(tool_id, str)
+                or not tool_id
+                or tool_id != tool_id.strip()
+                for tool_id in allowed_tools
+            )
+            or len(allowed_tools) != len(set(allowed_tools))
+        ):
+            raise ValueError("add_subgraph Agent execution profile is invalid")
+        profile = (execution_mode, tuple(allowed_tools))
+        if profile not in state["execution_profiles"]:
+            raise ValueError(
+                "add_subgraph Agent execution profile is outside the live domain"
+            )
+        sampled_profiles.append(profile)
+        normalized.append(agent)
+    profile_sequence = tuple(sampled_profiles)
+    if profile_sequence not in _live_add_subgraph_profile_sequences(domain):
+        raise ValueError(
+            "add_subgraph Agent execution profiles violate the live domain"
+        )
+    if selected_agent_profiles is not None:
+        selected_sequence = _live_selected_add_subgraph_profiles(
+            domain,
+            selected_agent_profiles,
+        )
+        if profile_sequence != selected_sequence:
+            raise ValueError(
+                "add_subgraph Agent declarations changed their selected profiles"
+            )
+    return tuple(normalized)
+
+
 def _live_add_subgraph_agents(
     action_target_domains: Mapping[str, Any],
     agents: Sequence[Mapping[str, Any]],
     *,
     selected_agent_roles: Optional[Sequence[Mapping[str, Any]]] = None,
+    selected_agent_profiles: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> tuple[dict[str, Any], ...]:
     """Validate sampled declarations against the exact first-phase schema."""
+
+    domain = action_target_domains.get("add_subgraph")
+    if isinstance(domain, Mapping) and free_contract_execution_profile_mode(
+        domain
+    ):
+        if (
+            selected_agent_roles is not None
+            and selected_agent_profiles is not None
+        ):
+            raise ValueError(
+                "add_subgraph profile selection was supplied more than once"
+            )
+        return _live_free_contract_add_subgraph_agents(
+            action_target_domains,
+            agents,
+            selected_agent_profiles=(
+                selected_agent_profiles
+                if selected_agent_profiles is not None
+                else selected_agent_roles
+            ),
+        )
+    if selected_agent_profiles is not None:
+        raise ValueError(
+            "add_subgraph execution profiles require the free-contract mode"
+        )
 
     declaration_schema = json.loads(
         director_live_add_subgraph_agent_declarations_json_schema_text(
@@ -2082,25 +2657,17 @@ def director_live_add_subgraph_relation_candidates(
     action_target_domains: Mapping[str, Any],
     agents: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, Any], ...]:
-    """Project exact role- and Canvas-valid relations for one sampled subgraph.
+    """Project exact Canvas-valid relations for one sampled subgraph.
 
-    The HotpotQA Canvas remains authoritative.  This projection applies its
-    incremental role-edge validator and the user-required semantic dataflow
-    order (Retriever/Repair -> Reasoner -> Verifier -> Formatter).  ADD may
-    only describe a relation incident to an Agent declared by that same
-    transaction; edits between two existing Canvas Agents belong to the live
-    ``set_relation`` domain.  Because the final ADD schema admits at most one
-    relation, a one-way edge incident to a new Agent cannot introduce a cycle.
-    A reciprocal edge is exposed here only between two Agents from this same
-    transaction: making a new Agent reciprocal with an existing Agent could
-    enlarge an already reciprocal Canvas block beyond its executable two-Agent
-    bound, which cannot be decided from role metadata alone.  The subsequent
-    Canvas-validated ``set_relation`` domain may still make that edge
-    reciprocal after execution feedback.  A one-way relation is always encoded
-    as its actual sender ``source_id`` to receiver ``target_id`` with
-    ``(true,false)`` instead of the directionally equivalent but ambiguous
-    ``(false,true)``.  No relation is required, so the Director still selects
-    the graph topology.
+    Role-free conditions expose only relations incident to an Agent declared
+    by the same transaction; edits between existing Agents remain in the live
+    ``set_relation`` domain.  Semantic QA conditions additionally apply their
+    role-edge protocol.  The final ADD schema admits at most one relation, and
+    reciprocal relations are exposed only between two same-action Agents so an
+    existing reciprocal block cannot be enlarged before Canvas validation.
+    One-way relations use the actual sender as ``source_id`` with
+    ``(true,false)``.  No relation is required, so topology remains a Director
+    decision rather than a fixed template.
     """
 
     normalized_agents = _live_add_subgraph_agents(
@@ -2108,6 +2675,44 @@ def director_live_add_subgraph_relation_candidates(
         agents,
     )
     domain = action_target_domains["add_subgraph"]
+    if free_contract_execution_profile_mode(domain):
+        if _live_add_subgraph_isolated_boundary(domain):
+            return ()
+        state = _live_free_contract_profile_domain(domain)
+        ordered_new_ids = tuple(agent["agent_id"] for agent in normalized_agents)
+        new_ids = set(ordered_new_ids)
+        endpoint_ids = [*state["existing_agent_ids"], *ordered_new_ids]
+        candidates: list[dict[str, Any]] = []
+        for source_index, source_id in enumerate(endpoint_ids):
+            for target_id in endpoint_ids[source_index + 1 :]:
+                if source_id not in new_ids and target_id not in new_ids:
+                    continue
+                candidates.extend(
+                    (
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        },
+                        {
+                            "source_id": target_id,
+                            "target_id": source_id,
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        },
+                    )
+                )
+                if source_id in new_ids and target_id in new_ids:
+                    candidates.append(
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "source_to_target": True,
+                            "target_to_source": True,
+                        }
+                    )
+        return tuple(candidates)
     if not verified_qa_semantic_protocol(domain.get("semantic_protocol")):
         return ()
     if _live_add_subgraph_isolated_boundary(domain):
@@ -2250,6 +2855,7 @@ def director_live_add_subgraph_agent_declarations_from_text(
     action_target_domains: Mapping[str, Any],
     *,
     selected_agent_roles: Optional[Sequence[Mapping[str, Any]]] = None,
+    selected_agent_profiles: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> tuple[dict[str, Any], ...]:
     """Parse one exact declaration-phase object without repairing its text."""
 
@@ -2274,6 +2880,7 @@ def director_live_add_subgraph_agent_declarations_from_text(
         action_target_domains,
         payload.get("agents"),
         selected_agent_roles=selected_agent_roles,
+        selected_agent_profiles=selected_agent_profiles,
     )
 
 
@@ -2560,7 +3167,51 @@ def director_live_action_parameter_json_schema_text(
             director_state_conditioned_sampling_json_schema_text("add_subgraph")
         )
         schema["properties"]["agents"] = {"const": list(normalized_agents)}
-        if verified_qa_semantic_protocol(domain.get("semantic_protocol")):
+        if free_contract_execution_profile_mode(domain):
+            state = _live_free_contract_profile_domain(domain)
+            relation_candidates = director_live_add_subgraph_relation_candidates(
+                action_target_domains,
+                normalized_agents,
+            )
+            if relation_candidates and state["max_relations"] > 0:
+                schema["properties"]["relations"] = {
+                    "type": "array",
+                    "minItems": state["min_relations"],
+                    "maxItems": state["max_relations"],
+                    "uniqueItems": True,
+                    "items": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": [
+                                    "source_id",
+                                    "target_id",
+                                    "source_to_target",
+                                    "target_to_source",
+                                ],
+                                "properties": {
+                                    key: {"const": value}
+                                    for key, value in candidate.items()
+                                },
+                            }
+                            for candidate in relation_candidates
+                        ]
+                    },
+                }
+            else:
+                if state["min_relations"] != 0:
+                    raise ValueError(
+                        "add_subgraph relation domain requires an unavailable edge"
+                    )
+                schema["properties"]["relations"] = {
+                    "type": "array",
+                    "maxItems": 0,
+                }
+            schema["properties"]["output_agent_id"] = {
+                "anyOf": [{"enum": endpoint_ids}, {"type": "null"}]
+            }
+        elif verified_qa_semantic_protocol(domain.get("semantic_protocol")):
             relation_candidates = director_live_add_subgraph_relation_candidates(
                 action_target_domains,
                 normalized_agents,
@@ -4069,6 +4720,8 @@ __all__ = [
     "director_model_admissible_schema_branch_v3",
     "director_live_add_subgraph_agent_declarations_from_text",
     "director_live_add_subgraph_agent_declarations_json_schema_text",
+    "director_live_add_subgraph_execution_profile_selection_from_text",
+    "director_live_add_subgraph_execution_profile_selection_json_schema_text",
     "director_live_add_subgraph_role_selection_from_text",
     "director_live_add_subgraph_role_selection_json_schema_text",
     "director_live_add_subgraph_relation_candidates",
@@ -4082,6 +4735,7 @@ __all__ = [
     "director_system_prompt_for_version",
     "director_sglang_sampling_json_schema_text",
     "director_state_conditioned_sampling_json_schema_text",
+    "free_contract_execution_profile_mode",
     "verified_qa_semantic_protocol",
     "encode_director_transcript",
 ]

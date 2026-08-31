@@ -3554,7 +3554,57 @@ class AgentWorkflowEnv:
                         ),
                     }
                     if self._uses_semantic_lineage_protocol()
-                    else {}
+                    else (
+                        {
+                            # DIRECT_REUSE + NECESSARY_ADAPTATION: commit 31b8c01
+                            # introduced FlowSteer's role-free, profile-first
+                            # transactional ADD boundary for stateful environments.
+                            # HealthBench has no Tool owner, so expose every Runtime
+                            # profile without the environment-owner count constraint.
+                            "declaration_mode": "free_contract_execution_profile",
+                            "contract_type": "free_text",
+                            "required_agent_fields": [
+                                "agent_id",
+                                "model_id",
+                                "contract",
+                                "execution_mode",
+                                "allowed_tools",
+                            ],
+                            "model_ids": list(self._available_model_ids()),
+                            "execution_profiles": [
+                                {
+                                    "execution_mode": execution_mode,
+                                    "allowed_tools": list(allowed_tools),
+                                }
+                                for execution_mode, allowed_tools in (
+                                    self.runtime.registered_execution_profiles()
+                                )
+                            ],
+                            "existing_agents": [
+                                {
+                                    "agent_id": node.id,
+                                    "execution_mode": node.execution_mode.value,
+                                    "allowed_tools": list(node.allowed_tools),
+                                }
+                                for node in self._graph.nodes
+                            ],
+                            "required_tool_id": None,
+                            "min_relations": 0,
+                            "max_relations": 1,
+                            "endpoint_scope": {
+                                "relation_endpoint_sources": [
+                                    "existing_agent_ids",
+                                    "same_action_agent_ids",
+                                ],
+                                "output_agent_id_sources": [
+                                    "existing_agent_ids",
+                                    "same_action_agent_ids",
+                                ],
+                            },
+                        }
+                        if self.required_tool_id is None
+                        else {}
+                    )
                 ),
             }
         if AgentActionType.MODIFY_AGENT.value in admitted:

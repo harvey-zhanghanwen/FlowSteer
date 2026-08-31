@@ -57,6 +57,8 @@ from .director import (
     director_model_admissible_sampling_json_schema_text_v3,
     director_live_add_subgraph_agent_declarations_from_text,
     director_live_add_subgraph_agent_declarations_json_schema_text,
+    director_live_add_subgraph_execution_profile_selection_from_text,
+    director_live_add_subgraph_execution_profile_selection_json_schema_text,
     director_live_add_subgraph_role_selection_from_text,
     director_live_add_subgraph_role_selection_json_schema_text,
     director_live_add_subgraph_relation_candidates,
@@ -67,6 +69,7 @@ from .director import (
     director_modify_agent_field_sampling_json_schema_text,
     director_modify_agent_field_selector_json_schema_text,
     director_state_conditioned_sampling_json_schema_text,
+    free_contract_execution_profile_mode,
     verified_qa_semantic_protocol,
 )
 from .openai_gateway import build_agent_messages
@@ -100,10 +103,19 @@ HIERARCHICAL_JSON_SCHEMA_STRATEGY = "hierarchical_json_schema"
 ROLE_FIRST_ADD_DECODING_STRATEGY = (
     "hierarchical_json_schema_role_first_add_v1"
 )
+EXECUTION_PROFILE_FIRST_ADD_DECODING_STRATEGY = (
+    "hierarchical_json_schema_execution_profile_first_add_v1"
+)
 _ADD_DECLARATION_PARSE_FAILURE_PHASE = "add_agent_declarations"
 _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE = "add_agent_role_selection"
 _ADD_ROLE_SELECTION_SERIALIZATION_FAILURE_PHASE = (
     "add_agent_role_selection_serialization_failure"
+)
+_ADD_EXECUTION_PROFILE_SELECTION_PARSE_FAILURE_PHASE = (
+    "add_agent_execution_profile_selection"
+)
+_ADD_EXECUTION_PROFILE_SELECTION_SERIALIZATION_FAILURE_PHASE = (
+    "add_agent_execution_profile_selection_serialization_failure"
 )
 _PARAMETER_SERIALIZATION_FAILURE_PHASE = "parameter_serialization_failure"
 _RELATION_CANDIDATE_SERIALIZATION_FAILURE_PHASE = (
@@ -115,6 +127,11 @@ _ADD_DECLARATION_CONTINUATION = (
     "Complete the Agent declarations for the selected positions and "
     "role_family values. Keep agent_id and role_family unchanged. Return only "
     "the JSON object required by the current schema."
+)
+_ADD_EXECUTION_PROFILE_DECLARATION_CONTINUATION = (
+    "Complete the Agent declarations for the selected positions and execution "
+    "profiles. Keep agent_id, execution_mode, and allowed_tools unchanged. "
+    "Return only the JSON object required by the current schema."
 )
 _ADD_ACTION_CONTINUATION = (
     "Complete the add_subgraph action for these Agent declarations. Keep "
@@ -1458,8 +1475,8 @@ class SGLangReceiptDirectorClient:
         total_latency_ms = 0.0
         total_attempt_count = 0
         phase_receipts: dict[str, Mapping[str, Any]] = {}
-        role_selection_regeneration_attempted = False
-        role_selection_regeneration_succeeded = False
+        add_selection_regeneration_attempted = False
+        add_selection_regeneration_succeeded = False
         relation_candidate_regeneration_attempted = False
         relation_candidate_regeneration_succeeded = False
 
@@ -1495,15 +1512,38 @@ class SGLangReceiptDirectorClient:
                 selector_response
             )
 
-        selected_add_agent_roles: tuple[dict[str, str], ...] | None = None
+        selected_add_agent_roles: tuple[dict[str, Any], ...] | None = None
+        selected_add_agent_profiles: tuple[dict[str, Any], ...] | None = None
         selected_add_agents: tuple[dict[str, Any], ...] | None = None
         selected_modify_field: str | None = None
         selected_modify_agent_id: str | None = None
         selected_relation_candidate: int | None = None
         parameter_prompt = prompt
         if selected_action == "add_subgraph" and action_target_domains is not None:
+            profile_first_add = free_contract_execution_profile_mode(
+                action_target_domains
+            )
+            add_selection_phase = (
+                _ADD_EXECUTION_PROFILE_SELECTION_PARSE_FAILURE_PHASE
+                if profile_first_add
+                else _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE
+            )
+            add_selection_serialization_failure_phase = (
+                _ADD_EXECUTION_PROFILE_SELECTION_SERIALIZATION_FAILURE_PHASE
+                if profile_first_add
+                else _ADD_ROLE_SELECTION_SERIALIZATION_FAILURE_PHASE
+            )
+            add_decoding_strategy = (
+                EXECUTION_PROFILE_FIRST_ADD_DECODING_STRATEGY
+                if profile_first_add
+                else ROLE_FIRST_ADD_DECODING_STRATEGY
+            )
             role_selection_schema = (
-                director_live_add_subgraph_role_selection_json_schema_text(
+                director_live_add_subgraph_execution_profile_selection_json_schema_text(
+                    action_target_domains
+                )
+                if profile_first_add
+                else director_live_add_subgraph_role_selection_json_schema_text(
                     action_target_domains
                 )
             )
@@ -1536,18 +1576,27 @@ class SGLangReceiptDirectorClient:
                 generation_seed=seed,
             )
             try:
-                selected_add_agent_roles = (
-                    director_live_add_subgraph_role_selection_from_text(
+                selected_add_agent_selection = (
+                    director_live_add_subgraph_execution_profile_selection_from_text(
+                        role_selection_response.text,
+                        action_target_domains,
+                    )
+                    if profile_first_add
+                    else director_live_add_subgraph_role_selection_from_text(
                         role_selection_response.text,
                         action_target_domains,
                     )
                 )
+                if profile_first_add:
+                    selected_add_agent_profiles = selected_add_agent_selection
+                else:
+                    selected_add_agent_roles = selected_add_agent_selection
             except ValueError as exc:
                 if not _hierarchical_selector_serialization_failed(
                     role_selection_response.text
                 ):
                     raise ReceiptValidationError(
-                        "v3 add_subgraph Agent role-selection phase is invalid: "
+                        "v3 add_subgraph Agent selection phase is invalid: "
                         f"{exc}"
                     ) from exc
                 # Reuse the existing SkillFlow-compatible bounded structured
@@ -1557,9 +1606,9 @@ class SGLangReceiptDirectorClient:
                 # seed may repair serialization only.  No role is inferred
                 # from free text and schema-valid semantic failures are not
                 # regenerated.
-                role_selection_regeneration_attempted = True
+                add_selection_regeneration_attempted = True
                 phase_receipts[
-                    _ADD_ROLE_SELECTION_SERIALIZATION_FAILURE_PHASE
+                    add_selection_serialization_failure_phase
                 ] = self._hierarchical_phase_receipt(role_selection_response)
                 regeneration_prompt = _hierarchical_continuation_prompt(
                     prompt,
@@ -1597,19 +1646,28 @@ class SGLangReceiptDirectorClient:
                     generation_seed=seed,
                 )
                 try:
-                    selected_add_agent_roles = (
-                        director_live_add_subgraph_role_selection_from_text(
+                    selected_add_agent_selection = (
+                        director_live_add_subgraph_execution_profile_selection_from_text(
+                            role_selection_response.text,
+                            action_target_domains,
+                        )
+                        if profile_first_add
+                        else director_live_add_subgraph_role_selection_from_text(
                             role_selection_response.text,
                             action_target_domains,
                         )
                     )
+                    if profile_first_add:
+                        selected_add_agent_profiles = selected_add_agent_selection
+                    else:
+                        selected_add_agent_roles = selected_add_agent_selection
                 except ValueError:
                     # Match FlowSteer's existing malformed declaration/final
                     # parameter boundary: preserve both exact samples and
                     # publish the second strict-parser failure as a rejected
                     # Canvas turn.  It cannot declare or execute an Agent and
                     # there is no third generation attempt.
-                    phase_receipts["add_agent_role_selection"] = (
+                    phase_receipts[add_selection_phase] = (
                         self._hierarchical_phase_receipt(
                             role_selection_response
                         )
@@ -1618,20 +1676,25 @@ class SGLangReceiptDirectorClient:
                     metadata.update(
                         {
                             "base_prompt_text": prompt,
-                            "action_decoding_strategy": (
-                                ROLE_FIRST_ADD_DECODING_STRATEGY
-                            ),
+                            "action_decoding_strategy": add_decoding_strategy,
                             "selected_action": selected_action,
                             "selected_modify_field": None,
                             "selected_modify_agent_id": None,
                             "selected_add_agent_ids": None,
                             "selected_add_agent_roles": None,
+                            "selected_add_agent_profiles": None,
                             "parameter_schema_branch": None,
-                            "parse_failure_phase": (
-                                _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE
-                            ),
-                            "role_selection_regeneration_attempted": True,
-                            "role_selection_regeneration_succeeded": False,
+                            "parse_failure_phase": add_selection_phase,
+                            (
+                                "profile_selection_regeneration_attempted"
+                                if profile_first_add
+                                else "role_selection_regeneration_attempted"
+                            ): True,
+                            (
+                                "profile_selection_regeneration_succeeded"
+                                if profile_first_add
+                                else "role_selection_regeneration_succeeded"
+                            ): False,
                             "hierarchical_phase_receipts": phase_receipts,
                             "request_count": len(phase_receipts),
                             "latency_ms": total_latency_ms,
@@ -1642,14 +1705,22 @@ class SGLangReceiptDirectorClient:
                         text=role_selection_response.text,
                         metadata=metadata,
                     )
-                role_selection_regeneration_succeeded = True
-            phase_receipts["add_agent_role_selection"] = (
+                add_selection_regeneration_succeeded = True
+            phase_receipts[add_selection_phase] = (
                 self._hierarchical_phase_receipt(role_selection_response)
             )
+            selected_add_agent_selection = (
+                selected_add_agent_profiles
+                if profile_first_add
+                else selected_add_agent_roles
+            )
+            assert selected_add_agent_selection is not None
             selected_roles_json = json.dumps(
                 {
                     "action": "add_subgraph",
-                    "agents": [dict(value) for value in selected_add_agent_roles],
+                    "agents": [
+                        dict(value) for value in selected_add_agent_selection
+                    ],
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -1658,12 +1729,17 @@ class SGLangReceiptDirectorClient:
             declaration_prompt = _hierarchical_continuation_prompt(
                 str(role_selection_response.metadata["prompt_text"]),
                 committed_json=selected_roles_json,
-                instruction=_ADD_DECLARATION_CONTINUATION,
+                instruction=(
+                    _ADD_EXECUTION_PROFILE_DECLARATION_CONTINUATION
+                    if profile_first_add
+                    else _ADD_DECLARATION_CONTINUATION
+                ),
             )
             declaration_schema = (
                 director_live_add_subgraph_agent_declarations_json_schema_text(
                     action_target_domains,
                     selected_agent_roles=selected_add_agent_roles,
+                    selected_agent_profiles=selected_add_agent_profiles,
                 )
             )
             declaration_payload = dict(
@@ -1701,6 +1777,7 @@ class SGLangReceiptDirectorClient:
                         declaration_response.text,
                         action_target_domains,
                         selected_agent_roles=selected_add_agent_roles,
+                        selected_agent_profiles=selected_add_agent_profiles,
                     )
                 )
             except ValueError:
@@ -1713,16 +1790,21 @@ class SGLangReceiptDirectorClient:
                 metadata.update(
                     {
                         "base_prompt_text": prompt,
-                        "action_decoding_strategy": (
-                            ROLE_FIRST_ADD_DECODING_STRATEGY
-                        ),
+                        "action_decoding_strategy": add_decoding_strategy,
                         "selected_action": selected_action,
                         "selected_modify_field": None,
                         "selected_modify_agent_id": None,
                         "selected_add_agent_ids": None,
-                        "selected_add_agent_roles": [
-                            dict(value) for value in selected_add_agent_roles
-                        ],
+                        "selected_add_agent_roles": (
+                            [dict(value) for value in selected_add_agent_roles]
+                            if selected_add_agent_roles is not None
+                            else None
+                        ),
+                        "selected_add_agent_profiles": (
+                            [dict(value) for value in selected_add_agent_profiles]
+                            if selected_add_agent_profiles is not None
+                            else None
+                        ),
                         "parameter_schema_branch": None,
                         "parse_failure_phase": (
                             _ADD_DECLARATION_PARSE_FAILURE_PHASE
@@ -1733,6 +1815,16 @@ class SGLangReceiptDirectorClient:
                         "attempt_count": total_attempt_count,
                     }
                 )
+                if add_selection_regeneration_attempted:
+                    prefix = (
+                        "profile_selection"
+                        if profile_first_add
+                        else "role_selection"
+                    )
+                    metadata[f"{prefix}_regeneration_attempted"] = True
+                    metadata[f"{prefix}_regeneration_succeeded"] = (
+                        add_selection_regeneration_succeeded
+                    )
                 return DirectorResponse(
                     text=declaration_response.text,
                     metadata=metadata,
@@ -2081,9 +2173,13 @@ class SGLangReceiptDirectorClient:
             {
                 "base_prompt_text": prompt,
                 "action_decoding_strategy": (
-                    ROLE_FIRST_ADD_DECODING_STRATEGY
-                    if selected_add_agent_roles is not None
-                    else HIERARCHICAL_JSON_SCHEMA_STRATEGY
+                    EXECUTION_PROFILE_FIRST_ADD_DECODING_STRATEGY
+                    if selected_add_agent_profiles is not None
+                    else (
+                        ROLE_FIRST_ADD_DECODING_STRATEGY
+                        if selected_add_agent_roles is not None
+                        else HIERARCHICAL_JSON_SCHEMA_STRATEGY
+                    )
                 ),
                 "selected_action": selected_action,
                 "selected_modify_field": selected_modify_field,
@@ -2108,17 +2204,25 @@ class SGLangReceiptDirectorClient:
             metadata["parameter_regeneration_succeeded"] = (
                 parameter_regeneration_succeeded
             )
-        if role_selection_regeneration_attempted:
-            metadata["role_selection_regeneration_attempted"] = True
-            metadata["role_selection_regeneration_succeeded"] = (
-                role_selection_regeneration_succeeded
+        if add_selection_regeneration_attempted:
+            profile_first_receipt = (
+                selected_action == "add_subgraph"
+                and action_target_domains is not None
+                and free_contract_execution_profile_mode(action_target_domains)
+            )
+            selection_metadata_prefix = (
+                "profile_selection" if profile_first_receipt else "role_selection"
+            )
+            metadata[f"{selection_metadata_prefix}_regeneration_attempted"] = True
+            metadata[f"{selection_metadata_prefix}_regeneration_succeeded"] = (
+                add_selection_regeneration_succeeded
             )
         if relation_candidate_regeneration_attempted:
             metadata["relation_candidate_regeneration_attempted"] = True
             metadata["relation_candidate_regeneration_succeeded"] = (
                 relation_candidate_regeneration_succeeded
             )
-        if action_target_domains is not None:
+        if action_target_domains is not None and selected_action == "add_subgraph":
             metadata["selected_add_agent_ids"] = (
                 None
                 if selected_add_agents is None
@@ -2129,6 +2233,12 @@ class SGLangReceiptDirectorClient:
                 if selected_add_agent_roles is None
                 else [dict(value) for value in selected_add_agent_roles]
             )
+            metadata["selected_add_agent_profiles"] = (
+                None
+                if selected_add_agent_profiles is None
+                else [dict(value) for value in selected_add_agent_profiles]
+            )
+        if action_target_domains is not None:
             metadata["selected_modify_agent_id"] = selected_modify_agent_id
         if selected_relation_candidate is not None:
             metadata["selected_relation_candidate"] = selected_relation_candidate
@@ -2543,11 +2653,11 @@ def _validate_v3_hierarchical_action_receipt(
 ) -> set[str]:
     """Validate the exact v3 phase/action/domain correspondence.
 
-    A malformed final parameter, role selection, or role-first ADD declaration
-    sample has no parsed ``AgentAction``.  It remains an exact behavior receipt
-    and FlowSteer's Canvas returns it as an invalid-action observation for the
-    next Director turn.  Hierarchical selections and completed phase receipts
-    stay authoritative; sampled text is never repaired into an executed action.
+    A malformed final parameter, Agent selection, or ADD declaration sample
+    has no parsed ``AgentAction``.  It remains an exact behavior receipt and
+    FlowSteer's Canvas returns it as an invalid-action observation for the next
+    Director turn.  Hierarchical selections and completed phase receipts stay
+    authoritative; sampled text is never repaired into an executed action.
     """
 
     branch = schema_request.get("action_schema_branch")
@@ -2594,6 +2704,23 @@ def _validate_v3_hierarchical_action_receipt(
         if isinstance(phase_receipts, Mapping)
         else None
     )
+    profile_selection_regeneration_attempted = metadata.get(
+        "profile_selection_regeneration_attempted"
+    )
+    if (
+        profile_selection_regeneration_attempted is not None
+        and profile_selection_regeneration_attempted is not True
+    ):
+        raise ReceiptValidationError(
+            "v3 execution-profile-selection regeneration attempt flag is invalid"
+        )
+    profile_selection_failure_receipt = (
+        phase_receipts.get(
+            _ADD_EXECUTION_PROFILE_SELECTION_SERIALIZATION_FAILURE_PHASE
+        )
+        if isinstance(phase_receipts, Mapping)
+        else None
+    )
     relation_candidate_regeneration_attempted = metadata.get(
         "relation_candidate_regeneration_attempted"
     )
@@ -2621,26 +2748,31 @@ def _validate_v3_hierarchical_action_receipt(
         raise ReceiptValidationError(
             "v3 selected action differs from its branch or parsed Canvas action"
         )
-    if (
-        decoding_strategy == ROLE_FIRST_ADD_DECODING_STRATEGY
-        and selected_action != "add_subgraph"
-    ):
+    if decoding_strategy in {
+        ROLE_FIRST_ADD_DECODING_STRATEGY,
+        EXECUTION_PROFILE_FIRST_ADD_DECODING_STRATEGY,
+    } and selected_action != "add_subgraph":
         raise ReceiptValidationError(
-            "role-first ADD decoding strategy is attached to a non-ADD action"
+            "ADD selection decoding strategy is attached to a non-ADD action"
         )
     if parse_failure_phase is not None and parse_failure_phase not in {
         _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE,
+        _ADD_EXECUTION_PROFILE_SELECTION_PARSE_FAILURE_PHASE,
         _ADD_DECLARATION_PARSE_FAILURE_PHASE,
     }:
         raise ReceiptValidationError(
             "v3 hierarchical receipt has an unsupported parse-failure phase"
         )
     if parse_failure_phase is not None and (
-        decoding_strategy != ROLE_FIRST_ADD_DECODING_STRATEGY
+        decoding_strategy
+        not in {
+            ROLE_FIRST_ADD_DECODING_STRATEGY,
+            EXECUTION_PROFILE_FIRST_ADD_DECODING_STRATEGY,
+        }
         or selected_action != "add_subgraph"
     ):
         raise ReceiptValidationError(
-            "v3 ADD phase parse failure requires role-first ADD decoding"
+            "v3 ADD phase parse failure requires hierarchical ADD selection"
         )
     if parse_failure_phase is not None and action is not None:
         raise ReceiptValidationError(
@@ -2663,36 +2795,88 @@ def _validate_v3_hierarchical_action_receipt(
         role_selection_regeneration_attempted is not None
         or metadata.get("role_selection_regeneration_succeeded") is not None
         or role_selection_failure_receipt is not None
+        or profile_selection_regeneration_attempted is not None
+        or metadata.get("profile_selection_regeneration_succeeded") is not None
+        or profile_selection_failure_receipt is not None
     ):
         raise ReceiptValidationError(
-            "v3 non-ADD action carries role-selection regeneration"
+            "v3 non-ADD action carries Agent-selection regeneration"
+        )
+    if selected_action != "add_subgraph" and (
+        "selected_add_agent_profiles" in metadata
+        or _ADD_EXECUTION_PROFILE_SELECTION_PARSE_FAILURE_PHASE
+        in (phase_receipts if isinstance(phase_receipts, Mapping) else {})
+        or _ADD_EXECUTION_PROFILE_SELECTION_SERIALIZATION_FAILURE_PHASE
+        in (phase_receipts if isinstance(phase_receipts, Mapping) else {})
+    ):
+        raise ReceiptValidationError(
+            "v3 non-ADD action carries execution-profile metadata"
         )
 
     if selected_action == "add_subgraph":
         role_first_add = decoding_strategy == ROLE_FIRST_ADD_DECODING_STRATEGY
-        role_selection_parse_failure = (
-            parse_failure_phase == _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE
+        profile_first_add = (
+            decoding_strategy == EXECUTION_PROFILE_FIRST_ADD_DECODING_STRATEGY
         )
-        if (
-            schema_request.get("action_target_domain_version")
-            == DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
-            and not role_first_add
+        expected_add_decoding_strategy = (
+            EXECUTION_PROFILE_FIRST_ADD_DECODING_STRATEGY
+            if free_contract_execution_profile_mode(domains)
+            else ROLE_FIRST_ADD_DECODING_STRATEGY
+        )
+        if decoding_strategy != expected_add_decoding_strategy:
+            raise ReceiptValidationError(
+                "v3 add_subgraph decoding strategy differs from its live "
+                "declaration mode"
+            )
+        selection_phase_name = (
+            _ADD_EXECUTION_PROFILE_SELECTION_PARSE_FAILURE_PHASE
+            if profile_first_add
+            else _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE
+        )
+        selection_serialization_failure_phase = (
+            _ADD_EXECUTION_PROFILE_SELECTION_SERIALIZATION_FAILURE_PHASE
+            if profile_first_add
+            else _ADD_ROLE_SELECTION_SERIALIZATION_FAILURE_PHASE
+        )
+        selection_regeneration_attempted = (
+            profile_selection_regeneration_attempted
+            if profile_first_add
+            else role_selection_regeneration_attempted
+        )
+        selection_regeneration_succeeded = metadata.get(
+            "profile_selection_regeneration_succeeded"
+            if profile_first_add
+            else "role_selection_regeneration_succeeded"
+        )
+        selection_failure_receipt = (
+            profile_selection_failure_receipt
+            if profile_first_add
+            else role_selection_failure_receipt
+        )
+        selection_parse_failure = parse_failure_phase == selection_phase_name
+        if profile_first_add and (
+            role_selection_regeneration_attempted is not None
+            or metadata.get("role_selection_regeneration_succeeded") is not None
+            or role_selection_failure_receipt is not None
+            or metadata.get("selected_add_agent_roles") is not None
         ):
             raise ReceiptValidationError(
-                "current live-domain ADD receipt did not use role-first decoding"
+                "execution-profile-first ADD receipt carries role-selection metadata"
             )
-        if role_first_add:
-            expected_phases.add("add_agent_role_selection")
-            if not role_selection_parse_failure:
-                expected_phases.add("add_agent_declarations")
-        elif decoding_strategy == HIERARCHICAL_JSON_SCHEMA_STRATEGY:
-            expected_phases.add("add_agent_declarations")
-        else:
+        if role_first_add and (
+            profile_selection_regeneration_attempted is not None
+            or metadata.get("profile_selection_regeneration_succeeded") is not None
+            or profile_selection_failure_receipt is not None
+            or metadata.get("selected_add_agent_profiles") is not None
+        ):
             raise ReceiptValidationError(
-                "v3 add_subgraph receipt has an unsupported decoding strategy"
+                "role-first ADD receipt carries execution-profile-selection metadata"
             )
-        role_phase = (
-            phase_receipts.get("add_agent_role_selection")
+        expected_phases.add(selection_phase_name)
+        if not selection_parse_failure:
+            expected_phases.add("add_agent_declarations")
+        selection_phase = (
+            phase_receipts.get(selection_phase_name)
             if isinstance(phase_receipts, Mapping)
             else None
         )
@@ -2701,44 +2885,42 @@ def _validate_v3_hierarchical_action_receipt(
             if isinstance(phase_receipts, Mapping)
             else None
         )
-        if role_first_add and (
-            not isinstance(role_phase, Mapping)
-            or not isinstance(role_phase.get("text"), str)
+        if (
+            not isinstance(selection_phase, Mapping)
+            or not isinstance(selection_phase.get("text"), str)
         ):
             raise ReceiptValidationError(
-                "v3 add_subgraph receipt has no Agent role-selection phase"
+                "v3 add_subgraph receipt has no Agent selection phase"
             )
-        if role_selection_parse_failure and declaration_phase is not None:
+        if selection_parse_failure and declaration_phase is not None:
             raise ReceiptValidationError(
-                "v3 role-selection parse failure fabricated an Agent declaration"
+                "v3 Agent-selection parse failure fabricated an Agent declaration"
             )
-        if not role_selection_parse_failure and (
+        if not selection_parse_failure and (
             not isinstance(declaration_phase, Mapping)
             or not isinstance(declaration_phase.get("text"), str)
         ):
             raise ReceiptValidationError(
                 "v3 add_subgraph receipt has no Agent declaration phase"
             )
-        if role_selection_regeneration_attempted:
-            expected_regeneration_succeeded = not role_selection_parse_failure
-            observed_regeneration_succeeded = metadata.get(
-                "role_selection_regeneration_succeeded"
-            )
+        if selection_regeneration_attempted:
+            expected_regeneration_succeeded = not selection_parse_failure
+            observed_regeneration_succeeded = selection_regeneration_succeeded
             if (
                 type(observed_regeneration_succeeded) is not bool
                 or observed_regeneration_succeeded
                 is not expected_regeneration_succeeded
             ):
                 raise ReceiptValidationError(
-                    "v3 role-selection regeneration result differs from its "
+                    "v3 Agent-selection regeneration result differs from its "
                     "parse-failure phase"
                 )
-            if not isinstance(role_selection_failure_receipt, Mapping):
+            if not isinstance(selection_failure_receipt, Mapping):
                 raise ReceiptValidationError(
-                    "v3 role-selection regeneration has no initial failure receipt"
+                    "v3 Agent-selection regeneration has no initial failure receipt"
                 )
-            failed_text = role_selection_failure_receipt.get("text")
-            failed_prompt = role_selection_failure_receipt.get("prompt_text")
+            failed_text = selection_failure_receipt.get("text")
+            failed_prompt = selection_failure_receipt.get("prompt_text")
             if (
                 not isinstance(failed_text, str)
                 or not failed_text
@@ -2747,7 +2929,7 @@ def _validate_v3_hierarchical_action_receipt(
                 or not _hierarchical_selector_serialization_failed(failed_text)
             ):
                 raise ReceiptValidationError(
-                    "v3 role-selection regeneration initial receipt is not a "
+                    "v3 Agent-selection regeneration initial receipt is not a "
                     "serialization failure"
                 )
             expected_regeneration_prompt = _hierarchical_continuation_prompt(
@@ -2755,53 +2937,60 @@ def _validate_v3_hierarchical_action_receipt(
                 committed_json=failed_text,
                 instruction=_PARAMETER_REGENERATION_CONTINUATION,
             )
-            if role_phase.get("prompt_text") != expected_regeneration_prompt:
+            if selection_phase.get("prompt_text") != expected_regeneration_prompt:
                 raise ReceiptValidationError(
-                    "v3 role-selection regeneration is not bound to its "
+                    "v3 Agent-selection regeneration is not bound to its "
                     "failed sample"
                 )
-            if role_selection_failure_receipt.get(
+            if selection_failure_receipt.get(
                 "generation_seed"
-            ) != role_phase.get("generation_seed"):
+            ) != selection_phase.get("generation_seed"):
                 raise ReceiptValidationError(
-                    "v3 role-selection regeneration changed its generation seed"
+                    "v3 Agent-selection regeneration changed its generation seed"
                 )
-            expected_phases.add(
-                _ADD_ROLE_SELECTION_SERIALIZATION_FAILURE_PHASE
-            )
+            expected_phases.add(selection_serialization_failure_phase)
         elif (
-            metadata.get("role_selection_regeneration_succeeded") is not None
-            or role_selection_failure_receipt is not None
+            selection_regeneration_succeeded is not None
+            or selection_failure_receipt is not None
         ):
             raise ReceiptValidationError(
-                "v3 role-selection regeneration receipt has no attempt flag"
+                "v3 Agent-selection regeneration receipt has no attempt flag"
             )
-        if role_selection_parse_failure:
-            if not role_selection_regeneration_attempted:
+        if selection_parse_failure:
+            if not selection_regeneration_attempted:
                 raise ReceiptValidationError(
-                    "v3 role-selection parse failure has no bounded regeneration"
+                    "v3 Agent-selection parse failure has no bounded regeneration"
                 )
-            assert isinstance(role_phase, Mapping)
+            assert isinstance(selection_phase, Mapping)
             try:
-                director_live_add_subgraph_role_selection_from_text(
-                    role_phase["text"],
-                    domains,
-                )
+                if profile_first_add:
+                    director_live_add_subgraph_execution_profile_selection_from_text(
+                        selection_phase["text"], domains
+                    )
+                else:
+                    director_live_add_subgraph_role_selection_from_text(
+                        selection_phase["text"], domains
+                    )
             except ValueError:
                 pass
             else:
                 raise ReceiptValidationError(
-                    "v3 role-selection parse-failure sample satisfies the "
+                    "v3 Agent-selection parse-failure sample satisfies the "
                     "strict live domain"
                 )
-            if metadata.get("prompt_text") != role_phase.get("prompt_text"):
+            if metadata.get("prompt_text") != selection_phase.get("prompt_text"):
                 raise ReceiptValidationError(
-                    "v3 role-selection parse-failure receipt is not bound to "
+                    "v3 Agent-selection parse-failure receipt is not bound to "
                     "its regeneration prompt"
                 )
             if metadata.get("selected_add_agent_roles") is not None:
                 raise ReceiptValidationError(
                     "v3 role-selection parse failure fabricated selected roles"
+                )
+            if metadata.get("selected_add_agent_profiles") is not None:
+                raise ReceiptValidationError(
+                    "v3 Agent-selection parse failure fabricated selected "
+                    "execution profiles"
                 )
             if metadata.get("selected_add_agent_ids") is not None:
                 raise ReceiptValidationError(
@@ -2817,61 +3006,92 @@ def _validate_v3_hierarchical_action_receipt(
                 )
             if metadata.get("request_count") != len(expected_phases):
                 raise ReceiptValidationError(
-                    "v3 role-selection parse-failure request count differs "
+                    "v3 Agent-selection parse-failure request count differs "
                     "from its completed phases"
                 )
             return expected_phases
         if parse_failure_phase == _ADD_DECLARATION_PARSE_FAILURE_PHASE:
-            assert role_first_add
-            assert isinstance(role_phase, Mapping)
+            assert isinstance(selection_phase, Mapping)
+            assert isinstance(declaration_phase, Mapping)
             try:
-                selected_roles = (
-                    director_live_add_subgraph_role_selection_from_text(
-                        role_phase["text"],
-                        domains,
+                selected_agent_selection = (
+                    director_live_add_subgraph_execution_profile_selection_from_text(
+                        selection_phase["text"], domains
+                    )
+                    if profile_first_add
+                    else director_live_add_subgraph_role_selection_from_text(
+                        selection_phase["text"], domains
                     )
                 )
             except ValueError as exc:
                 raise ReceiptValidationError(
-                    "v3 declaration parse failure has an invalid prior role receipt"
+                    "v3 declaration parse failure has an invalid prior Agent "
+                    "selection receipt"
                 ) from exc
-            role_prompt = role_phase.get("prompt_text")
+            selected_roles = None if profile_first_add else selected_agent_selection
+            selected_profiles = (
+                selected_agent_selection if profile_first_add else None
+            )
+            selection_prompt = selection_phase.get("prompt_text")
             declaration_prompt = declaration_phase.get("prompt_text")
-            if not isinstance(role_prompt, str) or not isinstance(
+            if not isinstance(selection_prompt, str) or not isinstance(
                 declaration_prompt,
                 str,
             ):
                 raise ReceiptValidationError(
                     "v3 declaration parse-failure phase has no prompt binding"
                 )
-            selected_roles_json = json.dumps(
+            selected_agent_selection_json = json.dumps(
                 {
                     "action": "add_subgraph",
-                    "agents": [dict(value) for value in selected_roles],
+                    "agents": [dict(value) for value in selected_agent_selection],
                 },
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
             )
             expected_declaration_prompt = _hierarchical_continuation_prompt(
-                role_prompt,
-                committed_json=selected_roles_json,
-                instruction=_ADD_DECLARATION_CONTINUATION,
+                selection_prompt,
+                committed_json=selected_agent_selection_json,
+                instruction=(
+                    _ADD_EXECUTION_PROFILE_DECLARATION_CONTINUATION
+                    if profile_first_add
+                    else _ADD_DECLARATION_CONTINUATION
+                ),
             )
             if declaration_prompt != expected_declaration_prompt:
                 raise ReceiptValidationError(
-                    "v3 role-first ADD declaration prompt is not conditioned on "
-                    "its selected roles"
+                    "v3 ADD declaration prompt is not conditioned on its "
+                    "selected Agent values"
                 )
             if metadata.get("prompt_text") != declaration_prompt:
                 raise ReceiptValidationError(
                     "v3 declaration parse-failure receipt is not bound to its "
                     "continuation prompt"
                 )
-            selected_role_values = [dict(value) for value in selected_roles]
-            if metadata.get("selected_add_agent_roles") != selected_role_values:
+            selected_values = [dict(value) for value in selected_agent_selection]
+            selected_metadata_key = (
+                "selected_add_agent_profiles"
+                if profile_first_add
+                else "selected_add_agent_roles"
+            )
+            if metadata.get(selected_metadata_key) != selected_values:
                 raise ReceiptValidationError(
-                    "v3 declaration parse-failure role receipt changed"
+                    "v3 declaration parse-failure Agent-selection receipt changed"
+                )
+            try:
+                director_live_add_subgraph_agent_declarations_from_text(
+                    declaration_phase["text"],
+                    domains,
+                    selected_agent_roles=selected_roles,
+                    selected_agent_profiles=selected_profiles,
+                )
+            except ValueError:
+                pass
+            else:
+                raise ReceiptValidationError(
+                    "v3 declaration parse-failure sample satisfies the strict "
+                    "live domain"
                 )
             if metadata.get("selected_add_agent_ids") is not None:
                 raise ReceiptValidationError(
@@ -2892,86 +3112,101 @@ def _validate_v3_hierarchical_action_receipt(
                 )
             return expected_phases
         try:
-            if role_first_add:
-                assert isinstance(role_phase, Mapping)
-                selected_roles = (
-                    director_live_add_subgraph_role_selection_from_text(
-                        role_phase["text"],
-                        domains,
-                    )
+            assert isinstance(selection_phase, Mapping)
+            assert isinstance(declaration_phase, Mapping)
+            selected_agent_selection = (
+                director_live_add_subgraph_execution_profile_selection_from_text(
+                    selection_phase["text"], domains
                 )
-            else:
-                selected_roles = None
+                if profile_first_add
+                else director_live_add_subgraph_role_selection_from_text(
+                    selection_phase["text"], domains
+                )
+            )
+            selected_roles = None if profile_first_add else selected_agent_selection
+            selected_profiles = (
+                selected_agent_selection if profile_first_add else None
+            )
             declarations = director_live_add_subgraph_agent_declarations_from_text(
                 declaration_phase["text"],
                 domains,
                 selected_agent_roles=selected_roles,
+                selected_agent_profiles=selected_profiles,
             )
-            director_live_action_parameter_json_schema_text(
-                "add_subgraph",
-                domains,
-                add_agents=declarations,
+            parameter_schema = json.loads(
+                director_live_action_parameter_json_schema_text(
+                    "add_subgraph",
+                    domains,
+                    add_agents=declarations,
+                )
             )
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise ReceiptValidationError(
                 "v3 add_subgraph declaration receipt violates its live domain"
             ) from exc
-        if role_first_add:
-            assert selected_roles is not None
-            assert isinstance(role_phase, Mapping)
-            role_prompt = role_phase.get("prompt_text")
-            declaration_prompt = declaration_phase.get("prompt_text")
-            if not isinstance(role_prompt, str) or not isinstance(
-                declaration_prompt, str
-            ):
-                raise ReceiptValidationError(
-                    "v3 role-first ADD phase has no prompt binding"
-                )
-            selected_roles_json = json.dumps(
-                {
-                    "action": "add_subgraph",
-                    "agents": [dict(value) for value in selected_roles],
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
+        selection_prompt = selection_phase.get("prompt_text")
+        declaration_prompt = declaration_phase.get("prompt_text")
+        if not isinstance(selection_prompt, str) or not isinstance(
+            declaration_prompt, str
+        ):
+            raise ReceiptValidationError(
+                "v3 hierarchical ADD phase has no prompt binding"
             )
-            expected_declaration_prompt = _hierarchical_continuation_prompt(
-                role_prompt,
-                committed_json=selected_roles_json,
-                instruction=_ADD_DECLARATION_CONTINUATION,
+        selected_agent_selection_json = json.dumps(
+            {
+                "action": "add_subgraph",
+                "agents": [dict(value) for value in selected_agent_selection],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        expected_declaration_prompt = _hierarchical_continuation_prompt(
+            selection_prompt,
+            committed_json=selected_agent_selection_json,
+            instruction=(
+                _ADD_EXECUTION_PROFILE_DECLARATION_CONTINUATION
+                if profile_first_add
+                else _ADD_DECLARATION_CONTINUATION
+            ),
+        )
+        if declaration_prompt != expected_declaration_prompt:
+            raise ReceiptValidationError(
+                "v3 hierarchical ADD declaration prompt is not conditioned "
+                "on its Agent selection"
             )
-            if declaration_prompt != expected_declaration_prompt:
-                raise ReceiptValidationError(
-                    "v3 role-first ADD declaration prompt is not conditioned on "
-                    "its selected roles"
-                )
-            selected_declarations_json = json.dumps(
-                {
-                    "action": "add_subgraph",
-                    "agents": [dict(value) for value in declarations],
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
+        selected_declarations_json = json.dumps(
+            {
+                "action": "add_subgraph",
+                "agents": [dict(value) for value in declarations],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        expected_parameter_prompt = _hierarchical_continuation_prompt(
+            declaration_prompt,
+            committed_json=selected_declarations_json,
+            instruction=_ADD_ACTION_CONTINUATION,
+        )
+        observed_parameter_prompt = (
+            parameter_failure_receipt.get("prompt_text")
+            if parameter_regeneration_attempted
+            and isinstance(parameter_failure_receipt, Mapping)
+            else metadata.get("prompt_text")
+        )
+        if observed_parameter_prompt != expected_parameter_prompt:
+            raise ReceiptValidationError(
+                "v3 hierarchical ADD parameter prompt is not conditioned on "
+                "its Agent declarations"
             )
-            expected_parameter_prompt = _hierarchical_continuation_prompt(
-                declaration_prompt,
-                committed_json=selected_declarations_json,
-                instruction=_ADD_ACTION_CONTINUATION,
-            )
-            observed_parameter_prompt = (
-                parameter_failure_receipt.get("prompt_text")
-                if parameter_regeneration_attempted
-                and isinstance(parameter_failure_receipt, Mapping)
-                else metadata.get("prompt_text")
-            )
-            if observed_parameter_prompt != expected_parameter_prompt:
-                raise ReceiptValidationError(
-                    "v3 role-first ADD parameter prompt is not conditioned on "
-                    "its Agent declarations"
-                )
         declaration_values = list(declarations)
+        if action_value is not None and any(
+            Draft202012Validator(parameter_schema).iter_errors(action_value)
+        ):
+            raise ReceiptValidationError(
+                "v3 final add_subgraph parameters are outside the exact live schema"
+            )
         if (
             action_value is not None
             and action_value.get("agents") != declaration_values
@@ -2984,17 +3219,18 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError(
                 "v3 add_subgraph Agent-ID receipt differs from its declarations"
             )
-        if role_first_add:
-            assert selected_roles is not None
-            selected_role_values = [dict(value) for value in selected_roles]
-            if metadata.get("selected_add_agent_roles") != selected_role_values:
+        selected_values = [dict(value) for value in selected_agent_selection]
+        if profile_first_add:
+            if metadata.get("selected_add_agent_profiles") != selected_values:
+                raise ReceiptValidationError(
+                    "v3 add_subgraph Agent execution-profile receipt differs "
+                    "from its declarations"
+                )
+        else:
+            if metadata.get("selected_add_agent_roles") != selected_values:
                 raise ReceiptValidationError(
                     "v3 add_subgraph Agent-role receipt differs from its declarations"
                 )
-        elif metadata.get("selected_add_agent_roles") is not None:
-            raise ReceiptValidationError(
-                "legacy v3 add_subgraph receipt unexpectedly carries selected roles"
-            )
         endpoint_ids = set(domains["add_subgraph"]["existing_agent_ids"])
         endpoint_ids.update(declared_ids)
         for relation in (
@@ -3138,6 +3374,8 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError("v3 MODIFY receipt carries ADD declarations")
         if metadata.get("selected_add_agent_roles") is not None:
             raise ReceiptValidationError("v3 MODIFY receipt carries ADD roles")
+        if metadata.get("selected_add_agent_profiles") is not None:
+            raise ReceiptValidationError("v3 MODIFY receipt carries ADD profiles")
     elif selected_action == "set_relation":
         expected_phases.add("relation_candidate_selection")
         selected_index = metadata.get("selected_relation_candidate")
@@ -3285,6 +3523,10 @@ def _validate_v3_hierarchical_action_receipt(
             if metadata.get("selected_add_agent_roles") is not None:
                 raise ReceiptValidationError(
                     "v3 scalar ADD_AGENT receipt carries role-first declarations"
+                )
+            if metadata.get("selected_add_agent_profiles") is not None:
+                raise ReceiptValidationError(
+                    "v3 scalar ADD_AGENT receipt carries profile-first declarations"
                 )
             schema_branches = parameter_schema.get(
                 "oneOf", (parameter_schema,)
@@ -4163,6 +4405,7 @@ class AgentGraphRolloutCollector:
             parse_failure_phase = metadata.get("parse_failure_phase")
             if parse_failure_phase is not None and parse_failure_phase not in {
                 _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE,
+                _ADD_EXECUTION_PROFILE_SELECTION_PARSE_FAILURE_PHASE,
                 _ADD_DECLARATION_PARSE_FAILURE_PHASE,
             }:
                 raise ReceiptValidationError(
@@ -4170,9 +4413,10 @@ class AgentGraphRolloutCollector:
                 )
             if parse_failure_phase in {
                 _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE,
+                _ADD_EXECUTION_PROFILE_SELECTION_PARSE_FAILURE_PHASE,
                 _ADD_DECLARATION_PARSE_FAILURE_PHASE,
             }:
-                # A role selection or declaration is not a Canvas edit.  Fail
+                # An Agent selection or declaration is not a Canvas edit. Fail
                 # closed before Env.step if its raw sample happens to parse as
                 # a complete AgentAction; no partial ADD may execute under
                 # phase-failure metadata.
@@ -4222,33 +4466,52 @@ class AgentGraphRolloutCollector:
             )
             if receipt_base_prompt != prompt:
                 raise ReceiptValidationError("Director receipt is bound to a different prompt")
-            if strategy_hint == ROLE_FIRST_ADD_DECODING_STRATEGY:
+            if strategy_hint in {
+                ROLE_FIRST_ADD_DECODING_STRATEGY,
+                EXECUTION_PROFILE_FIRST_ADD_DECODING_STRATEGY,
+            }:
                 raw_phases = metadata.get("hierarchical_phase_receipts")
-                role_phase = (
-                    raw_phases.get("add_agent_role_selection")
+                profile_first_receipt = (
+                    strategy_hint == EXECUTION_PROFILE_FIRST_ADD_DECODING_STRATEGY
+                )
+                selection_phase_name = (
+                    _ADD_EXECUTION_PROFILE_SELECTION_PARSE_FAILURE_PHASE
+                    if profile_first_receipt
+                    else _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE
+                )
+                selection_failure_phase_name = (
+                    _ADD_EXECUTION_PROFILE_SELECTION_SERIALIZATION_FAILURE_PHASE
+                    if profile_first_receipt
+                    else _ADD_ROLE_SELECTION_SERIALIZATION_FAILURE_PHASE
+                )
+                selection_phase = (
+                    raw_phases.get(selection_phase_name)
                     if isinstance(raw_phases, Mapping)
                     else None
                 )
-                role_failure_phase = (
-                    raw_phases.get(
-                        _ADD_ROLE_SELECTION_SERIALIZATION_FAILURE_PHASE
+                selection_failure_phase = (
+                    raw_phases.get(selection_failure_phase_name)
+                    if isinstance(raw_phases, Mapping)
+                    else None
+                )
+                selection_regenerated = (
+                    metadata.get(
+                        "profile_selection_regeneration_attempted"
+                        if profile_first_receipt
+                        else "role_selection_regeneration_attempted"
                     )
-                    if isinstance(raw_phases, Mapping)
-                    else None
-                )
-                role_selection_regenerated = (
-                    metadata.get("role_selection_regeneration_attempted") is True
+                    is True
                 )
                 root_phase = (
-                    role_failure_phase
-                    if role_selection_regenerated
-                    else role_phase
+                    selection_failure_phase
+                    if selection_regenerated
+                    else selection_phase
                 )
                 if not isinstance(root_phase, Mapping) or root_phase.get(
                     "prompt_text"
                 ) != prompt:
                     raise ReceiptValidationError(
-                        "role-first ADD receipt is not rooted in the Canvas prompt"
+                        "hierarchical ADD receipt is not rooted in the Canvas prompt"
                     )
             elif metadata.get("parameter_regeneration_attempted") is True:
                 raw_phases = metadata.get("hierarchical_phase_receipts")
@@ -4327,6 +4590,7 @@ class AgentGraphRolloutCollector:
                 if action_decoding_strategy not in {
                     HIERARCHICAL_JSON_SCHEMA_STRATEGY,
                     ROLE_FIRST_ADD_DECODING_STRATEGY,
+                    EXECUTION_PROFILE_FIRST_ADD_DECODING_STRATEGY,
                 }:
                     raise ReceiptValidationError(
                         "Director receipt has an unsupported decoding strategy"
@@ -4340,11 +4604,12 @@ class AgentGraphRolloutCollector:
                     schema_request.get("action_json_schema_version")
                     == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
                 )
-                if action_decoding_strategy == ROLE_FIRST_ADD_DECODING_STRATEGY and (
-                    not live_v3_receipt or selected_action != "add_subgraph"
-                ):
+                if action_decoding_strategy in {
+                    ROLE_FIRST_ADD_DECODING_STRATEGY,
+                    EXECUTION_PROFILE_FIRST_ADD_DECODING_STRATEGY,
+                } and (not live_v3_receipt or selected_action != "add_subgraph"):
                     raise ReceiptValidationError(
-                        "role-first ADD decoding requires a live-v3 ADD action"
+                        "hierarchical ADD selection requires a live-v3 ADD action"
                     )
                 if action is not None and selected_action != action.action_type.value:
                     raise ReceiptValidationError(
@@ -4556,6 +4821,10 @@ class AgentGraphRolloutCollector:
                     action_decoding["selected_add_agent_roles"] = metadata.get(
                         "selected_add_agent_roles"
                     )
+                if "selected_add_agent_profiles" in metadata:
+                    action_decoding["selected_add_agent_profiles"] = metadata.get(
+                        "selected_add_agent_profiles"
+                    )
                 if "selected_modify_agent_id" in metadata:
                     action_decoding["selected_modify_agent_id"] = metadata.get(
                         "selected_modify_agent_id"
@@ -4581,6 +4850,16 @@ class AgentGraphRolloutCollector:
                     action_decoding["role_selection_regeneration_succeeded"] = (
                         metadata.get("role_selection_regeneration_succeeded")
                     )
+                if (
+                    metadata.get("profile_selection_regeneration_attempted")
+                    is not None
+                ):
+                    action_decoding[
+                        "profile_selection_regeneration_attempted"
+                    ] = metadata.get("profile_selection_regeneration_attempted")
+                    action_decoding[
+                        "profile_selection_regeneration_succeeded"
+                    ] = metadata.get("profile_selection_regeneration_succeeded")
                 runtime_summary["director_action_decoding"] = action_decoding
             turn = TurnRecord(
                 turn_id=stable_id(
