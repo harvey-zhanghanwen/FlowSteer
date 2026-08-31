@@ -74,6 +74,7 @@ from src.interactive.openai_gateway import (
     supports_local_sglang_repetition_penalty,
     supports_local_sglang_top_k,
 )
+from src.interactive.persistence import stable_id
 from src.interactive.records import TaskRecord, TrajectoryRecord
 from src.interactive.rollout_collector import execution_record_from_call
 from src.interactive.scientific_sampling import (
@@ -925,7 +926,15 @@ def _paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
         "report_json": "report_json_path",
         "report_markdown": "report_markdown_path",
     }
-    return {name: _resolve(root, str(storage[field])) for name, field in names.items()}
+    paths = {name: _resolve(root, str(storage[field])) for name, field in names.items()}
+    progress_path = storage.get("rollout_progress_path")
+    if progress_path is not None:
+        if not isinstance(progress_path, str) or not progress_path.strip():
+            raise ConfigurationError(
+                "storage.rollout_progress_path must be non-empty text when configured"
+            )
+        paths["rollout_progress"] = _resolve(root, progress_path)
+    return paths
 
 
 def _benchmark_slice(task: TaskRecord) -> str:
@@ -4395,10 +4404,20 @@ async def run_completion_benchmark_round(
     effective_rollout_gpu = int(
         os.environ.get("FLOWSTEER_ROLLOUT_GPU", configured_rollout_gpu)
     )
+    started_at = _utc_now()
+    run_attempt_id = stable_id(
+        "run_attempt",
+        {
+            "config_path": str(resolved_config),
+            "condition_id": str(config["experiment"]["condition_id"]),
+            "started_at": started_at,
+        },
+    )
     manifest: dict[str, Any] = {
         "schema_version": "flowsteer.completion_benchmark.round_manifest.v1",
+        "run_attempt_id": run_attempt_id,
         "status": "prepared" if prepare_only else "runtime_preflight",
-        "started_at": _utc_now(),
+        "started_at": started_at,
         "config_path": str(resolved_config),
         "evaluation_section": section_name,
         "dataset_key": dataset_key,
@@ -4653,6 +4672,8 @@ async def run_completion_benchmark_round(
             paths["manifest"],
             failure_path=paths["failures"],
             additional_trajectory_identity_match=graph_resume_identity_match,
+            project_root=root,
+            run_attempt_id=run_attempt_id,
         )
         _atomic_jsonl(paths["failures"], failures)
 

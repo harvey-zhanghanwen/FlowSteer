@@ -38,6 +38,13 @@ class OpenAICompatibleGatewayError(RuntimeError):
 MASKED_UPSTREAM_CONTENT = "[UPSTREAM CONTENT MASKED FOR COMMUNICATION DIAGNOSTIC]"
 
 
+# NECESSARY_ADAPTATION: HealthBench supplies a native healthcare conversation
+# and expects a complete assistant response. This is a task execution boundary,
+# not a medical Agent role or workflow template. It contains no rubric,
+# reference response, benchmark answer, or evaluator state.
+HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL = """Treat diagnoses, plans, drug identities, doses, trial or guideline claims, and routed Agent artifacts as unverified until supported by the supplied conversation or reliable evidence available to this execution. Resolve ambiguous shorthand, entity binding, and internal contradictions before committing to an interpretation; if support is insufficient, state the uncertainty or ask the necessary clarification instead of inventing a fact. When clinically relevant, check red flags, contraindications, interactions, dosing, follow-up, and urgent escalation, and do not endorse unsafe content merely because the user asks to translate, summarize, or reformat it. Preserve the user's language, scope, requested output form, and clinically important quantities. A review must identify concrete support, conflict, or insufficiency rather than treating model agreement as verification. The user-facing response must be self-contained and must not expose Agent IDs, contracts, artifact labels, provenance headings, or workflow instructions."""
+
+
 def _number(metadata: Mapping[str, str], key: str, default: float) -> float:
     value = metadata.get(key)
     if value is None:
@@ -723,6 +730,12 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "artifact was produced. Follow this Agent's own contract; use "
                 "source provenance only to interpret and validate the artifact."
             )
+    if healthbench_messages is not None:
+        system += (
+            "\n\nHealthBench Professional execution protocol "
+            "(takes precedence over an Agent contract):\n"
+            + HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL
+        )
     upstream_text = _format_upstream(
         request.upstream,
         request.communication_condition,

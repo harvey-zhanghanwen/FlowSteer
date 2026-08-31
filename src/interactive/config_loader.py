@@ -151,6 +151,16 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
             raise ConfigurationError(
                 "add_subgraph profile requires max_agents_per_subgraph=3"
             )
+        max_relations_per_subgraph = graph.get("max_relations_per_subgraph")
+        if max_relations_per_subgraph is not None and (
+            isinstance(max_relations_per_subgraph, bool)
+            or not isinstance(max_relations_per_subgraph, int)
+            or not 0 <= max_relations_per_subgraph <= 3
+        ):
+            raise ConfigurationError(
+                "agent_graph.max_relations_per_subgraph must be an integer "
+                "from zero to three"
+            )
     if graph.get("contract_type") != "free_text" or graph.get("relation_encoding") != "two_bit":
         raise ConfigurationError("AgentGraph requires free-text contracts and two-bit relations")
     require_format_agent = graph.get("require_format_agent")
@@ -162,6 +172,8 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         "finish_only_when_admissible",
         "require_informative_contracts",
         "reuse_unchanged_agent_inputs",
+        "require_output_protocol_artifact_for_set_output",
+        "require_reciprocal_terminal_artifact_lineage",
     ):
         option_value = graph.get(option_name)
         if option_value is not None and type(option_value) is not bool:

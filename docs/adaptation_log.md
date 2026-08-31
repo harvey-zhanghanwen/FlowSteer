@@ -1184,3 +1184,106 @@ change was made during profile selection.
 - No API evaluation was started before these architecture tests. No training,
   backward pass, optimizer update, LoRA, GRPO, MACE, Bayesian update, Skill,
   memory, Web search, or benchmark-answer retrieval was enabled.
+
+## 2026-08-31: HealthBench held-out architecture repair v2.7
+
+- Froze a 20-task development population from v2.6 manifest ordinals 63--82.
+  It has zero task-ID overlap with the 58 v2.6 AgentGraph trajectories used for
+  error analysis. All 20 matching Direct receipts are reused under the runner's
+  existing model/protocol/seed/evaluator/judge checks.
+- Preserved v2.6 as an immutable baseline condition and created an independent
+  v2.7 condition, policy identity, artifacts, report namespace, and prompt
+  version. The old and new AgentGraph runs use the same catalog-order namespace
+  for the fixed task IDs.
+- Added only generic Director invariants observed in real trajectories: a
+  contract cannot serve as evidence for its own conclusion; ambiguity and
+  internal inconsistency cannot be silently collapsed; a correction must reach
+  the user-facing response producer. Enabled the existing compact historical
+  Canvas projection for v15 while retaining the exact latest observation.
+- Added a HealthBench task execution protocol to every free Agent invocation.
+  It checks ambiguity, contradictions, relevant red flags, contraindications,
+  interactions, dosing, follow-up and urgent escalation while preserving the
+  requested language and response form. It does not define Doctor, Researcher,
+  Reviewer, Verifier, Formatter, or any fixed workflow.
+- Repaired pointer-only Output promotion by recording whether an Artifact was
+  generated with `is_output_agent=true`. Under the v2.7 gate, `SET_OUTPUT`
+  cannot promote an intermediate Artifact; the existing atomic terminal
+  subgraph path must execute a user-facing consumer.
+- Raised only the v2.7 atomic subgraph relation capacity from one to two. This
+  corrects the imported ALFWorld owner-ingress cap for a three-Agent free
+  HealthBench functional unit without requiring any edge or topology.
+- Added a version-receipt FINISH check for reciprocal blocks. It detects when
+  one member's final revision never entered Output's current Artifact lineage,
+  returns `artifact_lineage` feedback with the missing Agent IDs, and leaves the
+  existing `SET_RELATION -> dirty closure -> execute -> feedback` path to the
+  Director. No automatic edge, transitive broadcast, or artifact rewrite is
+  performed.
+- Prepare-only and targeted unit tests validate the fixed population, official
+  evaluator identity, disabled training/Tool/Skill boundaries, role-neutral
+  v15 policy, two-relation domain, Output provenance gate, reciprocal lineage
+  gate, and native HealthBench message isolation.
+- No training, backward pass, optimizer step, GRPO, LoRA, MACE, Bayesian
+  update, Skill injection/evolution, generic Web search, or benchmark-answer
+  retrieval was enabled.
+
+## 2026-08-31: HealthBench held-out Output closure and runtime admission v2.8--v2.15
+
+- Kept the v2.7 fixed 20-task development population and all comparison
+  conditions unchanged: task IDs/order, local Qwen3.5-9B Director, four-model
+  all-thinking Executor catalog, empty Tool condition, seed, frozen Direct
+  records, reference evaluator, grader, and public-test source slice.
+- Added exact Output-closure admission over the existing quotient graph. A new
+  Output consumer must receive one current successful Artifact from every
+  quotient-DAG sink; grouped live JSON-Schema domains reject non-sink,
+  duplicate, missing, and extra ingress before Canvas mutation. This does not
+  prescribe a topology or a medical role.
+- Preserved FlowSteer's pointer-only `SET_OUTPUT`. It remains legal only for an
+  Artifact already generated under the Output protocol; otherwise the existing
+  atomic `ADD_SUBGRAPH(..., output_agent_id=...)` performs one terminal
+  execution after relations and Output identity are installed.
+- Made an empty visible completion a typed producer-scoped Runtime failure.
+  The provider call receipt is retained, whitespace-only text is never
+  published as a semantic Artifact, and the responsible producer becomes the
+  mandatory repair target instead of the first blocked consumer.
+- Applied mandatory repair symmetrically to constrained action domains and raw
+  Canvas admission. Unrelated ADD, DELETE, SET_OUTPUT, FINISH, relation, or
+  wrong-target MODIFY operations cannot bypass a measured repair state.
+  Existing correct Artifacts and valid lineage remain preserved.
+- Added exact reciprocal final-revision lineage admission. If a reciprocal
+  peer's current Artifact is absent from Output lineage, the Director receives
+  only legal directed acyclic repair edges into Output or its consumed
+  ancestors. The environment does not create the edge or force reciprocal
+  communication.
+- Stopped the first v2.14 canary after source review identified incomplete
+  sink/repair admission. Its partial namespace contains no completed public
+  trajectory or grader result and is excluded from v2.15.
+- Confirmed v2.15 Stable Zero on the first two fixed tasks. One grader request
+  returned transient HTTP 500/HTML; the existing terminal-evaluator-only retry
+  reused the exact frozen Director/Canvas trajectory, recorded
+  `reused_director_canvas=true`, and succeeded without another model rollout.
+- Completed all 20 fixed tasks: 20/20 evaluator-valid, 20/20 explicit
+  `FINISH`, zero `max_rounds`, zero terminal/runtime failure. Strict Official
+  Overall Score is `44.1811%`; the official primary Length-Adjusted Overall
+  Score is `39.9811%`.
+- The same-task Direct scores are `27.7152%` raw and `21.5569%`
+  length-adjusted, so v2.15 is higher by `16.4660` and `18.4241` percentage
+  points. Relative to strict v2.12, v2.15 is higher by `4.5145` and `5.1385`
+  percentage points and removes its one terminal failure.
+- The completed Graphs contain eight singleton, ten serial-three-plus, one
+  fan-in, and one mixed topology. The 49 Executor calls select Qwen3.5 Flash
+  25 times, local Qwen3.5-9B 13 times, MiniMax M3 six times, and DeepSeek V4
+  Flash five times; all finish normally. No fixed role or topology template was
+  introduced.
+- Seven Director actions were rejected and recovered. No accepted graph
+  contains a duplicate relation or cycle. The final batch did not trigger an
+  empty-completion repair, sink-reduction edit, reciprocal-lineage edit, or
+  lineage fallback; their correctness is established by targeted tests rather
+  than claimed from occurrence in this sample.
+- Remaining losses are primarily missing clinical facts, instruction
+  following, redundant serial work, and one observed Output synthesis loss
+  despite correct Artifact delivery. These are retained as evidence rather
+  than converted into a fixed medical workflow or sample-specific rule.
+- Broad regression verification completed with 430 tests plus 75 subtests
+  passing, zero failures. No training, backward, optimizer update, GRPO, LoRA,
+  MACE, Bayesian update, Skill injection/evolution, memory, Web search, or
+  medical Tool call ran.

@@ -380,6 +380,7 @@ class AgentWorkflowEnv:
         execute_on_edit: bool = False,
         max_agents: Optional[int] = None,
         max_agents_per_subgraph: int = 3,
+        max_relations_per_subgraph: Optional[int] = None,
         require_exact_answer_tag: bool = False,
         require_format_agent: bool = False,
         required_tool_id: Optional[str] = None,
@@ -390,6 +391,8 @@ class AgentWorkflowEnv:
         finish_only_when_admissible: bool = False,
         require_informative_contracts: bool = False,
         reuse_unchanged_agent_inputs: bool = False,
+        require_output_protocol_artifact_for_set_output: bool = False,
+        require_reciprocal_terminal_artifact_lineage: bool = False,
     ) -> None:
         if runtime is None and gateway is None:
             raise AgentWorkflowStateError("gateway or runtime is required")
@@ -407,6 +410,14 @@ class AgentWorkflowEnv:
             raise AgentWorkflowStateError(
                 "max_agents_per_subgraph must be a positive integer"
             )
+        if max_relations_per_subgraph is not None and (
+            isinstance(max_relations_per_subgraph, bool)
+            or not isinstance(max_relations_per_subgraph, int)
+            or not 0 <= max_relations_per_subgraph <= 3
+        ):
+            raise AgentWorkflowStateError(
+                "max_relations_per_subgraph must be an integer from zero to three"
+            )
         if type(require_exact_answer_tag) is not bool:
             raise AgentWorkflowStateError("require_exact_answer_tag must be bool")
         if type(require_format_agent) is not bool:
@@ -415,6 +426,14 @@ class AgentWorkflowEnv:
             ("finish_only_when_admissible", finish_only_when_admissible),
             ("require_informative_contracts", require_informative_contracts),
             ("reuse_unchanged_agent_inputs", reuse_unchanged_agent_inputs),
+            (
+                "require_output_protocol_artifact_for_set_output",
+                require_output_protocol_artifact_for_set_output,
+            ),
+            (
+                "require_reciprocal_terminal_artifact_lineage",
+                require_reciprocal_terminal_artifact_lineage,
+            ),
         ):
             if type(option_value) is not bool:
                 raise AgentWorkflowStateError(f"{option_name} must be bool")
@@ -502,11 +521,29 @@ class AgentWorkflowEnv:
         self.execute_on_edit = execute_on_edit
         self.max_agents = max_agents
         self.max_agents_per_subgraph = max_agents_per_subgraph
+        self._max_relations_per_subgraph_configured = (
+            max_relations_per_subgraph is not None
+        )
+        # The live constrained-decoding schema supports at most three relation
+        # declarations.  Preserve FlowSteer's legacy raw Canvas admission when
+        # no cap is explicitly configured; only an explicit condition applies
+        # the authoritative mutation limit below.
+        self.max_relations_per_subgraph = (
+            3
+            if max_relations_per_subgraph is None
+            else max_relations_per_subgraph
+        )
         self.require_exact_answer_tag = require_exact_answer_tag
         self.require_format_agent = require_format_agent
         self.finish_only_when_admissible = finish_only_when_admissible
         self.require_informative_contracts = require_informative_contracts
         self.reuse_unchanged_agent_inputs = reuse_unchanged_agent_inputs
+        self.require_output_protocol_artifact_for_set_output = (
+            require_output_protocol_artifact_for_set_output
+        )
+        self.require_reciprocal_terminal_artifact_lineage = (
+            require_reciprocal_terminal_artifact_lineage
+        )
         self.required_tool_id = (
             None if required_tool_id is None else required_tool_id.strip()
         )
@@ -816,6 +853,18 @@ class AgentWorkflowEnv:
             # sampling an unrelated contract or topology edit.
             return ()
 
+        unconsumed_reciprocal_ids = (
+            self._unconsumed_reciprocal_terminal_artifact_ids()
+        )
+        if unconsumed_reciprocal_ids:
+            if (
+                AgentActionType.SET_RELATION.value
+                in self._allowed_action_type_set
+                and self._reciprocal_terminal_lineage_relation_candidates()
+            ):
+                return (AgentActionType.SET_RELATION.value,)
+            return ()
+
         stalled_semantic_repair_ids = self._stalled_semantic_repair_agent_ids()
         if stalled_semantic_repair_ids and not any(
             (
@@ -838,6 +887,52 @@ class AgentWorkflowEnv:
         node_count = len(self._graph.nodes)
         node_ids = tuple(node.id for node in self._graph.nodes)
         can_add = self.max_agents is None or node_count < self.max_agents
+
+        output_provenance_issue = self._current_output_provenance_issue()
+        if output_provenance_issue is not None:
+            if (
+                self._graph.output_agent_id is not None
+                and AgentActionType.MODIFY_AGENT.value
+                in self._allowed_action_type_set
+            ):
+                # The Output pointer already exists, so a normal MODIFY edit
+                # re-executes exactly that node under the Output protocol.
+                # Do not spend the turn on a relation or unrelated Agent.
+                return (AgentActionType.MODIFY_AGENT.value,)
+            return ()
+
+        sink_domains = self._output_closure_sink_artifact_domains()
+        if (
+            self.require_output_protocol_artifact_for_set_output
+            and self._graph.output_agent_id is None
+            and sink_domains is not None
+            and len(sink_domains) > self.max_relations_per_subgraph
+        ):
+            sink_reduction_candidates = (
+                self._output_closure_sink_reduction_relation_candidates()
+            )
+            if (
+                sink_reduction_candidates
+                and AgentActionType.SET_RELATION.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.SET_RELATION.value,)
+            return ()
+
+        if self._requires_new_output_consumer():
+            if (
+                can_add
+                and AgentActionType.ADD_SUBGRAPH.value
+                in self._allowed_action_type_set
+            ):
+                # ``SET_OUTPUT`` cannot reformat an intermediate Artifact.
+                # Close the graph through FlowSteer's atomic ADD+execute edit;
+                # the live target domain requires the same-action Output.
+                return (AgentActionType.ADD_SUBGRAPH.value,)
+            # A legacy full-capacity Canvas with no provenance-safe Output has
+            # no non-destructive legal repair under the configured action set.
+            return ()
+
         exhausted_reasoner_ids = self._repair_exhausted_reasoner_ids()
         evidence_recovery_reasoner_ids = tuple(
             agent_id
@@ -1241,6 +1336,91 @@ class AgentWorkflowEnv:
                     )
         return candidates
 
+    def _reciprocal_terminal_lineage_relation_candidates(
+        self,
+        candidates: Optional[Sequence[Mapping[str, object]]] = None,
+    ) -> list[dict[str, object]]:
+        """Route one missing reciprocal final revision into Output lineage.
+
+        Structural reachability contracts a reciprocal component, but Runtime
+        versions each member's final Artifact independently.  When FINISH has
+        measured one or more missing versions, retain only one-way relation
+        edits from a missing member to the current Output or to a directed
+        ancestor whose current Artifact is already in Output's version lineage.
+        The source candidate set has already passed FlowSteer's partial graph
+        validation, including quotient-cycle rejection.
+        """
+
+        missing_ids = set(
+            self._unconsumed_reciprocal_terminal_artifact_ids()
+        )
+        output_agent_id = self._graph.output_agent_id
+        if not missing_ids or output_agent_id is None:
+            return []
+        current_lineage_ids = set(self._current_output_artifact_lineage_ids())
+        directed_ancestor_ids = set(
+            self._directed_ancestor_ids(self._graph, output_agent_id)
+        )
+        target_ids = {output_agent_id}
+        target_ids.update(current_lineage_ids.intersection(directed_ancestor_ids))
+        source_candidates = (
+            self._all_model_admissible_relation_candidates()
+            if candidates is None
+            else [dict(item) for item in candidates]
+        )
+        result: list[dict[str, object]] = []
+        for item in source_candidates:
+            added_edges = self._relation_added_edges(item)
+            if len(added_edges) != 1:
+                continue
+            source_id, target_id = added_edges[0]
+            if source_id not in missing_ids or target_id not in target_ids:
+                continue
+            candidate = self._graph.fork()
+            candidate.set_relation(
+                str(item["source_id"]),
+                str(item["target_id"]),
+                bool(item["source_to_target"]),
+                bool(item["target_to_source"]),
+            )
+            oriented = candidate.relation_bits(source_id, target_id)
+            if not oriented.source_to_target or oriented.target_to_source:
+                continue
+            # Publish the lineage repair in its semantic sender→receiver
+            # orientation even when the unordered relation record stores the
+            # endpoints in the opposite order.
+            result.append(
+                {
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            )
+        return result
+
+    def _reciprocal_terminal_lineage_repair_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Keep raw edits on the measured reciprocal-lineage repair edge."""
+
+        missing_ids = self._unconsumed_reciprocal_terminal_artifact_ids()
+        if not missing_ids:
+            return None
+        candidates = self._reciprocal_terminal_lineage_relation_candidates()
+        if any(
+            self._relation_action_matches_candidate(action, candidate)
+            for candidate in candidates
+        ):
+            return None
+        return (
+            "current reciprocal final-revision Artifacts are absent from the "
+            "Output Artifact lineage; apply one exact admitted directed "
+            "SET_RELATION lineage-repair edit before other Canvas actions; "
+            f"unconsumed_agent_ids={list(missing_ids)!r}"
+        )
+
     def _model_admissible_relation_candidates(self) -> list[dict[str, object]]:
         """Return the exact state-conditioned FlowSteer relation domain."""
 
@@ -1274,6 +1454,20 @@ class AgentWorkflowEnv:
             # state instead of drifting through arbitrary reciprocal edges.
             return []
         all_candidates = self._all_model_admissible_relation_candidates()
+        reciprocal_lineage_candidates = (
+            self._reciprocal_terminal_lineage_relation_candidates(
+                all_candidates
+            )
+        )
+        if self._unconsumed_reciprocal_terminal_artifact_ids():
+            return reciprocal_lineage_candidates
+        sink_reduction_candidates = (
+            self._output_closure_sink_reduction_relation_candidates(
+                all_candidates
+            )
+        )
+        if sink_reduction_candidates:
+            return sink_reduction_candidates
         failed_ingress_candidates = (
             self._failed_auxiliary_ingress_relation_candidates(all_candidates)
         )
@@ -1948,6 +2142,17 @@ class AgentWorkflowEnv:
         for node in self._graph.nodes:
             if node.id == self._graph.output_agent_id:
                 continue
+            if self.require_output_protocol_artifact_for_set_output:
+                metadata = self._progressive_output_metadata.get(node.id)
+                if (
+                    not isinstance(metadata, Mapping)
+                    or metadata.get("generated_as_output_agent") is not True
+                ):
+                    # SET_OUTPUT is pointer-only. An Artifact generated under
+                    # the intermediate-node protocol cannot become a user-facing
+                    # response without executing a terminal consumer. Atomic
+                    # ADD_SUBGRAPH(..., output_agent_id=...) remains available.
+                    continue
             if self._uses_semantic_lineage_protocol():
                 role_family = (node.role_family or "").casefold()
                 admitted_output_roles = (
@@ -1978,11 +2183,242 @@ class AgentWorkflowEnv:
             admitted.append(node.id)
         return tuple(admitted)
 
+    def _successful_artifact_agent_ids(self) -> Tuple[str, ...]:
+        """Return current Agents with a materialized, non-empty Artifact."""
+
+        return tuple(
+            node.id
+            for node in self._graph.nodes
+            if self._has_successful_artifact(node.id)
+        )
+
+    def _output_closure_sink_artifact_domains(
+        self,
+    ) -> Optional[Tuple[Tuple[str, ...], ...]]:
+        """Return exact ingress domains for each quotient-DAG sink Artifact.
+
+        ``AgentGraph._quotient_structure`` is the same reciprocal-component
+        contraction used by FlowSteer's structural validation and execution
+        order.  A terminal consumer must receive an Artifact from that current
+        frontier: routing an upstream non-sink directly to Output would strand
+        its existing successors outside terminal reachability.  Normally the
+        successful members of one reciprocal component are alternatives for
+        structural reachability.  Under the explicitly enabled reciprocal
+        final-revision lineage protocol, however, Runtime materializes one
+        final Artifact per member, so expose each materialized member as a
+        singleton required ingress instead of an alternative.
+        """
+
+        validation, _, _, successors = self._graph._quotient_structure()
+        if not validation.valid:
+            return None
+        domains: list[Tuple[str, ...]] = []
+        for component in validation.components:
+            if successors[component]:
+                continue
+            candidates = tuple(
+                agent_id
+                for agent_id in component
+                if self._has_successful_artifact(agent_id)
+            )
+            if not candidates:
+                return None
+            if (
+                self.require_reciprocal_terminal_artifact_lineage
+                and len(component) > 1
+            ):
+                domains.extend((agent_id,) for agent_id in candidates)
+            else:
+                domains.append(candidates)
+        return tuple(domains) if domains else None
+
+    def _output_closure_sink_artifact_agent_ids(self) -> Tuple[str, ...]:
+        """Flatten the component-grouped Output-closure ingress domain."""
+
+        domains = self._output_closure_sink_artifact_domains()
+        return tuple(
+            agent_id
+            for component in (() if domains is None else domains)
+            for agent_id in component
+        )
+
+    def _output_closure_sink_reduction_relation_candidates(
+        self,
+        candidates: Optional[Sequence[Mapping[str, object]]] = None,
+    ) -> list[dict[str, object]]:
+        """Return one-way edits that reduce an over-cap quotient sink frontier.
+
+        FlowSteer's ``construction_progress`` closes a partial graph by joining
+        quotient sinks before choosing Output.  When one atomic terminal ADD
+        cannot carry every required sink ingress, expose only those existing
+        ``SET_RELATION`` edits which reduce the sink-component count by one.
+        """
+
+        domains = self._output_closure_sink_artifact_domains()
+        if (
+            self._graph.output_agent_id is not None
+            or self._unresolved_dirty_agents
+            or self._failed_agent_ids
+            or domains is None
+            or len(domains) <= self.max_relations_per_subgraph
+        ):
+            return []
+        validation, component_for, _, successors = (
+            self._graph._quotient_structure()
+        )
+        sink_components = {
+            component
+            for component in validation.components
+            if not successors[component]
+        }
+        source_candidates = (
+            self._all_model_admissible_relation_candidates()
+            if candidates is None
+            else [dict(item) for item in candidates]
+        )
+        result: list[dict[str, object]] = []
+        for item in source_candidates:
+            added_edges = self._relation_added_edges(item)
+            if len(added_edges) != 1:
+                continue
+            source_id, target_id = added_edges[0]
+            source_component = component_for.get(source_id)
+            target_component = component_for.get(target_id)
+            if (
+                source_component not in sink_components
+                or target_component not in sink_components
+                or source_component == target_component
+            ):
+                continue
+            normalized = {
+                "source_id": source_id,
+                "target_id": target_id,
+                "source_to_target": True,
+                "target_to_source": False,
+            }
+            if normalized not in result:
+                result.append(normalized)
+        return result
+
+    def _output_closure_sink_reduction_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Keep raw Canvas edits on the same over-cap sink-reduction domain."""
+
+        domains = self._output_closure_sink_artifact_domains()
+        if (
+            not self.require_output_protocol_artifact_for_set_output
+            or self._graph.output_agent_id is not None
+            or domains is None
+            or len(domains) <= self.max_relations_per_subgraph
+        ):
+            return None
+        candidates = self._output_closure_sink_reduction_relation_candidates()
+        if any(
+            self._relation_action_matches_candidate(action, candidate)
+            for candidate in candidates
+        ):
+            return None
+        return (
+            "the quotient sink frontier exceeds the atomic Output-closure "
+            "relation capacity; apply one exact admitted directed "
+            "SET_RELATION sink-reduction edit before other Canvas actions"
+        )
+
+    def _requires_new_output_consumer(self) -> bool:
+        """Whether the next edit must materialize a new Output consumer.
+
+        FlowSteer's ``SET_OUTPUT`` edit is pointer-only.  When every current
+        Artifact was generated as an intermediate result, changing the pointer
+        cannot safely expose it as the user-facing response.  Keep the Canvas
+        repair atomic: the next ``ADD_SUBGRAPH`` declares and executes a new
+        Output Agent in the same edit.  This is a state-conditioned provenance
+        boundary, not a role, Agent-count, or topology template.
+        """
+
+        sink_domains = self._output_closure_sink_artifact_domains()
+        return bool(
+            self.require_output_protocol_artifact_for_set_output
+            and self._graph.output_agent_id is None
+            and self._graph.nodes
+            and not self._unresolved_dirty_agents
+            and not self._failed_agent_ids
+            and self._successful_artifact_agent_ids()
+            and sink_domains
+            and len(sink_domains) <= self.max_relations_per_subgraph
+            and not self._model_admissible_output_agent_ids()
+        )
+
+    def _add_output_provenance_domain(self) -> dict[str, object]:
+        """Project the exact Output provenance domain for one ADD edit."""
+
+        remaining_capacity = (
+            None
+            if self.max_agents is None
+            else max(self.max_agents - len(self._graph.nodes), 0)
+        )
+        eligible_existing = list(self._model_admissible_output_agent_ids())
+        if self._requires_new_output_consumer():
+            mode = "required_new_terminal_consumer"
+        elif (
+            self.require_output_protocol_artifact_for_set_output
+            and self._graph.output_agent_id is None
+            and not eligible_existing
+            and remaining_capacity is not None
+        ):
+            mode = "require_if_capacity_exhausted"
+        else:
+            mode = "optional"
+        sink_domains = self._output_closure_sink_artifact_domains()
+        normalized_sink_domains = (
+            () if sink_domains is None else sink_domains
+        )
+        return {
+            "mode": mode,
+            "eligible_existing_agent_ids": eligible_existing,
+            "same_action_agents_eligible": True,
+            "remaining_capacity": remaining_capacity,
+            "required_ingress_component_agent_ids": [
+                list(component) for component in normalized_sink_domains
+            ],
+            "required_ingress_count": len(normalized_sink_domains),
+            "eligible_input_agent_ids": list(
+                agent_id
+                for component in normalized_sink_domains
+                for agent_id in component
+            ),
+        }
+
+    def _current_output_provenance_issue(self) -> Optional[str]:
+        """Return a terminal issue when Output has only an intermediate receipt."""
+
+        if not self.require_output_protocol_artifact_for_set_output:
+            return None
+        output_agent_id = self._graph.output_agent_id
+        if output_agent_id is None:
+            return None
+        metadata = self._progressive_output_metadata.get(output_agent_id)
+        if (
+            isinstance(metadata, Mapping)
+            and metadata.get("generated_as_output_agent") is True
+            and self._has_successful_artifact(output_agent_id)
+        ):
+            return None
+        return (
+            "current Output Artifact was not generated under the Output "
+            "execution protocol; modify the current Output Agent so normal "
+            "dirty-closure execution materializes a user-facing Artifact"
+        )
+
     def _model_admissible_modify_agent_ids(self) -> Tuple[str, ...]:
         """Exclude an already verified semantic lineage from repair targets."""
 
         node_ids = tuple(node.id for node in self._graph.nodes)
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
+            if self._current_output_provenance_issue() is not None:
+                output_agent_id = self._graph.output_agent_id
+                return () if output_agent_id is None else (output_agent_id,)
             return node_ids
 
         def has_non_noop_repair(agent_id: str) -> bool:
@@ -2002,6 +2438,9 @@ class AgentWorkflowEnv:
                 for agent_id in mandatory_repair_ids
                 if has_non_noop_repair(agent_id)
             )
+        if self._current_output_provenance_issue() is not None:
+            output_agent_id = self._graph.output_agent_id
+            return () if output_agent_id is None else (output_agent_id,)
         dirty_replacement_ids = self._dirty_auxiliary_replacement_agent_ids()
         if dirty_replacement_ids:
             return tuple(
@@ -2235,6 +2674,155 @@ class AgentWorkflowEnv:
                 "domain; "
                 f"avoid_provider_id={failed_provider_id!r}, "
                 f"admitted_model_ids={list(admitted_model_ids)!r}"
+            )
+        return None
+
+    def _mandatory_repair_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Keep raw Canvas actions inside the exact live repair boundary.
+
+        The Flow-Director action mask already projects a measured Runtime
+        failure to one atomic ``MODIFY_AGENT`` domain.  This Env-side check is
+        the matching authoritative admission invariant: callers that submit an
+        ``AgentAction`` directly cannot bypass repair-first recovery with an
+        unrelated graph edit or with parameters outside the same live domain.
+        Provider- and ReAct-specific checks remain the more specialized
+        constraints after this common boundary.
+        """
+
+        mandatory_repair_ids = self._mandatory_repair_agent_ids()
+        if not mandatory_repair_ids:
+            return None
+        admitted_agent_ids = self._model_admissible_modify_agent_ids()
+        if (
+            action.action_type is not AgentActionType.MODIFY_AGENT
+            or action.agent_id not in admitted_agent_ids
+        ):
+            return (
+                "a measured Runtime failure requires one exact live "
+                "modify_agent repair before any other Canvas action; "
+                f"mandatory_repair_agent_ids={list(mandatory_repair_ids)!r}, "
+                f"admissible_modify_agent_ids={list(admitted_agent_ids)!r}"
+            )
+        if self._uses_semantic_lineage_protocol():
+            # Verified QA has narrower receipt-conditioned ReAct repair
+            # parameters.  The common gate owns action type and responsible
+            # target; preserve the existing semantic admission boundary as the
+            # authority for its field/value contract.
+            return None
+
+        target_domain = self.model_admissible_action_targets().get(
+            AgentActionType.MODIFY_AGENT.value
+        )
+        candidates = (
+            target_domain.get("per_agent_candidates")
+            if isinstance(target_domain, Mapping)
+            else None
+        )
+        candidate = next(
+            (
+                item
+                for item in candidates
+                if isinstance(item, Mapping)
+                and item.get("agent_id") == action.agent_id
+            ),
+            None,
+        ) if isinstance(candidates, (list, tuple)) else None
+        if not isinstance(candidate, Mapping):
+            return (
+                "mandatory repair target is absent from the current live "
+                f"modify_agent parameter domain: agent_id={action.agent_id!r}"
+            )
+
+        field_names = (
+            "model_id",
+            "contract",
+            "role_family",
+            "allowed_tools",
+            "execution_mode",
+            "artifact_type",
+            "completion_condition",
+        )
+        supplied_fields = tuple(
+            field_name
+            for field_name in field_names
+            if getattr(action, field_name) is not None
+        )
+        raw_mutable_fields = candidate.get("mutable_fields")
+        mutable_fields = (
+            set(raw_mutable_fields)
+            if isinstance(raw_mutable_fields, (list, tuple))
+            else set()
+        )
+        profile_fields = {"execution_mode", "allowed_tools"}
+        supplied_profile_fields = profile_fields.intersection(supplied_fields)
+        if supplied_profile_fields:
+            if (
+                set(supplied_fields) != profile_fields
+                or not profile_fields.intersection(mutable_fields)
+            ):
+                return (
+                    "mandatory modify_agent execution repair must submit only "
+                    "the coupled execution_mode and allowed_tools profile from "
+                    "the live parameter domain"
+                )
+            raw_profiles = candidate.get("execution_profiles")
+            admitted_profiles = {
+                (
+                    item.get("execution_mode"),
+                    tuple(item.get("allowed_tools", ())),
+                )
+                for item in raw_profiles
+                if isinstance(item, Mapping)
+                and isinstance(item.get("allowed_tools"), (list, tuple))
+            } if isinstance(raw_profiles, (list, tuple)) else set()
+            sampled_profile = (
+                action.execution_mode,
+                tuple(action.allowed_tools or ()),
+            )
+            if sampled_profile not in admitted_profiles:
+                return (
+                    "mandatory modify_agent execution profile is outside the "
+                    f"live admitted domain: admitted_profiles={sorted(admitted_profiles)!r}"
+                )
+            return None
+
+        if len(supplied_fields) != 1 or supplied_fields[0] not in mutable_fields:
+            return (
+                "mandatory modify_agent must change exactly one atomic field "
+                "from the live parameter domain; "
+                f"mutable_fields={sorted(mutable_fields)!r}, "
+                f"supplied_fields={list(supplied_fields)!r}"
+            )
+        field_name = supplied_fields[0]
+        sampled_value: object = getattr(action, field_name)
+        if field_name == "allowed_tools" and action.allowed_tools is not None:
+            sampled_value = list(action.allowed_tools)
+        raw_discrete_domains = candidate.get("discrete_value_domains", {})
+        if (
+            isinstance(raw_discrete_domains, Mapping)
+            and field_name in raw_discrete_domains
+        ):
+            admitted_values = raw_discrete_domains[field_name]
+            if (
+                not isinstance(admitted_values, (list, tuple))
+                or sampled_value not in admitted_values
+            ):
+                return (
+                    "mandatory modify_agent value is outside the live discrete "
+                    f"domain for {field_name!r}"
+                )
+        current_values = candidate.get("current_values", {})
+        if (
+            isinstance(current_values, Mapping)
+            and field_name in current_values
+            and sampled_value == current_values[field_name]
+        ):
+            return (
+                "mandatory modify_agent must change the measured Agent; the "
+                f"sampled {field_name!r} value is a no-op"
             )
         return None
 
@@ -3326,6 +3914,22 @@ class AgentWorkflowEnv:
                     max(self.max_agents - len(node_ids), 0),
                 )
             )
+            output_provenance_domain = (
+                self._add_output_provenance_domain()
+                if (
+                    not self._uses_semantic_lineage_protocol()
+                    and self.require_output_protocol_artifact_for_set_output
+                )
+                else None
+            )
+            if (
+                isinstance(output_provenance_domain, Mapping)
+                and output_provenance_domain.get("mode")
+                == "required_new_terminal_consumer"
+            ):
+                # One terminal consumer is the smallest FlowSteer executable
+                # unit that can materialize a provenance-safe Output Artifact.
+                remaining = min(remaining, 1)
             if replacement_domains or isolated_reasoner_augmentation:
                 # One same-role/same-artifact auxiliary replacement is one
                 # executable Canvas unit. Keep constrained decoding equal to
@@ -3589,8 +4193,39 @@ class AgentWorkflowEnv:
                                 for node in self._graph.nodes
                             ],
                             "required_tool_id": None,
-                            "min_relations": 0,
-                            "max_relations": 1,
+                            "min_relations": (
+                                int(
+                                    output_provenance_domain.get(
+                                        "required_ingress_count",
+                                        0,
+                                    )
+                                )
+                                if (
+                                    isinstance(
+                                        output_provenance_domain,
+                                        Mapping,
+                                    )
+                                    and output_provenance_domain.get("mode")
+                                    == "required_new_terminal_consumer"
+                                    and output_provenance_domain.get(
+                                        "eligible_input_agent_ids"
+                                    )
+                                )
+                                else 0
+                            ),
+                            "max_relations": self.max_relations_per_subgraph,
+                            **(
+                                {
+                                    "output_provenance": dict(
+                                        output_provenance_domain
+                                    )
+                                }
+                                if isinstance(
+                                    output_provenance_domain,
+                                    Mapping,
+                                )
+                                else {}
+                            ),
                             "endpoint_scope": {
                                 "relation_endpoint_sources": [
                                     "existing_agent_ids",
@@ -3981,6 +4616,11 @@ class AgentWorkflowEnv:
             execute_on_edit=self.execute_on_edit,
             max_agents=self.max_agents,
             max_agents_per_subgraph=self.max_agents_per_subgraph,
+            max_relations_per_subgraph=(
+                self.max_relations_per_subgraph
+                if self._max_relations_per_subgraph_configured
+                else None
+            ),
             require_exact_answer_tag=self.require_exact_answer_tag,
             require_format_agent=self.require_format_agent,
             required_tool_id=self.required_tool_id,
@@ -3991,6 +4631,12 @@ class AgentWorkflowEnv:
             finish_only_when_admissible=self.finish_only_when_admissible,
             require_informative_contracts=self.require_informative_contracts,
             reuse_unchanged_agent_inputs=self.reuse_unchanged_agent_inputs,
+            require_output_protocol_artifact_for_set_output=(
+                self.require_output_protocol_artifact_for_set_output
+            ),
+            require_reciprocal_terminal_artifact_lineage=(
+                self.require_reciprocal_terminal_artifact_lineage
+            ),
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
@@ -4031,6 +4677,28 @@ class AgentWorkflowEnv:
                 action,
                 "edit rejected: " + provider_repair_issue,
             )
+        mandatory_repair_issue = self._mandatory_repair_admission_issue(action)
+        if mandatory_repair_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + mandatory_repair_issue,
+            )
+        reciprocal_lineage_issue = (
+            self._reciprocal_terminal_lineage_repair_issue(action)
+        )
+        if reciprocal_lineage_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + reciprocal_lineage_issue,
+            )
+        output_sink_reduction_issue = (
+            self._output_closure_sink_reduction_issue(action)
+        )
+        if output_sink_reduction_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + output_sink_reduction_issue,
+            )
         preservation_issue = self._preservation_admission_issue(action)
         if preservation_issue is not None:
             return self._reject_after_count(
@@ -4044,6 +4712,18 @@ class AgentWorkflowEnv:
             return self._reject_after_count(
                 action,
                 "edit rejected: " + informative_contract_issue,
+            )
+        if (
+            self.require_output_protocol_artifact_for_set_output
+            and action.action_type is AgentActionType.SET_OUTPUT
+            and action.agent_id not in self._model_admissible_output_agent_ids()
+        ):
+            return self._reject_after_count(
+                action,
+                "edit rejected: SET_OUTPUT is pointer-only and the selected "
+                "Artifact was not generated under the Output execution protocol; "
+                "use an atomic add_subgraph with output_agent_id to execute a "
+                "user-facing terminal consumer",
             )
         if action.action_type is AgentActionType.DELETE_AGENT:
             delete_issue = self._delete_admission_issue(action.agent_id)
@@ -4066,6 +4746,12 @@ class AgentWorkflowEnv:
                     action,
                     f"cannot finish: {self._format_issues(validation)}",
                     validation.issues,
+                )
+            output_provenance_issue = self._current_output_provenance_issue()
+            if output_provenance_issue is not None:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: " + output_provenance_issue,
                 )
             format_issue = self.format_agent_issue()
             if format_issue is not None:
@@ -4140,6 +4826,21 @@ class AgentWorkflowEnv:
                 self._progressive_execution_revision = self._graph.revision
                 self._unresolved_dirty_agents.clear()
                 self._clear_failure_state()
+            unconsumed_reciprocal_ids = (
+                self._unconsumed_reciprocal_terminal_artifact_ids()
+            )
+            if unconsumed_reciprocal_ids:
+                return self._reject_after_count(
+                    action,
+                    "cannot finish: current reciprocal final-revision Artifacts "
+                    "have not been consumed by the current Output Artifact; "
+                    "unconsumed_agent_ids="
+                    f"{list(unconsumed_reciprocal_ids)!r}; add or repair a "
+                    "directed relation so normal dirty-closure execution routes "
+                    "the correction downstream",
+                    execution=execution,
+                    execution_reused=execution_reused,
+                )
             environment_terminal_issue = self._environment_terminal_issue(execution)
             if environment_terminal_issue is not None:
                 return self._reject_after_count(
@@ -4835,6 +5536,9 @@ class AgentWorkflowEnv:
                     "execution_mode": node.execution_mode.value,
                     "allowed_tools": list(node.allowed_tools),
                     "is_output_agent": agent_id == self._graph.output_agent_id,
+                    "generated_as_output_agent": (
+                        metadata.get("generated_as_output_agent") is True
+                    ),
                     "artifact_fresh": agent_id not in self._unresolved_dirty_agents,
                     "finish_reason": metadata.get("finish_reason"),
                     "artifact_complete": bool(
@@ -5165,6 +5869,69 @@ class AgentWorkflowEnv:
             )
         return f"{feedback}; execution_result={result}"
 
+    def _current_output_artifact_lineage_ids(self) -> frozenset[str]:
+        """Return current Artifact versions transitively consumed by Output.
+
+        Runtime communication remains relation-scoped. This receipt traversal
+        observes the exact ``artifact_version`` and ``input_artifact_versions``
+        already recorded by SkillFlow-compatible public Artifact provenance; it
+        never broadcasts content or adds a relation.
+        """
+
+        output_agent_id = self._graph.output_agent_id
+        if output_agent_id is None:
+            return frozenset()
+        current_versions = {
+            agent_id: metadata.get("artifact_version")
+            for agent_id, metadata in self._progressive_output_metadata.items()
+            if isinstance(metadata, Mapping)
+            and isinstance(metadata.get("artifact_version"), str)
+        }
+        if output_agent_id not in current_versions:
+            return frozenset()
+        consumed = {output_agent_id}
+        pending = [output_agent_id]
+        while pending:
+            consumer_id = pending.pop()
+            metadata = self._progressive_output_metadata.get(consumer_id, {})
+            raw_inputs = (
+                metadata.get("input_artifact_versions", {})
+                if isinstance(metadata, Mapping)
+                else {}
+            )
+            if not isinstance(raw_inputs, Mapping):
+                continue
+            for source_id, consumed_version in raw_inputs.items():
+                if (
+                    isinstance(source_id, str)
+                    and source_id not in consumed
+                    and current_versions.get(source_id) == consumed_version
+                ):
+                    consumed.add(source_id)
+                    pending.append(source_id)
+        return frozenset(consumed)
+
+    def _unconsumed_reciprocal_terminal_artifact_ids(self) -> Tuple[str, ...]:
+        """Find reciprocal final revisions absent from Output's current lineage.
+
+        FlowSteer's structural validator contracts a reciprocal pair for graph
+        reachability, while Runtime emits one final revision Artifact per member
+        after the bounded draft exchange. This compatibility check is enabled
+        only by an explicit condition and applies no role or topology template.
+        """
+
+        if not self.require_reciprocal_terminal_artifact_lineage:
+            return ()
+        output_agent_id = self._graph.output_agent_id
+        if output_agent_id is None:
+            return ()
+        required_ids: set[str] = set()
+        for relation in self._graph.relations:
+            if relation.bits.is_bidirectional:
+                required_ids.update((relation.source_id, relation.target_id))
+        consumed_ids = self._current_output_artifact_lineage_ids()
+        return tuple(sorted(required_ids - set(consumed_ids)))
+
     def _terminal_validation_error(self, answer: str) -> Optional[str]:
         """Apply the configured task terminal protocol before accepting FINISH.
 
@@ -5293,6 +6060,15 @@ class AgentWorkflowEnv:
                     # overwrite the structural repair target with a later
                     # semantic attribution.
             return result
+        output_provenance_issue = self._current_output_provenance_issue()
+        if output_provenance_issue is not None:
+            return {
+                "admissible": False,
+                "stage": "output_provenance",
+                "reason": output_provenance_issue,
+                "responsible_agent_id": self._graph.output_agent_id,
+                "preferred_actions": ["modify_agent"],
+            }
         format_issue = self.format_agent_issue()
         if format_issue is not None:
             result = {
@@ -5331,6 +6107,22 @@ class AgentWorkflowEnv:
                 if attribution is not None:
                     result["failure_attribution"] = attribution
             return result
+        unconsumed_reciprocal_ids = (
+            self._unconsumed_reciprocal_terminal_artifact_ids()
+        )
+        if unconsumed_reciprocal_ids:
+            return {
+                "admissible": False,
+                "stage": "artifact_lineage",
+                "reason": (
+                    "current reciprocal final-revision Artifacts have not been "
+                    "consumed by the current Output Artifact; add or repair a "
+                    "directed relation so normal dirty-closure execution routes "
+                    "the correction downstream"
+                ),
+                "unconsumed_agent_ids": list(unconsumed_reciprocal_ids),
+                "preferred_actions": ["set_relation", "add_subgraph"],
+            }
         environment_issue = self._environment_terminal_issue(execution)
         if environment_issue is not None:
             return {
@@ -10934,14 +11726,127 @@ class AgentWorkflowEnv:
             format_output_agent=self._uses_format_agent_protocol(),
         )
 
+    def _add_output_provenance_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Validate the live Output provenance receipt for one atomic ADD."""
+
+        if (
+            not self.require_output_protocol_artifact_for_set_output
+            or action.action_type is not AgentActionType.ADD_SUBGRAPH
+        ):
+            return None
+        new_ids = {item.agent_id for item in action.agents}
+        output_agent_id = action.output_agent_id
+        eligible_existing = set(self._model_admissible_output_agent_ids())
+        closes_existing_canvas = bool(
+            self._graph.output_agent_id is None
+            and self._graph.nodes
+            and output_agent_id in new_ids
+        )
+        if (
+            output_agent_id is not None
+            and output_agent_id not in new_ids
+            and output_agent_id not in eligible_existing
+        ):
+            return (
+                "add_subgraph output_agent_id names an existing intermediate "
+                "Artifact which was not generated under the Output protocol"
+            )
+        if closes_existing_canvas and (
+            self._unresolved_dirty_agents or self._failed_agent_ids
+        ):
+            return (
+                "Output-closure add_subgraph is unavailable while current "
+                "Agents are unresolved or failed; repair the measured "
+                "execution boundary before selecting Output"
+            )
+
+        sink_domains = self._output_closure_sink_artifact_domains()
+        if closes_existing_canvas:
+            if sink_domains is None:
+                return (
+                    "Output-closure add_subgraph requires a successful, "
+                    "non-empty current Artifact in every quotient sink "
+                    "component"
+                )
+            if len(sink_domains) > self.max_relations_per_subgraph:
+                return (
+                    "Output-closure add_subgraph exceeds the configured "
+                    "relation capacity; reduce the quotient sink frontier "
+                    "with a directed SET_RELATION edit first"
+                )
+            if len(new_ids) != 1:
+                return (
+                    "Output-closure add_subgraph must add exactly one "
+                    "same-action terminal consumer"
+                )
+
+        exhausts_capacity = bool(
+            self.max_agents is not None
+            and self._graph.output_agent_id is None
+            and not eligible_existing
+            and len(self._graph.nodes) + len(new_ids) >= self.max_agents
+        )
+        requires_new_output = bool(
+            self._requires_new_output_consumer() or exhausts_capacity
+        )
+        if requires_new_output and output_agent_id not in new_ids:
+            return (
+                "add_subgraph must select a same-action new Agent as "
+                "output_agent_id before Output capacity is closed"
+            )
+        if closes_existing_canvas and sink_domains is not None:
+            if len(action.relations) != len(sink_domains):
+                return (
+                    "Output-closure add_subgraph must provide exactly one "
+                    "directed Artifact ingress for every quotient sink "
+                    f"component; required_ingress_count={len(sink_domains)}"
+                )
+            for component in sink_domains:
+                matches = tuple(
+                    relation
+                    for relation in action.relations
+                    if relation.source_id in component
+                    and relation.target_id == output_agent_id
+                    and relation.source_to_target is True
+                    and relation.target_to_source is False
+                )
+                if len(matches) != 1:
+                    return (
+                        "Output-closure add_subgraph must route exactly one "
+                        "successful Artifact from quotient sink component "
+                        f"{list(component)!r} into the same-action Output"
+                    )
+        return None
+
     def _apply_mutation(self, graph: AgentGraph, action: AgentAction) -> set[str]:
         if action.action_type is AgentActionType.ADD_SUBGRAPH:
+            closes_existing_canvas = bool(
+                graph.output_agent_id is None
+                and graph.nodes
+                and action.output_agent_id is not None
+                and action.output_agent_id
+                in {item.agent_id for item in action.agents}
+            )
+            output_provenance_issue = self._add_output_provenance_issue(action)
+            if output_provenance_issue is not None:
+                raise GraphMutationError(output_provenance_issue)
             if not action.agents:
                 raise GraphMutationError("add_subgraph action has no Agents")
             if len(action.agents) > self.max_agents_per_subgraph:
                 raise GraphMutationError(
                     "add_subgraph agent limit reached: "
                     f"max_agents_per_subgraph={self.max_agents_per_subgraph}"
+                )
+            if (
+                self._max_relations_per_subgraph_configured
+                and len(action.relations) > self.max_relations_per_subgraph
+            ):
+                raise GraphMutationError(
+                    "add_subgraph relation limit reached: "
+                    f"max_relations_per_subgraph={self.max_relations_per_subgraph}"
                 )
             new_ids = {item.agent_id for item in action.agents}
             existing_ids = {item.id for item in graph.nodes}
@@ -11002,6 +11907,17 @@ class AgentWorkflowEnv:
                         agent_id=action.output_agent_id,
                     ),
                 )
+            if closes_existing_canvas:
+                closure_validation = graph.validate(
+                    self.model_registry,
+                    require_complete=True,
+                )
+                if not closure_validation.valid:
+                    raise GraphMutationError(
+                        "Output-closure add_subgraph failed complete graph "
+                        "validation: "
+                        + self._format_issues(closure_validation)
+                    )
             return graph.dirty_closure(dirty_agents)
         if action.action_type is AgentActionType.ADD_AGENT:
             if action.agent_id is None or action.model_id is None or action.contract is None:

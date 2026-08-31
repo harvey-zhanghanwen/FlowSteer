@@ -88,6 +88,15 @@ DIRECTOR_SYSTEM_PROMPT_V14 = DIRECTOR_SYSTEM_PROMPT_V13 + """
 
 Represent each unordered Agent endpoint pair at most once in relations. Use source_to_target and target_to_source in that single relation object to encode one-way or bidirectional communication; do not add a second relation object for the same pair in reverse order."""
 
+# v15 keeps the same role- and topology-neutral search space. It adds only
+# generic epistemic and routing invariants exposed by failed Canvas receipts:
+# a pre-execution contract is not evidence, ambiguity is not silently resolved,
+# and a correction must reach the terminal producer. High-stakes content is a
+# task property rather than a prescribed medical role or workflow.
+DIRECTOR_SYSTEM_PROMPT_V15 = DIRECTOR_SYSTEM_PROMPT_V14 + """
+
+A pre-execution contract must not assert an unobserved domain fact or predetermine the task conclusion. If the task is ambiguous or internally inconsistent, resolve the ambiguity from available evidence or preserve the uncertainty instead of silently choosing an interpretation. A checking or correction artifact is useful only when grounded in the task or independent evidence, and any correction must be routed to the Agent that produces the user-facing response. For high-stakes content, a request to translate, summarize, or format does not verify the embedded claims; preserve the requested form while checking contradictions and material safety risks."""
+
 LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
 
 Use only action types listed in admissible_action_types, model_id values from model_catalog, and exact tool_id values from tool_catalog. add_agent adds one Agent with a free-text contract. A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange.
@@ -140,6 +149,7 @@ DIRECTOR_PROMPT_VERSION_V11 = "agentgraph.director.minimal-neutral.v11"
 DIRECTOR_PROMPT_VERSION_V12 = "agentgraph.director.minimal-neutral.v12"
 DIRECTOR_PROMPT_VERSION_V13 = "agentgraph.director.minimal-neutral.v13"
 DIRECTOR_PROMPT_VERSION_V14 = "agentgraph.director.minimal-neutral.v14"
+DIRECTOR_PROMPT_VERSION_V15 = "agentgraph.director.minimal-neutral.v15"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
 SCALAR_DIRECTOR_PROMPT_VERSION_V3 = (
     "agentgraph.director.minimal-neutral-scalar.v3"
@@ -607,6 +617,7 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         DIRECTOR_PROMPT_VERSION_V12: DIRECTOR_SYSTEM_PROMPT_V12,
         DIRECTOR_PROMPT_VERSION_V13: DIRECTOR_SYSTEM_PROMPT_V13,
         DIRECTOR_PROMPT_VERSION_V14: DIRECTOR_SYSTEM_PROMPT_V14,
+        DIRECTOR_PROMPT_VERSION_V15: DIRECTOR_SYSTEM_PROMPT_V15,
         SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_PROMPT_VERSION_V3: SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_PROMPT_VERSION_V4: SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
@@ -681,6 +692,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         DIRECTOR_SYSTEM_PROMPT_V12,
         DIRECTOR_SYSTEM_PROMPT_V13,
         DIRECTOR_SYSTEM_PROMPT_V14,
+        DIRECTOR_SYSTEM_PROMPT_V15,
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
@@ -877,8 +889,14 @@ DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION = (
 DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3 = (
     "agentgraph.model-admissible-action-mask.v3"
 )
-DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION = (
+DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION_V12 = (
     "agentgraph.live-action-target-domains.v12"
+)
+DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION_V13 = (
+    "agentgraph.live-action-target-domains.v13"
+)
+DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION = (
+    "agentgraph.live-action-target-domains.v14"
 )
 DIRECTOR_ACTION_JSON_SCHEMA_TEXT = json.dumps(
     DIRECTOR_ACTION_JSON_SCHEMA,
@@ -1308,9 +1326,132 @@ def _live_free_contract_profile_domain(
     if (
         type(min_relations) is not int
         or type(max_relations) is not int
-        or not 0 <= min_relations <= max_relations <= 1
+        or not 0 <= min_relations <= max_relations <= 3
     ):
         raise ValueError("add_subgraph live relation-count domain is invalid")
+    raw_output_provenance = domain.get("output_provenance")
+    output_provenance: Optional[dict[str, Any]] = None
+    if raw_output_provenance is not None:
+        required_keys = {
+            "mode",
+            "eligible_existing_agent_ids",
+            "same_action_agents_eligible",
+            "remaining_capacity",
+            "eligible_input_agent_ids",
+            "required_ingress_component_agent_ids",
+            "required_ingress_count",
+        }
+        if (
+            not isinstance(raw_output_provenance, Mapping)
+            or set(raw_output_provenance) != required_keys
+            or raw_output_provenance.get("mode")
+            not in {
+                "optional",
+                "require_if_capacity_exhausted",
+                "required_new_terminal_consumer",
+            }
+            or raw_output_provenance.get("same_action_agents_eligible")
+            is not True
+        ):
+            raise ValueError("add_subgraph Output provenance domain is invalid")
+        eligible_existing = raw_output_provenance.get(
+            "eligible_existing_agent_ids"
+        )
+        eligible_inputs = raw_output_provenance.get(
+            "eligible_input_agent_ids"
+        )
+        raw_ingress_components = raw_output_provenance.get(
+            "required_ingress_component_agent_ids"
+        )
+        required_ingress_count = raw_output_provenance.get(
+            "required_ingress_count"
+        )
+        remaining_capacity = raw_output_provenance.get("remaining_capacity")
+        for label, values in (
+            ("eligible existing Output Agents", eligible_existing),
+            ("eligible Output input Agents", eligible_inputs),
+        ):
+            if (
+                not isinstance(values, (list, tuple))
+                or any(
+                    not isinstance(agent_id, str)
+                    or agent_id not in existing_ids
+                    for agent_id in values
+                )
+                or len(values) != len(set(values))
+            ):
+                raise ValueError(f"add_subgraph {label} are invalid")
+        if (
+            not isinstance(raw_ingress_components, (list, tuple))
+            or type(required_ingress_count) is not int
+            or required_ingress_count != len(raw_ingress_components)
+        ):
+            raise ValueError(
+                "add_subgraph Output ingress component domain is invalid"
+            )
+        ingress_components: list[tuple[str, ...]] = []
+        flattened_ingress: list[str] = []
+        for raw_component in raw_ingress_components:
+            if (
+                not isinstance(raw_component, (list, tuple))
+                or not raw_component
+                or any(
+                    not isinstance(agent_id, str)
+                    or agent_id not in existing_ids
+                    for agent_id in raw_component
+                )
+                or len(raw_component) != len(set(raw_component))
+                or any(
+                    agent_id in flattened_ingress
+                    for agent_id in raw_component
+                )
+            ):
+                raise ValueError(
+                    "add_subgraph Output ingress component domain is invalid"
+                )
+            component = tuple(raw_component)
+            ingress_components.append(component)
+            flattened_ingress.extend(component)
+        if tuple(flattened_ingress) != tuple(eligible_inputs):
+            raise ValueError(
+                "add_subgraph Output ingress component flattening changed"
+            )
+        if (
+            remaining_capacity is not None
+            and (
+                type(remaining_capacity) is not int
+                or remaining_capacity < 0
+            )
+        ):
+            raise ValueError(
+                "add_subgraph Output remaining capacity is invalid"
+            )
+        if (
+            raw_output_provenance.get("mode")
+            == "required_new_terminal_consumer"
+            and (
+                max_agents != 1
+                or required_ingress_count < 1
+                or min_relations != required_ingress_count
+                or max_relations < required_ingress_count
+                or not eligible_inputs
+            )
+        ):
+            raise ValueError(
+                "required Output closure must expose one new consumer and "
+                "one current Artifact ingress per quotient sink component"
+            )
+        output_provenance = {
+            "mode": raw_output_provenance["mode"],
+            "eligible_existing_agent_ids": tuple(eligible_existing),
+            "same_action_agents_eligible": True,
+            "remaining_capacity": remaining_capacity,
+            "eligible_input_agent_ids": tuple(eligible_inputs),
+            "required_ingress_component_agent_ids": tuple(
+                ingress_components
+            ),
+            "required_ingress_count": required_ingress_count,
+        }
     return {
         "min_agents": min_agents,
         "max_agents": max_agents,
@@ -1321,6 +1462,7 @@ def _live_free_contract_profile_domain(
         "existing_agent_ids": tuple(existing_ids),
         "min_relations": min_relations,
         "max_relations": max_relations,
+        "output_provenance": output_provenance,
     }
 
 
@@ -2662,7 +2804,8 @@ def director_live_add_subgraph_relation_candidates(
     Role-free conditions expose only relations incident to an Agent declared
     by the same transaction; edits between existing Agents remain in the live
     ``set_relation`` domain.  Semantic QA conditions additionally apply their
-    role-edge protocol.  The final ADD schema admits at most one relation, and
+    role-edge protocol.  The final ADD schema admits the bounded relation count
+    exposed by the current Canvas, and
     reciprocal relations are exposed only between two same-action Agents so an
     existing reciprocal block cannot be enlarged before Canvas validation.
     One-way relations use the actual sender as ``source_id`` with
@@ -2681,6 +2824,27 @@ def director_live_add_subgraph_relation_candidates(
         state = _live_free_contract_profile_domain(domain)
         ordered_new_ids = tuple(agent["agent_id"] for agent in normalized_agents)
         new_ids = set(ordered_new_ids)
+        output_provenance = state.get("output_provenance")
+        if (
+            isinstance(output_provenance, Mapping)
+            and output_provenance.get("mode")
+            == "required_new_terminal_consumer"
+        ):
+            # The provenance-safe closure is one atomic FlowSteer executable
+            # unit: a current Artifact flows into the same-action Output sink.
+            # No medical role or fixed upstream topology is selected here.
+            return tuple(
+                {
+                    "source_id": source_id,
+                    "target_id": output_id,
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+                for source_id in output_provenance[
+                    "eligible_input_agent_ids"
+                ]
+                for output_id in ordered_new_ids
+            )
         endpoint_ids = [*state["existing_agent_ids"], *ordered_new_ids]
         candidates: list[dict[str, Any]] = []
         for source_index, source_id in enumerate(endpoint_ids):
@@ -3173,7 +3337,70 @@ def director_live_action_parameter_json_schema_text(
                 action_target_domains,
                 normalized_agents,
             )
-            if relation_candidates and state["max_relations"] > 0:
+            output_provenance = state.get("output_provenance")
+            required_ingress_components = (
+                output_provenance[
+                    "required_ingress_component_agent_ids"
+                ]
+                if (
+                    isinstance(output_provenance, Mapping)
+                    and output_provenance.get("mode")
+                    == "required_new_terminal_consumer"
+                )
+                else ()
+            )
+            if required_ingress_components:
+                output_ids = tuple(
+                    agent["agent_id"] for agent in normalized_agents
+                )
+                if len(output_ids) != 1:
+                    raise ValueError(
+                        "required Output closure must declare one new consumer"
+                    )
+                positional_relation_schemas: list[dict[str, Any]] = []
+                for component in required_ingress_components:
+                    component_candidates = tuple(
+                        candidate
+                        for candidate in relation_candidates
+                        if candidate.get("source_id") in component
+                        and candidate.get("target_id") == output_ids[0]
+                        and candidate.get("source_to_target") is True
+                        and candidate.get("target_to_source") is False
+                    )
+                    if not component_candidates:
+                        raise ValueError(
+                            "required Output closure component has no live ingress"
+                        )
+                    positional_relation_schemas.append(
+                        {
+                            "anyOf": [
+                                {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": [
+                                        "source_id",
+                                        "target_id",
+                                        "source_to_target",
+                                        "target_to_source",
+                                    ],
+                                    "properties": {
+                                        key: {"const": value}
+                                        for key, value in candidate.items()
+                                    },
+                                }
+                                for candidate in component_candidates
+                            ]
+                        }
+                    )
+                required_count = len(required_ingress_components)
+                schema["properties"]["relations"] = {
+                    "type": "array",
+                    "minItems": required_count,
+                    "maxItems": required_count,
+                    "prefixItems": positional_relation_schemas,
+                    "items": False,
+                }
+            elif relation_candidates and state["max_relations"] > 0:
                 schema["properties"]["relations"] = {
                     "type": "array",
                     "minItems": state["min_relations"],
@@ -3208,9 +3435,46 @@ def director_live_action_parameter_json_schema_text(
                     "type": "array",
                     "maxItems": 0,
                 }
-            schema["properties"]["output_agent_id"] = {
-                "anyOf": [{"enum": endpoint_ids}, {"type": "null"}]
-            }
+            if isinstance(output_provenance, Mapping):
+                mode = output_provenance["mode"]
+                remaining_capacity = output_provenance[
+                    "remaining_capacity"
+                ]
+                output_required = bool(
+                    mode == "required_new_terminal_consumer"
+                    or (
+                        mode == "require_if_capacity_exhausted"
+                        and isinstance(remaining_capacity, int)
+                        and len(normalized_agents) >= remaining_capacity
+                    )
+                )
+                new_output_ids = [
+                    agent["agent_id"] for agent in normalized_agents
+                ]
+                if output_required:
+                    if "output_agent_id" not in schema["required"]:
+                        schema["required"].append("output_agent_id")
+                    schema["properties"]["output_agent_id"] = (
+                        {"const": new_output_ids[0]}
+                        if len(new_output_ids) == 1
+                        else {"enum": new_output_ids}
+                    )
+                else:
+                    eligible_output_ids = list(
+                        output_provenance[
+                            "eligible_existing_agent_ids"
+                        ]
+                    ) + new_output_ids
+                    schema["properties"]["output_agent_id"] = {
+                        "anyOf": [
+                            {"enum": eligible_output_ids},
+                            {"type": "null"},
+                        ]
+                    }
+            else:
+                schema["properties"]["output_agent_id"] = {
+                    "anyOf": [{"enum": endpoint_ids}, {"type": "null"}]
+                }
         elif verified_qa_semantic_protocol(domain.get("semantic_protocol")):
             relation_candidates = director_live_add_subgraph_relation_candidates(
                 action_target_domains,
@@ -4321,7 +4585,8 @@ class AgentGraphOrchestrator:
         # Director repairs the responsible semantic node instead of probing
         # FINISH or repeatedly modifying the Formatter.
         if (
-            verified_qa_semantic_protocol(self.semantic_protocol)
+            env.finish_only_when_admissible
+            or verified_qa_semantic_protocol(self.semantic_protocol)
             or self.prompt_version
             in {
                 SCALAR_DIRECTOR_PROMPT_VERSION_V4,
@@ -4453,6 +4718,7 @@ class AgentGraphOrchestrator:
             QA_DIRECTOR_PROMPT_VERSION,
             SCALAR_DIRECTOR_PROMPT_VERSION_V4,
             SCALAR_DIRECTOR_PROMPT_VERSION_V5,
+            DIRECTOR_PROMPT_VERSION_V15,
         }:
             return copied
         return self._compact_qa_historical_messages(copied)
@@ -4643,6 +4909,7 @@ __all__ = [
     "DIRECTOR_ACTION_JSON_SCHEMA_TEXT",
     "DIRECTOR_ACTION_SCHEMA_VERSION",
     "DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION",
+    "DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION_V13",
     "DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE",
     "DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION",
     "DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V1",
@@ -4656,11 +4923,13 @@ __all__ = [
     "DIRECTOR_SYSTEM_PROMPT_V12",
     "DIRECTOR_SYSTEM_PROMPT_V13",
     "DIRECTOR_SYSTEM_PROMPT_V14",
+    "DIRECTOR_SYSTEM_PROMPT_V15",
     "DIRECTOR_PROMPT_VERSION",
     "DIRECTOR_PROMPT_VERSION_V11",
     "DIRECTOR_PROMPT_VERSION_V12",
     "DIRECTOR_PROMPT_VERSION_V13",
     "DIRECTOR_PROMPT_VERSION_V14",
+    "DIRECTOR_PROMPT_VERSION_V15",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT",
     "SCALAR_DIRECTOR_PROMPT_VERSION",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT_V3",

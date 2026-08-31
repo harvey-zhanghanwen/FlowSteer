@@ -702,3 +702,59 @@ The condition remains inference-only with the same 525-task public-test order,
 empty Tool condition, Direct identity, reference evaluator, grader, seed, and
 generation settings as v2.5. It uses an independent v2.6 artifact namespace;
 v2.5 trajectories are not resumed into v2.6.
+
+### HealthBench held-out architecture repair v2.7
+
+The v2.7 condition is a fixed 20-task development check drawn from ordinal
+63--82 of the frozen v2.6 public-test manifest.  These task IDs do not overlap
+the 58 v2.6 AgentGraph trajectories used to derive the repair hypotheses.  It
+retains the v2.6 heterogeneous all-thinking catalog, local Qwen3.5-9B
+Flow-Director, no-Tool condition, generation seed, Direct receipts, and exact
+OpenAI simple-evals reference evaluator.  It is not a 525-task benchmark score.
+
+| v2.7 boundary | Source and classification |
+| --- | --- |
+| `agentgraph.director.minimal-neutral.v15` and compact historical Canvas observations | **Direct reuse plus minimal generic adaptation.** The compact Action--Observation projection already used by the SkillFlow/FlowSteer QA and scalar Director paths is enabled for v15. The added policy states only that a pre-execution contract is not evidence, unresolved ambiguity must not be silently collapsed, and a correction must be routed to the terminal producer. It does not name a medical role, require an Agent count, or fix a topology. |
+| HealthBench Professional execution protocol in `build_agent_messages` | **Necessary task-adapter change.** It is applied uniformly to any free Agent receiving the official native conversation, and covers ambiguity, contradictions, clinical safety and requested response form. It contains no rubric, reference response, benchmark answer, role inventory, or evaluator state. |
+| `generated_as_output_agent` / `generated_as_format_agent` Artifact metadata | **Necessary compatibility adaptation over direct FlowSteer pointer-only `SET_OUTPUT`.** `AgentRuntime` records the exact invocation protocol. When the v2.7 gate is enabled, an intermediate Artifact cannot be promoted by pointer-only `SET_OUTPUT`; the existing atomic `ADD_SUBGRAPH(..., output_agent_id=...)` executes a terminal consumer instead. No model output is rewritten. |
+| Configurable `max_relations_per_subgraph=2` | **Direct FlowSteer transaction reuse plus necessary HealthBench adaptation.** Commit `31b8c01` supplied the profile-first atomic `ADD_SUBGRAPH` path but capped its ALFWorld Tool-owner transaction at one relation. HealthBench may add three free Agents, so v2.7 exposes up to two sampled relations in the same transaction. Zero relations, directed relations, reciprocal relations, Agent identities, and topology remain Director choices. |
+| Reciprocal terminal Artifact-lineage coverage | **Necessary AgentGraph compatibility adaptation; not present in either upstream.** FlowSteer structural validation contracts a reciprocal pair for reachability, while Runtime produces two independent final revision Artifacts. The optional v2.7 FINISH gate follows existing `artifact_version` / `input_artifact_versions` receipts and reports any reciprocal final revision absent from Output's current lineage. It never broadcasts content, adds an edge, parses a contract for a role, or consults the evaluator; ordinary `SET_RELATION` plus dirty-closure execution performs any sampled repair. |
+| Frozen task IDs and Direct reuse | **Direct reuse** of `evaluate_completion_benchmark_round.py` task-ID selection, immutable manifest validation, and strict Direct receipt matching. The comparator remains local Qwen3.5-9B Direct and the AgentGraph remains heterogeneous, so `protocol_equivalent_to_direct=false` is retained. |
+
+Training, backward, optimizer update, GRPO, LoRA, MACE, Bayesian updates,
+Skill retrieval/evolution, generic Web search, and benchmark-answer retrieval
+remain disabled. The existing MedRAG/PubMed ReAct adapters are not enabled in
+this no-Tool architecture ablation.
+
+### HealthBench held-out Output closure and runtime admission v2.8--v2.15
+
+Versions v2.8--v2.15 retain the exact v2.7 fixed 20-task population, local
+Qwen3.5-9B Flow-Director, heterogeneous all-thinking Executor catalog, empty
+Tool condition, generation seed, Direct receipts, and OpenAI simple-evals
+HealthBench Professional reference evaluator.  They are incremental
+architecture diagnostics on a development slice, not a 525-task benchmark
+result and not a trained policy.
+
+| Boundary | Source and classification |
+| --- | --- |
+| Accepted Canvas edit followed by execution, public feedback, and a later explicit `FINISH` | **Direct FlowSteer reuse** through `AgentWorkflowEnv.step`, `_apply_mutation`, and the existing trajectory collector. `ADD_SUBGRAPH` remains an atomic functional-unit edit; the adaptation does not change the six Canvas actions or impose an Agent count, role inventory, relation, or topology. |
+| Provider call receipt followed by non-empty public completion admission | **Thin SkillFlow runtime adaptation** from the sampled-turn/error boundary in SkillFlow `src/executor/m_exec.py`. `AgentRuntime._invoke` first retains the actual provider receipt and then rejects whitespace-only visible content as the producer-scoped `CompletionArtifactEmpty`; hidden reasoning is not a semantic Artifact and an empty producer is not misattributed to a downstream consumer. |
+| `artifact_version` and exact `input_artifact_versions` | **Direct reuse of the existing project Artifact receipt boundary**, aligned with SkillFlow's public Action--Observation state. The repair reads recorded provenance only; it does not infer hidden reasoning or synthesize missing content. |
+| Quotient-sink Output closure | **Necessary AgentGraph compatibility adaptation** over the existing FlowSteer-derived `AgentGraph._quotient_structure`. Each current quotient-DAG sink must route one successful Artifact into an atomic new Output consumer. A reciprocal component is structurally contracted exactly as before; when final-revision lineage checking is enabled, each materialized reciprocal member is a required Artifact ingress. |
+| Grouped ingress domains in constrained `ADD_SUBGRAPH` decoding | **Necessary constrained-decoding adaptation**. JSON Schema `prefixItems` expresses one candidate from each exact sink component and rejects non-sink, duplicate, missing, or extra ingress before execution. The schema exposes the live Canvas domain; it does not select a topology for the Director. |
+| Pointer-only `SET_OUTPUT` and atomic Output construction | **Direct FlowSteer reuse plus the v2.7 provenance guard**. An existing user-facing Output Artifact may be selected without another model call; otherwise the existing atomic `ADD_SUBGRAPH(..., output_agent_id=...)` executes the terminal consumer once with all required ingress Artifacts. |
+| Mandatory producer repair and raw-action admission | **Necessary generic adaptation** of the project MD's `preserve -> diagnose -> repair -> augment` policy. After a measured producer failure or incomplete Output provenance, both the constrained action mask and authoritative raw admission admit only the responsible live `MODIFY_AGENT`, exact lineage relation, or atomic Output closure. Correct Artifacts and valid graph structure are preserved. |
+| Reciprocal final-revision lineage repair | **Necessary AgentGraph compatibility adaptation**. If one reciprocal member's current Artifact version is absent from Output lineage, the live domain exposes only a directed acyclic edge from that missing producer into Output or an already consumed Output ancestor. No edge is inserted automatically and no reciprocal topology is required. |
+| Terminal-evaluator-only retry | **Direct reuse of the existing runner separation between trajectory collection and terminal evaluation**, implemented by `evaluate_hotpotqa_round.py::_retry_terminal_evaluator`. A transient grader failure reuses the frozen Director/Canvas trajectory and records `evaluation_retry_receipt.reused_director_canvas=true`; it never repeats Executor or Tool work. |
+
+The completed v2.15 run produced 20/20 evaluator-valid explicit `FINISH`
+trajectories, zero `max_rounds`, and zero terminal/runtime failure. Its strict
+Official Overall Score is `0.4418114973` and its primary Length-Adjusted
+Overall Score is `0.3998106573`, versus `0.2771519608` and `0.2155692508`
+for the same 20 Direct records. The v2.14 namespace is an interrupted
+diagnostic and is excluded from every v2.15 metric.
+
+No training, backward pass, optimizer update, GRPO, LoRA, MACE, Bayesian
+update, Skill injection/evolution, memory, Web search, or medical Tool was
+enabled in v2.15. ReAct remains an optional per-Agent execution mode, not an
+Agent role; this no-Tool condition happened to admit only `reasoning` profiles.

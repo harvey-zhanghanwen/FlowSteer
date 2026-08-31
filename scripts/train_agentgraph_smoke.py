@@ -101,6 +101,7 @@ from src.interactive.policy_sync import (
 from src.interactive.records import TaskRecord, TrajectoryRecord
 from src.interactive.rollout_collector import (
     AgentGraphRolloutCollector,
+    ProgressCallback,
     RolloutGate,
     SGLangReceiptDirectorClient,
 )
@@ -2070,6 +2071,7 @@ class SmokeBackend(Protocol):
         forced_probe: bool = False,
         condition_satisfied: bool = True,
         sampling_anchor_ordinal: Optional[int] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> TrajectoryRecord: ...
 
     def train(
@@ -3343,6 +3345,7 @@ class LiveSmokeBackend:
         forced_probe: bool = False,
         condition_satisfied: bool = True,
         sampling_anchor_ordinal: Optional[int] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> TrajectoryRecord:
         director = _mapping(self.config["director"], "director")
         graph_config = _mapping(self.config["agent_graph"], "agent_graph")
@@ -3609,6 +3612,12 @@ class LiveSmokeBackend:
                 max_agents_per_subgraph=int(
                     graph_config.get("max_agents_per_subgraph", 3)
                 ),
+                max_relations_per_subgraph=(
+                    int(graph_config["max_relations_per_subgraph"])
+                    if graph_config.get("max_relations_per_subgraph")
+                    is not None
+                    else None
+                ),
                 require_exact_answer_tag=(
                     terminal_protocol == "exact_single_answer_tag"
                 ),
@@ -3632,6 +3641,18 @@ class LiveSmokeBackend:
                 ),
                 reuse_unchanged_agent_inputs=bool(
                     graph_config.get("reuse_unchanged_agent_inputs", False)
+                ),
+                require_output_protocol_artifact_for_set_output=bool(
+                    graph_config.get(
+                        "require_output_protocol_artifact_for_set_output",
+                        False,
+                    )
+                ),
+                require_reciprocal_terminal_artifact_lineage=bool(
+                    graph_config.get(
+                        "require_reciprocal_terminal_artifact_lineage",
+                        False,
+                    )
                 ),
                 allowed_actions=(
                     tuple(str(value) for value in graph_config["actions"])
@@ -3688,6 +3709,7 @@ class LiveSmokeBackend:
                 ),
                 forced_probe=forced_probe,
                 expected_task_split=expected_task_split,
+                progress_callback=progress_callback,
             )
         except BaseException:
             close_task_runtime()

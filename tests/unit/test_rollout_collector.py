@@ -1868,7 +1868,7 @@ def test_native_sglang_v3_add_role_selection_does_not_repair_trailing_text():
 
     with pytest.raises(
         ReceiptValidationError,
-        match="role-selection phase is invalid.*trailing text",
+        match="Agent selection phase is invalid.*contains trailing text",
     ):
         asyncio.run(
             client.propose(
@@ -2410,7 +2410,10 @@ def test_v3_receipt_validation_fails_closed_on_phase_and_final_action_mismatch()
             separators=(",", ":"),
         )
     )
-    with pytest.raises(ReceiptValidationError, match="changed its sampled"):
+    with pytest.raises(
+        ReceiptValidationError,
+        match="outside the exact live schema",
+    ):
         _validate_v3_hierarchical_action_receipt(
             mismatched_action,
             metadata,
@@ -2448,17 +2451,24 @@ def test_v3_receipt_validation_fails_closed_on_phase_and_final_action_mismatch()
             }
         },
     }
-    assert _validate_v3_hierarchical_action_receipt(
-        action,
-        legacy_metadata,
-        {
-            **schema_request,
-            "action_target_domain_version": (
-                "agentgraph.live-action-target-domains.v3"
-            ),
-        },
-    ) == {"add_agent_declarations"}
-    with pytest.raises(ReceiptValidationError, match="did not use role-first"):
+    with pytest.raises(
+        ReceiptValidationError,
+        match="decoding strategy differs from its live declaration mode",
+    ):
+        _validate_v3_hierarchical_action_receipt(
+            action,
+            legacy_metadata,
+            {
+                **schema_request,
+                "action_target_domain_version": (
+                    "agentgraph.live-action-target-domains.v3"
+                ),
+            },
+        )
+    with pytest.raises(
+        ReceiptValidationError,
+        match="decoding strategy differs from its live declaration mode",
+    ):
         _validate_v3_hierarchical_action_receipt(
             action,
             legacy_metadata,
@@ -3302,8 +3312,10 @@ def test_collector_does_not_duplicate_reused_progressive_execution():
 
     trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
 
-    assert len(trajectory.turns[1].executions) == 1
+    assert trajectory.turns[1].executions == ()
     assert trajectory.turns[1].execution_reused is False
+    assert trajectory.turns[1].runtime_summary["executed_agent_ids"] == []
+    assert trajectory.turns[1].runtime_summary["reused_agent_ids"] == ["solver"]
     assert trajectory.turns[2].executions == ()
     assert trajectory.turns[2].execution_reused is True
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime
 import inspect
 import json
 import math
@@ -3670,6 +3671,7 @@ ActiveSkillProvider = Callable[
     [TaskRecord, AgentWorkflowEnv, VersionBundle],
     Sequence[str],
 ]
+ProgressCallback = Callable[[Mapping[str, object]], None]
 
 
 def _retrieved_skill_ids(
@@ -4224,6 +4226,7 @@ class AgentGraphRolloutCollector:
         api_fallback_used: bool = False,
         manual_repair_used: bool = False,
         expected_task_split: str = "train",
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> None:
         if orchestrator.registry is not environment.model_registry:
             raise ValueError("orchestrator and environment must share the model registry")
@@ -4254,6 +4257,8 @@ class AgentGraphRolloutCollector:
             raise ValueError("static skills and a dynamic skill_provider are mutually exclusive")
         if active_skill_provider is not None and not callable(active_skill_provider):
             raise TypeError("active_skill_provider must be callable when supplied")
+        if progress_callback is not None and not callable(progress_callback):
+            raise TypeError("progress_callback must be callable when supplied")
         self.skills = tuple(dict(skill) for skill in skills)
         self.skill_provider = skill_provider
         self.active_skill_provider = active_skill_provider
@@ -4262,7 +4267,59 @@ class AgentGraphRolloutCollector:
         self.api_fallback_used = api_fallback_used
         self.manual_repair_used = manual_repair_used
         self.expected_task_split = expected_task_split
+        self.progress_callback = progress_callback
         self._lock = asyncio.Lock()
+
+    def _emit_progress(
+        self,
+        *,
+        task_id: str,
+        rollout_id: str,
+        round_index: Optional[int],
+        stage: str,
+        action: Optional[str] = None,
+        accepted: Optional[bool] = None,
+        done: Optional[bool] = None,
+        graph_revision: Optional[int] = None,
+        error_type: Optional[str] = None,
+    ) -> None:
+        """Publish one non-authoritative, observation-only progress event.
+
+        This is the thin AgentGraph projection of SkillFlow's
+        ``RuntimeEventEmitter`` rollout lifecycle.  As in FlowSteer's
+        progressive Canvas loop, a step is reported as committed only after
+        its validated ``TurnRecord`` exists.  Callback failures are isolated:
+        diagnostics must never change action sampling, Canvas admission, or
+        evaluator evidence.
+        """
+
+        callback = self.progress_callback
+        if callback is None:
+            return
+        event: Mapping[str, object] = {
+            "task_id": task_id,
+            "rollout_id": rollout_id,
+            "round_index": round_index,
+            "stage": stage,
+            "action": action,
+            "accepted": accepted,
+            "done": done,
+            "graph_revision": graph_revision,
+            "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "error_type": error_type,
+        }
+        try:
+            callback(event)
+        except asyncio.CancelledError:
+            # A sink must not be able to turn an otherwise live rollout into
+            # a cancelled one.  Real task cancellation is delivered at the
+            # collector's awaited model/evaluator boundaries and is handled
+            # separately in ``collect`` below.
+            return
+        except Exception:
+            # A diagnostic sink is deliberately outside the rollout's
+            # authoritative Action--Observation/evidence boundary.
+            return
 
     async def collect(
         self,
@@ -4300,13 +4357,44 @@ class AgentGraphRolloutCollector:
         ):
             raise ValueError("workflow_problem must be non-empty text when supplied")
 
-        async with self._lock:
-            return await self._collect_locked(
-                task,
-                rollout_index,
-                evaluator_callback,
-                workflow_problem=workflow_problem,
+        rollout_id = (
+            f"{task.task_id}:{self.condition_id}:{self.versions.policy}:"
+            f"rollout:{rollout_index:04d}"
+        )
+        try:
+            async with self._lock:
+                return await self._collect_locked(
+                    task,
+                    rollout_index,
+                    evaluator_callback,
+                    workflow_problem=workflow_problem,
+                )
+        except asyncio.CancelledError:
+            history = tuple(getattr(self.environment, "history", ()))
+            self._emit_progress(
+                task_id=task.task_id,
+                rollout_id=rollout_id,
+                round_index=len(history) - 1 if history else None,
+                stage="rollout_cancelled",
+                done=self.environment.finished,
+                graph_revision=getattr(self.environment.graph, "revision", None),
+                error_type="CancelledError",
             )
+            # Cancellation is not a terminal evaluation.  In particular, do
+            # not materialize or persist a scoreable trajectory/evidence row.
+            raise
+        except Exception as exc:
+            history = tuple(getattr(self.environment, "history", ()))
+            self._emit_progress(
+                task_id=task.task_id,
+                rollout_id=rollout_id,
+                round_index=len(history) - 1 if history else None,
+                stage="rollout_rejected",
+                done=self.environment.finished,
+                graph_revision=getattr(self.environment.graph, "revision", None),
+                error_type=type(exc).__name__,
+            )
+            raise
 
     async def _collect_locked(
         self,
@@ -4344,6 +4432,14 @@ class AgentGraphRolloutCollector:
                 "versions": self.versions.to_dict(),
                 "director_sampling": dict(self.orchestrator.sampling_receipt),
             },
+        )
+        self._emit_progress(
+            task_id=task.task_id,
+            rollout_id=rollout_id,
+            round_index=None,
+            stage="rollout_started",
+            done=False,
+            graph_revision=env.graph.revision,
         )
 
         raw_active_skill_ids = (
@@ -4394,6 +4490,14 @@ class AgentGraphRolloutCollector:
                         runtime_summary=runtime_summary,
                     )
                 break
+            self._emit_progress(
+                task_id=task.task_id,
+                rollout_id=rollout_id,
+                round_index=round_index,
+                stage="director_started",
+                done=False,
+                graph_revision=env.graph.revision,
+            )
             generation_seed = self.orchestrator.generation_seed(round_index)
             schema_request = self.orchestrator.action_schema_request(env)
             response = await self.orchestrator.client.propose(
@@ -4903,6 +5007,18 @@ class AgentGraphRolloutCollector:
             turns.append(turn)
             snapshots.append(snapshot)
             previous_snapshot_id = snapshot.snapshot_id
+            self._emit_progress(
+                task_id=task.task_id,
+                rollout_id=rollout_id,
+                round_index=round_index,
+                stage="rollout_step_committed",
+                action=(
+                    None if action is None else action.action_type.value
+                ),
+                accepted=canvas.accepted,
+                done=canvas.done,
+                graph_revision=canvas.revision,
+            )
 
             if canvas.done:
                 explicit_finish = True
@@ -4969,6 +5085,15 @@ class AgentGraphRolloutCollector:
 
         if final_graph is None:
             final_graph = env.graph.to_dict()
+        final_round_index = turns[-1].round_index if turns else None
+        self._emit_progress(
+            task_id=task.task_id,
+            rollout_id=rollout_id,
+            round_index=final_round_index,
+            stage="evaluator_started",
+            done=explicit_finish,
+            graph_revision=env.graph.revision,
+        )
         raw_evaluation = evaluator_callback(
             task,
             final_answer,
@@ -4978,6 +5103,14 @@ class AgentGraphRolloutCollector:
         if inspect.isawaitable(raw_evaluation):
             raw_evaluation = await raw_evaluation
         evaluation = _evaluation_receipt(raw_evaluation)
+        self._emit_progress(
+            task_id=task.task_id,
+            rollout_id=rollout_id,
+            round_index=final_round_index,
+            stage="evaluator_completed",
+            done=explicit_finish,
+            graph_revision=env.graph.revision,
+        )
         trajectory = TrajectoryRecord(
             trajectory_id=trajectory_id,
             task=task,
@@ -5010,6 +5143,22 @@ class AgentGraphRolloutCollector:
             for snapshot in snapshots:
                 self.evidence_store.append_snapshot(snapshot)
             self.evidence_store.append_trajectory(trajectory)
+        self._emit_progress(
+            task_id=task.task_id,
+            rollout_id=rollout_id,
+            round_index=final_round_index,
+            stage="rollout_completed",
+            action=(
+                None
+                if not turns or not turns[-1].action
+                else str(turns[-1].action.get("action"))
+            ),
+            accepted=(
+                None if not env.history else env.history[-1].accepted
+            ),
+            done=explicit_finish,
+            graph_revision=env.graph.revision,
+        )
         return trajectory
 
 
@@ -5018,6 +5167,7 @@ __all__ = [
     "AgentGraphRolloutCollector",
     "ActiveSkillProvider",
     "EvaluatorCallback",
+    "ProgressCallback",
     "ReceiptValidationError",
     "RolloutGate",
     "SGLangReceiptDirectorClient",

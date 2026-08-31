@@ -187,6 +187,13 @@ class MessageTests(unittest.TestCase):
         )
         self.assertEqual("user", messages[4]["role"])
         self.assertIn("AgentGraph execution context", messages[4]["content"])
+        self.assertIn(
+            "HealthBench Professional execution protocol",
+            messages[0]["content"],
+        )
+        self.assertIn("ambiguous shorthand", messages[0]["content"])
+        self.assertIn("do not endorse unsafe content", messages[0]["content"])
+        self.assertIn("must not expose Agent IDs", messages[0]["content"])
         self.assertNotIn("rubric", "\n".join(item["content"] for item in messages))
 
     def test_semantic_lineage_projects_only_artifact_referenced_read_receipts(

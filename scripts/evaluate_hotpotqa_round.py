@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 
@@ -53,7 +54,7 @@ from src.interactive.graph_diagnostics import (
 )
 from src.interactive.persistence import stable_id
 from src.interactive.records import EvaluationReceipt, TaskRecord, TrajectoryRecord
-from src.interactive.rollout_collector import execution_record_from_call
+from src.interactive.rollout_collector import ProgressCallback, execution_record_from_call
 from src.interactive.task_dataset import iter_task_records
 from src.interactive.task_evaluator import evaluate_task
 
@@ -66,6 +67,69 @@ DIRECT_CONTRACT = (
     "Chain evidence across passages to answer multi-hop questions. Answer briefly: "
     "name, date, number, or short phrase."
 )
+ROLLOUT_PROGRESS_SCHEMA_VERSION = "flowsteer.agentgraph.rollout-progress.v1"
+
+
+class _RolloutProgressJsonlSink:
+    """Thread-safe append-only diagnostic sink outside scored evidence.
+
+    SkillFlow's runtime event log keeps progress events separate from rollout
+    artifacts.  This runner-local adapter preserves that boundary: it wraps
+    the collector's minimal event without promoting it to a trajectory or an
+    evaluator receipt.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        run_attempt_id: str,
+        condition_id: str,
+    ) -> None:
+        self.path = path
+        self.run_attempt_id = run_attempt_id
+        self.condition_id = condition_id
+        self._lock = threading.Lock()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def __call__(self, event: Mapping[str, object]) -> None:
+        envelope = {
+            "schema_version": ROLLOUT_PROGRESS_SCHEMA_VERSION,
+            "run_attempt_id": self.run_attempt_id,
+            "condition_id": self.condition_id,
+            "event": dict(event),
+        }
+        encoded = json.dumps(
+            envelope,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._lock:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(encoded + "\n")
+
+
+def _rollout_progress_callback(
+    config: Mapping[str, Any],
+    root: Path,
+    *,
+    run_attempt_id: str,
+    condition_id: str,
+) -> Optional[ProgressCallback]:
+    storage = _mapping(config["storage"], "storage")
+    raw_path = storage.get("rollout_progress_path")
+    if raw_path is None:
+        return None
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ConfigurationError(
+            "storage.rollout_progress_path must be non-empty text when configured"
+        )
+    return _RolloutProgressJsonlSink(
+        _resolve(root, raw_path),
+        run_attempt_id=run_attempt_id,
+        condition_id=condition_id,
+    )
 
 
 def _utc_now() -> str:
@@ -198,7 +262,15 @@ def _paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
         "report_json": "report_json_path",
         "report_markdown": "report_markdown_path",
     }
-    return {name: _resolve(root, str(storage[field])) for name, field in names.items()}
+    paths = {name: _resolve(root, str(storage[field])) for name, field in names.items()}
+    progress_path = storage.get("rollout_progress_path")
+    if progress_path is not None:
+        if not isinstance(progress_path, str) or not progress_path.strip():
+            raise ConfigurationError(
+                "storage.rollout_progress_path must be non-empty text when configured"
+            )
+        paths["rollout_progress"] = _resolve(root, progress_path)
+    return paths
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -798,6 +870,8 @@ async def _collect_graph(
     additional_trajectory_identity_match: Optional[
         Callable[[Mapping[str, Any], TaskRecord], bool]
     ] = None,
+    project_root: Optional[Path] = None,
+    run_attempt_id: Optional[str] = None,
 ) -> dict[str, dict[str, Any]]:
     bounded = _mapping(config["hotpotqa_evaluation"], "hotpotqa_evaluation")
     experiment = _mapping(config["experiment"], "experiment")
@@ -806,6 +880,31 @@ async def _collect_graph(
     skills = _mapping(config.get("skills", {}), "skills")
     policy = str(director["behavior_policy_version"])
     condition_id = str(experiment["condition_id"])
+    progress_callback: Optional[ProgressCallback] = None
+    raw_storage = config.get("storage")
+    rollout_progress_configured = (
+        isinstance(raw_storage, Mapping)
+        and raw_storage.get("rollout_progress_path") is not None
+    )
+    if rollout_progress_configured:
+        resolved_run_attempt_id = (
+            run_attempt_id
+            if isinstance(run_attempt_id, str) and run_attempt_id.strip()
+            else stable_id(
+                "run_attempt",
+                {
+                    "condition_id": condition_id,
+                    "started_at": _utc_now(),
+                    "process_id": os.getpid(),
+                },
+            )
+        )
+        progress_callback = _rollout_progress_callback(
+            config,
+            (project_root or PROJECT_ROOT).expanduser().resolve(),
+            run_attempt_id=resolved_run_attempt_id,
+            condition_id=condition_id,
+        )
     versions = {
         task.task_id: version_bundle_for(
             task,
@@ -927,11 +1026,18 @@ async def _collect_graph(
                         attempt=attempt,
                     )
                 else:
+                    collect_kwargs: dict[str, Any] = {
+                        "expected_task_split": str(
+                            bounded.get("split", "validation")
+                        )
+                    }
+                    if progress_callback is not None:
+                        collect_kwargs["progress_callback"] = progress_callback
                     invocation = backend.collect(
                         task,
                         0,
                         versions[task.task_id],
-                        expected_task_split=str(bounded.get("split", "validation")),
+                        **collect_kwargs,
                     )
                 result = (
                     await invocation
@@ -1497,10 +1603,20 @@ async def run_hotpot_round(
     effective_rollout_gpu = int(
         os.environ.get("FLOWSTEER_ROLLOUT_GPU", configured_rollout_gpu)
     )
+    started_at = _utc_now()
+    run_attempt_id = stable_id(
+        "run_attempt",
+        {
+            "config_path": str(resolved_config),
+            "condition_id": str(config["experiment"]["condition_id"]),
+            "started_at": started_at,
+        },
+    )
     manifest: dict[str, Any] = {
         "schema_version": "flowsteer.hotpotqa.round_manifest.v1",
+        "run_attempt_id": run_attempt_id,
         "status": "prepared" if prepare_only else "runtime_preflight",
-        "started_at": _utc_now(),
+        "started_at": started_at,
         "config_path": str(resolved_config),
         "git_start": _git_state(root),
         "selected_task_ids": [task.task_id for task in selected],
@@ -1589,6 +1705,8 @@ async def run_hotpot_round(
         manifest,
         paths["manifest"],
         failure_path=paths["failures"],
+        project_root=root,
+        run_attempt_id=run_attempt_id,
     )
     _atomic_jsonl(paths["failures"], failures)
 

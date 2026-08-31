@@ -2490,6 +2490,13 @@ class AgentRuntime:
 
         metadata = dict(response.metadata)
         metadata["artifact_version"] = request.request_id
+        # FlowSteer's SET_OUTPUT edit is pointer-only. Persist the invocation
+        # role so Canvas can distinguish a user-facing Artifact produced under
+        # the Output protocol from an intermediate Artifact before promoting an
+        # existing node. This records execution provenance; it does not assign
+        # an Agent role or alter the generated content.
+        metadata["generated_as_output_agent"] = request.is_output_agent
+        metadata["generated_as_format_agent"] = request.is_format_agent
         inputs = list(request.upstream)
         if request.peer_draft is not None:
             inputs.append(request.peer_draft)
@@ -2687,8 +2694,43 @@ class AgentRuntime:
                 failure_records=nested_records,
                 pending_agent_ids=(request.agent.id,),
             ) from exc
-        response = raw_response if isinstance(raw_response, AgentResponse) else AgentResponse(raw_response)
+        response = (
+            raw_response
+            if isinstance(raw_response, AgentResponse)
+            else AgentResponse(raw_response)
+        )
+        # SkillFlow records the sampled provider turn before treating an empty
+        # completion as a failed execution boundary.  Preserve that receipt,
+        # but never publish whitespace-only content as a semantic Artifact:
+        # doing so defers the error to the first downstream UpstreamMessage and
+        # incorrectly attributes the failure to the consumer rather than this
+        # producer.
         calls.append(AgentCallRecord(request=request, response=response))
+        if not response.text.strip():
+            failure_metadata = MappingProxyType(
+                {
+                    **dict(response.metadata),
+                    **dict(input_artifact_metadata()),
+                    "public_error_code": "completion_artifact_empty",
+                    "artifact_complete": False,
+                    "response_text_characters": len(response.text.strip()),
+                }
+            )
+            record = AgentFailureRecord(
+                request_id=request.request_id,
+                agent_id=request.agent.id,
+                phase=request.phase,
+                graph_revision=request.graph_revision,
+                error_type="CompletionArtifactEmpty",
+                message="Agent produced no non-empty completion Artifact",
+                metadata=failure_metadata,
+            )
+            raise AgentRuntimeError(
+                f"agent {request.agent.id!r} produced no non-empty "
+                "completion Artifact",
+                failure_records=(record,),
+                pending_agent_ids=(request.agent.id,),
+            )
         return response
 
 

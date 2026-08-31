@@ -995,8 +995,8 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.final_graph["output_agent_id"], "solver")
         self.assertEqual(client.seeds, [1, 2, 3])
 
-        # Each completed Agent configuration executes immediately.  Changing
-        # the node to the Output role re-executes that dirty node.
+        # Each completed Agent configuration executes immediately. SET_OUTPUT
+        # changes only the pointer and reuses the already materialized Artifact.
         self.assertIsNotNone(result.turns[0].canvas_result.execution)
         self.assertIsNotNone(result.turns[1].canvas_result.execution)
         self.assertIn("execution_result=", result.turns[0].canvas_result.feedback)
@@ -1005,8 +1005,13 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("output_format", result.turns[1].canvas_result.feedback)
         self.assertNotIn('"final_answer"', result.turns[1].canvas_result.feedback)
         self.assertIn("output_inbox", result.turns[1].canvas_result.feedback)
+        self.assertEqual((), result.turns[1].canvas_result.execution.calls)
+        self.assertEqual(
+            ("solver",),
+            result.turns[1].canvas_result.execution.reused_agent_ids,
+        )
         # Finish reuses the successful result for the unchanged graph revision.
-        self.assertEqual(len(gateway.requests), 2)
+        self.assertEqual(len(gateway.requests), 1)
 
         initial_messages = transcript_messages(client.prompts[0])
         continued_messages = transcript_messages(client.prompts[1])
@@ -1060,10 +1065,11 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("execution_result=", complete_state["canvas_feedback"])
         self.assertEqual("empty", initial_state["topology_statistics"]["topology_family"])
         self.assertEqual("single", complete_state["topology_statistics"]["topology_family"])
+        self.assertEqual(20, initial_state["remaining_rounds"])
+        self.assertEqual(18, complete_state["remaining_rounds"])
         for state in (initial_state, complete_state):
             for removed_cue in (
                 "max_rounds",
-                "remaining_rounds",
                 "graph_validation",
                 "structurally_complete",
                 "recent_canvas_history",
@@ -1249,7 +1255,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             },
             state["finish_admissibility"],
         )
-        self.assertNotIn("remaining_rounds", state)
+        self.assertEqual(19, state["remaining_rounds"])
         self.assertIn("finish", state["admissible_action_types"])
 
     async def test_director_terminal_policy_is_issue_driven_without_role_template(
@@ -2557,7 +2563,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             request["action_target_domain_version"],
         )
         self.assertEqual(
-            "agentgraph.live-action-target-domains.v12",
+            "agentgraph.live-action-target-domains.v14",
             DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
         )
         initial_retriever_domain = env.model_admissible_action_targets()[
