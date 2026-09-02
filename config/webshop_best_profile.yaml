@@ -3,9 +3,8 @@
 
 schema_version: "flowsteer.agentgraph.current-best-profile-pointer.v1"
 dataset_key: "webshop"
-selected_profile_path: "config/webshop_best_profile_v1.yaml"
-selected_condition_id: "webshop_initial_adapter_v5"
-next_run_config_path: "config/evaluation_webshop_initial_adapter_v5.yaml"
+selected_profile_path: "config/webshop_best_profile_v2.yaml"
+selected_condition_id: "webshop_stateful_multi_agent_component_v37_128"
+next_run_config_path: "config/evaluation_webshop_stateful_multi_agent_component_v37_128.yaml"
 runner_requires_explicit_config_argument: true
 automatic_global_default_resolver: false
-

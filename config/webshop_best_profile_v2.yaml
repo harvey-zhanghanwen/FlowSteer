@@ -1,0 +1,98 @@
+# Versioned evidence pointer for the highest fully completed, protocol-eligible
+# WebShop AgentGraph condition currently present in this repository. This file
+# points to an evaluated configuration; it does not alter that configuration.
+
+schema_version: "flowsteer.agentgraph.best-profile-pointer.v2"
+dataset_key: "webshop"
+dataset_name: "WebShop"
+
+selection_scope:
+  benchmark_slice: "native_validation"
+  split: "validation"
+  sample_count: 128
+  task_id_first: "webshop:00500"
+  task_id_last: "webshop:00627"
+  primary_metric: "average_score"
+  auxiliary_metric: "success_rate"
+  aggregation: "strict_full_denominator"
+  evaluator_protocol: "WebShop_official_environment_Average_Score_and_Success_Rate"
+  evaluator_version: "skillflow.ragen_adapter.v2"
+  require_complete_agentgraph_population: true
+  require_same_task_population: true
+  require_same_evaluator_protocol: true
+  exclude_evaluator_leakage: true
+
+selection:
+  selected_condition_id: "webshop_stateful_multi_agent_component_v37_128"
+  selection_reason: "highest_completed_same_panel_official_average_score"
+  evaluated_source_commit: "4075cef57118e76543b888e0d571e41034f53185"
+  final_evaluation_report_commit: "4075cef57118e76543b888e0d571e41034f53185"
+  executable_config_path: "config/evaluation_webshop_stateful_multi_agent_component_v37_128.yaml"
+  current_profile_pointer_path: "config/webshop_best_profile.yaml"
+  dataset_registry_path: "config/datasets_runtime_webshop_initial_v1.yaml"
+  model_catalog_path: "config/model_catalog_webshop_stepwise_v18_nonthinking_32768.yaml"
+  run_manifest_path: "artifacts/webshop_stateful_multi_agent_component_v37_128/validation/run_manifest.json"
+  paired_results_path: "artifacts/webshop_stateful_multi_agent_component_v37_128/validation/paired_results.jsonl"
+  trajectory_path: "artifacts/webshop_stateful_multi_agent_component_v37_128/validation/agentgraph_trajectories.jsonl"
+  wrong_demo_path: "artifacts/webshop_stateful_multi_agent_component_v37_128/validation/wrong_demos.jsonl"
+  evaluation_report_path: "reports/webshop_stateful_multi_agent_component_v37_128/validation_report.json"
+  evaluation_report_zh_path: "reports/webshop_stateful_multi_agent_component_v37_128/full_analysis_zh.md"
+  completion_status: "completed"
+
+architecture_profile:
+  director_model: "qwen3.5-9b-local"
+  policy_version: "qwen35-9b-base-webshop-stateful-multi-agent-v37-128"
+  policy_adapter: null
+  director_prompt_version: "agentgraph.director.minimal-neutral-component-stepwise.v2"
+  action_schema_version: "agentgraph.canvas-action-json-schema.v1"
+  action_mask_version: "agentgraph.model-admissible-action-mask.v3"
+  canvas_execution: "incremental_execute_on_edit"
+  environment_execution: "one_action_one_observation"
+  max_agents: 8
+  max_rounds: 20
+  max_environment_steps: 10
+  relation_encoding: "two_bit"
+  require_unique_output: true
+  recovery_policy: "preserve_diagnose_repair_augment"
+  tool_version: "skillflow.structured-action.webshop.stepwise-director.stateful-multi-agent.v37"
+  skill_condition: "none"
+  training_condition: "none"
+
+verified_metrics:
+  agentgraph:
+    denominator: 128
+    completed: 128
+    evaluator_valid: 128
+    explicit_finish: 128
+    environment_terminal: 110
+    environment_step_limit: 18
+    terminal_failure: 0
+    strict_average_score: 0.6282421875
+    strict_success_count: 46
+    strict_success_rate: 0.359375
+  direct:
+    denominator: 128
+    completed: 128
+    evaluator_valid: 128
+    strict_average_score: 0.3269401041666666
+    strict_success_count: 18
+    strict_success_rate: 0.140625
+  agentgraph_minus_direct:
+    strict_average_score: 0.30130208333333336
+    strict_success_rate: 0.21875
+  agentgraph_v37_minus_v34:
+    strict_average_score: 0.02145833333333336
+    strict_success_rate: 0.0078125
+
+next_run:
+  selected: true
+  executable_config_path: "config/evaluation_webshop_stateful_multi_agent_component_v37_128.yaml"
+  runner_requires_explicit_config_argument: true
+  automatic_global_default_resolver: false
+  evaluation_only: true
+  full_evaluation_rerun_authorized: false
+
+supersedes:
+  profile_path: "config/webshop_best_profile_v1.yaml"
+  condition_id: "webshop_initial_adapter_v5"
+  reason: "v37 has a higher official Average Score on the same 128-task native validation panel with complete evaluator-valid receipts"
