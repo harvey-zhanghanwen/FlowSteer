@@ -348,6 +348,120 @@ class ConfigLoaderTests(unittest.TestCase):
                 with self.assertRaises(ConfigurationError):
                     validate_agent_graph_config(config)
 
+    def test_webshop_v18_uses_live_role_free_sampling_schema(self) -> None:
+        config = load_yaml("config/evaluation_webshop_stepwise_director_v18.yaml")
+        validate_agent_graph_config(config)
+
+        self.assertEqual(
+            config["director"]["sampling_schema_version"],
+            "agentgraph.model-admissible-action-mask.v3",
+        )
+        self.assertIn("add_agent", config["agent_graph"]["actions"])
+        self.assertIn("add_subgraph", config["agent_graph"]["actions"])
+        self.assertEqual(
+            config["agent_graph"]["semantic_protocol_by_source"],
+            {"webshop": "none"},
+        )
+        self.assertTrue(
+            config["webshop_evaluation"]["direct_reused_from"].endswith(
+                "direct_predictions.jsonl"
+            )
+        )
+
+    def test_webshop_agent_thinking_v19_is_isolated_and_recollects_direct(self) -> None:
+        config = load_yaml(
+            "config/evaluation_webshop_stepwise_agent_thinking_v19.yaml"
+        )
+        catalog = load_yaml(
+            "config/model_catalog_webshop_stepwise_v14_thinking.yaml"
+        )
+
+        validate_agent_graph_config(config)
+        self.assertEqual(
+            config["experiment"]["condition_id"],
+            "webshop_stepwise_agent_thinking_v19",
+        )
+        self.assertEqual(config["webshop_evaluation"]["sample_count"], 128)
+        self.assertIsNone(config["webshop_evaluation"]["direct_reused_from"])
+        self.assertEqual(config["gpu"]["supervisor_gpu_id"], 0)
+        self.assertFalse(config["grpo"]["enabled"])
+        self.assertFalse(config["skills"]["enabled"])
+        self.assertEqual(
+            config["agent_graph"]["model_catalog_path"],
+            "config/model_catalog_webshop_stepwise_v14_thinking.yaml",
+        )
+        metadata = catalog["models"][0]["metadata"]
+        self.assertEqual(metadata["chat_template_enable_thinking"], "true")
+        self.assertEqual(metadata["chat_template_thinking_budget"], "512")
+
+    def test_webshop_agent_thinking_v20_reuses_thinking_direct_and_bounds_concurrency(self) -> None:
+        config = load_yaml(
+            "config/evaluation_webshop_stepwise_agent_thinking_v20.yaml"
+        )
+
+        validate_agent_graph_config(config)
+        self.assertEqual(config["webshop_evaluation"]["sample_count"], 128)
+        self.assertEqual(config["webshop_evaluation"]["concurrency"], 4)
+        self.assertEqual(
+            config["webshop_evaluation"]["direct_reused_from"],
+            "artifacts/webshop_stepwise_agent_thinking_v19/development/direct_predictions.jsonl",
+        )
+        self.assertEqual(
+            config["agent_graph"]["model_catalog_path"],
+            "config/model_catalog_webshop_stepwise_v14_thinking.yaml",
+        )
+        self.assertFalse(config["grpo"]["enabled"])
+        self.assertFalse(config["skills"]["enabled"])
+
+    def test_webshop_agent_thinking_fixed_v21_recollects_direct(self) -> None:
+        config = load_yaml(
+            "config/evaluation_webshop_stepwise_agent_thinking_fixed_v21.yaml"
+        )
+        catalog = load_yaml(
+            "config/model_catalog_webshop_stepwise_v15_thinking_fixed.yaml"
+        )
+
+        validate_agent_graph_config(config)
+        self.assertEqual(
+            config["experiment"]["condition_id"],
+            "webshop_stepwise_agent_thinking_fixed_v21",
+        )
+        self.assertEqual(config["webshop_evaluation"]["sample_count"], 128)
+        self.assertEqual(config["webshop_evaluation"]["concurrency"], 4)
+        self.assertNotIn("direct_reused_from", config["webshop_evaluation"])
+        self.assertEqual(
+            config["agent_graph"]["model_catalog_path"],
+            "config/model_catalog_webshop_stepwise_v15_thinking_fixed.yaml",
+        )
+        metadata = catalog["models"][0]["metadata"]
+        self.assertEqual(metadata["chat_template_enable_thinking"], "true")
+        self.assertEqual(metadata["chat_template_thinking_budget"], "512")
+        self.assertFalse(config["grpo"]["enabled"])
+        self.assertFalse(config["skills"]["enabled"])
+
+    def test_webshop_agent_thinking_1024_v22_changes_only_reasoning_budget(self) -> None:
+        config = load_yaml(
+            "config/evaluation_webshop_stepwise_agent_thinking_1024_v22.yaml"
+        )
+        catalog = load_yaml(
+            "config/model_catalog_webshop_stepwise_v16_thinking_1024.yaml"
+        )
+
+        validate_agent_graph_config(config)
+        self.assertEqual(
+            config["experiment"]["condition_id"],
+            "webshop_stepwise_agent_thinking_1024_v22",
+        )
+        self.assertEqual(config["webshop_evaluation"]["sample_count"], 128)
+        self.assertEqual(config["webshop_evaluation"]["concurrency"], 4)
+        self.assertNotIn("direct_reused_from", config["webshop_evaluation"])
+        self.assertEqual(config["environment_runtime"]["max_action_tokens"], 512)
+        metadata = catalog["models"][0]["metadata"]
+        self.assertEqual(metadata["chat_template_enable_thinking"], "true")
+        self.assertEqual(metadata["chat_template_thinking_budget"], "1024")
+        self.assertFalse(config["grpo"]["enabled"])
+        self.assertFalse(config["skills"]["enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

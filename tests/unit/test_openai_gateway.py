@@ -745,6 +745,217 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             {"enable_thinking": False},
         )
 
+    def test_qwen_thinking_budget_is_separate_from_action_budget(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={
+                    "chat_template_enable_thinking": "true",
+                    "chat_template_thinking_budget": "512",
+                    "max_tokens": "512",
+                    "response_json_schema": json.dumps(
+                        {
+                            "type": "object",
+                            "required": ["action"],
+                            "properties": {"action": {"type": "string"}},
+                            "additionalProperties": False,
+                        }
+                    ),
+                },
+            ),
+        )
+
+        payload = OpenAICompatibleGateway().request_payload(item)
+
+        self.assertEqual(
+            payload["chat_template_kwargs"],
+            {"enable_thinking": True, "thinking_budget": 512},
+        )
+        self.assertEqual(payload["max_tokens"], 512)
+
+    async def test_qwen_thinking_uses_independent_reasoning_then_constrained_action(
+        self,
+    ) -> None:
+        response_schema = {
+            "type": "object",
+            "required": ["arguments", "kind", "name", "resource_id", "skill_id"],
+            "properties": {
+                "arguments": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+                "kind": {"const": "tool"},
+                "name": {"const": "search"},
+                "resource_id": {"const": "webshop"},
+                "skill_id": {"type": "null"},
+            },
+            "additionalProperties": False,
+        }
+        action_text = json.dumps(
+            {
+                "arguments": {"query": "blue mug"},
+                "kind": "tool",
+                "name": "search",
+                "resource_id": "webshop",
+                "skill_id": None,
+            }
+        )
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={
+                    "chat_template_enable_thinking": "true",
+                    "chat_template_thinking_budget": "512",
+                    "generation_seed": "123",
+                    "reasoning_generation_seed": "456",
+                    "max_tokens": "512",
+                    "response_json_schema": json.dumps(response_schema),
+                },
+            ),
+        )
+        payloads = []
+        gateway = OpenAICompatibleGateway(max_retries=0)
+
+        def fake_post(url, api_key, payload):
+            payloads.append(dict(payload))
+            if len(payloads) == 1:
+                return {
+                    "id": "reasoning-request",
+                    "model": "supervisor_theta",
+                    "choices": [
+                        {
+                            "message": {
+                                "reasoning_content": "bounded private reasoning",
+                                "content": "",
+                            },
+                            "finish_reason": "length",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 20,
+                        "completion_tokens": 512,
+                        "reasoning_tokens": 512,
+                        "total_tokens": 532,
+                    },
+                }
+            return {
+                "id": "action-request",
+                "model": "supervisor_theta",
+                "choices": [
+                    {
+                        "message": {
+                            "reasoning_content": "",
+                            "content": action_text,
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 540,
+                    "completion_tokens": 5,
+                    "total_tokens": 545,
+                },
+            }
+
+        gateway._post_json = fake_post  # type: ignore[method-assign]
+        response = await gateway.generate(item)
+
+        self.assertEqual(response.text, action_text)
+        self.assertEqual(len(payloads), 2)
+        self.assertEqual(payloads[0]["max_tokens"], 512)
+        self.assertEqual(payloads[0]["seed"], 456)
+        self.assertNotIn("continue_final_message", payloads[0])
+        self.assertNotIn("response_format", payloads[0])
+        self.assertEqual(payloads[1]["max_tokens"], 512)
+        self.assertEqual(payloads[1]["seed"], 123)
+        self.assertNotIn("continue_final_message", payloads[1])
+        self.assertEqual(
+            payloads[1]["chat_template_kwargs"], {"enable_thinking": False}
+        )
+        self.assertEqual(payloads[1]["response_format"]["type"], "json_schema")
+        self.assertEqual(
+            payloads[1]["response_format"]["json_schema"]["schema"],
+            response_schema,
+        )
+        self.assertEqual(payloads[1]["messages"][-1]["role"], "user")
+        self.assertIn(
+            "Reasoning:\nbounded private reasoning\nAction:\n",
+            payloads[1]["messages"][-1]["content"],
+        )
+        self.assertTrue(
+            payloads[1]["messages"][-1]["content"].endswith("\nAction:\n")
+        )
+        self.assertTrue(response.metadata["reasoning_content_present"])
+        self.assertEqual(
+            response.metadata["reasoning_content_chars"],
+            len("bounded private reasoning"),
+        )
+        self.assertEqual(response.metadata["provider_call_count"], 2)
+        self.assertEqual(response.metadata["total_tokens_including_thinking"], 1077)
+        receipt = response.metadata["thinking_phase_receipt"]
+        self.assertEqual(receipt["budget_tokens"], 512)
+        self.assertEqual(receipt["finish_reason"], "length")
+        self.assertNotIn("bounded private reasoning", json.dumps(receipt))
+
+    def test_reasoning_channel_is_not_returned_as_agent_artifact(self) -> None:
+        response = OpenAICompatibleGateway._parse_response(
+            {
+                "id": "thinking-request",
+                "model": "supervisor_theta",
+                "choices": [
+                    {
+                        "message": {
+                            "reasoning_content": "private reasoning",
+                            "content": '{"kind":"tool"}',
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {},
+            },
+            request(),
+        )
+
+        self.assertEqual(response.text, '{"kind":"tool"}')
+        self.assertTrue(response.metadata["reasoning_content_present"])
+        self.assertEqual(
+            response.metadata["reasoning_content_chars"],
+            len("private reasoning"),
+        )
+        self.assertNotIn("reasoning_content", response.metadata)
+
+    def test_reasoning_only_response_fails_closed(self) -> None:
+        with self.assertRaisesRegex(
+            OpenAICompatibleGatewayError,
+            "no text message content",
+        ):
+            OpenAICompatibleGateway._parse_response(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "reasoning_content": "unfinished reasoning",
+                                "content": "",
+                            },
+                            "finish_reason": "length",
+                        }
+                    ]
+                },
+                request(),
+            )
+
     def test_skillflow_response_schema_is_forwarded(self) -> None:
         item = request()
         schema = {

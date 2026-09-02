@@ -1,32 +1,22 @@
-# WebShop stepwise Director v18: FlowSteer functional-subgraph editing and
-# SkillFlow Action--Observation feedback.
-#
-# This condition preserves v17's fixed ordered validation panel, native
-# evaluator, action budget and local Qwen3.5-9B catalog.  The first Canvas edit
-# still establishes the single stateful WebShop Tool owner atomically.  Later
-# edits may use FlowSteer's existing add_subgraph transaction to add one to
-# three free-contract Agents and their relations as one executable component.
-# Every accepted edit executes once; every native WebShop Action returns the
-# original goal, current public state, Observation and remaining budget before
-# the next Director decision.  Bounded Agent artifact/message receipts remain
-# Director-visible, while reward, hidden targets and evaluator info remain
-# private.  ReAct is execution control, not an Agent role.  Training, MACE,
-# Bayesian updates and Skills remain disabled.
+# WebShop v36 controlled 128-task validation after full-panel diagnosis.
+# The v34 validation task panel, model, evaluator, sampling schedule and catalog
+# order remain frozen. Only public-state grounding, option/measurement binding,
+# action-budget projection and recovery/reporting defects change.
 
 schema_version: "flowsteer.agentgraph.config.v1"
 execution_timeout: 900.0
 
 experiment:
-  name: "webshop_stepwise_director_v18"
+  name: "webshop_stateful_multi_agent_component_v36_128"
   phase: "webshop_evaluation"
   training_enabled: false
   seed: 20260825
-  condition_id: "webshop_stepwise_director_v18"
-  sampling_schedule_purpose: "webshop_native_validation_stepwise_director_v1"
-  catalog_order_namespace: "webshop_stepwise_v18_local_catalog"
-  prompt_version: "agentgraph.director.minimal-neutral-component-stepwise.v1"
-  tool_version: "skillflow.structured-action.webshop.stepwise-director.v18"
-  output_dir: "artifacts/webshop_stepwise_director_v18/development"
+  condition_id: "webshop_stateful_multi_agent_component_v36_128"
+  sampling_schedule_purpose: "webshop_native_validation_stateful_multi_agent_v34"
+  catalog_order_namespace: "webshop_stepwise_v34_nonthinking_32768_catalog"
+  prompt_version: "agentgraph.director.minimal-neutral-component-stepwise.v2"
+  tool_version: "skillflow.structured-action.webshop.stepwise-director.stateful-multi-agent.v36"
+  output_dir: "artifacts/webshop_stateful_multi_agent_component_v36_128/validation"
 
 data:
   catalog_path: "${FLOWSTEER_SHARED_ROOT:-/ssd1/iclr/1/FlowSteer}/config/datasets_webshop.yaml"
@@ -46,18 +36,18 @@ webshop_evaluation:
   sample_count: 128
   stable_zero_sample_count: 2
   rollouts_per_task: 1
-  concurrency: 1
+  concurrency: 2
   task_timeout_seconds: 900.0
   direct_model_id: "qwen3.5-9b-local"
   direct_protocol: "skillflow_ragen_webshop_react_v1"
+  direct_reused_from: "artifacts/webshop_stateful_multi_agent_component_v34_128/validation/direct_predictions.jsonl"
   protocol_equivalent_to_direct: false
   direct_contract: "Return exactly one currently admissible native WebShop action."
   direct_generation_seed: 20260825
-  direct_reused_from: "${FLOWSTEER_WEBSHOP_DIRECT_PREDICTIONS_PATH:-artifacts/webshop_initial_adapter_v5/development/direct_predictions.jsonl}"
 
 environment_runtime:
   enabled: true
-  condition_id: "webshop_stepwise_director_v18"
+  condition_id: "webshop_stateful_multi_agent_component_v36_128"
   mode: "model_driven_ragen_react"
   dataset_scope: ["webshop"]
   ragen_adapter_path: "${FLOWSTEER_RAGEN_ADAPTER_PATH:-/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/ragen_adapter.py}"
@@ -70,18 +60,18 @@ environment_runtime:
     webshop: 10
 
 storage:
-  schema_version: "flowsteer.webshop.stepwise-director.v18"
-  root: "artifacts/webshop_stepwise_director_v18/development/evidence"
-  selected_tasks_path: "artifacts/webshop_stepwise_director_v18/development/selected_tasks.jsonl"
-  direct_predictions_path: "artifacts/webshop_stepwise_director_v18/development/direct_predictions.jsonl"
-  trajectories_path: "artifacts/webshop_stepwise_director_v18/development/agentgraph_trajectories.jsonl"
-  failures_path: "artifacts/webshop_stepwise_director_v18/development/collection_failures.jsonl"
-  paired_results_path: "artifacts/webshop_stepwise_director_v18/development/paired_results.jsonl"
-  wrong_demos_path: "artifacts/webshop_stepwise_director_v18/development/wrong_demos.jsonl"
-  manifest_path: "artifacts/webshop_stepwise_director_v18/development/run_manifest.json"
-  preflight_receipt_path: "artifacts/webshop_stepwise_director_v18/development/preflight_receipt.json"
-  report_json_path: "reports/webshop_stepwise_director_v18/development_report.json"
-  report_markdown_path: "reports/webshop_stepwise_director_v18/development_report.md"
+  schema_version: "flowsteer.webshop.stateful-multi-agent-component.v36-128"
+  root: "artifacts/webshop_stateful_multi_agent_component_v36_128/validation/evidence"
+  selected_tasks_path: "artifacts/webshop_stateful_multi_agent_component_v36_128/validation/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/webshop_stateful_multi_agent_component_v36_128/validation/direct_predictions.jsonl"
+  trajectories_path: "artifacts/webshop_stateful_multi_agent_component_v36_128/validation/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/webshop_stateful_multi_agent_component_v36_128/validation/collection_failures.jsonl"
+  paired_results_path: "artifacts/webshop_stateful_multi_agent_component_v36_128/validation/paired_results.jsonl"
+  wrong_demos_path: "artifacts/webshop_stateful_multi_agent_component_v36_128/validation/wrong_demos.jsonl"
+  manifest_path: "artifacts/webshop_stateful_multi_agent_component_v36_128/validation/run_manifest.json"
+  preflight_receipt_path: "artifacts/webshop_stateful_multi_agent_component_v36_128/validation/preflight_receipt.json"
+  report_json_path: "reports/webshop_stateful_multi_agent_component_v36_128/validation_report.json"
+  report_markdown_path: "reports/webshop_stateful_multi_agent_component_v36_128/validation_report.md"
 
 director:
   base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
@@ -89,7 +79,7 @@ director:
   backend: "sglang"
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
   served_model_name: "supervisor_theta"
-  behavior_policy_version: "qwen35-9b-base-webshop-stepwise-director-v18"
+  behavior_policy_version: "qwen35-9b-base-webshop-stateful-multi-agent-v36-128"
   behavior_adapter_name: null
   behavior_adapter_checkpoint: null
   updated_policy_version: "unused-evaluation-only"
@@ -106,12 +96,14 @@ director:
   top_p: 1.0
   top_k: -1
   max_rounds: 20
+  max_retries: 60
   execute_on_edit: true
   history_window: 2
   lora:
     enabled: false
 
 agent_graph:
+  architecture_profile: "webshop.stateful-multi-agent-component.v36"
   max_agents: 8
   max_agents_per_subgraph: 3
   contract_type: "free_text"
@@ -127,7 +119,7 @@ agent_graph:
   recovery_policy: "preserve_diagnose_repair_augment"
   terminal_protocol_by_source:
     webshop: "none"
-  model_catalog_path: "config/model_catalog_webshop_stepwise_v13.yaml"
+  model_catalog_path: "config/model_catalog_webshop_stepwise_v18_nonthinking_32768.yaml"
 
 evaluation:
   healthbench_judge_model: ""
@@ -162,7 +154,7 @@ grpo:
 policy_sync:
   enabled: false
   api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
-  adapter_name_prefix: "unused_webshop_stepwise_director_v18_"
+  adapter_name_prefix: "unused_webshop_stateful_multi_agent_component_v36_128_"
   request_timeout_seconds: 120
   max_retries: 0
   retry_backoff_seconds: 1

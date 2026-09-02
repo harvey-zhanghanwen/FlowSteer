@@ -161,6 +161,25 @@ class UnifiedMetadataGateway:
                 "model_id": request.model.model_id,
                 "attempt_count": True,
                 "generation_seed": 17,
+                "requested_sampling": {
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "max_tokens": 64,
+                    "seed": 17,
+                },
+                "reasoning_content_present": True,
+                "reasoning_content_chars": 2048,
+                "thinking_phase_receipt": {
+                    "schema_version": "flowsteer.agent-thinking-phase-receipt.v1",
+                    "phase": "reasoning",
+                    "budget_tokens": 512,
+                    "reasoning_content_present": True,
+                    "reasoning_content_chars": 2048,
+                    "completion_tokens": 512,
+                },
+                "thinking_phase_attempt_count": 1,
+                "provider_call_count": 2,
+                "total_tokens_including_thinking": 527,
                 "temperature": 0.0,
                 "top_p": 1.0,
                 "max_tokens": 64,
@@ -752,6 +771,392 @@ def test_native_sglang_v3_regenerates_malformed_relation_candidate_selector_once
         "relation_candidate_serialization_failure",
         "relation_candidate_selection",
     }
+
+
+def test_native_sglang_v3_role_free_add_skips_role_selection_phase():
+    domains = {
+        "add_subgraph": {
+            "min_new_agents": 1,
+            "max_new_agents": 2,
+            "existing_agent_ids": ["environment_owner"],
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+            ],
+            "optional_agent_fields": [
+                "role_family",
+                "allowed_tools",
+                "execution_mode",
+                "artifact_type",
+                "completion_condition",
+            ],
+            "model_ids": ["qwen"],
+            "registered_execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["webshop.environment"],
+                },
+            ],
+            "endpoint_scope": {
+                "relation_endpoint_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+                "output_agent_id_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+            },
+        }
+    }
+    declarations = {
+        "action": "add_subgraph",
+        "agents": [
+            {
+                "agent_id": "node_1",
+                "model_id": "qwen",
+                "contract": "Inspect the public result and publish one grounded artifact.",
+            }
+        ],
+    }
+    final_action = {
+        **declarations,
+        "relations": [
+            {
+                "source_id": "node_1",
+                "target_id": "environment_owner",
+                "source_to_target": True,
+                "target_to_source": False,
+            }
+        ],
+        "output_agent_id": "environment_owner",
+    }
+    actions = ("add_subgraph",)
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    client = ScriptedSGLangClient(
+        [
+            json.dumps(declarations, separators=(",", ":")),
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    response = asyncio.run(
+        client.propose(
+            "current WebShop Canvas",
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text_v3(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(actions),
+            action_target_domains_json=domains_json,
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+
+    assert len(client.payloads) == 2
+    assert client.payloads[0]["sampling_params"]["json_schema"] == (
+        director_live_add_subgraph_agent_declarations_json_schema_text(domains)
+    )
+    assert client.payloads[1]["sampling_params"]["json_schema"] == (
+        director_live_action_parameter_json_schema_text(
+            "add_subgraph",
+            domains,
+            add_agents=declarations["agents"],
+        )
+    )
+    assert response.text == json.dumps(final_action, separators=(",", ":"))
+    assert response.metadata["selected_add_agent_ids"] == ["node_1"]
+    assert response.metadata["selected_add_agent_roles"] is None
+    assert response.metadata["action_decoding_strategy"] == (
+        HIERARCHICAL_JSON_SCHEMA_STRATEGY
+    )
+    assert response.metadata["request_count"] == 2
+    assert set(response.metadata["hierarchical_phase_receipts"]) == {
+        "add_agent_declarations"
+    }
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(actions),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    assert _validate_v3_hierarchical_action_receipt(
+        AgentActionParser().parse(response.text),
+        response.metadata,
+        schema_request,
+    ) == {"add_agent_declarations"}
+
+
+def test_native_sglang_v3_reaches_atomic_webshop_multi_agent_component():
+    actions = ("add_subgraph",)
+    domains = {
+        "add_subgraph": {
+            "min_new_agents": 2,
+            "max_new_agents": 2,
+            "existing_agent_ids": [],
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+                "execution_mode",
+                "allowed_tools",
+            ],
+            "optional_agent_fields": [
+                "artifact_type",
+                "completion_condition",
+            ],
+            "model_ids": ["qwen"],
+            "registered_execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+                {
+                    "execution_mode": "react",
+                    "allowed_tools": ["webshop.environment"],
+                },
+            ],
+            "stateful_tool_owner": {
+                "tool_id": "webshop.environment",
+                "required_count": 1,
+                "owner_execution_profile": {
+                    "execution_mode": "react",
+                    "allowed_tools": ["webshop.environment"],
+                },
+                "auxiliary_execution_profiles": [
+                    {"execution_mode": "reasoning", "allowed_tools": []}
+                ],
+            },
+            "endpoint_scope": {
+                "relation_endpoint_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+                "output_agent_id_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+            },
+        }
+    }
+    declarations = {
+        "action": "add_subgraph",
+        "agents": [
+            {
+                "agent_id": "node_1",
+                "model_id": "qwen",
+                "contract": "Interpret the latest public state.",
+                "execution_mode": "reasoning",
+                "allowed_tools": [],
+            },
+            {
+                "agent_id": "node_2",
+                "model_id": "qwen",
+                "contract": "Take one admissible WebShop action.",
+                "execution_mode": "react",
+                "allowed_tools": ["webshop.environment"],
+            },
+        ],
+    }
+    final_action = {
+        **declarations,
+        "relations": [
+            {
+                "source_id": "node_1",
+                "target_id": "node_2",
+                "source_to_target": True,
+                "target_to_source": False,
+            }
+        ],
+        "output_agent_id": "node_2",
+    }
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    client = ScriptedSGLangClient(
+        [
+            json.dumps(declarations, separators=(",", ":")),
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(
+            actions
+        ),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+
+    response = asyncio.run(
+        client.propose("current WebShop Canvas", **schema_request)
+    )
+
+    assert len(client.payloads) == 2
+    declaration_schema = json.loads(
+        client.payloads[0]["sampling_params"]["json_schema"]
+    )
+    assert len(declaration_schema["properties"]["agents"]["oneOf"]) == 2
+    parameter_schema = json.loads(
+        client.payloads[1]["sampling_params"]["json_schema"]
+    )
+    relation_branches = parameter_schema["properties"]["relations"][
+        "items"
+    ]["anyOf"]
+    assert relation_branches
+    assert not any(
+        branch["properties"]["target_to_source"]["const"] is True
+        and "node_2"
+        in {
+            branch["properties"]["source_id"]["const"],
+            branch["properties"]["target_id"]["const"],
+        }
+        for branch in relation_branches
+    )
+    assert response.text == json.dumps(final_action, separators=(",", ":"))
+    assert response.metadata["selected_add_agent_roles"] is None
+    assert response.metadata["selected_add_agent_ids"] == [
+        "node_1",
+        "node_2",
+    ]
+    assert _validate_v3_hierarchical_action_receipt(
+        AgentActionParser().parse(response.text),
+        response.metadata,
+        schema_request,
+    ) == {"add_agent_declarations"}
+
+
+def test_collector_accepts_role_free_v3_add_continuation_prompt_receipt():
+    registry = _registry()
+    actions = ("add_subgraph",)
+    domains = {
+        "add_subgraph": {
+            "min_new_agents": 1,
+            "max_new_agents": 1,
+            "existing_agent_ids": [],
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+            ],
+            "optional_agent_fields": [
+                "role_family",
+                "allowed_tools",
+                "execution_mode",
+                "artifact_type",
+                "completion_condition",
+            ],
+            "model_ids": ["cheap-model"],
+            "registered_execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+            ],
+            "endpoint_scope": {
+                "relation_endpoint_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+                "output_agent_id_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+            },
+        }
+    }
+    declarations = {
+        "action": "add_subgraph",
+        "agents": [
+            {
+                "agent_id": "node_1",
+                "model_id": "cheap-model",
+                "contract": "Produce one grounded artifact.",
+            }
+        ],
+    }
+    final_action = {
+        **declarations,
+        "relations": [],
+        "output_agent_id": "node_1",
+    }
+    client = ScriptedSGLangClient(
+        [
+            json.dumps(declarations, separators=(",", ":")),
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    orchestrator = _orchestrator(registry, client, max_rounds=1)
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(actions),
+        "action_target_domains_json": director_live_action_target_domains_json(
+            actions,
+            domains,
+        ),
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    orchestrator.action_schema_request = lambda _env: dict(schema_request)
+    collector = AgentGraphRolloutCollector(
+        orchestrator,
+        AgentWorkflowEnv(
+            registry,
+            gateway=FakeGateway(),
+            execute_on_edit=False,
+        ),
+        _versions(),
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 0.0,
+            "metrics": {"f1": 0.0},
+        }
+
+    trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
+
+    assert len(trajectory.turns) == 1
+    turn = trajectory.turns[0]
+    assert turn.action == final_action
+    decoding = turn.runtime_summary["director_action_decoding"]
+    assert decoding["strategy"] == HIERARCHICAL_JSON_SCHEMA_STRATEGY
+    assert decoding["selected_action"] == "add_subgraph"
+    assert decoding["selected_add_agent_ids"] == ["node_1"]
+    assert decoding["selected_add_agent_roles"] is None
+    declaration_prompt = decoding["phase_receipts"]["add_agent_declarations"][
+        "prompt_text"
+    ]
+    assert declaration_prompt != turn.prompt
+    declaration_messages = decode_director_transcript(declaration_prompt)
+    assert declaration_messages is not None
+    assert declaration_messages[-1]["content"].startswith("Canvas observation.")
 
 
 def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
@@ -2330,6 +2735,14 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     assert response_receipt["total_tokens"] == 15
     assert response_receipt["latency_ms"] == 4.0
     assert response_receipt["attempt_count"] == 3
+    assert response_receipt["reasoning_content_present"] is True
+    assert response_receipt["reasoning_content_chars"] == 2048
+    assert response_receipt["thinking_phase_attempt_count"] == 1
+    assert response_receipt["provider_call_count"] == 2
+    assert response_receipt["total_tokens_including_thinking"] == 527
+    assert response_receipt["thinking_phase_receipt"]["budget_tokens"] == 512
+    assert response_receipt["requested_sampling"]["seed"] == 17
+    assert "reasoning_content" not in response_receipt
     assert trajectory.turns[-1].executions[0].input_tokens == 12
     assert trajectory.turns[-1].executions[0].output_tokens == 3
     assert trajectory.turns[-1].executions[0].latency_ms == 4.0

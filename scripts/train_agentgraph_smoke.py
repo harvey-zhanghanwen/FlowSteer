@@ -2395,6 +2395,15 @@ class LiveSmokeBackend:
                 "execution_timeout must be an explicit positive finite number"
             )
         execution_timeout_seconds = float(execution_timeout)
+        provider_max_retries = director.get("max_retries", 2)
+        if (
+            isinstance(provider_max_retries, bool)
+            or not isinstance(provider_max_retries, int)
+            or provider_max_retries < 0
+        ):
+            raise ConfigurationError(
+                "director.max_retries must be a non-negative integer"
+            )
 
         catalog_path = _resolve(root, str(graph_config["model_catalog_path"]))
         if not catalog_path.is_file():
@@ -2525,6 +2534,7 @@ class LiveSmokeBackend:
             top_p=float(director["top_p"]),
             top_k=int(director["top_k"]),
             max_tokens=int(director["max_action_tokens"]),
+            max_retries=provider_max_retries,
             action_json_schema=(
                 director_sglang_sampling_json_schema_text(
                     tuple(str(value) for value in graph_config["actions"])
@@ -2547,6 +2557,7 @@ class LiveSmokeBackend:
 
         gateway = OpenAICompatibleGateway(
             timeout_seconds=execution_timeout_seconds,
+            max_retries=provider_max_retries,
             default_seed=int(experiment["seed"]),
         )
         runtime = AgentRuntime(

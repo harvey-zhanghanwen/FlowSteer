@@ -886,6 +886,30 @@ def test_environment_stable_zero_accepts_exact_fixed_budget_truncation():
     assert malformed["checks"][0]["environment_terminal_receipt_valid"] is False
 
     metadata["environment_turns_used"] = 2
+    for entry in metadata["evaluator_environment_trace"]:
+        entry["structured_action_status"] = "success"
+    schema_valid = _MODULE._completion_stable_zero_check(
+        (task,), direct, {task.task_id: trajectory}, dataset_key="webshop"
+    )
+    assert schema_valid["passed"] is True
+
+    metadata["evaluator_environment_trace"][1][
+        "structured_action_status"
+    ] = "schema_invalid"
+    metadata["evaluator_environment_trace"][1]["state_advanced"] = False
+    schema_invalid = _MODULE._completion_stable_zero_check(
+        (task,), direct, {task.task_id: trajectory}, dataset_key="webshop"
+    )
+    assert schema_invalid["passed"] is False
+    assert (
+        schema_invalid["checks"][0]["environment_terminal_receipt_valid"]
+        is False
+    )
+    metadata["evaluator_environment_trace"][1][
+        "structured_action_status"
+    ] = "format_normalized"
+    metadata["evaluator_environment_trace"][1]["state_advanced"] = True
+
     metadata["task_family"] = "alfworld"
     wrong_family = _MODULE._completion_stable_zero_check(
         (task,), direct, {task.task_id: trajectory}, dataset_key="webshop"
@@ -1114,6 +1138,93 @@ def test_webshop_diagnostics_count_native_actions_and_first_invalid_turn():
     assert diagnosis["failure_layer"] == "environment_action"
     assert diagnosis["first_error_turn"] == 1
     assert diagnosis["error"] == "invalid_native_environment_action"
+
+
+def test_webshop_noncausal_outcome_keeps_last_action_out_of_first_error():
+    graph_value = {
+        "evaluation": {
+            "valid": True,
+            "reason": "environment_terminal",
+            "metrics": {
+                "average_score": 0.5,
+                "success_rate": 0.0,
+                "terminal": 1.0,
+            },
+            "details": {
+                "trace": [
+                    {
+                        "step": 0,
+                        "action": "search[blue bottle]",
+                        "state_advanced": True,
+                    },
+                    {
+                        "step": 1,
+                        "action": "click[buy now]",
+                        "state_advanced": True,
+                    },
+                ]
+            },
+        },
+        "explicit_finish": True,
+        "termination_reason": "finish",
+        "turns": [],
+    }
+
+    diagnosis = _MODULE._webshop_wrong_demo_diagnosis(graph_value)
+
+    assert diagnosis["causal_decision_identified"] is False
+    assert diagnosis["first_error_turn"] is None
+    assert diagnosis["first_error_action"] is None
+    assert diagnosis["terminal_observation_turn"] == 1
+    assert diagnosis["terminal_observation_action"] == "click[buy now]"
+
+
+def test_webshop_diagnosis_does_not_treat_nested_rejected_false_as_canvas_rejection():
+    graph_value = {
+        "evaluation": {
+            "valid": True,
+            "reason": "environment_terminal",
+            "metrics": {
+                "average_score": 0.6,
+                "success_rate": 0.0,
+                "terminal": 1.0,
+            },
+            "details": {
+                "trace": [
+                    {
+                        "step": 0,
+                        "action": "search[blue table]",
+                        "state_advanced": True,
+                    },
+                    {
+                        "step": 1,
+                        "action": "click[buy now]",
+                        "state_advanced": True,
+                    },
+                ]
+            },
+        },
+        "explicit_finish": True,
+        "termination_reason": "finish",
+        "turns": [
+            {
+                "round_index": 0,
+                "action": {"action": "add_subgraph", "agents": []},
+                "canvas_feedback": (
+                    "accepted add_subgraph at revision 3; execution_result="
+                    '{"agent_artifacts":[{"tool_action_output_rejected":false}]}'
+                ),
+                "runtime_summary": {"execution_status": "success"},
+            }
+        ],
+    }
+
+    diagnosis = _MODULE._webshop_wrong_demo_diagnosis(graph_value)
+
+    assert diagnosis["failure_layer"] == "environment_outcome"
+    assert diagnosis["error"] == "native_terminal_score_below_full"
+    assert diagnosis["causal_decision_identified"] is False
+    assert diagnosis["first_error_action"] is None
 
 
 def test_webshop_terminal_failure_keeps_runtime_environment_prefix_in_report():

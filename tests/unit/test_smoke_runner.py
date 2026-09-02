@@ -209,6 +209,7 @@ def test_live_backend_requires_and_wires_explicit_execution_timeout():
 
     config = copy.deepcopy(source)
     config["execution_timeout"] = 37.0
+    config["director"]["max_retries"] = 60
     fake_transformers = SimpleNamespace(
         AutoTokenizer=SimpleNamespace(
             from_pretrained=lambda *args, **kwargs: object()
@@ -222,7 +223,7 @@ def test_live_backend_requires_and_wires_explicit_execution_timeout():
         _MODULE,
         "SGLangReceiptDirectorClient",
         return_value=object(),
-    ):
+    ) as director_client:
         backend = _MODULE.LiveSmokeBackend.from_config(
             config,
             root,
@@ -231,6 +232,30 @@ def test_live_backend_requires_and_wires_explicit_execution_timeout():
 
     assert backend.runtime.timeout_seconds == 37.0
     assert backend.runtime.gateway.timeout_seconds == 37.0
+    assert backend.runtime.gateway.max_retries == 60
+    assert director_client.call_args.kwargs["max_retries"] == 60
+
+
+def test_live_backend_rejects_invalid_director_max_retries():
+    root = Path(__file__).resolve().parents[2]
+    source = yaml.safe_load(
+        (root / "config/evaluation_hotpotqa_unified_architecture_v1.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    source["execution_timeout"] = 37.0
+    for invalid_value in (-1, True, 1.5, "60"):
+        config = copy.deepcopy(source)
+        config["director"]["max_retries"] = invalid_value
+        with unittest.TestCase().assertRaisesRegex(
+            ConfigurationError,
+            "director.max_retries must be a non-negative integer",
+        ):
+            _MODULE.LiveSmokeBackend.from_config(
+                config,
+                root,
+                evaluation_only=True,
+            )
 
 
 def test_interactive_workflow_problem_exposes_only_the_execution_contract():

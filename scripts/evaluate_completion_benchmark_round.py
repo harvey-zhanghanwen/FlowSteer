@@ -1940,13 +1940,20 @@ def _aime_wrong_demo_diagnosis(
                 "first_error_agent_id": None,
                 "error": "invalid_or_unparsed_director_action",
             }
-        elif (
-            "rejected" in folded
-            or folded.startswith("[invalid]")
-            or "invalid action:" in folded
-            or "cannot finish:" in folded
-            or "parse_error" in folded
-            or "schema_invalid" in folded
+        # Canvas feedback can contain serialized execution metadata such as
+        # ``"tool_action_output_rejected": false``.  Those nested fields do
+        # not mean that the Director's Canvas action was rejected.  Admission
+        # failures are top-level feedback receipts, so classify only their
+        # established prefixes instead of searching the whole serialized
+        # execution result for the word ``rejected``.
+        elif folded.startswith(
+            (
+                "action rejected:",
+                "edit rejected:",
+                "invalid action:",
+                "cannot finish:",
+                "[invalid]",
+            )
         ):
             first = {
                 "failure_layer": (
@@ -2130,8 +2137,14 @@ def _webshop_wrong_demo_diagnosis(
     return {
         "diagnosis_scope": "first_observable_failure",
         "failure_layer": layer,
-        "first_error_turn": (len(trace) - 1) if trace else None,
-        "first_error_action": (
+        # Terminal reward proves that the episode outcome is incomplete, but
+        # it does not identify the first causally wrong shopping decision.
+        # Preserve the terminal observation separately instead of mislabelling
+        # the last action as a first error for later Wrong Demo analysis.
+        "first_error_turn": None,
+        "first_error_action": None,
+        "terminal_observation_turn": (len(trace) - 1) if trace else None,
+        "terminal_observation_action": (
             trace[-1].get("action") if trace and isinstance(trace[-1], Mapping) else None
         ),
         "first_error_agent_id": None,
@@ -3485,6 +3498,22 @@ def _graph_environment_terminal_receipt(
         for index, entry in enumerate(trace)
     ):
         return False
+    if dataset_key == "webshop":
+        structured_statuses = [
+            entry.get("structured_action_status")
+            for entry in trace
+            if "structured_action_status" in entry
+        ]
+        if structured_statuses and (
+            len(structured_statuses) != len(trace)
+            or any(
+                status not in {"success", "format_normalized"}
+                for status in structured_statuses
+            )
+        ):
+            return False
+        if not any(entry.get("state_advanced") is True for entry in trace):
+            return False
     turns_used = metadata.get("environment_turns_used")
     max_turns = metadata.get("environment_max_turns")
     if (

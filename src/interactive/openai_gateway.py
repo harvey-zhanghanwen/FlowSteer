@@ -835,9 +835,22 @@ class OpenAICompatibleGateway:
             # template toggle under chat_template_kwargs.  This keeps Agent
             # answers in message.content instead of an empty content field
             # accompanied only by reasoning_content.
+            thinking_enabled = normalized == "true"
             payload["chat_template_kwargs"] = {
-                "enable_thinking": normalized == "true"
+                "enable_thinking": thinking_enabled
             }
+            if thinking_enabled:
+                # NECESSARY_ADAPTATION: SkillFlow's thinking Supervisor gives
+                # Qwen an additional bounded reasoning allowance instead of
+                # consuming the action budget.  Keep the same 512-token
+                # default while allowing the frozen model catalog to record it
+                # explicitly for an evaluation condition.
+                thinking_budget = _integer(
+                    metadata,
+                    "chat_template_thinking_budget",
+                    512,
+                )
+                payload["chat_template_kwargs"]["thinking_budget"] = thinking_budget
         response_schema_text = metadata.get("response_json_schema")
         if response_schema_text is not None:
             if not isinstance(response_schema_text, str) or not response_schema_text.strip():
@@ -867,46 +880,28 @@ class OpenAICompatibleGateway:
             }
         return payload
 
-    async def generate(self, request: AgentRequest) -> AgentResponse:
-        endpoint = request.provider.endpoint
-        if not endpoint:
-            raise OpenAICompatibleGatewayError(
-                f"provider {request.provider.provider_id!r} has no endpoint"
-            )
-        api_key = "EMPTY"
-        if request.provider.api_key_env:
-            api_key = os.getenv(request.provider.api_key_env, "")
-            if not api_key:
-                raise OpenAICompatibleGatewayError(
-                    f"missing provider credential environment variable: "
-                    f"{request.provider.api_key_env}"
-                )
-        payload = self.request_payload(request)
-        scientific_generation_seed = _non_negative_integer(
-            request.model.metadata,
-            "generation_seed",
-            self.default_seed,
-        )
-        requested_sampling = _requested_sampling(payload)
-        if (
-            scientific_generation_seed is not None
-            and payload.get("seed") != scientific_generation_seed
-        ):
-            requested_sampling["seed"] = scientific_generation_seed
-            requested_sampling["backend_seed"] = payload.get("seed")
-        url = endpoint.rstrip("/") + "/chat/completions"
+    async def _post_with_retries(
+        self,
+        *,
+        url: str,
+        api_key: str,
+        payload: Mapping[str, Any],
+        request: AgentRequest,
+        phase: str,
+        requested_sampling: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], list[dict[str, object]]]:
+        """Execute one provider phase with the existing bounded retry policy."""
 
         last_error: BaseException | None = None
-        started_at = time.monotonic()
         retry_receipts: list[dict[str, object]] = []
         for attempt in range(self.max_retries + 1):
             attempt_started_at = time.monotonic()
             backoff_seconds = 0.0
             try:
                 response = await asyncio.to_thread(self._post_json, url, api_key, payload)
-                parsed = self._parse_response(response, request)
                 retry_receipts.append(
                     {
+                        "phase": phase,
                         "attempt": attempt + 1,
                         "request_id": request.request_id,
                         "provider_id": request.provider.provider_id,
@@ -921,22 +916,7 @@ class OpenAICompatibleGateway:
                         ),
                     }
                 )
-                metadata = dict(parsed.metadata)
-                metadata.update(
-                    {
-                        "latency_ms": max(
-                            (time.monotonic() - started_at) * 1000.0,
-                            0.0,
-                        ),
-                        "attempt_count": attempt + 1,
-                        "generation_seed": scientific_generation_seed,
-                        "backend_sampling_seed": payload.get("seed"),
-                        "requested_sampling": requested_sampling,
-                        "request_status": "completed",
-                        "retry_receipts": retry_receipts,
-                    }
-                )
-                return AgentResponse(parsed.text, metadata)
+                return response, retry_receipts
             except HTTPError as exc:
                 last_error = exc
                 retryable = exc.code in {408, 409, 425, 429} or exc.code >= 500
@@ -944,6 +924,7 @@ class OpenAICompatibleGateway:
                 backoff_seconds = min(2.0**attempt, 4.0) if will_retry else 0.0
                 retry_receipts.append(
                     {
+                        "phase": phase,
                         "attempt": attempt + 1,
                         "request_id": request.request_id,
                         "provider_id": request.provider.provider_id,
@@ -967,6 +948,7 @@ class OpenAICompatibleGateway:
                 backoff_seconds = min(2.0**attempt, 4.0) if will_retry else 0.0
                 retry_receipts.append(
                     {
+                        "phase": phase,
                         "attempt": attempt + 1,
                         "request_id": request.request_id,
                         "provider_id": request.provider.provider_id,
@@ -1007,6 +989,207 @@ class OpenAICompatibleGateway:
         )
         raise error from last_error
 
+    @staticmethod
+    def _parse_thinking_phase(
+        response: Mapping[str, Any],
+    ) -> tuple[str, dict[str, object]]:
+        """Read a private reasoning phase without exposing its text as an artifact."""
+
+        choices = response.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise OpenAICompatibleGatewayError(
+                "provider thinking response has no completion choice"
+            )
+        message = choices[0].get("message")
+        if not isinstance(message, dict):
+            raise OpenAICompatibleGatewayError(
+                "provider thinking response has no assistant message"
+            )
+        reasoning_content = message.get("reasoning_content")
+        if not isinstance(reasoning_content, str) or not reasoning_content.strip():
+            raise OpenAICompatibleGatewayError(
+                "provider thinking response has no reasoning content"
+            )
+        content = message.get("content")
+        if content is not None and not isinstance(content, str):
+            raise OpenAICompatibleGatewayError(
+                "provider thinking response content must be text"
+            )
+        usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+        receipt: dict[str, object] = {
+            "schema_version": "flowsteer.agent-thinking-phase-receipt.v1",
+            "phase": "reasoning",
+            "provider_request_id": response.get("id"),
+            "finish_reason": choices[0].get("finish_reason"),
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "reasoning_tokens": usage.get("reasoning_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+            "reasoning_content_present": True,
+            "reasoning_content_chars": len(reasoning_content),
+            "discarded_early_content_chars": len(content or ""),
+        }
+        return reasoning_content, receipt
+
+    async def generate(self, request: AgentRequest) -> AgentResponse:
+        endpoint = request.provider.endpoint
+        if not endpoint:
+            raise OpenAICompatibleGatewayError(
+                f"provider {request.provider.provider_id!r} has no endpoint"
+            )
+        api_key = "EMPTY"
+        if request.provider.api_key_env:
+            api_key = os.getenv(request.provider.api_key_env, "")
+            if not api_key:
+                raise OpenAICompatibleGatewayError(
+                    f"missing provider credential environment variable: "
+                    f"{request.provider.api_key_env}"
+                )
+        payload = self.request_payload(request)
+        scientific_generation_seed = _non_negative_integer(
+            request.model.metadata,
+            "generation_seed",
+            self.default_seed,
+        )
+        requested_sampling = _requested_sampling(payload)
+        if (
+            scientific_generation_seed is not None
+            and payload.get("seed") != scientific_generation_seed
+        ):
+            requested_sampling["seed"] = scientific_generation_seed
+            requested_sampling["backend_seed"] = payload.get("seed")
+        url = endpoint.rstrip("/") + "/chat/completions"
+        started_at = time.monotonic()
+
+        thinking_receipt: dict[str, object] | None = None
+        thinking_retry_receipts: list[dict[str, object]] = []
+        template_kwargs = payload.get("chat_template_kwargs")
+        thinking_enabled = bool(
+            isinstance(template_kwargs, Mapping)
+            and template_kwargs.get("enable_thinking") is True
+        )
+        if thinking_enabled:
+            thinking_budget = _integer(
+                request.model.metadata,
+                "chat_template_thinking_budget",
+                512,
+            )
+            reasoning_payload = dict(payload)
+            reasoning_payload["max_tokens"] = thinking_budget
+            # FlowSteer's reasoning/action phase boundary: free reasoning is
+            # never constrained by the final StructuredAction grammar.
+            reasoning_payload.pop("response_format", None)
+            reasoning_generation_seed = _non_negative_integer(
+                request.model.metadata,
+                "reasoning_generation_seed",
+                scientific_generation_seed,
+            )
+            if reasoning_generation_seed is not None:
+                reasoning_payload["seed"] = (
+                    _sglang_backend_sampling_seed(reasoning_generation_seed)
+                    if supports_local_sglang_top_k(request)
+                    else reasoning_generation_seed
+                )
+            reasoning_sampling = _requested_sampling(reasoning_payload)
+            if (
+                reasoning_generation_seed is not None
+                and reasoning_payload.get("seed") != reasoning_generation_seed
+            ):
+                reasoning_sampling["seed"] = reasoning_generation_seed
+                reasoning_sampling["backend_seed"] = reasoning_payload.get("seed")
+            reasoning_response, thinking_retry_receipts = await self._post_with_retries(
+                url=url,
+                api_key=api_key,
+                payload=reasoning_payload,
+                request=request,
+                phase="reasoning",
+                requested_sampling=reasoning_sampling,
+            )
+            reasoning_content, thinking_receipt = self._parse_thinking_phase(
+                reasoning_response
+            )
+            thinking_receipt.update(
+                {
+                    "budget_tokens": thinking_budget,
+                    "requested_sampling": reasoning_sampling,
+                    "retry_receipts": tuple(thinking_retry_receipts),
+                }
+            )
+
+            # NECESSARY_ADAPTATION: SkillFlow renders the decoded reasoning as
+            # ordinary condition text before its independent ACTION phase
+            # (rollout/engine.py + scoring/rendering.py).  Preserve that phase
+            # boundary on the OpenAI-compatible surface: close thinking, append
+            # the bounded reasoning to the current user context, and start a
+            # fresh non-thinking assistant generation under the original JSON
+            # Schema.  SGLang response-prefill continuation cannot be combined
+            # reliably with strict StructuredAction decoding for Qwen3.5.
+            action_payload = dict(payload)
+            action_messages = [dict(message) for message in payload["messages"]]
+            if (
+                not action_messages
+                or action_messages[-1].get("role") != "user"
+                or not isinstance(action_messages[-1].get("content"), str)
+            ):
+                raise OpenAICompatibleGatewayError(
+                    "thinking action phase requires a terminal user message"
+                )
+            action_messages[-1]["content"] = (
+                str(action_messages[-1]["content"]).rstrip()
+                + "\n\nReasoning:\n"
+                + reasoning_content.rstrip()
+                + "\nAction:\n"
+            )
+            action_payload["messages"] = action_messages
+            action_payload["chat_template_kwargs"] = {"enable_thinking": False}
+            action_payload.pop("continue_final_message", None)
+            payload = action_payload
+
+        response, retry_receipts = await self._post_with_retries(
+            url=url,
+            api_key=api_key,
+            payload=payload,
+            request=request,
+            phase="action" if thinking_enabled else "single",
+            requested_sampling=requested_sampling,
+        )
+        parsed = self._parse_response(response, request)
+        metadata = dict(parsed.metadata)
+        metadata.update(
+            {
+                "latency_ms": max(
+                    (time.monotonic() - started_at) * 1000.0,
+                    0.0,
+                ),
+                "attempt_count": len(retry_receipts),
+                "generation_seed": scientific_generation_seed,
+                "backend_sampling_seed": payload.get("seed"),
+                "requested_sampling": requested_sampling,
+                "request_status": "completed",
+                "retry_receipts": retry_receipts,
+            }
+        )
+        if thinking_receipt is not None:
+            metadata.update(
+                {
+                    "reasoning_content_present": True,
+                    "reasoning_content_chars": thinking_receipt[
+                        "reasoning_content_chars"
+                    ],
+                    "thinking_phase_receipt": thinking_receipt,
+                    "thinking_phase_attempt_count": len(thinking_retry_receipts),
+                    "provider_call_count": len(thinking_retry_receipts)
+                    + len(retry_receipts),
+                }
+            )
+            thinking_total = thinking_receipt.get("total_tokens")
+            action_total = metadata.get("total_tokens")
+            if isinstance(thinking_total, int) and isinstance(action_total, int):
+                metadata["total_tokens_including_thinking"] = (
+                    thinking_total + action_total
+                )
+        return AgentResponse(parsed.text, metadata)
+
     def _post_json(self, url: str, api_key: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = Request(
@@ -1034,6 +1217,17 @@ class OpenAICompatibleGateway:
         message = choices[0].get("message")
         if not isinstance(message, dict) or not isinstance(message.get("content"), str):
             raise OpenAICompatibleGatewayError("provider response has no text message content")
+        content = message["content"]
+        if not content.strip():
+            # The reasoning channel is never executable output.  A truncated
+            # thinking response with no final content must fail closed instead
+            # of being parsed as a WebShop action.
+            raise OpenAICompatibleGatewayError("provider response has no text message content")
+        reasoning_content = message.get("reasoning_content")
+        if reasoning_content is not None and not isinstance(reasoning_content, str):
+            raise OpenAICompatibleGatewayError(
+                "provider response reasoning_content must be text"
+            )
         usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
         metadata = {
             "provider_id": request.provider.provider_id,
@@ -1044,8 +1238,13 @@ class OpenAICompatibleGateway:
             "completion_tokens": usage.get("completion_tokens"),
             "total_tokens": usage.get("total_tokens"),
             "provider_request_id": response.get("id"),
+            # Keep only bounded provenance about private model reasoning.  The
+            # raw reasoning text is neither an Agent artifact nor a Canvas
+            # message and is not persisted or executed.
+            "reasoning_content_present": bool(reasoning_content),
+            "reasoning_content_chars": len(reasoning_content or ""),
         }
-        return AgentResponse(text=message["content"], metadata=metadata)
+        return AgentResponse(text=content, metadata=metadata)
 
 
 __all__ = [

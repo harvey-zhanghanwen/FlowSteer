@@ -612,6 +612,12 @@ class ToolReactExecutionAdapter:
                     step_index=absolute_step_index,
                     phase=GenerationPhase.ACTION,
                 )
+                reasoning_generation_seed = derive_generation_seed(
+                    base_seed=self._sampling_base_seed,
+                    coordinate=self._sampling_coordinate,
+                    step_index=absolute_step_index,
+                    phase=GenerationPhase.REASONING,
+                )
                 # DIRECT_REUSE: SkillFlow fixes temperature=1, top_p=1 and one
                 # step-specific scientific seed.  Its SGLang-native top_k=-1
                 # is forwarded only through an explicitly declared compatible
@@ -620,6 +626,9 @@ class ToolReactExecutionAdapter:
                 model_metadata["temperature"] = "1.0"
                 model_metadata["top_p"] = "1.0"
                 model_metadata["generation_seed"] = str(generation_seed)
+                model_metadata["reasoning_generation_seed"] = str(
+                    reasoning_generation_seed
+                )
                 top_k = None
                 if supports_local_sglang_top_k(request):
                     top_k = -1

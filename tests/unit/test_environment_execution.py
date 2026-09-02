@@ -14,10 +14,14 @@ from src.interactive.agent_runtime import (
     CommunicationCondition,
     ExecutionPhase,
 )
-from src.interactive.agent_workflow_env import AgentWorkflowEnv
+from src.interactive.agent_workflow_env import (
+    AgentWorkflowEnv,
+    AgentWorkflowStateError,
+)
 from src.interactive.environment_execution import (
     _public_transition_summary,
     _webshop_model_visible_actions,
+    _webshop_public_task_projection,
     build_environment_execution_resources,
     EnvironmentExecutionError,
     evaluator_locked_ragen_session_factory,
@@ -111,6 +115,52 @@ def resources(
 
 
 class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
+    def test_webshop_public_task_profile_is_task_only_and_side_effect_free(
+        self,
+    ) -> None:
+        task = (
+            "find a dry skin product 2 inches in width, with color: Teal, "
+            "size: Medium, fit type: Relaxed, flavor: Vanilla, "
+            "and price lower than 30 dollars"
+        )
+        projection = _webshop_public_task_projection(task)
+
+        self.assertEqual(
+            {"task_constraints", "requirement_phrases", "labeled_measurements"},
+            set(projection),
+        )
+        self.assertEqual(
+            ["dry skin", "Teal", "Medium", "Relaxed", "Vanilla"],
+            projection["requirement_phrases"],
+        )
+        self.assertEqual(
+            [("width", "inch", "2", "2 inches in width")],
+            projection["labeled_measurements"],
+        )
+
+        class WebShopSession(FakeSession):
+            environment_id = "fake:webshop"
+            task_family = "webshop"
+
+        session = WebShopSession()
+        runtime = resources(
+            session=session,
+            gateway=SequenceGateway([]),
+            max_turns=1,
+        )
+        self.assertEqual(
+            projection,
+            runtime.execution_adapter.public_task_profile(
+                task_family="webshop", task_instruction=task
+            ),
+        )
+        self.assertIsNone(
+            runtime.execution_adapter.public_task_profile(
+                task_family="alfworld", task_instruction=task
+            )
+        )
+        self.assertEqual(0, session.reset_count)
+
     def test_repeated_identical_search_transition_is_no_progress(self) -> None:
         receipt = {
             "state_advanced": True,
@@ -166,6 +216,27 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(summary["no_progress"]["detected"])
 
+    def test_webshop_public_state_retains_explicit_task_attributes(self) -> None:
+        summary = _public_transition_summary(
+            task_family="webshop",
+            task_instruction=(
+                "find dental tools of design: set of 4, material: steel, "
+                "and color: blue, and price lower than 30.00 dollars"
+            ),
+            observation="WebShop [SEP] Search",
+            receipts=(),
+        )
+
+        self.assertEqual(
+            [
+                "price_lower_than=30.00",
+                "color=blue",
+                "material=steel",
+                "design=set of 4",
+            ],
+            summary["task_constraints"],
+        )
+
     def test_webshop_visible_actions_remove_only_current_option_assignments(
         self,
     ) -> None:
@@ -216,6 +287,191 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             "click[B000ITEM02]",
         ):
             self.assertIn(retained, visible)
+
+    def test_webshop_visible_actions_preserve_candidate_and_primary_evidence(
+        self,
+    ) -> None:
+        product = (
+            "WebShop [SEP] Instruction: buy a washable blue item [SEP] "
+            "Back to Search [SEP] < Prev [SEP] Demo Product [SEP] "
+            "Price: $10 [SEP] Description [SEP] Features [SEP] Reviews"
+        )
+        receipts = (
+            {
+                "state_advanced": True,
+                "action": "click[B000ITEM01]",
+                "observation": "Page 1 (Total results: 10)",
+                "next_observation": product,
+            },
+            {
+                "state_advanced": True,
+                "action": "click[Description]",
+                "observation": product,
+                "next_observation": "Description [SEP] machine washable [SEP] < Prev",
+            },
+        )
+        observation = "Description [SEP] machine washable [SEP] < Prev"
+        visible, _, _ = _webshop_model_visible_actions(
+            task_instruction="buy a washable blue item for less than 20 dollars",
+            observation=observation,
+            receipts=receipts,
+            native_actions=(
+                "click[Back to Search]",
+                "click[< Prev]",
+                "click[Description]",
+                "click[Features]",
+                "click[Reviews]",
+            ),
+        )
+
+        self.assertNotIn("click[Back to Search]", visible)
+        self.assertNotIn("click[Description]", visible)
+        self.assertIn("click[< Prev]", visible)
+        self.assertIn("click[Features]", visible)
+
+    def test_webshop_combined_visible_color_binds_natural_conjunction(self) -> None:
+        observation = (
+            "WebShop [SEP] < Prev [SEP] color [SEP] pink [SEP] "
+            "black | white [SEP] Tripod [SEP] Price: $20 [SEP] Buy Now"
+        )
+        visible, _, _ = _webshop_model_visible_actions(
+            task_instruction=(
+                "find an Apple compatible tripod that is black and white, "
+                "and price lower than 50 dollars"
+            ),
+            observation=observation,
+            receipts=(),
+            native_actions=(
+                "click[pink]",
+                "click[black | white]",
+                "click[Buy Now]",
+            ),
+        )
+
+        self.assertIn("click[black | white]", visible)
+        self.assertNotIn("click[Buy Now]", visible)
+
+    def test_webshop_empty_result_page_masks_next_navigation(self) -> None:
+        visible, _, _ = _webshop_model_visible_actions(
+            task_instruction="find a blue table",
+            observation="WebShop [SEP] Page 4 [SEP] Next >",
+            receipts=(),
+            native_actions=("search[<your query>]", "click[Next >]"),
+        )
+
+        self.assertEqual(("search[<your query>]",), visible)
+
+    def test_webshop_numeric_asin_keeps_nonempty_result_navigation(self) -> None:
+        visible, _, _ = _webshop_model_visible_actions(
+            task_instruction="find a book under 20 dollars",
+            observation=(
+                "WebShop [SEP] Page 1 (Total results: 2) [SEP] Next > "
+                "[SEP] 054501218X [SEP] Book One [SEP] $10 "
+                "[SEP] 1523502118 [SEP] Book Two [SEP] $12"
+            ),
+            receipts=(),
+            native_actions=(
+                "click[054501218X]",
+                "click[1523502118]",
+                "click[Next >]",
+            ),
+        )
+
+        self.assertIn("click[054501218X]", visible)
+        self.assertIn("click[1523502118]", visible)
+        self.assertIn("click[Next >]", visible)
+
+    def test_webshop_numeric_asin_candidate_history_masks_only_visited(self) -> None:
+        results = (
+            "WebShop [SEP] Page 1 (Total results: 2) [SEP] Next > "
+            "[SEP] 054501218X [SEP] Book One [SEP] $10 "
+            "[SEP] 1523502118 [SEP] Book Two [SEP] $12"
+        )
+        product = (
+            "WebShop [SEP] < Prev [SEP] Book One [SEP] Price: $10 "
+            "[SEP] Description [SEP] Features [SEP] Buy Now"
+        )
+        receipts = (
+            {
+                "state_advanced": True,
+                "action": "search[book]",
+                "observation": "WebShop [SEP] Search",
+                "next_observation": results,
+            },
+            {
+                "state_advanced": True,
+                "action": "click[054501218X]",
+                "observation": results,
+                "next_observation": product,
+            },
+            {
+                "state_advanced": True,
+                "action": "click[Back to Search]",
+                "observation": product,
+                "next_observation": "WebShop [SEP] Search",
+            },
+            {
+                "state_advanced": True,
+                "action": "search[book alternatives]",
+                "observation": "WebShop [SEP] Search",
+                "next_observation": results,
+            },
+        )
+
+        visible, _, _ = _webshop_model_visible_actions(
+            task_instruction="find a book under 20 dollars",
+            observation=results,
+            receipts=receipts,
+            native_actions=(
+                "click[054501218X]",
+                "click[1523502118]",
+                "click[Next >]",
+            ),
+        )
+
+        self.assertNotIn("click[054501218X]", visible)
+        self.assertIn("click[1523502118]", visible)
+        self.assertIn("click[Next >]", visible)
+
+    def test_webshop_numeric_asin_survives_product_tab_state_projection(
+        self,
+    ) -> None:
+        product = (
+            "WebShop [SEP] < Prev [SEP] Book One [SEP] Price: $10 "
+            "[SEP] Description [SEP] Features [SEP] Buy Now"
+        )
+        description = "WebShop [SEP] < Prev [SEP] A public description."
+        receipts = (
+            {
+                "state_advanced": True,
+                "action": "click[054501218X]",
+                "observation": "WebShop [SEP] Page 1 (Total results: 1)",
+                "next_observation": product,
+            },
+            {
+                "state_advanced": True,
+                "action": "click[Description]",
+                "observation": product,
+                "next_observation": description,
+            },
+        )
+
+        summary = _public_transition_summary(
+            task_family="webshop",
+            task_instruction="find a book under 20 dollars",
+            observation=description,
+            receipts=receipts,
+        )
+
+        self.assertEqual(["054501218x"], summary["opened_asins"])
+        self.assertEqual(
+            "054501218x",
+            summary["current_product"]["asin"],
+        )
+        self.assertEqual(
+            ["description"],
+            summary["current_product"]["inspected_tabs"],
+        )
 
     def test_revisited_public_state_exposes_prior_actions_without_false_loop(
         self,
@@ -784,7 +1040,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["look"], session.actions)
         self.assertEqual(1, len(gateway.requests))
 
-    async def test_required_environment_capability_uses_atomic_live_repair_domain(
+    async def test_required_environment_capability_uses_atomic_profile_boundary(
         self,
     ) -> None:
         class WebShopSession(FakeSession):
@@ -886,57 +1142,21 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         reasoning_graph = AgentGraph(
             [AgentNode("arbitrary", "m", "Use the available interface.")]
         )
-        reasoning = AgentWorkflowEnv(
-            model_registry,
-            runtime=repair_runtime,
-            problem="complete the task",
-            graph=reasoning_graph,
-            execute_on_edit=True,
-            required_tool_id=repair_environment.tool_id,
-            allowed_actions=allowed_actions,
-        )
-        self.assertEqual(
-            ("modify_agent",), reasoning.model_admissible_action_types()
-        )
-        repair = reasoning.model_admissible_action_targets()["modify_agent"]
-        self.assertEqual(["execution_profile"], repair["mutable_fields"])
-        self.assertEqual(
-            {
-                "execution_profile": [
-                    {
-                        "execution_mode": "react",
-                        "allowed_tools": [repair_environment.tool_id],
-                    }
-                ]
-            },
-            repair["per_agent_candidates"][0]["discrete_value_domains"],
-        )
-        half_modify = await reasoning.step(
-            '{"action":"modify_agent","agent_id":"arbitrary",'
-            '"execution_mode":"react"}'
-        )
-        self.assertFalse(half_modify.accepted)
-        self.assertIn("atomically commit", half_modify.feedback)
+        with self.assertRaisesRegex(
+            AgentWorkflowStateError,
+            "exactly one Agent with execution_mode='react'",
+        ):
+            AgentWorkflowEnv(
+                model_registry,
+                runtime=repair_runtime,
+                problem="complete the task",
+                graph=reasoning_graph,
+                execute_on_edit=True,
+                required_tool_id=repair_environment.tool_id,
+                allowed_actions=allowed_actions,
+            )
         self.assertEqual(0, len(repair_gateway.requests))
-        repaired = await reasoning.step(
-            '{"action":"modify_agent","agent_id":"arbitrary",'
-            f'"execution_mode":"react","allowed_tools":["{repair_environment.tool_id}"]'
-            "}"
-        )
-        self.assertTrue(repaired.accepted)
-        self.assertEqual(
-            "react",
-            reasoning.graph.get_node("arbitrary").execution_mode.value,
-        )
-        self.assertEqual(
-            (repair_environment.tool_id,),
-            reasoning.graph.get_node("arbitrary").allowed_tools,
-        )
-        self.assertEqual(["finish"], repair_session.actions)
-        restored = reasoning.model_admissible_action_types()
-        self.assertIn("add_agent", restored)
-        self.assertIn("set_output", restored)
-        self.assertNotEqual(("modify_agent",), restored)
+        self.assertEqual([], repair_session.actions)
 
     async def test_webshop_live_relation_domain_excludes_stateful_reciprocal_block(
         self,
@@ -1060,8 +1280,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             "environment_action", gateway.requests[0].agent.artifact_type
         )
         self.assertEqual(
-            "Select exactly one native action permitted by the current "
-            "admissible-action list.",
+            "select an admissible environment action",
             gateway.requests[0].agent.contract,
         )
 
@@ -1344,9 +1563,14 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
                         "has_search_bar": False,
                         "clickables": ["Buy Now"],
                     }
-                    return "Matching product page", 0.0, False, {
-                        "graded_score": 0.0
-                    }
+                    return (
+                        "Instruction: [SEP] buy the requested item [SEP] "
+                        "Back to Search [SEP] < Prev [SEP] Matching Product "
+                        "[SEP] Price: $1 [SEP] Buy Now",
+                        0.0,
+                        False,
+                        {"graded_score": 0.0},
+                    )
                 return "Thank you for shopping with us!", 1.0, True, {
                     "graded_score": 1.0
                 }
@@ -1475,13 +1699,19 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
 
             def reset(self) -> str:
                 self.reset_count += 1
-                return "Product page with size options 6.6ft and Buy Now"
+                return (
+                    "Instruction: [SEP] buy the exact requested size [SEP] "
+                    "Back to Search [SEP] < Prev [SEP] size [SEP] 6.6ft "
+                    "[SEP] Demo Item [SEP] Price: $1 [SEP] Buy Now"
+                )
 
             def step(self, action: str):  # type: ignore[no-untyped-def]
                 self.actions.append(action)
                 if action == "click[6.6ft]":
                     return (
-                        "Product page with size options 6.6ft and Buy Now",
+                        "Instruction: [SEP] buy the exact requested size "
+                        "[SEP] Back to Search [SEP] < Prev [SEP] size [SEP] "
+                        "6.6ft [SEP] Demo Item [SEP] Price: $1 [SEP] Buy Now",
                         0.0,
                         False,
                         {"graded_score": 0.0},
@@ -1570,7 +1800,8 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(stalled_state)
         assert stalled_state is not None
         self.assertEqual(instruction, stalled_state["original_task_instruction"])
-        self.assertEqual(workflow_problem, stalled_state["task_instruction"])
+        self.assertEqual(instruction, stalled_state["task_instruction"])
+        self.assertNotIn("Execution interface:", str(stalled_state))
         self.assertNotIn("admissible_actions", stalled_state)
         self.assertEqual(2, stalled_state["admissible_action_count"])
         progress = stalled_state["public_progress"]
@@ -1581,7 +1812,10 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             progress["no_progress"]["reasons"],
         )
         episode_id = stalled_state["environment_episode_id"]
-        self.assertEqual(("modify_agent",), canvas.model_admissible_action_types())
+        self.assertEqual(
+            ("add_agent", "modify_agent"),
+            canvas.model_admissible_action_types(),
+        )
         modify_domain = canvas.model_admissible_action_targets()["modify_agent"]
         self.assertEqual(["actor"], modify_domain["agent_ids"])
         self.assertEqual(["contract"], modify_domain["mutable_fields"])
@@ -1639,12 +1873,18 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
 
             def reset(self) -> str:
                 self.reset_count += 1
-                return "Product page with size options 6.6ft and Buy Now"
+                return (
+                    "Instruction: [SEP] buy the exact requested size [SEP] "
+                    "Back to Search [SEP] < Prev [SEP] size [SEP] 6.6ft "
+                    "[SEP] Demo Item [SEP] Price: $1 [SEP] Buy Now"
+                )
 
             def step(self, action: str):  # type: ignore[no-untyped-def]
                 self.actions.append(action)
                 return (
-                    "Product page with size options 6.6ft and Buy Now",
+                    "Instruction: [SEP] buy the exact requested size [SEP] "
+                    "Back to Search [SEP] < Prev [SEP] size [SEP] 6.6ft "
+                    "[SEP] Demo Item [SEP] Price: $1 [SEP] Buy Now",
                     0.0,
                     False,
                     {"graded_score": 0.0},
@@ -1718,8 +1958,16 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state["public_progress"]["no_progress"]["detected"])
         self.assertIsNone(canvas._stateful_no_progress_receipt())
         self.assertTrue(canvas.finish_admissibility()["admissible"])
-        self.assertIn("finish", canvas.model_admissible_action_types())
-        self.assertNotIn("continue", canvas.model_admissible_action_types())
+        self.assertEqual(("finish",), canvas.model_admissible_action_types())
+        self.assertEqual(
+            {
+                "finish": {
+                    "admissible": True,
+                    "submission_semantics": "explicit_finish",
+                }
+            },
+            canvas.model_admissible_action_targets(),
+        )
 
         finished = await canvas.step('{"action":"finish"}')
         self.assertTrue(finished.accepted)
@@ -1840,7 +2088,11 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
 
             def reset(self) -> str:
                 self.reset_count += 1
-                return "Product page"
+                return (
+                    "Instruction: [SEP] complete the webshop task [SEP] "
+                    "Back to Search [SEP] < Prev [SEP] Demo Product [SEP] "
+                    "Price: $1 [SEP] Buy Now"
+                )
 
             def step(self, action: str):  # type: ignore[no-untyped-def]
                 self.actions.append(action)
@@ -1863,7 +2115,11 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
                 }
 
             def reset(self, env_type, config, question="", extra=None):  # type: ignore[no-untyped-def]
-                return "Product page"
+                return (
+                    "Instruction: [SEP] complete the webshop task [SEP] "
+                    "Back to Search [SEP] < Prev [SEP] Demo Product [SEP] "
+                    "Price: $1 [SEP] Buy Now"
+                )
 
             def step(self, action):  # type: ignore[no-untyped-def]
                 return raw_terminal_observation, 1.0, True, {"graded_score": 1.0}
@@ -1962,7 +2218,11 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
 
             def reset(self) -> str:
                 self.reset_count += 1
-                return "Product page"
+                return (
+                    "Instruction: [SEP] complete the webshop task [SEP] "
+                    "Back to Search [SEP] < Prev [SEP] Demo Product [SEP] "
+                    "Price: $1 [SEP] Buy Now"
+                )
 
             def step(self, action: str):  # type: ignore[no-untyped-def]
                 self.actions.append(action)
@@ -1991,7 +2251,11 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
                 }
 
             def reset(self, env_type, config, question="", extra=None):  # type: ignore[no-untyped-def]
-                return "Product page"
+                return (
+                    "Instruction: [SEP] complete the webshop task [SEP] "
+                    "Back to Search [SEP] < Prev [SEP] Demo Product [SEP] "
+                    "Price: $1 [SEP] Buy Now"
+                )
 
             def step(self, action):  # type: ignore[no-untyped-def]
                 return raw_terminal_observation, 1.0, True, {"graded_score": 1.0}
@@ -2045,7 +2309,11 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
                 self._available = {"has_search_bar": False, "clickables": ["Buy Now"]}
 
             def reset(self) -> str:
-                return "Product page"
+                return (
+                    "Instruction: [SEP] buy the requested item [SEP] Back to "
+                    "Search [SEP] < Prev [SEP] Demo Product [SEP] Price: $1 "
+                    "[SEP] Buy Now"
+                )
 
             def step(self, action: str):  # type: ignore[no-untyped-def]
                 self.actions.append(action)

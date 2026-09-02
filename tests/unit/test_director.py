@@ -54,7 +54,9 @@ from src.interactive.director import (
     STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2,
     STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2,
     STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION,
+    STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION_V2,
     STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT,
+    STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT_V2,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
@@ -88,6 +90,9 @@ from src.interactive.director import (
     director_state_conditioned_sampling_json_schema_text,
     encode_director_transcript,
     _director_stateful_feedback_projection,
+)
+from src.interactive.environment_execution import (
+    build_environment_execution_resources,
 )
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
 from src.interactive.scientific_sampling import (
@@ -138,6 +143,18 @@ class FakeGateway:
         return AgentResponse(f"answer from {request.agent.id}")
 
 
+class _UnusedWebShopSession:
+    task_family = "webshop"
+    environment_id = "fake:webshop:director"
+    available_actions = {"has_search_bar": False, "clickables": []}
+
+    def reset(self):
+        return "WebShop [SEP] Search"
+
+    def step(self, action):
+        raise AssertionError(f"unexpected environment action: {action}")
+
+
 def registry() -> ModelRegistry:
     return ModelRegistry(
         [ProviderSpec("provider", endpoint="http://local/v1")],
@@ -164,6 +181,63 @@ def transcript_messages(prompt: str) -> tuple[dict[str, str], ...]:
     if messages is None:
         raise AssertionError("expected a canonical Director transcript")
     return tuple(dict(message) for message in messages)
+
+
+def stateful_director_env(*, with_helper: bool = False) -> AgentWorkflowEnv:
+    model_registry = registry()
+    gateway = FakeGateway()
+    resources = build_environment_execution_resources(
+        gateway=gateway,
+        session_factory=lambda _request: _UnusedWebShopSession(),
+        task_family="webshop",
+        max_turns=5,
+        stepwise_director=True,
+        structured_actions=True,
+    )
+    nodes = [
+        AgentNode(
+            "actor",
+            "qwen",
+            "Advance the public environment by one admissible action.",
+            allowed_tools=(resources.tool_id,),
+            execution_mode="react",
+            artifact_type="environment_observation",
+        )
+    ]
+    if with_helper:
+        nodes.append(
+            AgentNode(
+                "helper",
+                "qwen",
+                "Produce a routed evidence artifact.",
+            )
+        )
+    graph = AgentGraph(nodes, output_agent_id="actor")
+    if with_helper:
+        graph.set_relation("helper", "actor", True, False)
+    runtime = AgentRuntime(
+        model_registry,
+        gateway,
+        execution_adapters={"react": resources.execution_adapter},
+        tool_registry=resources.tool_registry,
+        dataset_id="webshop",
+    )
+    return AgentWorkflowEnv(
+        model_registry,
+        runtime=runtime,
+        graph=graph,
+        problem="Buy the requested public product.",
+        required_tool_id=resources.tool_id,
+        allowed_actions=(
+            "add_agent",
+            "modify_agent",
+            "delete_agent",
+            "set_relation",
+            "set_output",
+            "continue",
+            "finish",
+        ),
+    )
 
 
 def observation_payload(message: dict[str, str]) -> dict[str, object]:
@@ -249,6 +323,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         feedback = "accepted add_subgraph; execution_result=" + json.dumps(
             {
                 "output_agent_id": "actor",
+                "environment_actor_id": "actor",
                 "executed_agent_ids": ["advisor", "actor"],
                 "reused_agent_ids": [],
                 "deferred_agent_ids": [],
@@ -285,6 +360,22 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                         "raw_output": "not duplicated into the Director prompt",
                     }
                 ],
+                "environment_actor_inbox": [
+                    {
+                        "source_agent_id": "advisor",
+                        "target_agent_id": "actor",
+                        "artifact_id": "artifact-advisor",
+                        "message_type": "artifact",
+                        "artifact_type": "text",
+                        "graph_revision": 2,
+                        "environment_revision": 1,
+                        "request_or_dependency": "compare candidates",
+                        "tool_receipt_count": 0,
+                        "tool_ids": [],
+                        "content_preview": "Compare the public candidate constraints.",
+                        "raw_output": "Use candidate B000ITEM01 after checking its public constraints.",
+                    }
+                ],
                 "environment_state": {
                     "current_observation": "large-observation" * 1000,
                 },
@@ -307,8 +398,15 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "actor",
             payload["output_inbox"][0]["target_agent_id"],
         )
+        self.assertEqual("actor", payload["environment_actor_id"])
+        self.assertEqual(
+            "Use candidate B000ITEM01 after checking its public constraints.",
+            payload["environment_actor_inbox"][0]["raw_output"],
+        )
+        self.assertFalse(
+            payload["environment_actor_inbox"][0]["raw_output_truncated"]
+        )
         self.assertNotIn("private_full_output", projected)
-        self.assertNotIn("raw_output", projected)
         self.assertNotIn("evaluator_environment_trace", projected)
         self.assertNotIn("large-observation", projected)
 
@@ -339,6 +437,272 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         )
         for fixed_role in ("Searcher", "Reviewer", "Buyer"):
             self.assertNotIn(fixed_role, STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT)
+
+    def test_stepwise_component_v2_exposes_dataflow_without_fixed_topology(
+        self,
+    ) -> None:
+        self.assertEqual(
+            STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT_V2,
+            director_system_prompt_for_version(
+                STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION_V2
+            ),
+        )
+        self.assertIn(
+            "only a directed predecessor artifact is available",
+            STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT_V2,
+        )
+        self.assertIn(
+            "tool-free Agent produces an artifact rather than an environment action",
+            STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT_V2,
+        )
+        self.assertIn(
+            "Do not assume a fixed role sequence, Agent count, workflow topology",
+            STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT_V2,
+        )
+        for fixed_role in ("Searcher", "Reviewer", "Buyer"):
+            self.assertNotIn(
+                fixed_role,
+                STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT_V2,
+            )
+
+    def test_stateful_observation_exposes_exact_action_mask_and_capabilities(
+        self,
+    ) -> None:
+        env = stateful_director_env(with_helper=True)
+        raw_state = {
+            "task_family": "webshop",
+            "environment_revision": 2,
+            "current_observation": "Product page",
+            "model_visible_admissible_actions": ["click[Next >]"],
+            "public_progress": {
+                "latest_transition": {
+                    "action": "click[Features]",
+                    "state_advanced": True,
+                    "observation_changed": False,
+                },
+                "no_progress": {
+                    "detected": False,
+                    "reasons": [],
+                    "repeated_state_action_count": 1,
+                    "action_cycle": False,
+                },
+            },
+            "turns_used": 2,
+            "remaining_action_budget": 3,
+            "environment_terminal": False,
+            "environment_truncated": False,
+        }
+        env._progressive_output_metadata["actor"] = {
+            "environment_current_state": raw_state
+        }
+        orchestrator = AgentGraphOrchestrator(
+            registry(),
+            ScriptedDirector([]),
+            prompt_version=STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION_V2,
+            sampling_action_profile=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            ),
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+        )
+
+        payload = observation_payload(
+            transcript_messages(orchestrator.build_prompt(env, 0, ()))[-1]
+        )
+
+        self.assertEqual(
+            ["click[Next >]"],
+            payload["environment_state"][
+                "model_visible_admissible_actions"
+            ],
+        )
+        rejection = payload["environment_state"][
+            "rejected_state_action_pairs"
+        ][0]
+        self.assertEqual("click[Features]", rejection["action"])
+        self.assertTrue(rejection["masked_from_next_action"])
+        capabilities = {
+            item["agent_id"]: item
+            for item in payload["agent_execution_capabilities"]
+        }
+        self.assertTrue(capabilities["actor"]["can_advance_environment"])
+        self.assertFalse(capabilities["helper"]["can_advance_environment"])
+        self.assertEqual(
+            "artifact_only",
+            capabilities["helper"]["environment_output_semantics"],
+        )
+
+        raw_state["public_progress"]["latest_transition"] = {
+            "action": "click[Next >]",
+            "state_advanced": True,
+            "observation_changed": True,
+        }
+        self.assertNotIn(
+            "rejected_state_action_pairs",
+            env.public_environment_state(),
+        )
+
+    async def test_terminal_environment_freezes_graph_until_legal_finish(
+        self,
+    ) -> None:
+        env = stateful_director_env()
+        terminal_state = {
+            "task_family": "webshop",
+            "environment_revision": 1,
+            "current_observation": "Thank you for shopping with us!",
+            "model_visible_admissible_actions": [],
+            "public_progress": {
+                "latest_transition": {
+                    "action": "click[Buy Now]",
+                    "state_advanced": True,
+                    "observation_changed": True,
+                    "terminal": True,
+                },
+                "no_progress": {"detected": False, "reasons": []},
+            },
+            "turns_used": 1,
+            "remaining_action_budget": 4,
+            "environment_terminal": True,
+            "environment_truncated": False,
+        }
+        metadata = {
+            "environment_current_state": terminal_state,
+            "environment_terminal": True,
+            "evaluator_environment_trace": [
+                {"done": True, "state_advanced": True}
+            ],
+        }
+        runtime_result = AgentRuntimeResult(
+            run_id="terminal",
+            graph_revision=env.graph.revision,
+            output_agent_id="actor",
+            final_answer="Thank you for shopping with us!",
+            outputs={"actor": "Thank you for shopping with us!"},
+            calls=(),
+            block_completion_order=(("actor",),),
+            output_metadata={"actor": metadata},
+        )
+        env._progressive_outputs = dict(runtime_result.outputs)
+        env._progressive_output_metadata = {"actor": metadata}
+        env._progressive_execution = runtime_result
+        env._progressive_execution_revision = env.graph.revision
+        before = env.graph.to_dict()
+
+        self.assertEqual(("finish",), env.model_admissible_action_types())
+        rejected = await env.step(
+            '{"action":"modify_agent","agent_id":"actor",'
+            '"contract":"change terminal owner"}'
+        )
+        self.assertFalse(rejected.accepted)
+        self.assertEqual(
+            "environment_terminal_graph_frozen", rejected.feedback_code
+        )
+        self.assertEqual(before, env.graph.to_dict())
+        self.assertIs(runtime_result, env._progressive_execution)
+
+        finished = await env.step('{"action":"finish"}')
+        self.assertTrue(finished.accepted)
+        self.assertTrue(finished.done)
+
+    async def test_terminal_environment_allows_output_pointer_only_repair(
+        self,
+    ) -> None:
+        env = stateful_director_env()
+        env._graph = AgentGraph(env.graph.nodes)
+        terminal_state = {
+            "task_family": "webshop",
+            "environment_revision": 1,
+            "current_observation": "Thank you for shopping with us!",
+            "model_visible_admissible_actions": [],
+            "public_progress": {
+                "latest_transition": {
+                    "action": "click[Buy Now]",
+                    "state_advanced": True,
+                    "observation_changed": True,
+                    "terminal": True,
+                },
+                "no_progress": {"detected": False, "reasons": []},
+            },
+            "turns_used": 1,
+            "remaining_action_budget": 4,
+            "environment_terminal": True,
+            "environment_truncated": False,
+        }
+        metadata = {
+            "environment_current_state": terminal_state,
+            "environment_terminal": True,
+            "evaluator_environment_trace": [
+                {"done": True, "state_advanced": True}
+            ],
+        }
+        runtime_result = AgentRuntimeResult(
+            run_id="terminal-before-output",
+            graph_revision=env.graph.revision,
+            output_agent_id=None,
+            final_answer=None,
+            outputs={"actor": "Thank you for shopping with us!"},
+            calls=(),
+            block_completion_order=(("actor",),),
+            output_metadata={"actor": metadata},
+        )
+        env._progressive_outputs = dict(runtime_result.outputs)
+        env._progressive_output_metadata = {"actor": metadata}
+        env._progressive_execution = runtime_result
+        env._progressive_execution_revision = env.graph.revision
+
+        self.assertEqual(("set_output",), env.model_admissible_action_types())
+        repaired = await env.step(
+            '{"action":"set_output","agent_id":"actor"}'
+        )
+        self.assertTrue(repaired.accepted)
+        self.assertEqual("actor", env.graph.output_agent_id)
+        self.assertEqual(1, terminal_state["environment_revision"])
+
+    async def test_tool_free_tool_action_proposal_remains_routable_artifact(
+        self,
+    ) -> None:
+        env = stateful_director_env(with_helper=True)
+        env._progressive_outputs = {
+            "helper": json.dumps(
+                {
+                    "resource_id": "webshop",
+                    "kind": "tool",
+                    "name": "click",
+                    "arguments": {"target": "Next >"},
+                    "skill_id": None,
+                }
+            ),
+            "actor": "Results page",
+        }
+        env._progressive_output_metadata["actor"] = {
+            "environment_current_state": {
+                "task_family": "webshop",
+                "environment_revision": 1,
+                "current_observation": "Results page",
+                "model_visible_admissible_actions": ["click[Next >]"],
+                "public_progress": {
+                    "latest_transition": {
+                        "action": "search[item]",
+                        "state_advanced": True,
+                        "observation_changed": True,
+                    },
+                    "no_progress": {"detected": False, "reasons": []},
+                },
+                "turns_used": 1,
+                "remaining_action_budget": 4,
+                "environment_terminal": False,
+                "environment_truncated": False,
+            }
+        }
+
+        self.assertIn("continue", env.model_admissible_action_types())
+        capabilities = {
+            item["agent_id"]: item
+            for item in env.agent_execution_capabilities()
+        }
+        self.assertFalse(capabilities["helper"]["tool_action_output_rejected"])
+        self.assertEqual((), env._tool_free_action_output_rejections())
 
     async def test_legacy_canonical_transcript_remains_decodable(self) -> None:
         legacy = encode_director_transcript(
@@ -2588,6 +2952,211 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             director_live_action_target_domains_json(
                 ("add_agent",),
                 malformed_domains,
+            )
+
+    def test_role_free_add_subgraph_schema_uses_live_fields_and_profile_pairs(
+        self,
+    ) -> None:
+        profiles = [
+            {"execution_mode": "reasoning", "allowed_tools": []},
+            {
+                "execution_mode": "react",
+                "allowed_tools": ["webshop.environment"],
+            },
+        ]
+        domains = {
+            "add_subgraph": {
+                "min_new_agents": 1,
+                "max_new_agents": 3,
+                "existing_agent_ids": ["node_1"],
+                "model_ids": ["qwen", "other"],
+                "semantic_protocol": "none",
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                ],
+                "optional_agent_fields": [
+                    "role_family",
+                    "allowed_tools",
+                    "execution_mode",
+                    "artifact_type",
+                    "completion_condition",
+                ],
+                "registered_execution_profiles": profiles,
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
+            }
+        }
+
+        self.assertEqual(
+            domains,
+            json.loads(
+                director_live_action_target_domains_json(
+                    ("add_subgraph",),
+                    domains,
+                )
+            ),
+        )
+        schema = json.loads(
+            director_live_add_subgraph_agent_declarations_json_schema_text(
+                domains
+            )
+        )
+        count_branches = schema["properties"]["agents"]["oneOf"]
+        self.assertEqual([1, 2, 3], [item["minItems"] for item in count_branches])
+        first_agent_branches = count_branches[0]["prefixItems"][0]["anyOf"]
+        self.assertEqual(3, len(first_agent_branches))
+        self.assertEqual(
+            {"const": "node_2"},
+            first_agent_branches[0]["properties"]["agent_id"],
+        )
+        self.assertNotIn("role_family", first_agent_branches[0]["required"])
+        self.assertNotIn("execution_mode", first_agent_branches[0]["properties"])
+        self.assertEqual(
+            {
+                ("reasoning", ()),
+                ("react", ("webshop.environment",)),
+            },
+            {
+                (
+                    branch["properties"]["execution_mode"]["const"],
+                    tuple(branch["properties"]["allowed_tools"]["const"]),
+                )
+                for branch in first_agent_branches[1:]
+            },
+        )
+
+        validator = Draft202012Validator(schema)
+        base_declaration = {
+            "action": "add_subgraph",
+            "agents": [
+                {
+                    "agent_id": "node_2",
+                    "model_id": "qwen",
+                    "contract": "Summarize the public state for another Agent.",
+                }
+            ],
+        }
+        self.assertTrue(validator.is_valid(base_declaration))
+        profiled_declaration = {
+            "action": "add_subgraph",
+            "agents": [
+                {
+                    "agent_id": "node_2",
+                    "model_id": "qwen",
+                    "contract": "Choose one admissible environment action.",
+                    "role_family": "environment actor",
+                    "execution_mode": "react",
+                    "allowed_tools": ["webshop.environment"],
+                },
+                {
+                    "agent_id": "node_3",
+                    "model_id": "other",
+                    "contract": "Check the routed public observation.",
+                    "execution_mode": "reasoning",
+                    "allowed_tools": [],
+                    "artifact_type": "text",
+                },
+            ],
+        }
+        self.assertTrue(validator.is_valid(profiled_declaration))
+        sampled = director_live_add_subgraph_agent_declarations_from_text(
+            json.dumps(profiled_declaration),
+            domains,
+        )
+        self.assertEqual(profiled_declaration["agents"], list(sampled))
+        invalid_pair = json.loads(json.dumps(profiled_declaration))
+        invalid_pair["agents"][0]["execution_mode"] = "reasoning"
+        self.assertFalse(validator.is_valid(invalid_pair))
+        with self.assertRaisesRegex(ValueError, "registered profile"):
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps(invalid_pair),
+                domains,
+            )
+        missing_pair_field = json.loads(json.dumps(profiled_declaration))
+        del missing_pair_field["agents"][0]["allowed_tools"]
+        self.assertFalse(validator.is_valid(missing_pair_field))
+        with self.assertRaisesRegex(ValueError, "must appear together"):
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps(missing_pair_field),
+                domains,
+            )
+        with self.assertRaisesRegex(ValueError, "requires live role constraints"):
+            director_live_add_subgraph_role_selection_json_schema_text(domains)
+
+    def test_role_free_add_subgraph_required_profile_is_not_optional(self) -> None:
+        domains = {
+            "add_subgraph": {
+                "min_new_agents": 1,
+                "max_new_agents": 1,
+                "existing_agent_ids": [],
+                "model_ids": ["qwen"],
+                "semantic_protocol": "none",
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+                "optional_agent_fields": ["role_family"],
+                "registered_execution_profiles": [
+                    {
+                        "execution_mode": "react",
+                        "allowed_tools": ["webshop.environment"],
+                    }
+                ],
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
+            }
+        }
+        schema = json.loads(
+            director_live_add_subgraph_agent_declarations_json_schema_text(
+                domains
+            )
+        )
+        branches = schema["properties"]["agents"]["oneOf"][0][
+            "prefixItems"
+        ][0]["anyOf"]
+        self.assertEqual(1, len(branches))
+        self.assertEqual(
+            {"execution_mode", "allowed_tools"},
+            {"execution_mode", "allowed_tools"}.intersection(
+                branches[0]["required"]
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "fields are invalid"):
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps(
+                    {
+                        "action": "add_subgraph",
+                        "agents": [
+                            {
+                                "agent_id": "node_1",
+                                "model_id": "qwen",
+                                "contract": "Act on the public environment.",
+                            }
+                        ],
+                    }
+                ),
+                domains,
             )
 
     def test_hotpotqa_v3_binds_semantic_relation_directions_and_format_output(

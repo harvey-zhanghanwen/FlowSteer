@@ -189,10 +189,19 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
             step_index=5,
             phase=GenerationPhase.ACTION,
         )
+        expected_reasoning_seed = derive_generation_seed(
+            base_seed=17,
+            coordinate=coordinate,
+            step_index=5,
+            phase=GenerationPhase.REASONING,
+        )
         metadata = gateway.requests[0].model.metadata
         self.assertEqual("1.0", metadata["temperature"])
         self.assertEqual("1.0", metadata["top_p"])
         self.assertEqual(str(expected_seed), metadata["generation_seed"])
+        self.assertEqual(
+            str(expected_reasoning_seed), metadata["reasoning_generation_seed"]
+        )
         receipt = response.metadata["model_calls"][0]["scientific_sampling"]
         self.assertEqual(5, receipt["step_index"])
         self.assertEqual("action", receipt["phase"])

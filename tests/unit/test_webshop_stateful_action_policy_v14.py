@@ -450,7 +450,10 @@ class WebShopStatefulActionPolicyV14Tests(unittest.IsolatedAsyncioTestCase):
         }
 
         repair_actions = set(canvas.model_admissible_action_types())
-        self.assertEqual({"modify_agent"}, repair_actions)
+        # Two measured repeats already establish a public no-progress fault.
+        # Keep in-place repair available while opening augmentation before the
+        # bounded WebShop action budget is almost exhausted.
+        self.assertEqual({"modify_agent", "add_agent"}, repair_actions)
         self.assertTrue(canvas.graph.has_node("actor"))
         self.assertNotIn("delete_agent", repair_actions)
         self.assertNotIn("finish", repair_actions)

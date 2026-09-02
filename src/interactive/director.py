@@ -78,6 +78,12 @@ Use only action types, targets and parameters in the current admissible_action_t
 
 Each accepted Canvas edit is executed once. continue leaves the AgentGraph unchanged and executes exactly one Action--Observation transition in the current stateful environment. After every execution, inspect the original task, latest Action--Observation, current public state, routed Agent artifacts and remaining budget before choosing the next Canvas action. ReAct is an execution mode, not an Agent role. Use finish only when finish_admissibility is admissible. Do not assume a fixed role sequence, workflow topology or unlisted Skill."""
 
+STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT_V2 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types, targets and parameters in the current admissible_action_types and action_target_domains, model_id values in model_catalog, and exact tool_id values in tool_catalog. add_agent adds one Agent. add_subgraph adds one functional subgraph of one to three Agents with free-text contracts and model-selected relations as one Canvas edit. A directed relation routes the source artifact to the target; only a directed predecessor artifact is available to a stateful environment Agent before its next action, while a tool-free Agent produces an artifact rather than an environment action.
+
+Each accepted Canvas edit is executed once. continue leaves the AgentGraph unchanged and executes exactly one Action--Observation transition in the current stateful environment. After every execution, inspect the original task, latest Action--Observation, current public state, routed Agent artifacts, evidence coverage and remaining budget before choosing the next Canvas action. Add collaborators only for distinct required artifacts or checks. ReAct is an execution mode, not an Agent role. Use finish only when finish_admissibility is admissible. Do not assume a fixed role sequence, Agent count, workflow topology or unlisted Skill."""
+
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
 STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION = (
@@ -88,6 +94,9 @@ STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2 = (
 )
 STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION = (
     "agentgraph.director.minimal-neutral-component-stepwise.v1"
+)
+STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION_V2 = (
+    "agentgraph.director.minimal-neutral-component-stepwise.v2"
 )
 LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1 = (
     "agentgraph.director.minimal-neutral-scalar.v1"
@@ -223,10 +232,12 @@ def _director_neutral_feedback_projection(feedback: str) -> str:
 
 _STATEFUL_EXECUTION_RESULT_KEYS = (
     "output_agent_id",
+    "environment_actor_id",
     "executed_agent_ids",
     "reused_agent_ids",
     "deferred_agent_ids",
     "candidate_conflict",
+    "tool_free_action_rejections",
 )
 _STATEFUL_AGENT_ARTIFACT_KEYS = (
     "agent_id",
@@ -240,6 +251,8 @@ _STATEFUL_AGENT_ARTIFACT_KEYS = (
     "upstream_source_ids",
     "artifact_id",
     "artifact_preview",
+    "can_advance_environment",
+    "tool_action_output_rejected",
 )
 _STATEFUL_OUTPUT_INBOX_KEYS = (
     "source_agent_id",
@@ -254,6 +267,17 @@ _STATEFUL_OUTPUT_INBOX_KEYS = (
     "tool_ids",
     "content_preview",
 )
+_STATEFUL_ENVIRONMENT_ACTOR_INBOX_KEYS = _STATEFUL_OUTPUT_INBOX_KEYS
+
+
+def _bounded_stateful_artifact_body(value: object) -> tuple[str, bool]:
+    """Bound one routed artifact body for the next Canvas observation."""
+
+    body = str(value or "")
+    limit = 2000
+    if len(body) <= limit:
+        return body, False
+    return body[: limit - 3] + "...", True
 _STATEFUL_EXECUTION_ERROR_KEYS = (
     "type",
     "message",
@@ -356,6 +380,28 @@ def _stateful_execution_result_projection(value: object) -> dict[str, Any]:
         ]
         if projected_inbox:
             projected["output_inbox"] = projected_inbox
+    environment_actor_inbox = value.get("environment_actor_inbox")
+    if isinstance(environment_actor_inbox, Sequence) and not isinstance(
+        environment_actor_inbox, (str, bytes)
+    ):
+        projected_actor_inbox = []
+        for item in environment_actor_inbox[-8:]:
+            if not isinstance(item, Mapping):
+                continue
+            projected_item = {
+                key: _director_neutral_state_projection(item[key])
+                for key in _STATEFUL_ENVIRONMENT_ACTOR_INBOX_KEYS
+                if key in item
+            }
+            if "raw_output" in item:
+                artifact_body, truncated = _bounded_stateful_artifact_body(
+                    item["raw_output"]
+                )
+                projected_item["raw_output"] = artifact_body
+                projected_item["raw_output_truncated"] = truncated
+            projected_actor_inbox.append(projected_item)
+        if projected_actor_inbox:
+            projected["environment_actor_inbox"] = projected_actor_inbox
     return projected
 
 
@@ -716,6 +762,7 @@ def scalar_director_prompt_version(value: object) -> bool:
         STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION,
         STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2,
         STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION,
+        STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION_V2,
     }
 
 
@@ -736,6 +783,9 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         ),
         STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION: (
             STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT
+        ),
+        STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION_V2: (
+            STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT_V2
         ),
         LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
@@ -805,6 +855,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT,
         STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2,
         STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT,
+        STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT_V2,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
@@ -1458,6 +1509,204 @@ def _live_role_agent_schema_branches(
     )
 
 
+def _live_add_subgraph_uses_role_free_domain(
+    domain: Mapping[str, Any],
+) -> bool:
+    """Return whether ADD declarations come from the neutral live domain.
+
+    Non-QA environments expose free Agent contracts plus exact registered
+    execution profiles, but no semantic-role inventory.  A non-empty
+    ``role_constraints`` object continues to select the existing QA/legacy
+    role-conditioned path, including for replayed domains that predate an
+    explicit ``semantic_protocol`` field.
+    """
+
+    if domain.get("semantic_protocol", "none") != "none":
+        return False
+    role_constraints = domain.get("role_constraints")
+    return role_constraints is None or (
+        isinstance(role_constraints, Mapping) and not role_constraints
+    )
+
+
+def _live_role_free_add_subgraph_field_domain(
+    domain: Mapping[str, Any],
+) -> tuple[
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[tuple[str, tuple[str, ...]], ...],
+]:
+    """Validate the exact generic Agent fields and execution-profile pairs."""
+
+    required_fields = _live_string_domain(
+        domain.get("required_agent_fields"),
+        label="add_subgraph.required_agent_fields",
+    )
+    required_minimum = {"agent_id", "model_id", "contract"}
+    if (
+        not required_minimum.issubset(required_fields)
+        or any(
+            field not in _AGENT_SPEC_JSON_SCHEMA["properties"]
+            for field in required_fields
+        )
+    ):
+        raise ValueError("add_subgraph required Agent fields are incomplete")
+
+    raw_optional_fields = domain.get("optional_agent_fields", ())
+    if not isinstance(raw_optional_fields, (list, tuple)):
+        raise ValueError("add_subgraph optional Agent fields must be a sequence")
+    optional_fields = tuple(raw_optional_fields)
+    if (
+        any(
+            not isinstance(field, str)
+            or field not in _AGENT_SPEC_JSON_SCHEMA["properties"]
+            or field in required_fields
+            for field in optional_fields
+        )
+        or len(optional_fields) != len(set(optional_fields))
+    ):
+        raise ValueError("add_subgraph optional Agent fields are invalid")
+
+    profile_fields = {"execution_mode", "allowed_tools"}
+    required_profile_fields = profile_fields.intersection(required_fields)
+    optional_profile_fields = profile_fields.intersection(optional_fields)
+    if required_profile_fields and required_profile_fields != profile_fields:
+        raise ValueError(
+            "add_subgraph execution profile fields must both be required"
+        )
+    if optional_profile_fields and optional_profile_fields != profile_fields:
+        raise ValueError(
+            "add_subgraph execution profile fields must both be optional"
+        )
+    if required_profile_fields and optional_profile_fields:
+        raise ValueError(
+            "add_subgraph execution profile fields cannot mix required and optional"
+        )
+
+    raw_registered_profiles = domain.get("registered_execution_profiles")
+    if required_profile_fields or optional_profile_fields:
+        registered_profiles = _live_execution_profiles(
+            raw_registered_profiles,
+            label="add_subgraph.registered_execution_profiles",
+        )
+    elif raw_registered_profiles in (None, [], ()):
+        registered_profiles = ()
+    else:
+        # Preserve the runtime's profile receipt even when this particular
+        # live domain does not expose profile fields to the Director.
+        registered_profiles = _live_execution_profiles(
+            raw_registered_profiles,
+            label="add_subgraph.registered_execution_profiles",
+        )
+    return required_fields, optional_fields, registered_profiles
+
+
+def _live_role_free_stateful_owner_profiles(
+    domain: Mapping[str, Any],
+    registered_profiles: Sequence[tuple[str, tuple[str, ...]]],
+) -> Optional[
+    tuple[
+        tuple[str, tuple[str, ...]],
+        tuple[tuple[str, tuple[str, ...]], ...],
+    ]
+]:
+    """Validate the exact owner/non-owner profiles of an initial component."""
+
+    raw = domain.get("stateful_tool_owner")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping) or set(raw) != {
+        "tool_id",
+        "required_count",
+        "owner_execution_profile",
+        "auxiliary_execution_profiles",
+    }:
+        raise ValueError("add_subgraph stateful Tool-owner domain is malformed")
+    tool_id = raw.get("tool_id")
+    if not isinstance(tool_id, str) or not tool_id:
+        raise ValueError("add_subgraph stateful Tool ID is invalid")
+    if raw.get("required_count") != 1:
+        raise ValueError("add_subgraph requires exactly one stateful Tool owner")
+    owner_profiles = _live_execution_profiles(
+        [raw.get("owner_execution_profile")],
+        label="add_subgraph.stateful_tool_owner.owner_execution_profile",
+    )
+    auxiliary_profiles = _live_execution_profiles(
+        raw.get("auxiliary_execution_profiles"),
+        label="add_subgraph.stateful_tool_owner.auxiliary_execution_profiles",
+    )
+    if len(owner_profiles) != 1 or not auxiliary_profiles:
+        raise ValueError("add_subgraph stateful execution profiles are incomplete")
+    owner_profile = owner_profiles[0]
+    registered = set(registered_profiles)
+    if owner_profile not in registered or not set(auxiliary_profiles) <= registered:
+        raise ValueError("add_subgraph exposes an unregistered stateful profile")
+    if owner_profile[0] != "react" or owner_profile[1] != (tool_id,):
+        raise ValueError("add_subgraph stateful owner profile is incompatible")
+    if owner_profile in auxiliary_profiles or any(
+        tool_id in allowed_tools for _, allowed_tools in auxiliary_profiles
+    ):
+        raise ValueError("add_subgraph auxiliary profile owns the stateful Tool")
+    return owner_profile, auxiliary_profiles
+
+
+def _live_role_free_agent_schema_branches(
+    required_fields: Sequence[str],
+    optional_fields: Sequence[str],
+    model_ids: Sequence[str],
+    registered_profiles: Sequence[tuple[str, tuple[str, ...]]],
+    *,
+    agent_id: str,
+) -> tuple[Mapping[str, Any], ...]:
+    """Render mutually exclusive generic Agent/profile declaration branches."""
+
+    if not isinstance(agent_id, str) or not agent_id:
+        raise ValueError("live Agent ID must be non-empty text")
+    profile_fields = {"execution_mode", "allowed_tools"}
+    required_profile = profile_fields.issubset(required_fields)
+    optional_profile = profile_fields.issubset(optional_fields)
+    non_profile_fields = tuple(
+        field
+        for field in (*required_fields, *optional_fields)
+        if field not in profile_fields
+    )
+
+    def branch(
+        profile: Optional[tuple[str, tuple[str, ...]]],
+    ) -> Mapping[str, Any]:
+        properties = {
+            field: json.loads(
+                json.dumps(_AGENT_SPEC_JSON_SCHEMA["properties"][field])
+            )
+            for field in non_profile_fields
+        }
+        properties["agent_id"] = {"const": agent_id}
+        properties["model_id"] = {"enum": list(model_ids)}
+        branch_required = [
+            field for field in required_fields if field not in profile_fields
+        ]
+        if profile is not None:
+            execution_mode, allowed_tools = profile
+            properties["execution_mode"] = {"const": execution_mode}
+            properties["allowed_tools"] = {"const": list(allowed_tools)}
+            branch_required.extend(("execution_mode", "allowed_tools"))
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": branch_required,
+            "properties": properties,
+        }
+
+    if required_profile:
+        return tuple(branch(profile) for profile in registered_profiles)
+    if optional_profile:
+        return (
+            branch(None),
+            *(branch(profile) for profile in registered_profiles),
+        )
+    return (branch(None),)
+
+
 def _live_new_agent_ids(
     existing_agent_ids: Sequence[str],
     max_agents: int,
@@ -1684,24 +1933,44 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
     ):
         raise ValueError("add_subgraph live Agent-count domain is invalid")
     required_fields = domain.get("required_agent_fields")
-    required_minimum = {
-        "agent_id",
-        "model_id",
-        "contract",
-        "role_family",
-        "allowed_tools",
-        "execution_mode",
-    }
-    if (
-        not isinstance(required_fields, (list, tuple))
-        or any(
-            field not in _AGENT_SPEC_JSON_SCHEMA["properties"]
-            for field in required_fields
+    role_free_domain = _live_add_subgraph_uses_role_free_domain(domain)
+    optional_fields: tuple[str, ...] = ()
+    registered_profiles: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    stateful_owner_profiles: Optional[
+        tuple[
+            tuple[str, tuple[str, ...]],
+            tuple[tuple[str, tuple[str, ...]], ...],
+        ]
+    ] = None
+    if role_free_domain:
+        (
+            required_fields,
+            optional_fields,
+            registered_profiles,
+        ) = _live_role_free_add_subgraph_field_domain(domain)
+        stateful_owner_profiles = _live_role_free_stateful_owner_profiles(
+            domain,
+            registered_profiles,
         )
-        or not required_minimum.issubset(required_fields)
-        or len(required_fields) != len(set(required_fields))
-    ):
-        raise ValueError("add_subgraph required Agent fields are incomplete")
+    else:
+        required_minimum = {
+            "agent_id",
+            "model_id",
+            "contract",
+            "role_family",
+            "allowed_tools",
+            "execution_mode",
+        }
+        if (
+            not isinstance(required_fields, (list, tuple))
+            or any(
+                field not in _AGENT_SPEC_JSON_SCHEMA["properties"]
+                for field in required_fields
+            )
+            or not required_minimum.issubset(required_fields)
+            or len(required_fields) != len(set(required_fields))
+        ):
+            raise ValueError("add_subgraph required Agent fields are incomplete")
     model_ids = _live_string_domain(
         domain.get("model_ids"),
         label="add_subgraph.model_ids",
@@ -1722,9 +1991,12 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
     ):
         raise ValueError("add_subgraph endpoint scope is incomplete")
     role_constraints = domain.get("role_constraints")
-    if not isinstance(role_constraints, Mapping) or not role_constraints:
+    if not role_free_domain and (
+        not isinstance(role_constraints, Mapping) or not role_constraints
+    ):
         raise ValueError("add_subgraph role constraints are missing")
-    if role_conditional_qa_protocol(domain):
+    if not role_free_domain and role_conditional_qa_protocol(domain):
+        assert isinstance(role_constraints, Mapping)
         registered_profiles = set(
             _live_execution_profiles(
                 domain.get("registered_execution_profiles"),
@@ -1747,9 +2019,13 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
                 raise ValueError(
                     f"{role_family} exposes an unregistered execution profile"
                 )
-    admitted_new_roles = _live_admitted_new_role_families(
-        domain,
-        role_constraints,
+    admitted_new_roles = (
+        ()
+        if role_free_domain
+        else _live_admitted_new_role_families(
+            domain,
+            role_constraints,
+        )
     )
     if verified_qa_semantic_protocol(domain.get("semantic_protocol")):
         existing_roles = _live_existing_agent_roles(domain, role_constraints)
@@ -1757,6 +2033,10 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
     new_agent_ids = _live_new_agent_ids(existing_agent_ids, max_agents)
     selected_roles: Optional[tuple[str, ...]] = None
     if selected_agent_roles is not None:
+        if role_free_domain:
+            raise ValueError(
+                "add_subgraph role-free domain does not accept selected roles"
+            )
         if (
             not isinstance(selected_agent_roles, (list, tuple))
             or not min_agents <= len(selected_agent_roles) <= max_agents
@@ -1788,29 +2068,46 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
         len(selected_roles) if selected_roles is not None else max_agents
     )
     for position, agent_id in enumerate(new_agent_ids[:positional_count]):
-        admitted_roles = (
-            ((selected_roles[position], role_constraints[selected_roles[position]]),)
-            if selected_roles is not None
-            else tuple(
-                (role_family, role_constraints[role_family])
-                for role_family in admitted_new_roles
+        if role_free_domain:
+            role_branches = list(
+                _live_role_free_agent_schema_branches(
+                    required_fields,
+                    optional_fields,
+                    model_ids,
+                    registered_profiles,
+                    agent_id=agent_id,
+                )
             )
-        )
-        role_branches = [
-            branch
-            for role_family, constraint in admitted_roles
-            if isinstance(role_family, str)
-            and role_family
-            and isinstance(constraint, Mapping)
-            for branch in _live_role_agent_schema_branches(
-                required_fields,
-                domain,
-                role_family,
-                constraint,
-                model_ids,
-                agent_id=agent_id,
+        else:
+            assert isinstance(role_constraints, Mapping)
+            admitted_roles = (
+                (
+                    (
+                        selected_roles[position],
+                        role_constraints[selected_roles[position]],
+                    ),
+                )
+                if selected_roles is not None
+                else tuple(
+                    (role_family, role_constraints[role_family])
+                    for role_family in admitted_new_roles
+                )
             )
-        ]
+            role_branches = [
+                branch
+                for role_family, constraint in admitted_roles
+                if isinstance(role_family, str)
+                and role_family
+                and isinstance(constraint, Mapping)
+                for branch in _live_role_agent_schema_branches(
+                    required_fields,
+                    domain,
+                    role_family,
+                    constraint,
+                    model_ids,
+                    agent_id=agent_id,
+                )
+            ]
         if not role_branches:
             raise ValueError("add_subgraph role constraints are malformed")
         positional_agent_schemas.append({"anyOf": role_branches})
@@ -1819,16 +2116,51 @@ def director_live_add_subgraph_agent_declarations_json_schema_text(
         if selected_roles is not None
         else tuple(range(min_agents, max_agents + 1))
     )
-    agent_count_branches = [
-        {
-            "type": "array",
-            "minItems": count,
-            "maxItems": count,
-            "prefixItems": positional_agent_schemas[:count],
-            "items": False,
-        }
-        for count in admitted_counts
-    ]
+    if stateful_owner_profiles is None:
+        agent_count_branches = [
+            {
+                "type": "array",
+                "minItems": count,
+                "maxItems": count,
+                "prefixItems": positional_agent_schemas[:count],
+                "items": False,
+            }
+            for count in admitted_counts
+        ]
+    else:
+        owner_profile, auxiliary_profiles = stateful_owner_profiles
+        # Each branch fixes one and only one positional Agent to the mutable
+        # environment-owner profile.  Other Agents retain free contracts and
+        # models but can only select registered non-owner profiles.  This is a
+        # constrained-decoding projection of the Runtime invariant, not a
+        # prescribed responsibility or topology.
+        agent_count_branches = []
+        for count in admitted_counts:
+            for owner_position in range(count):
+                prefix_items: list[Mapping[str, Any]] = []
+                for position, agent_id in enumerate(new_agent_ids[:count]):
+                    profiles = (
+                        (owner_profile,)
+                        if position == owner_position
+                        else auxiliary_profiles
+                    )
+                    branches = _live_role_free_agent_schema_branches(
+                        required_fields,
+                        optional_fields,
+                        model_ids,
+                        profiles,
+                        agent_id=agent_id,
+                    )
+                    prefix_items.append({"anyOf": list(branches)})
+                agent_count_branches.append(
+                    {
+                        "type": "array",
+                        "minItems": count,
+                        "maxItems": count,
+                        "prefixItems": prefix_items,
+                        "items": False,
+                    }
+                )
     return json.dumps(
         {
             "type": "object",
@@ -1858,12 +2190,18 @@ def director_live_add_subgraph_role_selection_json_schema_text(
     the Director write each free contract.
     """
 
+    domain = action_target_domains.get("add_subgraph")
+    if not isinstance(domain, Mapping):
+        raise ValueError("add_subgraph live target domain is missing")
+    if _live_add_subgraph_uses_role_free_domain(domain):
+        raise ValueError(
+            "add_subgraph role selection requires live role constraints"
+        )
     declaration_schema = json.loads(
         director_live_add_subgraph_agent_declarations_json_schema_text(
             action_target_domains
         )
     )
-    domain = action_target_domains["add_subgraph"]
     min_agents = domain["min_new_agents"]
     max_agents = domain["max_new_agents"]
     existing_agent_ids = domain["existing_agent_ids"]
@@ -1946,6 +2284,10 @@ def director_live_add_subgraph_role_selection_from_text(
     domain = action_target_domains.get("add_subgraph")
     if not isinstance(domain, Mapping):
         raise ValueError("add_subgraph live target domain is missing")
+    if _live_add_subgraph_uses_role_free_domain(domain):
+        raise ValueError(
+            "add_subgraph role selection requires live role constraints"
+        )
     min_agents = domain.get("min_new_agents")
     max_agents = domain.get("max_new_agents")
     if (
@@ -1992,6 +2334,135 @@ def director_live_add_subgraph_role_selection_from_text(
     return tuple(normalized)
 
 
+def _live_role_free_add_subgraph_agents(
+    domain: Mapping[str, Any],
+    agents: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Validate generic declarations against the exact role-free live domain."""
+
+    min_agents = domain["min_new_agents"]
+    max_agents = domain["max_new_agents"]
+    if (
+        not isinstance(agents, (list, tuple))
+        or not min_agents <= len(agents) <= max_agents
+    ):
+        raise ValueError("add_subgraph sampled Agent declarations have invalid count")
+    (
+        required_fields,
+        optional_fields,
+        registered_profiles,
+    ) = _live_role_free_add_subgraph_field_domain(domain)
+    admitted_fields = set((*required_fields, *optional_fields))
+    required_field_set = set(required_fields)
+    model_ids = set(
+        _live_string_domain(
+            domain.get("model_ids"),
+            label="add_subgraph.model_ids",
+        )
+    )
+    existing_ids = set(domain["existing_agent_ids"])
+    expected_new_ids = _live_new_agent_ids(
+        domain["existing_agent_ids"],
+        max_agents,
+    )
+    profile_fields = {"execution_mode", "allowed_tools"}
+    profile_fields_exposed = profile_fields.issubset(admitted_fields)
+    normalized: list[dict[str, Any]] = []
+    new_ids: set[str] = set()
+    for position, raw_agent in enumerate(agents):
+        if not isinstance(raw_agent, Mapping):
+            raise ValueError("add_subgraph Agent declaration must be an object")
+        agent = dict(raw_agent)
+        if (
+            not required_field_set.issubset(agent)
+            or not set(agent).issubset(admitted_fields)
+        ):
+            raise ValueError("add_subgraph Agent declaration fields are invalid")
+        agent_id = agent.get("agent_id")
+        if (
+            not isinstance(agent_id, str)
+            or not agent_id
+            or agent_id != agent_id.strip()
+            or agent_id != expected_new_ids[position]
+            or agent_id in existing_ids
+            or agent_id in new_ids
+        ):
+            raise ValueError(
+                "add_subgraph new Agent IDs must match the unique neutral IDs "
+                "assigned by the current Canvas"
+            )
+        model_id = agent.get("model_id")
+        if (
+            not isinstance(model_id, str)
+            or not model_id
+            or model_id != model_id.strip()
+            or model_id not in model_ids
+        ):
+            raise ValueError("add_subgraph Agent model_id is outside the live catalog")
+        for field_name in (
+            "contract",
+            "role_family",
+            "artifact_type",
+            "completion_condition",
+        ):
+            if field_name not in agent:
+                continue
+            value = agent[field_name]
+            if (
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+            ):
+                raise ValueError(
+                    f"add_subgraph Agent {field_name} must be non-empty text"
+                )
+
+        present_profile_fields = profile_fields.intersection(agent)
+        if present_profile_fields and present_profile_fields != profile_fields:
+            raise ValueError(
+                "add_subgraph Agent execution profile fields must appear together"
+            )
+        if profile_fields.issubset(required_field_set) and not present_profile_fields:
+            raise ValueError("add_subgraph Agent execution profile is required")
+        if present_profile_fields:
+            execution_mode = agent["execution_mode"]
+            allowed_tools = agent["allowed_tools"]
+            if (
+                not profile_fields_exposed
+                or not isinstance(allowed_tools, list)
+                or (execution_mode, tuple(allowed_tools))
+                not in registered_profiles
+            ):
+                raise ValueError(
+                    "add_subgraph Agent execution mode and Tool set do not "
+                    "form one registered profile"
+                )
+        new_ids.add(agent_id)
+        normalized.append(agent)
+    stateful_owner_profiles = _live_role_free_stateful_owner_profiles(
+        domain,
+        registered_profiles,
+    )
+    if stateful_owner_profiles is not None:
+        owner_profile, auxiliary_profiles = stateful_owner_profiles
+        declared_profiles = tuple(
+            (agent["execution_mode"], tuple(agent["allowed_tools"]))
+            for agent in normalized
+        )
+        if declared_profiles.count(owner_profile) != 1:
+            raise ValueError(
+                "add_subgraph must declare exactly one stateful Tool owner"
+            )
+        if any(
+            profile != owner_profile and profile not in auxiliary_profiles
+            for profile in declared_profiles
+        ):
+            raise ValueError(
+                "add_subgraph contains an invalid stateful auxiliary profile"
+            )
+    return tuple(normalized)
+
+
 def _live_add_subgraph_agents(
     action_target_domains: Mapping[str, Any],
     agents: Sequence[Mapping[str, Any]],
@@ -2014,6 +2485,14 @@ def _live_add_subgraph_agents(
         or not min_agents <= len(agents) <= max_agents
     ):
         raise ValueError("add_subgraph sampled Agent declarations have invalid count")
+    if _live_add_subgraph_uses_role_free_domain(domain):
+        if selected_agent_roles is not None:
+            raise ValueError(
+                "add_subgraph role-free domain does not accept selected roles"
+            )
+        return _live_role_free_add_subgraph_agents(domain, agents)
+
+
     existing_ids = set(domain["existing_agent_ids"])
     expected_new_ids = _live_new_agent_ids(
         domain["existing_agent_ids"],
@@ -2145,6 +2624,96 @@ def _live_add_subgraph_agents(
                 "add_subgraph Agent declarations changed their selected roles"
             )
     return tuple(normalized)
+
+
+def director_live_stateful_add_subgraph_relation_candidates(
+    action_target_domains: Mapping[str, Any],
+    agents: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Project stateful-safe relation choices for one WebShop component.
+
+    SkillFlow serializes one mutable WebShop episode through one owner.  The
+    remaining Agents may be independent, communicate in either one-way
+    direction, or communicate reciprocally with each other.  A reciprocal
+    edge incident to the stateful owner is omitted because FlowSteer's bounded
+    reciprocal block executes both members and cannot serialize that resource.
+    """
+
+    domain = action_target_domains.get("add_subgraph")
+    if not isinstance(domain, Mapping):
+        raise ValueError("add_subgraph live target domain is missing")
+    if (
+        "stateful_tool_owner" not in domain
+        and "stateful_tool_owner_agent_id" not in domain
+    ):
+        return ()
+    normalized_agents = _live_add_subgraph_agents(
+        action_target_domains,
+        agents,
+    )
+    new_agent_ids = {agent["agent_id"] for agent in normalized_agents}
+    existing_agent_ids = tuple(domain.get("existing_agent_ids", ()))
+    if "stateful_tool_owner" in domain:
+        _, _, registered_profiles = _live_role_free_add_subgraph_field_domain(
+            domain
+        )
+        stateful_profiles = _live_role_free_stateful_owner_profiles(
+            domain,
+            registered_profiles,
+        )
+        if stateful_profiles is None:
+            raise ValueError("add_subgraph stateful owner profile is missing")
+        owner_profile = stateful_profiles[0]
+        owner_ids = [
+            agent["agent_id"]
+            for agent in normalized_agents
+            if (
+                agent.get("execution_mode"),
+                tuple(agent.get("allowed_tools", ())),
+            )
+            == owner_profile
+        ]
+        if len(owner_ids) != 1:
+            raise ValueError("add_subgraph stateful owner declaration is invalid")
+        owner_id = owner_ids[0]
+    else:
+        owner_id = domain.get("stateful_tool_owner_agent_id")
+        if not isinstance(owner_id, str) or owner_id not in existing_agent_ids:
+            raise ValueError("add_subgraph existing stateful owner is invalid")
+
+    endpoint_ids = [*existing_agent_ids]
+    endpoint_ids.extend(agent["agent_id"] for agent in normalized_agents)
+    candidates: list[dict[str, Any]] = []
+    for source_index, source_id in enumerate(endpoint_ids):
+        for target_id in endpoint_ids[source_index + 1 :]:
+            if source_id not in new_agent_ids and target_id not in new_agent_ids:
+                continue
+            candidates.extend(
+                (
+                    {
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "source_to_target": True,
+                        "target_to_source": False,
+                    },
+                    {
+                        "source_id": target_id,
+                        "target_id": source_id,
+                        "source_to_target": True,
+                        "target_to_source": False,
+                    },
+                )
+            )
+            if owner_id not in {source_id, target_id}:
+                candidates.append(
+                    {
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "source_to_target": True,
+                        "target_to_source": True,
+                    }
+                )
+    return tuple(candidates)
 
 
 def director_live_add_subgraph_relation_candidates(
@@ -2679,10 +3248,46 @@ def director_live_action_parameter_json_schema_text(
                 else {"type": "null"}
             )
         else:
-            relation_items = schema["properties"]["relations"]["items"]
-            for branch in relation_items["anyOf"]:
-                branch["properties"]["source_id"] = {"enum": endpoint_ids}
-                branch["properties"]["target_id"] = {"enum": endpoint_ids}
+            stateful_relation_domain = bool(
+                "stateful_tool_owner" in domain
+                or "stateful_tool_owner_agent_id" in domain
+            )
+            if stateful_relation_domain:
+                relation_candidates = (
+                    director_live_stateful_add_subgraph_relation_candidates(
+                        action_target_domains,
+                        normalized_agents,
+                    )
+                )
+                schema["properties"]["relations"] = {
+                    "type": "array",
+                    "maxItems": max(1, len(normalized_agents) - 1),
+                    "uniqueItems": True,
+                    "items": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": [
+                                    "source_id",
+                                    "target_id",
+                                    "source_to_target",
+                                    "target_to_source",
+                                ],
+                                "properties": {
+                                    key: {"const": value}
+                                    for key, value in candidate.items()
+                                },
+                            }
+                            for candidate in relation_candidates
+                        ]
+                    },
+                }
+            else:
+                relation_items = schema["properties"]["relations"]["items"]
+                for branch in relation_items["anyOf"]:
+                    branch["properties"]["source_id"] = {"enum": endpoint_ids}
+                    branch["properties"]["target_id"] = {"enum": endpoint_ids}
             schema["properties"]["output_agent_id"] = {
                 "anyOf": [{"enum": endpoint_ids}, {"type": "null"}]
             }
@@ -3592,6 +4197,13 @@ class AgentGraphOrchestrator:
                 "required_tool_id": env.required_tool_id,
             },
         }
+        agent_execution_capabilities = env.agent_execution_capabilities()
+        if agent_execution_capabilities:
+            # This is measured execution authority for the current graph, not
+            # a role inventory: contracts and topology remain Director-owned.
+            payload["agent_execution_capabilities"] = (
+                agent_execution_capabilities
+            )
         if scalar_director_prompt_version(self.prompt_version):
             # FlowSteer exposes the current Canvas identifiers and bounded
             # horizon to the editor.  The v2 scalar observation adds only
@@ -3709,6 +4321,17 @@ class AgentGraphOrchestrator:
                 _director_stateful_feedback_projection(snapshot.last_feedback)
             )
             payload["environment_state"] = environment_state
+        if self.prompt_version == STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION_V2:
+            # Project the public task evidence burden before the unique
+            # stateful owner exists, then expose the actual directed-artifact
+            # consumption receipts after it materializes.  These are execution
+            # semantics and measured state, not a role or topology template.
+            public_task_profile = env.public_task_profile()
+            if public_task_profile is not None:
+                payload["public_task_profile"] = public_task_profile
+            stateful_execution = env.stateful_execution_state()
+            if stateful_execution is not None:
+                payload["stateful_execution"] = stateful_execution
         if partial_validation.issues:
             payload["structural_issues"] = [
                 {
@@ -3740,7 +4363,7 @@ class AgentGraphOrchestrator:
         if include_task_context:
             payload.update(
                 {
-                    "task": env.problem,
+                    "task": env.original_task_instruction,
                     "model_catalog": self._model_catalog(),
                 }
             )
@@ -3850,6 +4473,7 @@ class AgentGraphOrchestrator:
             QA_DIRECTOR_PROMPT_VERSION,
             STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2,
             STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION,
+            STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION_V2,
         }:
             return copied
         return self._compact_qa_historical_messages(copied)
@@ -4002,6 +4626,41 @@ class AgentGraphOrchestrator:
                 env,
                 skills,
             )
+        # NECESSARY_ADAPTATION: execute-on-edit may consume the final ordinary
+        # Canvas round while the serialized SkillFlow episode becomes terminal.
+        # When the public action mask is now exactly FINISH, reserve one
+        # bounded control turn for FlowSteer's required explicit terminal edit.
+        # No answer is synthesized and no other mutation is admitted.
+        public_environment_state = env.public_environment_state()
+        if (
+            self.prompt_version == STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION_V2
+            and not terminal_canvas_diagnosis
+            and public_environment_state is not None
+            and tuple(env.model_admissible_action_types()) == ("finish",)
+            and any(
+                (
+                    public_environment_state.get("environment_terminal") is True,
+                    public_environment_state.get("environment_truncated") is True,
+                    public_environment_state.get("remaining_action_budget") == 0,
+                )
+            )
+        ):
+            index = self.max_rounds
+            response = await self.client.propose(
+                prompt,
+                seed=self.generation_seed(index),
+                **self.action_schema_request(env),
+            )
+            canvas = await env.step(response.text)
+            turns.append(DirectorTurn(index, prompt, response, canvas))
+            if canvas.done and canvas.final_answer is not None:
+                return OrchestrationResult(
+                    final_answer=canvas.final_answer,
+                    turns=tuple(turns),
+                    final_graph=env.graph.to_dict(),
+                    termination_reason="finish",
+                    explicit_finish=True,
+                )
         # DIRECT_REUSE + NECESSARY_ADAPTATION: upstream FlowSteer retains the
         # last executed solver result when its edit budget is exhausted.  The
         # shared QA environment tightens that boundary: only an atomic graph
@@ -4057,7 +4716,9 @@ __all__ = [
     "STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT",
     "STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2",
     "STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION",
+    "STEPWISE_COMPONENT_DIRECTOR_PROMPT_VERSION_V2",
     "STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT",
+    "STEPWISE_COMPONENT_DIRECTOR_SYSTEM_PROMPT_V2",
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15",

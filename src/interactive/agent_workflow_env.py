@@ -556,10 +556,27 @@ class AgentWorkflowEnv:
         semantic_edit_issue = self._semantic_edit_issue_for(self._graph)
         if semantic_edit_issue is not None:
             raise AgentWorkflowStateError(semantic_edit_issue)
+        stateful_issue = self._stateful_candidate_admission_issue(self._graph)
+        if stateful_issue is not None:
+            raise AgentWorkflowStateError(stateful_issue)
 
     @property
     def problem(self) -> str:
         return self._problem
+
+    @property
+    def original_task_instruction(self) -> str:
+        """Return the immutable benchmark goal visible to the Director.
+
+        The runner appends an environment-owner execution interface to
+        stateful WebShop tasks.  SkillFlow keeps that interface at the acting
+        policy boundary; FlowSteer's Director instead receives the goal plus
+        Canvas/Tool capability state.
+        """
+
+        if not self._uses_atomic_stateful_execution_profile():
+            return self._problem
+        return self._problem.partition("\n\nExecution interface:")[0].strip()
 
     @property
     def graph(self) -> AgentGraph:
@@ -788,6 +805,16 @@ class AgentWorkflowEnv:
         metadata = self._progressive_output_metadata.get(actor_id, {})
         raw_state = metadata.get("environment_current_state")
         if not isinstance(raw_state, Mapping):
+            # An accepted FlowSteer edit invalidates dirty artifacts before it
+            # executes the revised graph. The serialized SkillFlow episode has
+            # not advanced at that point, so its previous-revision public
+            # state remains the current observation for the next Agent input.
+            previous_metadata = self._previous_revision_output_metadata.get(
+                actor_id,
+                {},
+            )
+            raw_state = previous_metadata.get("environment_current_state")
+        if not isinstance(raw_state, Mapping):
             continuation = self._failure_continuations.get(actor_id, {})
             raw_state = continuation.get("environment_current_state")
         if not isinstance(raw_state, Mapping):
@@ -804,6 +831,7 @@ class AgentWorkflowEnv:
             "current_observation_clipped",
             "current_observation_original_chars",
             "admissible_action_count",
+            "model_visible_admissible_action_count",
             "public_progress",
             "turns_used",
             "remaining_action_budget",
@@ -815,21 +843,497 @@ class AgentWorkflowEnv:
             for key in allowed_fields
             if key in raw_state
         }
-        original_task_instruction = self._problem.partition(
-            "\n\nExecution interface:"
-        )[0].strip()
+        original_task_instruction = self.original_task_instruction
         result.update(
             {
-                "task_instruction": self._problem,
+                "task_instruction": original_task_instruction,
                 "original_task_instruction": original_task_instruction,
                 "environment_actor_id": actor_id,
                 "execution_semantics": "one_action_one_observation",
             }
         )
-        if str(raw_state.get("task_family", "")).casefold() != "webshop":
+        if str(raw_state.get("task_family", "")).casefold() == "webshop":
+            # SkillFlow gives the acting policy the current admissible action
+            # projection after every WebShop transition.  Reuse that same
+            # public projection for FlowSteer's next Canvas observation and
+            # for tool-free predecessor Agents; native evaluator-only state is
+            # not exposed here.
+            model_visible_actions = raw_state.get(
+                "model_visible_admissible_actions"
+            )
+            if isinstance(model_visible_actions, (list, tuple)):
+                result["model_visible_admissible_actions"] = list(
+                    model_visible_actions
+                )
+            rejected_pairs = self._unchanged_observation_action_rejections(
+                raw_state
+            )
+            if rejected_pairs:
+                # The native environment keeps its complete legal-action
+                # receipt.  This is the next-policy action mask: an exact
+                # public state/action pair that already returned the same
+                # observation is omitted, with a typed reason visible to the
+                # Director.  A normal page transition has
+                # ``observation_changed=True`` and is never included here.
+                result["rejected_state_action_pairs"] = rejected_pairs
+        else:
             admissible_actions = raw_state.get("admissible_actions")
             if isinstance(admissible_actions, (list, tuple)):
                 result["admissible_actions"] = list(admissible_actions)
+        return result
+
+    @staticmethod
+    def _unchanged_observation_action_rejections(
+        raw_state: Mapping[str, object],
+    ) -> list[dict[str, object]]:
+        """Return exact unchanged-observation pairs removed from the mask."""
+
+        visible_actions = raw_state.get("model_visible_admissible_actions")
+        progress = raw_state.get("public_progress")
+        if (
+            not isinstance(visible_actions, (list, tuple))
+            or not isinstance(progress, Mapping)
+        ):
+            return []
+        latest = progress.get("latest_transition")
+        if not isinstance(latest, Mapping):
+            return []
+        action = latest.get("action")
+        if not isinstance(action, str) or action in visible_actions:
+            return []
+        precondition_reason = latest.get("precondition_failure_reason")
+        repeated_precondition = precondition_reason in {
+            "repeated_unchanged_click",
+            "repeated_state_action",
+        }
+        observed_unchanged = (
+            latest.get("state_advanced") is True
+            and latest.get("observation_changed") is False
+        )
+        if not observed_unchanged and not repeated_precondition:
+            return []
+        return [
+            {
+                "action": action,
+                "reason": (
+                    str(precondition_reason)
+                    if repeated_precondition
+                    else "observation_unchanged"
+                ),
+                "environment_revision": raw_state.get(
+                    "environment_revision"
+                ),
+                "same_public_observation": True,
+                "masked_from_next_action": True,
+            }
+        ]
+
+    @staticmethod
+    def _tool_action_artifact_receipt(
+        artifact: object,
+        *,
+        public_actions: Sequence[object] = (),
+    ) -> Optional[dict[str, object]]:
+        """Recognize an exact tool-action wire, not prose mentioning one."""
+
+        if not isinstance(artifact, str) or not artifact.strip():
+            return None
+        text = artifact.strip()
+        try:
+            structured = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            structured = None
+        if (
+            isinstance(structured, Mapping)
+            and structured.get("kind") == "tool"
+            and isinstance(structured.get("resource_id"), str)
+            and isinstance(structured.get("name"), str)
+        ):
+            return {
+                "action_format": "structured_tool_action",
+                "resource_id": structured["resource_id"],
+                "action_name": structured["name"],
+            }
+
+        tagged = re.fullmatch(
+            r"<action>\s*(.*?)\s*</action>",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        candidate = tagged.group(1).strip() if tagged is not None else text
+        if candidate and any(
+            isinstance(action, str) and candidate == action
+            for action in public_actions
+        ):
+            return {
+                "action_format": (
+                    "action_tag" if tagged is not None else "native_action"
+                ),
+                "action": candidate[:240],
+            }
+        return None
+
+    def _tool_free_action_output_rejections(
+        self,
+    ) -> tuple[dict[str, object], ...]:
+        """Diagnose only measured Tool dispatches by tool-free Agents.
+
+        A routed action proposal is a valid FlowSteer artifact.  Capability is
+        enforced by AgentRuntime/ToolRegistry, so artifact text must not be
+        mistaken for an executed stateful Tool action.  Reject only an actual
+        Tool receipt attributed to an Agent whose declared tool set is empty.
+        """
+
+        if not self._uses_atomic_stateful_execution_profile():
+            return ()
+        rejections: list[dict[str, object]] = []
+        for node in self._graph.nodes:
+            if node.allowed_tools:
+                continue
+            metadata = self._progressive_output_metadata.get(node.id, {})
+            raw_receipts = (
+                metadata.get("tool_receipts", ())
+                if isinstance(metadata, Mapping)
+                else ()
+            )
+            receipts = [
+                dict(receipt)
+                for receipt in raw_receipts
+                if isinstance(receipt, Mapping)
+            ] if isinstance(raw_receipts, (list, tuple)) else []
+            if not receipts:
+                continue
+            rejections.append(
+                {
+                    "agent_id": node.id,
+                    "execution_mode": node.execution_mode.value,
+                    "allowed_tools": [],
+                    "can_advance_environment": False,
+                    "rejection_reason": "tool_capability_not_declared",
+                    "measured_tool_receipt_count": len(receipts),
+                    "tool_ids": list(
+                        dict.fromkeys(
+                            str(
+                                receipt.get("tool_id")
+                                or receipt.get("resource_id")
+                                or "unknown"
+                            )
+                            for receipt in receipts
+                        )
+                    ),
+                }
+            )
+        return tuple(rejections)
+
+    def agent_execution_capabilities(self) -> list[dict[str, object]]:
+        """Return each stateful Agent's measured execution authority."""
+
+        if not self._uses_atomic_stateful_execution_profile():
+            return []
+        registered_profiles = set(self.runtime.registered_execution_profiles())
+        environment_actor_ids = set(self._required_tool_actor_ids())
+        rejected_ids = {
+            str(item["agent_id"])
+            for item in self._tool_free_action_output_rejections()
+        }
+        return [
+            {
+                "agent_id": node.id,
+                "execution_mode": node.execution_mode.value,
+                "allowed_tools": list(node.allowed_tools),
+                "execution_profile_registered": (
+                    node.execution_mode.value,
+                    tuple(node.allowed_tools),
+                )
+                in registered_profiles,
+                "can_advance_environment": node.id in environment_actor_ids,
+                "environment_output_semantics": (
+                    "state_transition"
+                    if node.id in environment_actor_ids
+                    else "artifact_only"
+                ),
+                "tool_action_output_rejected": node.id in rejected_ids,
+            }
+            for node in self._graph.nodes
+        ]
+
+    def public_task_profile(self) -> Optional[dict[str, object]]:
+        """Project public task constraints before the stateful owner exists.
+
+        SkillFlow derives WebShop requirement text from the public instruction
+        before the first environment action.  The project adapter exposes the
+        same read-only projection to FlowSteer's first Canvas observation so
+        the Director can see the evidence burden without receiving reward,
+        hidden targets, candidate rankings, or a prescribed topology.
+        """
+
+        if not self._uses_atomic_stateful_execution_profile():
+            return None
+        adapter = self.runtime.execution_adapters.get("react")
+        projector = getattr(adapter, "public_task_profile", None)
+        if not callable(projector):
+            return None
+        value = projector(
+            task_family=self.runtime.dataset_id,
+            task_instruction=self.original_task_instruction,
+        )
+        if not isinstance(value, Mapping):
+            return None
+        return dict(value)
+
+    def stateful_execution_state(self) -> Optional[dict[str, object]]:
+        """Return public stateful dataflow and execution receipts.
+
+        FlowSteer routes only directed predecessor artifacts into an Agent.
+        SkillFlow advances one serialized WebShop episode through one
+        Action--Observation transition at a time.  This projection makes that
+        existing composition observable to the Director; it does not require
+        a predecessor, choose an Agent count, or prescribe a topology.
+        """
+
+        if not self._uses_atomic_stateful_execution_profile():
+            return None
+        owners = self._required_tool_actor_ids()
+        actor_id = owners[0] if len(owners) == 1 else None
+        result: dict[str, object] = {
+            "stateful_tool_id": self.required_tool_id,
+            "environment_actor_id": actor_id,
+            "agent_execution_capabilities": (
+                self.agent_execution_capabilities()
+            ),
+            "single_stateful_owner_required": True,
+            "reciprocal_environment_actor_relation_allowed": False,
+            "action_input_semantics": "incoming_directed_artifacts_only",
+            "tool_free_agent_environment_action_semantics": (
+                "produces_artifact_only"
+            ),
+            "incoming_artifacts_are_unverified": True,
+            "outgoing_relations_feed_environment_actor": False,
+            "continue_execution_scope": (
+                "environment_actor_and_directed_ancestors"
+            ),
+        }
+        if actor_id is None:
+            result.update(
+                {
+                    "declared_incoming_source_ids": [],
+                    "environment_actor_directed_ancestor_ids": [],
+                    "environment_actor_in_degree": 0,
+                    "tool_free_agent_ids": [],
+                    "tool_free_agent_ids_without_directed_path_to_environment_actor": [],
+                    "consumed_input_source_ids": [],
+                    "consumed_input_artifact_ids": [],
+                    "recent_action_observations": [],
+                }
+            )
+            return result
+
+        direct_predecessors = self._graph.directed_predecessors(actor_id)
+        directed_ancestors = self._directed_ancestor_ids(
+            self._graph,
+            actor_id,
+        )
+        tool_free_agent_ids = [
+            node.id for node in self._graph.nodes if node.id != actor_id
+        ]
+        result.update(
+            {
+                "declared_incoming_source_ids": list(direct_predecessors),
+                "environment_actor_directed_ancestor_ids": list(
+                    directed_ancestors
+                ),
+                "environment_actor_in_degree": len(direct_predecessors),
+                "tool_free_agent_ids": tool_free_agent_ids,
+                "tool_free_agent_ids_without_directed_path_to_environment_actor": [
+                    agent_id
+                    for agent_id in tool_free_agent_ids
+                    if agent_id not in directed_ancestors
+                ],
+            }
+        )
+        metadata: Mapping[str, object] = self._progressive_output_metadata.get(
+            actor_id,
+            {},
+        )
+        if not isinstance(metadata.get("environment_current_state"), Mapping):
+            metadata = self._previous_revision_output_metadata.get(actor_id, {})
+        if not isinstance(metadata.get("environment_current_state"), Mapping):
+            continuation = self._failure_continuations.get(actor_id, {})
+            if isinstance(continuation, Mapping):
+                metadata = continuation
+
+        raw_provenance = metadata.get("input_artifact_provenance", ())
+        provenance = (
+            [item for item in raw_provenance if isinstance(item, Mapping)]
+            if isinstance(raw_provenance, (list, tuple))
+            else []
+        )
+        result["consumed_input_source_ids"] = sorted(
+            {
+                str(item["source_agent_id"])
+                for item in provenance
+                if item.get("source_agent_id") is not None
+            }
+        )
+        result["consumed_input_artifact_ids"] = sorted(
+            {
+                str(item.get("artifact_id", item.get("artifact_version")))
+                for item in provenance
+                if item.get("artifact_id", item.get("artifact_version"))
+                is not None
+            }
+        )
+        result["consumed_input_artifacts"] = [
+            {
+                key: item[key]
+                for key in (
+                    "source_agent_id",
+                    "target_agent_id",
+                    "artifact_id",
+                    "artifact_version",
+                    "artifact_type",
+                    "message_type",
+                    "graph_revision",
+                    "environment_revision",
+                    "request_or_dependency",
+                )
+                if key in item
+            }
+            for item in provenance
+        ]
+        raw_receipts = metadata.get("environment_receipts", ())
+        receipts = (
+            [item for item in raw_receipts if isinstance(item, Mapping)]
+            if isinstance(raw_receipts, (list, tuple))
+            else []
+        )
+        public_receipt_fields = (
+            "turn",
+            "action",
+            "observation_status",
+            "state_advanced",
+            "terminal",
+            "truncated",
+            "environment_revision_before",
+            "environment_revision_after",
+        )
+        result["recent_action_observations"] = [
+            {
+                key: receipt[key]
+                for key in public_receipt_fields
+                if key in receipt
+            }
+            for receipt in receipts[-3:]
+        ]
+        public_state = self.public_environment_state()
+        if public_state is not None:
+            for key in (
+                "environment_revision",
+                "remaining_action_budget",
+                "environment_terminal",
+                "environment_truncated",
+                "observation_status",
+            ):
+                if key in public_state:
+                    result[key] = public_state[key]
+            progress = public_state.get("public_progress")
+            if isinstance(progress, Mapping):
+                no_progress = progress.get("no_progress")
+                if isinstance(no_progress, Mapping):
+                    result["no_progress"] = dict(no_progress)
+            rejected_pairs = public_state.get("rejected_state_action_pairs")
+            if isinstance(rejected_pairs, (list, tuple)) and rejected_pairs:
+                result["rejected_state_action_pairs"] = [
+                    dict(item)
+                    for item in rejected_pairs
+                    if isinstance(item, Mapping)
+                ]
+        tool_free_rejections = self._tool_free_action_output_rejections()
+        if tool_free_rejections:
+            result["tool_free_action_rejections"] = [
+                dict(item) for item in tool_free_rejections
+            ]
+        return result
+
+    def _runtime_problem_with_public_environment_state(self) -> str:
+        """Append the latest public state to every Agent execution input.
+
+        FlowSteer executes the accepted Canvas edit before returning feedback
+        to the Director.  SkillFlow conditions each following environment
+        action on the original task and latest public Action--Observation
+        state.  A stateful AgentGraph therefore needs the same read-only state
+        for tool-free predecessor Agents when they are re-executed.  The
+        execution-interface separator preserves the immutable benchmark goal
+        consumed by the environment adapter.
+        """
+
+        if not self._uses_atomic_stateful_execution_profile():
+            return self._problem
+        separator = "\n\nExecution interface:"
+        original_task = self.original_task_instruction
+        state = self.public_environment_state()
+        if state is None:
+            # The environment owner has not materialized the reset receipt
+            # yet.  Share only the immutable task at this initial execution;
+            # its adapter supplies the native action contract itself.
+            return original_task
+        public_state = dict(state)
+        # Avoid duplicating the complete problem inside its own runtime input;
+        # the immutable goal remains explicit in original_task_instruction.
+        public_state.pop("task_instruction", None)
+        payload = json.dumps(
+            public_state,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        suffix = (
+            "\nCurrent public environment state (read-only; latest "
+            "Action--Observation result):\n"
+            f"{payload}"
+        )
+        # The runner may already have attached an action-only interface for
+        # the WebShop environment owner.  That interface must not condition
+        # FlowSteer reasoning collaborators.  Rebuild their shared input from
+        # the immutable benchmark goal plus public state; the SkillFlow-derived
+        # environment adapter injects the native action schema only when it
+        # invokes the unique stateful owner.
+        return original_task + separator + suffix
+
+    def _partial_metadata_preserving_public_environment_state(
+        self,
+        metadata: Mapping[str, Mapping[str, object]],
+    ) -> dict[str, dict[str, object]]:
+        """Keep the last measured public state across an upstream failure.
+
+        A failed reasoning predecessor can stop a dirty execution plan before
+        the unique WebShop owner runs.  SkillFlow's serialized episode has not
+        changed in that case, so the last Action--Observation state remains
+        current.  Preserve only its metadata receipt; the prior owner output
+        stays absent and cannot be reused as a fresh artifact.
+        """
+
+        result = {
+            agent_id: dict(value)
+            for agent_id, value in metadata.items()
+        }
+        if not self._uses_atomic_stateful_execution_profile():
+            return result
+        owner_ids = self._required_tool_actor_ids()
+        if len(owner_ids) != 1:
+            return result
+        owner_id = owner_ids[0]
+        if owner_id in result:
+            return result
+        previous = self._progressive_output_metadata.get(owner_id)
+        if not isinstance(previous, Mapping) or not isinstance(
+            previous.get("environment_current_state"), Mapping
+        ):
+            previous = self._previous_revision_output_metadata.get(owner_id)
+        if not isinstance(previous, Mapping) or not isinstance(
+            previous.get("environment_current_state"), Mapping
+        ):
+            return result
+        result[owner_id] = dict(previous)
         return result
 
     def _stateful_no_progress_receipt(self) -> Optional[dict[str, object]]:
@@ -892,6 +1396,45 @@ class AgentWorkflowEnv:
         if type(remaining) is not int or remaining <= 0:
             return "the environment has no remaining action budget"
         return None
+
+    def _tool_free_action_output_repair_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Keep Canvas edits on a measured tool-capability violation."""
+
+        rejections = self._tool_free_action_output_rejections()
+        if not rejections:
+            return None
+        rejected_ids = {
+            str(item["agent_id"])
+            for item in rejections
+        }
+        mutable_fields = tuple(
+            field_name
+            for field_name in (
+                "model_id",
+                "contract",
+                "role_family",
+                "allowed_tools",
+                "execution_mode",
+                "artifact_type",
+                "completion_condition",
+            )
+            if getattr(action, field_name) is not None
+        )
+        if (
+            action.action_type is AgentActionType.MODIFY_AGENT
+            and action.agent_id in rejected_ids
+            and mutable_fields == ("contract",)
+        ):
+            return None
+        return (
+            "a tool-free Agent produced a measured Tool receipt without the "
+            "declared capability to execute it; repair only that Agent's contract "
+            "before another Canvas edit; responsible_agent_ids="
+            f"{sorted(rejected_ids)!r}"
+        )
 
     def _required_tool_capability_repair_domains(
         self,
@@ -1004,6 +1547,51 @@ class AgentWorkflowEnv:
             and self.runtime.dataset_id.casefold() == "webshop"
         )
 
+    def _initial_stateful_subgraph_profiles(
+        self,
+    ) -> Optional[
+        tuple[
+            tuple[str, tuple[str, ...]],
+            tuple[tuple[str, tuple[str, ...]], ...],
+        ]
+    ]:
+        """Return the executable profiles for one initial WebShop component.
+
+        SkillFlow binds one mutable WebShop episode to one serialized
+        Action--Observation actor.  FlowSteer's structure ADD may still create
+        that actor together with read-only collaborators in one transactional
+        Canvas edit.  The component is available only when the Runtime has one
+        exact owner profile, at least one non-owner profile, and capacity for
+        at least two Agents.  Contracts, models, relation direction and Output
+        ownership remain Director choices.
+        """
+
+        if (
+            not self._uses_atomic_stateful_execution_profile()
+            or self._graph.nodes
+            or self.required_tool_id is None
+            or self.max_agents_per_subgraph < 2
+            or (self.max_agents is not None and self.max_agents < 2)
+        ):
+            return None
+        registered = self.runtime.registered_execution_profiles()
+        owner_profile = ("react", (self.required_tool_id,))
+        if owner_profile not in registered:
+            return None
+        # The SkillFlow-derived WebShop adapter is registered under ``react``
+        # and owns the single mutable environment session. A tool-free
+        # ``react`` Agent would still be dispatched to that adapter and fail
+        # before producing an artifact, so read-only collaborators must use
+        # FlowSteer's ordinary reasoning executor.
+        auxiliary_profiles = tuple(
+            profile
+            for profile in registered
+            if profile == ("reasoning", ())
+        )
+        if not auxiliary_profiles:
+            return None
+        return owner_profile, auxiliary_profiles
+
     def _required_tool_profile_admission_issue(
         self,
         action: AgentAction,
@@ -1020,17 +1608,55 @@ class AgentWorkflowEnv:
             "allowed_tools": (self.required_tool_id,),
         }
         if not self._graph.nodes:
-            if action.action_type is not AgentActionType.ADD_AGENT:
-                return "the first stateful environment edit must add its Agent"
-            if (
-                action.execution_mode != expected_fields["execution_mode"]
-                or action.allowed_tools != expected_fields["allowed_tools"]
-            ):
-                return (
-                    "the stateful environment Agent must atomically declare "
-                    "execution_mode='react' and the exact required Tool"
+            if action.action_type is AgentActionType.ADD_AGENT:
+                if (
+                    action.execution_mode != expected_fields["execution_mode"]
+                    or action.allowed_tools != expected_fields["allowed_tools"]
+                ):
+                    return (
+                        "the stateful environment Agent must atomically declare "
+                        "execution_mode='react' and the exact required Tool"
+                    )
+                return None
+            if action.action_type is AgentActionType.ADD_SUBGRAPH:
+                profiles = self._initial_stateful_subgraph_profiles()
+                if profiles is None:
+                    return (
+                        "the initial stateful component has no registered "
+                        "owner/auxiliary execution-profile domain"
+                    )
+                owner_profile, auxiliary_profiles = profiles
+                if len(action.agents) < 2:
+                    return (
+                        "the initial stateful add_subgraph must contain the "
+                        "Tool owner and at least one collaborator"
+                    )
+                declared_profiles = tuple(
+                    (
+                        spec.execution_mode,
+                        () if spec.allowed_tools is None else spec.allowed_tools,
+                    )
+                    for spec in action.agents
                 )
-            return None
+                if declared_profiles.count(owner_profile) != 1:
+                    return (
+                        "the initial stateful add_subgraph must declare exactly "
+                        "one registered WebShop Tool owner"
+                    )
+                if any(
+                    profile != owner_profile
+                    and profile not in auxiliary_profiles
+                    for profile in declared_profiles
+                ):
+                    return (
+                        "every non-owner Agent in the initial stateful "
+                        "add_subgraph must use a registered non-owner profile"
+                    )
+                return None
+            return (
+                "the first stateful environment edit must add its Tool owner "
+                "alone or inside one executable subgraph"
+            )
 
         repairs = self._required_tool_capability_repair_domains()
         if not repairs:
@@ -1076,17 +1702,39 @@ class AgentWorkflowEnv:
         if not self._uses_atomic_stateful_execution_profile():
             return None
         assert self.required_tool_id is not None
-        owner_ids = tuple(
+        if not graph.nodes:
+            return None
+        exact_owner_ids = tuple(
             node.id
             for node in graph.nodes
-            if self.required_tool_id in node.allowed_tools
+            if node.execution_mode.value == "react"
+            and node.allowed_tools == (self.required_tool_id,)
         )
-        if len(owner_ids) != 1:
+        if len(exact_owner_ids) != 1:
             return (
                 f"stateful Tool {self.required_tool_id!r} requires exactly one "
-                f"Agent owner; candidate graph has {len(owner_ids)}"
+                "Agent with execution_mode='react' and the exact singleton "
+                f"Tool profile; candidate graph has {len(exact_owner_ids)}"
             )
-        owner_id = owner_ids[0]
+        owner_id = exact_owner_ids[0]
+        incompatible_auxiliary_agents = tuple(
+            node.id
+            for node in graph.nodes
+            if node.id != owner_id
+            and (
+                node.allowed_tools
+                or node.execution_mode.value != "reasoning"
+            )
+        )
+        if incompatible_auxiliary_agents:
+            return (
+                "stateful WebShop auxiliary Agents must use the registered "
+                "tool-free reasoning profile; incompatible profiles found on "
+                + ", ".join(
+                    repr(agent_id)
+                    for agent_id in incompatible_auxiliary_agents
+                )
+            )
         for relation in graph.relations:
             if (
                 relation.bits.is_bidirectional
@@ -1108,6 +1756,55 @@ class AgentWorkflowEnv:
         """
 
         finish_admitted = self.finish_admissibility().get("admissible") is True
+        public_environment_state = self.public_environment_state()
+        if (
+            public_environment_state is not None
+            and public_environment_state.get("environment_terminal") is True
+        ):
+            # The simulator terminal transition is authoritative.  No later
+            # Canvas edit may mutate the graph and accidentally invalidate or
+            # re-execute its terminal artifact.  If that artifact is not a
+            # legal FINISH submission, fail closed with an empty domain.
+            if (
+                finish_admitted
+                and AgentActionType.FINISH.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.FINISH.value,)
+            if (
+                self._model_admissible_output_agent_ids()
+                and AgentActionType.SET_OUTPUT.value
+                in self._allowed_action_type_set
+            ):
+                # SET_OUTPUT changes only the pointer to an already
+                # materialized artifact and does not execute the graph.  This
+                # is the sole safe terminal repair when the environment
+                # finished before the Director selected an Output Agent.
+                return (AgentActionType.SET_OUTPUT.value,)
+            return ()
+        if (
+            public_environment_state is not None
+            and (
+                public_environment_state.get("environment_truncated") is True
+                or public_environment_state.get("remaining_action_budget") == 0
+            )
+        ):
+            # SkillFlow evaluates the serialized WebShop episode at terminal
+            # state or the fixed action-budget boundary.  FlowSteer's explicit
+            # FINISH still records the AgentGraph terminal result, but no
+            # further Canvas edit can advance that environment state.
+            if (
+                finish_admitted
+                and AgentActionType.FINISH.value in self._allowed_action_type_set
+            ):
+                return (AgentActionType.FINISH.value,)
+            if (
+                self._model_admissible_output_agent_ids()
+                and AgentActionType.SET_OUTPUT.value
+                in self._allowed_action_type_set
+            ):
+                return (AgentActionType.SET_OUTPUT.value,)
+            return ()
         if (
             self._uses_semantic_lineage_protocol()
             and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
@@ -1142,16 +1839,41 @@ class AgentWorkflowEnv:
             if not required_profile_registered:
                 return ()
             if not self._graph.nodes:
-                if (
-                    AgentActionType.ADD_AGENT.value
-                    in self._allowed_action_type_set
-                ):
-                    return (AgentActionType.ADD_AGENT.value,)
-                return ()
+                admitted_initial_actions: list[str] = []
+                for action_type in self.allowed_action_types:
+                    if (
+                        action_type == AgentActionType.ADD_AGENT.value
+                        and action_type in self._allowed_action_type_set
+                    ):
+                        admitted_initial_actions.append(action_type)
+                    elif (
+                        action_type == AgentActionType.ADD_SUBGRAPH.value
+                        and self._initial_stateful_subgraph_profiles() is not None
+                    ):
+                        admitted_initial_actions.append(action_type)
+                return tuple(admitted_initial_actions)
             if (
                 self._required_tool_capability_repair_domains()
                 and AgentActionType.MODIFY_AGENT.value
                 in self._allowed_action_type_set
+            ):
+                return (AgentActionType.MODIFY_AGENT.value,)
+            return ()
+
+        tool_free_action_rejections = (
+            self._tool_free_action_output_rejections()
+        )
+        if tool_free_action_rejections:
+            rejected_ids = {
+                str(item["agent_id"])
+                for item in tool_free_action_rejections
+            }
+            if (
+                AgentActionType.MODIFY_AGENT.value
+                in self._allowed_action_type_set
+                and rejected_ids.intersection(
+                    self._model_admissible_modify_agent_ids()
+                )
             ):
                 return (AgentActionType.MODIFY_AGENT.value,)
             return ()
@@ -1211,7 +1933,7 @@ class AgentWorkflowEnv:
                 "repeated_state_action_count", 0
             )
             augmentation_admitted = (
-                type(repeated_count) is int and repeated_count >= 3
+                type(repeated_count) is int and repeated_count >= 2
             )
             admitted_no_progress: list[str] = []
             for action_type in self.allowed_action_types:
@@ -2385,6 +3107,16 @@ class AgentWorkflowEnv:
         """Exclude an already verified semantic lineage from repair targets."""
 
         node_ids = tuple(node.id for node in self._graph.nodes)
+        tool_free_action_rejection_ids = {
+            str(item["agent_id"])
+            for item in self._tool_free_action_output_rejections()
+        }
+        if tool_free_action_rejection_ids:
+            return tuple(
+                node_id
+                for node_id in node_ids
+                if node_id in tool_free_action_rejection_ids
+            )
         capability_repairs = self._required_tool_capability_repair_domains()
         if self.required_tool_issue() is not None and capability_repairs:
             return tuple(
@@ -3745,6 +4477,29 @@ class AgentWorkflowEnv:
                 ),
             }
         if AgentActionType.ADD_SUBGRAPH.value in admitted:
+            initial_stateful_profiles = (
+                self._initial_stateful_subgraph_profiles()
+            )
+            registered_subgraph_profiles = (
+                self.runtime.registered_execution_profiles()
+            )
+            stateful_owner_ids = self._required_tool_actor_ids()
+            if self._uses_atomic_stateful_execution_profile():
+                if initial_stateful_profiles is not None:
+                    owner_profile, auxiliary_profiles = initial_stateful_profiles
+                    registered_subgraph_profiles = (
+                        owner_profile,
+                        *auxiliary_profiles,
+                    )
+                elif len(stateful_owner_ids) == 1:
+                    # The mutable WebShop episode already has its sole owner.
+                    # Subsequent structure ADD actions may introduce only
+                    # non-owner collaborators.
+                    registered_subgraph_profiles = tuple(
+                        profile
+                        for profile in registered_subgraph_profiles
+                        if profile == ("reasoning", ())
+                    )
             remaining = (
                 self.max_agents_per_subgraph
                 if self.max_agents is None
@@ -3769,7 +4524,9 @@ class AgentWorkflowEnv:
                 # schema on the same one-Agent boundary enforced by admission.
                 remaining = min(remaining, 1)
             targets[AgentActionType.ADD_SUBGRAPH.value] = {
-                "min_new_agents": 1,
+                "min_new_agents": (
+                    2 if initial_stateful_profiles is not None else 1
+                ),
                 "max_new_agents": remaining,
                 "existing_agent_ids": node_ids,
                 "model_ids": list(self._available_model_ids()),
@@ -3777,21 +4534,34 @@ class AgentWorkflowEnv:
                     "agent_id",
                     "model_id",
                     "contract",
+                    *(
+                        ["execution_mode", "allowed_tools"]
+                        if self._uses_atomic_stateful_execution_profile()
+                        else []
+                    ),
                 ],
-                "optional_agent_fields": [
-                    "role_family",
-                    "allowed_tools",
-                    "execution_mode",
-                    "artifact_type",
-                    "completion_condition",
-                ],
+                "optional_agent_fields": (
+                    [
+                        "role_family",
+                        "artifact_type",
+                        "completion_condition",
+                    ]
+                    if self._uses_atomic_stateful_execution_profile()
+                    else [
+                        "role_family",
+                        "allowed_tools",
+                        "execution_mode",
+                        "artifact_type",
+                        "completion_condition",
+                    ]
+                ),
                 "registered_execution_profiles": [
                     {
                         "execution_mode": execution_mode,
                         "allowed_tools": list(allowed_tools),
                     }
                     for execution_mode, allowed_tools in (
-                        self.runtime.registered_execution_profiles()
+                        registered_subgraph_profiles
                     )
                 ],
                 "endpoint_scope": {
@@ -3804,6 +4574,52 @@ class AgentWorkflowEnv:
                         "same_action_agent_ids",
                     ],
                 },
+                **(
+                    {
+                        "stateful_execution_semantics": {
+                            "action_input_semantics": (
+                                "incoming_directed_artifacts_only"
+                            ),
+                            "tool_free_agent_environment_action_semantics": (
+                                "produces_artifact_only"
+                            ),
+                        }
+                    }
+                    if self._uses_atomic_stateful_execution_profile()
+                    else {}
+                ),
+                **(
+                    {
+                        "stateful_tool_owner": {
+                            "tool_id": self.required_tool_id,
+                            "required_count": 1,
+                            "owner_execution_profile": {
+                                "execution_mode": initial_stateful_profiles[0][0],
+                                "allowed_tools": list(
+                                    initial_stateful_profiles[0][1]
+                                ),
+                            },
+                            "auxiliary_execution_profiles": [
+                                {
+                                    "execution_mode": execution_mode,
+                                    "allowed_tools": list(allowed_tools),
+                                }
+                                for execution_mode, allowed_tools in (
+                                    initial_stateful_profiles[1]
+                                )
+                            ],
+                        }
+                    }
+                    if initial_stateful_profiles is not None
+                    else {
+                        "stateful_tool_owner_agent_id": stateful_owner_ids[0]
+                    }
+                    if (
+                        self._uses_atomic_stateful_execution_profile()
+                        and len(stateful_owner_ids) == 1
+                    )
+                    else {}
+                ),
                 **(
                     {
                         "semantic_protocol": self.semantic_protocol,
@@ -4018,6 +4834,10 @@ class AgentWorkflowEnv:
             }
         if AgentActionType.MODIFY_AGENT.value in admitted:
             modifiable_node_ids = list(self._model_admissible_modify_agent_ids())
+            tool_free_action_rejection_ids = {
+                str(item["agent_id"])
+                for item in self._tool_free_action_output_rejections()
+            }
             stateful_no_progress = self._stateful_no_progress_receipt()
             no_progress_actor_id = (
                 stateful_no_progress.get("environment_actor_id")
@@ -4035,7 +4855,9 @@ class AgentWorkflowEnv:
                 if self.required_tool_issue() is not None
                 else {}
             )
-            if capability_repairs:
+            if tool_free_action_rejection_ids:
+                base_mutable_fields = ["contract"]
+            elif capability_repairs:
                 base_mutable_fields = (
                     ["execution_profile"]
                     if self._uses_atomic_stateful_execution_profile()
@@ -4130,6 +4952,8 @@ class AgentWorkflowEnv:
                         if agent_id in capability_repairs
                         else ["model_id"]
                         if agent_id in provider_failure_agent_ids
+                        else ["contract"]
+                        if agent_id in tool_free_action_rejection_ids
                         else ["contract"]
                         if agent_id == no_progress_actor_id
                         else list(
@@ -4286,11 +5110,27 @@ class AgentWorkflowEnv:
                 ]
             }
         if AgentActionType.SET_RELATION.value in admitted:
+            relation_candidates = self._model_admissible_relation_candidates()
             targets[AgentActionType.SET_RELATION.value] = {
                 "source_agent_ids": node_ids,
                 "target_agent_ids": node_ids,
                 "endpoints_must_differ": True,
-                "candidates": self._model_admissible_relation_candidates(),
+                "candidates": relation_candidates,
+                **(
+                    {
+                        "stateful_environment_actor_id": (
+                            self._required_tool_actor_ids()[0]
+                        ),
+                        "stateful_action_input_semantics": (
+                            "incoming_directed_artifacts_only"
+                        ),
+                    }
+                    if (
+                        self._uses_atomic_stateful_execution_profile()
+                        and len(self._required_tool_actor_ids()) == 1
+                    )
+                    else {}
+                ),
             }
         if AgentActionType.SET_OUTPUT.value in admitted:
             targets[AgentActionType.SET_OUTPUT.value] = {
@@ -4337,6 +5177,9 @@ class AgentWorkflowEnv:
         semantic_edit_issue = self._semantic_edit_issue_for(candidate)
         if semantic_edit_issue is not None:
             raise AgentWorkflowStateError(semantic_edit_issue)
+        stateful_issue = self._stateful_candidate_admission_issue(candidate)
+        if stateful_issue is not None:
+            raise AgentWorkflowStateError(stateful_issue)
         self._problem = problem.strip()
         self._graph = candidate
         self._turn_count = 0
@@ -4373,6 +5216,9 @@ class AgentWorkflowEnv:
         semantic_edit_issue = self._semantic_edit_issue_for(graph)
         if semantic_edit_issue is not None:
             raise AgentWorkflowStateError(semantic_edit_issue)
+        stateful_issue = self._stateful_candidate_admission_issue(graph)
+        if stateful_issue is not None:
+            raise AgentWorkflowStateError(stateful_issue)
         self._problem = snapshot.problem
         self._graph = graph
         self._turn_count = snapshot.turn_count
@@ -4416,6 +5262,12 @@ class AgentWorkflowEnv:
             return self._reject(None, "workflow already finished")
         if not self._problem:
             return self._reject(None, "environment has no active problem")
+        stateful_issue = self._stateful_candidate_admission_issue(self._graph)
+        if stateful_issue is not None:
+            return self._reject(
+                None,
+                "stateful AgentGraph invariant violated: " + stateful_issue,
+            )
         try:
             action = (
                 self.parser.parse(action_or_response)
@@ -4428,6 +5280,20 @@ class AgentWorkflowEnv:
             return self._reject(None, "action must be AgentAction or JSON text")
 
         self._turn_count += 1
+        public_environment_state = self.public_environment_state()
+        if (
+            public_environment_state is not None
+            and public_environment_state.get("environment_terminal") is True
+            and action.action_type
+            not in {AgentActionType.FINISH, AgentActionType.SET_OUTPUT}
+        ):
+            return self._reject_after_count(
+                action,
+                "action rejected: environment terminal state freezes the "
+                "AgentGraph and environment; only a legal FINISH may consume "
+                "the preserved terminal artifact",
+                feedback_code="environment_terminal_graph_frozen",
+            )
         if self._is_repeated_rejected_action(action):
             return self._reject_after_count(
                 action,
@@ -4440,6 +5306,15 @@ class AgentWorkflowEnv:
                 action,
                 "action rejected: action type is outside the configured Canvas "
                 f"action set {list(self.allowed_action_types)!r}",
+            )
+        tool_free_action_issue = self._tool_free_action_output_repair_issue(
+            action
+        )
+        if tool_free_action_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + tool_free_action_issue,
+                feedback_code="tool_free_action_output_rejected",
             )
         required_tool_profile_issue = (
             self._required_tool_profile_admission_issue(action)
@@ -4498,7 +5373,16 @@ class AgentWorkflowEnv:
                 )
             actor_id = self._required_tool_actor_ids()[0]
             current_agent_ids = {node.id for node in self._graph.nodes}
-            dirty_agents = self._graph.dirty_closure({actor_id})
+            # Re-execute the stateless routed predecessor component against
+            # the latest public environment state, then execute the unique
+            # stateful owner exactly once.  This is FlowSteer's progressive
+            # execute-after-edit semantics around SkillFlow's serial session;
+            # it does not permit a second Agent to mutate the environment.
+            stateful_component = {
+                actor_id,
+                *self._directed_ancestor_ids(self._graph, actor_id),
+            }
+            dirty_agents = self._graph.dirty_closure(stateful_component)
             self._progressive_execution = None
             self._progressive_execution_revision = None
             self._unresolved_dirty_agents.update(dirty_agents)
@@ -4508,7 +5392,7 @@ class AgentWorkflowEnv:
             try:
                 execution = await self.runtime.execute(
                     self._graph,
-                    self._problem,
+                    self._runtime_problem_with_public_environment_state(),
                     require_complete=False,
                     prior_outputs=self._progressive_outputs,
                     prior_output_metadata=self._progressive_output_metadata,
@@ -4522,12 +5406,11 @@ class AgentWorkflowEnv:
                 partial_execution = exc.partial_result
                 if partial_execution is not None:
                     self._progressive_outputs = dict(partial_execution.outputs)
-                    self._progressive_output_metadata = {
-                        agent_id: dict(metadata)
-                        for agent_id, metadata in (
-                            partial_execution.output_metadata.items()
+                    self._progressive_output_metadata = (
+                        self._partial_metadata_preserving_public_environment_state(
+                            partial_execution.output_metadata
                         )
-                    }
+                    )
                     self._unresolved_dirty_agents = (
                         current_agent_ids - set(partial_execution.outputs)
                     )
@@ -4619,7 +5502,7 @@ class AgentWorkflowEnv:
                 try:
                     execution = await self.runtime.execute(
                         self._graph,
-                        self._problem,
+                        self._runtime_problem_with_public_environment_state(),
                         prior_outputs=self._progressive_outputs,
                         prior_output_metadata=self._progressive_output_metadata,
                         prior_failure_metadata=self._failure_continuations,
@@ -4629,12 +5512,11 @@ class AgentWorkflowEnv:
                 except AgentRuntimeError as exc:
                     if exc.partial_result is not None:
                         self._progressive_outputs = dict(exc.partial_result.outputs)
-                        self._progressive_output_metadata = {
-                            agent_id: dict(metadata)
-                            for agent_id, metadata in (
-                                exc.partial_result.output_metadata.items()
+                        self._progressive_output_metadata = (
+                            self._partial_metadata_preserving_public_environment_state(
+                                exc.partial_result.output_metadata
                             )
-                        }
+                        )
                     current_agent_ids = {node.id for node in self._graph.nodes}
                     completed_agent_ids = (
                         set()
@@ -4892,7 +5774,7 @@ class AgentWorkflowEnv:
                     )
                     execution = await self.runtime.execute(
                         execution_graph,
-                        self._problem,
+                        self._runtime_problem_with_public_environment_state(),
                         require_complete=False,
                         prior_outputs=prior_outputs,
                         prior_output_metadata=prior_output_metadata,
@@ -4926,7 +5808,11 @@ class AgentWorkflowEnv:
                             )
                         else:
                             self._progressive_outputs = partial_outputs
-                            self._progressive_output_metadata = partial_metadata
+                            self._progressive_output_metadata = (
+                                self._partial_metadata_preserving_public_environment_state(
+                                    partial_metadata
+                                )
+                            )
                         self._unresolved_dirty_agents.difference_update(
                             partial_execution.outputs
                             if self.recovery_policy
@@ -5094,20 +5980,37 @@ class AgentWorkflowEnv:
             if call.request.agent.id == execution.output_agent_id
         ]
         output_request = output_calls[-1].request if output_calls else None
-        provenance_items: list[Mapping[str, object]] = []
-        if output_request is not None:
-            provenance_items = [
-                message.to_dict() for message in output_request.upstream
-            ]
-        elif execution.output_agent_id is not None:
-            raw_provenance = execution.output_metadata.get(
-                execution.output_agent_id,
-                {},
-            ).get("input_artifact_provenance", ())
+        calls_by_agent = {
+            call.request.agent.id: call for call in execution.calls
+        }
+        tool_free_action_rejections = {
+            str(item["agent_id"]): dict(item)
+            for item in self._tool_free_action_output_rejections()
+        }
+
+        def provenance_for_agent(
+            agent_id: Optional[str],
+        ) -> list[Mapping[str, object]]:
+            if agent_id is None:
+                return []
+            call = calls_by_agent.get(agent_id)
+            if call is not None:
+                return [message.to_dict() for message in call.request.upstream]
+            raw_provenance = execution.output_metadata.get(agent_id, {}).get(
+                "input_artifact_provenance",
+                (),
+            )
             if isinstance(raw_provenance, (list, tuple)):
-                provenance_items = [
+                return [
                     item for item in raw_provenance if isinstance(item, Mapping)
                 ]
+            return []
+
+        provenance_items = (
+            [message.to_dict() for message in output_request.upstream]
+            if output_request is not None
+            else provenance_for_agent(execution.output_agent_id)
+        )
 
         output_inbox = []
         candidate_observations = []
@@ -5181,12 +6084,70 @@ class AgentWorkflowEnv:
                 if item.get("candidate") is not None
             }
         ) > 1
-        calls_by_agent = {
-            call.request.agent.id: call for call in execution.calls
-        }
+        environment_actor_inbox = []
+        environment_actor_id = None
+        environment_actor_ids = self._required_tool_actor_ids()
+        if len(environment_actor_ids) == 1:
+            environment_actor_id = environment_actor_ids[0]
+            environment_actor_provenance = provenance_for_agent(
+                environment_actor_id
+            )
+            for item in environment_actor_provenance:
+                raw_output = item.get(
+                    "raw_output",
+                    item.get(
+                        "artifact_body",
+                        item.get("artifact", item.get("content")),
+                    ),
+                )
+                if not isinstance(raw_output, str):
+                    continue
+                content_preview = " ".join(raw_output.split())
+                if len(content_preview) > 160:
+                    content_preview = content_preview[:157] + "..."
+                raw_tool_receipts = item.get("tool_receipts", ())
+                tool_receipts = (
+                    [
+                        receipt
+                        for receipt in raw_tool_receipts
+                        if isinstance(receipt, Mapping)
+                    ]
+                    if isinstance(raw_tool_receipts, (list, tuple))
+                    else []
+                )
+                environment_actor_inbox.append(
+                    {
+                        "source_agent_id": item.get("source_agent_id"),
+                        "target_agent_id": item.get("target_agent_id"),
+                        "artifact_id": item.get(
+                            "artifact_id", item.get("artifact_version")
+                        ),
+                        "raw_output": raw_output,
+                        "message_type": item.get("message_type"),
+                        "artifact_type": item.get("artifact_type"),
+                        "graph_revision": item.get("graph_revision"),
+                        "environment_revision": item.get(
+                            "environment_revision"
+                        ),
+                        "request_or_dependency": item.get(
+                            "request_or_dependency",
+                            item.get("dependency"),
+                        ),
+                        "tool_receipt_count": len(tool_receipts),
+                        "tool_ids": sorted(
+                            {
+                                str(receipt.get("tool_id"))
+                                for receipt in tool_receipts
+                                if receipt.get("tool_id") is not None
+                            }
+                        ),
+                        "content_preview": content_preview,
+                    }
+                )
         agent_artifacts = []
         for agent_id, artifact in sorted(execution.outputs.items()):
             call = calls_by_agent.get(agent_id)
+            artifact_provenance = provenance_for_agent(agent_id)
             preview = " ".join(artifact.split())
             if len(preview) > 160:
                 preview = preview[:157] + "..."
@@ -5212,9 +6173,11 @@ class AgentWorkflowEnv:
                     ),
                     "is_output_agent": agent_id == execution.output_agent_id,
                     "upstream_source_ids": (
-                        []
-                        if call is None
-                        else [item.source_agent_id for item in call.request.upstream]
+                        [
+                            str(item["source_agent_id"])
+                            for item in artifact_provenance
+                            if item.get("source_agent_id") is not None
+                        ]
                     ),
                     "artifact_id": execution.output_metadata.get(
                         agent_id,
@@ -5226,6 +6189,12 @@ class AgentWorkflowEnv:
                         ),
                     ),
                     "artifact_preview": preview,
+                    "can_advance_environment": (
+                        agent_id in environment_actor_ids
+                    ),
+                    "tool_action_output_rejected": (
+                        agent_id in tool_free_action_rejections
+                    ),
                 }
             )
         result = json.dumps(
@@ -5244,6 +6213,11 @@ class AgentWorkflowEnv:
                 "candidate_conflict": candidate_conflict,
                 "candidate_observations": candidate_observations,
                 "agent_artifacts": agent_artifacts,
+                "environment_actor_id": environment_actor_id,
+                "environment_actor_inbox": environment_actor_inbox,
+                "tool_free_action_rejections": list(
+                    tool_free_action_rejections.values()
+                ),
                 **(
                     {"environment_state": environment_state}
                     if (environment_state := self.public_environment_state())
@@ -10891,11 +11865,14 @@ class AgentWorkflowEnv:
     async def execute(self, *, run_id: Optional[str] = None) -> AgentRuntimeResult:
         if not self._problem:
             raise AgentWorkflowStateError("environment has no active problem")
+        stateful_issue = self._stateful_candidate_admission_issue(self._graph)
+        if stateful_issue is not None:
+            raise AgentWorkflowStateError(stateful_issue)
         validation = self._graph.validate(self.model_registry, require_complete=True)
         validation.raise_if_invalid()
         return await self.runtime.execute(
             self._graph,
-            self._problem,
+            self._runtime_problem_with_public_environment_state(),
             run_id=run_id,
             prior_failure_metadata=self._failure_continuations,
             unavailable_model_ids=self._unavailable_model_ids,

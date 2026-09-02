@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import unittest
+from unittest.mock import patch
 
 from src.interactive.agent_graph import AgentGraph, AgentNode
-from src.interactive.agent_runtime import AgentRequest, AgentRuntime
-from src.interactive.agent_workflow_env import AgentWorkflowEnv
+from src.interactive.agent_runtime import AgentRequest, AgentResponse, AgentRuntime
+from src.interactive.agent_workflow_env import (
+    AgentWorkflowEnv,
+    AgentWorkflowStateError,
+)
+from src.interactive.director import (
+    director_live_action_parameter_json_schema_text,
+    director_live_add_subgraph_agent_declarations_json_schema_text,
+    director_live_stateful_add_subgraph_relation_candidates,
+)
 from src.interactive.model_registry import ModelRegistry, ModelSpec, ProviderSpec
 from test_environment_execution import (
     FakeSession,
@@ -55,6 +65,1261 @@ class _WebShopSession(FakeSession):
 
 
 class WebShopMultiAgentSubgraphTests(unittest.IsolatedAsyncioTestCase):
+    def test_stateful_execution_projects_incoming_artifact_and_relation_effects(
+        self,
+    ) -> None:
+        session = _WebShopSession()
+        gateway = SequenceGateway([])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "environment_owner",
+                    "m",
+                    "Take one public environment action.",
+                    execution_mode="react",
+                    allowed_tools=(environment.tool_id,),
+                ),
+                AgentNode(
+                    "auxiliary",
+                    "m",
+                    "Produce an evidence artifact from public state.",
+                ),
+            ],
+            output_agent_id="environment_owner",
+        )
+        graph.set_relation("auxiliary", "environment_owner", True, False)
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            graph=graph,
+            problem="Buy a blue steel table.",
+            required_tool_id=environment.tool_id,
+            allowed_actions=("set_relation", "continue", "finish"),
+            max_agents=3,
+            max_agents_per_subgraph=2,
+        )
+        canvas._progressive_output_metadata["environment_owner"] = {
+            "input_artifact_provenance": [
+                {
+                    "source_agent_id": "auxiliary",
+                    "target_agent_id": "environment_owner",
+                    "artifact_id": "artifact-1",
+                    "artifact_type": "text",
+                }
+            ],
+            "environment_receipts": [
+                {
+                    "turn": 1,
+                    "action": "search[blue steel table]",
+                    "observation_status": "success",
+                    "state_advanced": True,
+                    "terminal": False,
+                    "reward": 0.75,
+                    "info": {"hidden": True},
+                }
+            ],
+            "environment_current_state": {
+                "task_family": "webshop",
+                "environment_revision": 1,
+                "remaining_action_budget": 3,
+                "environment_terminal": False,
+                "environment_truncated": False,
+                "observation_status": "success",
+            },
+        }
+
+        projected = canvas.stateful_execution_state()
+        assert projected is not None
+        self.assertEqual(
+            ["auxiliary"], projected["declared_incoming_source_ids"]
+        )
+        self.assertEqual(
+            ["auxiliary"], projected["consumed_input_source_ids"]
+        )
+        self.assertEqual(
+            ["auxiliary"],
+            projected["environment_actor_directed_ancestor_ids"],
+        )
+        self.assertEqual(1, projected["environment_actor_in_degree"])
+        self.assertEqual(
+            [],
+            projected[
+                "tool_free_agent_ids_without_directed_path_to_environment_actor"
+            ],
+        )
+        self.assertEqual(
+            ["artifact-1"], projected["consumed_input_artifact_ids"]
+        )
+        self.assertNotIn(
+            "reward", projected["recent_action_observations"][0]
+        )
+        self.assertNotIn("info", projected["recent_action_observations"][0])
+
+        relation_domain = canvas.model_admissible_action_targets()[
+            "set_relation"
+        ]
+        self.assertEqual(
+            "environment_owner",
+            relation_domain["stateful_environment_actor_id"],
+        )
+        self.assertEqual(
+            "incoming_directed_artifacts_only",
+            relation_domain["stateful_action_input_semantics"],
+        )
+        self.assertNotIn("relation_execution_effects", relation_domain)
+
+    def test_stateful_auxiliary_profiles_are_strictly_tool_free(self) -> None:
+        session = _WebShopSession()
+        gateway = SequenceGateway([])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="Buy a blue steel table.",
+            required_tool_id=environment.tool_id,
+            allowed_actions=("add_agent", "add_subgraph", "finish"),
+            max_agents=3,
+            max_agents_per_subgraph=3,
+        )
+        registered = (
+            ("reasoning", ()),
+            ("react", ()),
+            ("react", (environment.tool_id,)),
+            ("react", ("webshop.catalog.read",)),
+        )
+
+        with patch.object(
+            runtime,
+            "registered_execution_profiles",
+            return_value=registered,
+        ):
+            domain = canvas.model_admissible_action_targets()["add_subgraph"]
+
+        self.assertEqual(
+            [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+            ],
+            sorted(
+                domain["stateful_tool_owner"][
+                    "auxiliary_execution_profiles"
+                ],
+                key=lambda item: item["execution_mode"],
+                reverse=True,
+            ),
+        )
+        self.assertNotIn(
+            ["webshop.catalog.read"],
+            [
+                item["allowed_tools"]
+                for item in domain["registered_execution_profiles"]
+            ],
+        )
+
+    async def test_tool_free_react_auxiliary_is_rejected_before_execution(
+        self,
+    ) -> None:
+        session = _WebShopSession()
+        gateway = SequenceGateway([])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "environment_owner",
+                    "m",
+                    "Take one WebShop action.",
+                    execution_mode="react",
+                    allowed_tools=(environment.tool_id,),
+                ),
+                AgentNode(
+                    "auxiliary",
+                    "m",
+                    "Analyze the public observation.",
+                    execution_mode="react",
+                ),
+            ],
+            output_agent_id="environment_owner",
+        )
+
+        with self.assertRaisesRegex(
+            AgentWorkflowStateError,
+            "tool-free reasoning profile",
+        ):
+            AgentWorkflowEnv(
+                registry,
+                runtime=runtime,
+                graph=graph,
+                problem="Buy a blue steel table.",
+                required_tool_id=environment.tool_id,
+            )
+
+    def test_constructor_and_restore_reject_invalid_stateful_profile(
+        self,
+    ) -> None:
+        session = _WebShopSession()
+        gateway = SequenceGateway([])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        invalid_graph = AgentGraph(
+            [
+                AgentNode(
+                    "invalid_owner",
+                    "m",
+                    "Take one WebShop action.",
+                    execution_mode="reasoning",
+                    allowed_tools=(environment.tool_id,),
+                )
+            ],
+            output_agent_id="invalid_owner",
+        )
+        with self.assertRaisesRegex(
+            AgentWorkflowStateError,
+            "exactly one Agent with execution_mode='react'",
+        ):
+            AgentWorkflowEnv(
+                registry,
+                runtime=runtime,
+                graph=invalid_graph,
+                problem="Buy a blue steel table.",
+                required_tool_id=environment.tool_id,
+            )
+
+        valid_graph = AgentGraph(
+            [
+                AgentNode(
+                    "environment_owner",
+                    "m",
+                    "Take one WebShop action.",
+                    execution_mode="react",
+                    allowed_tools=(environment.tool_id,),
+                )
+            ],
+            output_agent_id="environment_owner",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            graph=valid_graph,
+            problem="Buy a blue steel table.",
+            required_tool_id=environment.tool_id,
+        )
+        invalid_snapshot = replace(
+            canvas.snapshot(),
+            graph=invalid_graph.snapshot(),
+        )
+        with self.assertRaisesRegex(
+            AgentWorkflowStateError,
+            "exactly one Agent with execution_mode='react'",
+        ):
+            canvas.restore(invalid_snapshot)
+
+    async def test_raw_owner_profile_mutation_is_rejected_before_execution(
+        self,
+    ) -> None:
+        session = _WebShopSession()
+        gateway = SequenceGateway([])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "environment_owner",
+                    "m",
+                    "Take one WebShop action.",
+                    execution_mode="react",
+                    allowed_tools=(environment.tool_id,),
+                )
+            ],
+            output_agent_id="environment_owner",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            graph=graph,
+            problem="Buy a blue steel table.",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=("modify_agent", "finish"),
+        )
+        baseline_revision = canvas.graph.revision
+
+        result = await canvas.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "environment_owner",
+                    "execution_mode": "reasoning",
+                }
+            )
+        )
+
+        self.assertFalse(result.accepted)
+        self.assertIn("exactly one Agent with execution_mode='react'", result.feedback)
+        self.assertEqual(baseline_revision, canvas.graph.revision)
+        self.assertEqual([], session.actions)
+
+    async def test_out_of_band_invalid_graph_is_rejected_before_step(
+        self,
+    ) -> None:
+        session = _WebShopSession()
+        gateway = SequenceGateway([])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "environment_owner",
+                    "m",
+                    "Take one WebShop action.",
+                    execution_mode="react",
+                    allowed_tools=(environment.tool_id,),
+                )
+            ],
+            output_agent_id="environment_owner",
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            graph=graph,
+            problem="Buy a blue steel table.",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=("finish",),
+        )
+        canvas.graph.add_agent(
+            AgentNode(
+                "second_owner",
+                "m",
+                "Take another WebShop action.",
+                execution_mode="react",
+                allowed_tools=(environment.tool_id,),
+            )
+        )
+
+        result = await canvas.step(json.dumps({"action": "finish"}))
+
+        self.assertFalse(result.accepted)
+        self.assertIn("stateful AgentGraph invariant violated", result.feedback)
+        self.assertEqual([], session.actions)
+
+    def test_empty_canvas_exposes_exact_atomic_stateful_component_domain(
+        self,
+    ) -> None:
+        session = _WebShopSession()
+        gateway = SequenceGateway([])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="Buy a blue steel table.",
+            required_tool_id=environment.tool_id,
+            allowed_actions=(
+                "add_agent",
+                "add_subgraph",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "continue",
+                "finish",
+            ),
+            max_agents=3,
+            max_agents_per_subgraph=2,
+        )
+
+        self.assertEqual(
+            ("add_agent", "add_subgraph"),
+            canvas.model_admissible_action_types(),
+        )
+        domains = canvas.model_admissible_action_targets()
+        subgraph = domains["add_subgraph"]
+        self.assertEqual(2, subgraph["min_new_agents"])
+        self.assertEqual(2, subgraph["max_new_agents"])
+        self.assertEqual(1, subgraph["stateful_tool_owner"]["required_count"])
+        self.assertEqual(
+            environment.tool_id,
+            subgraph["stateful_tool_owner"]["tool_id"],
+        )
+        self.assertEqual(
+            {"execution_mode", "allowed_tools"},
+            {"execution_mode", "allowed_tools"}.intersection(
+                subgraph["required_agent_fields"]
+            ),
+        )
+
+        declaration_schema = json.loads(
+            director_live_add_subgraph_agent_declarations_json_schema_text(
+                domains
+            )
+        )
+        # Two mutually exclusive branches correspond to the two possible
+        # owner positions; Agent contracts and models remain sampled.
+        self.assertEqual(
+            2,
+            len(declaration_schema["properties"]["agents"]["oneOf"]),
+        )
+        valid_agents = [
+            {
+                "agent_id": "node_1",
+                "model_id": "m",
+                "contract": "Analyze the visible constraints.",
+                "execution_mode": "reasoning",
+                "allowed_tools": [],
+            },
+            {
+                "agent_id": "node_2",
+                "model_id": "m",
+                "contract": "Take one admissible WebShop action.",
+                "execution_mode": "react",
+                "allowed_tools": [environment.tool_id],
+            },
+        ]
+        relation_candidates = (
+            director_live_stateful_add_subgraph_relation_candidates(
+                domains,
+                valid_agents,
+            )
+        )
+        self.assertTrue(relation_candidates)
+        self.assertFalse(
+            any(
+                candidate["target_to_source"] is True
+                and "node_2"
+                in {candidate["source_id"], candidate["target_id"]}
+                for candidate in relation_candidates
+            )
+        )
+        parameter_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=valid_agents,
+            )
+        )
+        self.assertEqual(
+            1,
+            parameter_schema["properties"]["relations"]["maxItems"],
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one stateful Tool owner"):
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=[
+                    {
+                        **valid_agents[0],
+                        "agent_id": "node_1",
+                    },
+                    {
+                        **valid_agents[0],
+                        "agent_id": "node_2",
+                    },
+                ],
+            )
+
+    async def test_empty_canvas_atomic_subgraph_routes_once_to_stateful_owner(
+        self,
+    ) -> None:
+        session = _WebShopSession()
+        gateway = SequenceGateway(
+            [
+                "The visible constraints require a blue steel table.",
+                "search[blue steel table]",
+                "Preserve the currently observed product constraints.",
+            ]
+        )
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="Buy a blue steel table.",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=(
+                "add_agent",
+                "add_subgraph",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "continue",
+                "finish",
+            ),
+            max_agents=3,
+            max_agents_per_subgraph=2,
+        )
+
+        result = await canvas.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "node_1",
+                            "model_id": "m",
+                            "contract": "Analyze the visible constraints.",
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        },
+                        {
+                            "agent_id": "node_2",
+                            "model_id": "m",
+                            "contract": "Take one admissible WebShop action.",
+                            "execution_mode": "react",
+                            "allowed_tools": [environment.tool_id],
+                        },
+                    ],
+                    "relations": [
+                        {
+                            "source_id": "node_1",
+                            "target_id": "node_2",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    ],
+                    "output_agent_id": "node_2",
+                }
+            )
+        )
+
+        self.assertTrue(result.accepted, result.feedback)
+        self.assertEqual(["search[blue steel table]"], session.actions)
+        self.assertEqual(
+            ["node_1", "node_2"],
+            list(result.execution.executed_agent_ids),
+        )
+        owner_request = [
+            request for request in gateway.requests if request.agent.id == "node_2"
+        ][0]
+        self.assertEqual(
+            ["node_1"],
+            [message.source_agent_id for message in owner_request.upstream],
+        )
+        self.assertIn("blue steel table", owner_request.upstream[0].content)
+
+        independent = await canvas.step(
+            json.dumps(
+                {
+                    "action": "add_agent",
+                    "agent_id": "node_3",
+                    "model_id": "m",
+                    "contract": "Record the public constraints independently.",
+                    "execution_mode": "reasoning",
+                    "allowed_tools": [],
+                }
+            )
+        )
+        self.assertTrue(independent.accepted, independent.feedback)
+        feedback_payload = json.loads(
+            independent.feedback.split("execution_result=", 1)[1]
+        )
+        self.assertEqual("node_2", feedback_payload["environment_actor_id"])
+        self.assertEqual(
+            ["node_1"],
+            [
+                item["source_agent_id"]
+                for item in feedback_payload["environment_actor_inbox"]
+            ],
+        )
+        self.assertIn(
+            "blue steel table",
+            feedback_payload["environment_actor_inbox"][0]["raw_output"],
+        )
+
+    async def test_continue_refreshes_predecessor_from_latest_public_state(
+        self,
+    ) -> None:
+        session = _WebShopSession()
+        gateway = SequenceGateway(
+            [
+                "Use the original goal to search for a blue steel table.",
+                "search[blue steel table]",
+                (
+                    "The latest result exposes B000ITEM01; inspect that exact "
+                    "product next."
+                ),
+                "click[B000ITEM01]",
+            ]
+        )
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="Buy a blue steel table.",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=(
+                "add_agent",
+                "add_subgraph",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "continue",
+                "finish",
+            ),
+            max_agents=3,
+            max_agents_per_subgraph=2,
+        )
+        added = await canvas.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "advisor",
+                            "model_id": "m",
+                            "contract": (
+                                "Use the public task and environment state to "
+                                "produce a grounded next-step artifact."
+                            ),
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        },
+                        {
+                            "agent_id": "environment_owner",
+                            "model_id": "m",
+                            "contract": "Take one admissible WebShop action.",
+                            "execution_mode": "react",
+                            "allowed_tools": [environment.tool_id],
+                        },
+                    ],
+                    "relations": [
+                        {
+                            "source_id": "advisor",
+                            "target_id": "environment_owner",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    ],
+                    "output_agent_id": "environment_owner",
+                }
+            )
+        )
+        self.assertTrue(added.accepted, added.feedback)
+        self.assertEqual(["search[blue steel table]"], session.actions)
+
+        continued = await canvas.step(json.dumps({"action": "continue"}))
+
+        self.assertTrue(continued.accepted, continued.feedback)
+        self.assertEqual(
+            ["advisor", "environment_owner"],
+            list(continued.execution.executed_agent_ids),
+        )
+        self.assertEqual(
+            ["search[blue steel table]", "click[B000ITEM01]"],
+            session.actions,
+        )
+        advisor_requests = [
+            request
+            for request in gateway.requests
+            if request.agent.id == "advisor"
+        ]
+        self.assertEqual(2, len(advisor_requests))
+        refreshed_problem = advisor_requests[-1].problem
+        self.assertIn("Buy a blue steel table.", refreshed_problem)
+        self.assertIn("B000ITEM01", refreshed_problem)
+        self.assertIn("model_visible_admissible_actions", refreshed_problem)
+        owner_requests = [
+            request
+            for request in gateway.requests
+            if request.agent.id == "environment_owner"
+        ]
+        self.assertEqual(2, len(owner_requests))
+        self.assertIn("B000ITEM01", owner_requests[-1].upstream[0].content)
+        self.assertIn(
+            '"model_visible_admissible_actions"',
+            continued.feedback,
+        )
+
+    async def test_reasoning_auxiliary_does_not_receive_owner_action_interface(
+        self,
+    ) -> None:
+        session = _WebShopSession()
+        gateway = SequenceGateway(
+            [
+                "The goal requires a blue steel table.",
+                "search[blue steel table]",
+            ]
+        )
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem=(
+                "Buy a blue steel table.\n\n"
+                "Execution interface: a react node may use the WebShop "
+                "environment. Return exactly one currently admissible native "
+                "WebShop action. Do not return a prose answer."
+            ),
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=("add_subgraph", "finish"),
+            max_agents=2,
+            max_agents_per_subgraph=2,
+        )
+
+        result = await canvas.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "auxiliary",
+                            "model_id": "m",
+                            "contract": "Analyze the public state.",
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        },
+                        {
+                            "agent_id": "environment_owner",
+                            "model_id": "m",
+                            "contract": "Take one admissible WebShop action.",
+                            "execution_mode": "react",
+                            "allowed_tools": [environment.tool_id],
+                        },
+                    ],
+                    "relations": [
+                        {
+                            "source_id": "auxiliary",
+                            "target_id": "environment_owner",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    ],
+                    "output_agent_id": "environment_owner",
+                }
+            )
+        )
+
+        self.assertTrue(result.accepted, result.feedback)
+        self.assertEqual(
+            "Buy a blue steel table.",
+            canvas.original_task_instruction,
+        )
+        public_state = canvas.public_environment_state()
+        self.assertIsNotNone(public_state)
+        self.assertEqual(
+            "Buy a blue steel table.",
+            public_state["task_instruction"],
+        )
+        self.assertNotIn(
+            "Return exactly one currently admissible native WebShop action",
+            json.dumps(public_state),
+        )
+        auxiliary_request = next(
+            request
+            for request in gateway.requests
+            if request.agent.id == "auxiliary"
+        )
+        self.assertIn("Buy a blue steel table.", auxiliary_request.problem)
+        self.assertNotIn(
+            "Return exactly one currently admissible native WebShop action",
+            auxiliary_request.problem,
+        )
+        self.assertNotIn("Do not return a prose answer", auxiliary_request.problem)
+        owner_request = next(
+            request
+            for request in gateway.requests
+            if request.agent.id == "environment_owner"
+        )
+        self.assertIn("Return exactly one native WebShop action", owner_request.problem)
+
+    async def test_predecessor_failure_preserves_latest_public_environment_state(
+        self,
+    ) -> None:
+        class FailingGateway(SequenceGateway):
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                if len(self.requests) == 2:
+                    self.requests.append(request)
+                    raise RuntimeError("reasoning predecessor failed")
+                return await super().generate(request)
+
+        session = _WebShopSession()
+        gateway = FailingGateway(
+            [
+                "Search for the requested blue steel table.",
+                "search[blue steel table]",
+            ]
+        )
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="Buy a blue steel table.",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=("add_subgraph", "continue", "finish"),
+            max_agents=2,
+            max_agents_per_subgraph=2,
+        )
+        added = await canvas.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "auxiliary",
+                            "model_id": "m",
+                            "contract": "Analyze the latest public state.",
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        },
+                        {
+                            "agent_id": "environment_owner",
+                            "model_id": "m",
+                            "contract": "Take one admissible WebShop action.",
+                            "execution_mode": "react",
+                            "allowed_tools": [environment.tool_id],
+                        },
+                    ],
+                    "relations": [
+                        {
+                            "source_id": "auxiliary",
+                            "target_id": "environment_owner",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    ],
+                    "output_agent_id": "environment_owner",
+                }
+            )
+        )
+        self.assertTrue(added.accepted, added.feedback)
+        before = canvas.public_environment_state()
+        self.assertIsNotNone(before)
+
+        continued = await canvas.step(json.dumps({"action": "continue"}))
+
+        self.assertTrue(continued.accepted, continued.feedback)
+        self.assertIsNotNone(continued.partial_execution)
+        self.assertEqual(["search[blue steel table]"], session.actions)
+        after = canvas.public_environment_state()
+        self.assertIsNotNone(after)
+        for key in (
+            "environment_episode_id",
+            "environment_revision",
+            "current_observation",
+            "remaining_action_budget",
+        ):
+            self.assertEqual(before[key], after[key])
+        self.assertNotIn("environment_owner", canvas._progressive_outputs)
+
+    async def test_edit_failure_preserves_state_and_repair_reruns_owner(
+        self,
+    ) -> None:
+        class FailOnceGateway(SequenceGateway):
+            def __init__(self) -> None:
+                super().__init__(
+                    [
+                        "Search for the requested blue steel table.",
+                        "search[blue steel table]",
+                        "Inspect B000ITEM01 from the latest result.",
+                        "click[B000ITEM01]",
+                    ]
+                )
+                self.failed = False
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                if len(self.requests) == 2 and not self.failed:
+                    self.requests.append(request)
+                    self.failed = True
+                    raise RuntimeError("revised predecessor failed")
+                return await super().generate(request)
+
+        session = _WebShopSession()
+        gateway = FailOnceGateway()
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="Buy a blue steel table.",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=("add_subgraph", "modify_agent", "finish"),
+            max_agents=2,
+            max_agents_per_subgraph=2,
+        )
+        added = await canvas.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "auxiliary",
+                            "model_id": "m",
+                            "contract": "Analyze the public state.",
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        },
+                        {
+                            "agent_id": "environment_owner",
+                            "model_id": "m",
+                            "contract": "Take one admissible WebShop action.",
+                            "execution_mode": "react",
+                            "allowed_tools": [environment.tool_id],
+                        },
+                    ],
+                    "relations": [
+                        {
+                            "source_id": "auxiliary",
+                            "target_id": "environment_owner",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    ],
+                    "output_agent_id": "environment_owner",
+                }
+            )
+        )
+        self.assertTrue(added.accepted, added.feedback)
+        before = canvas.public_environment_state()
+        self.assertIsNotNone(before)
+
+        failed_edit = await canvas.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "auxiliary",
+                    "contract": "Re-evaluate the latest public result.",
+                }
+            )
+        )
+
+        self.assertTrue(failed_edit.accepted, failed_edit.feedback)
+        self.assertIsNotNone(failed_edit.partial_execution)
+        self.assertEqual(["search[blue steel table]"], session.actions)
+        after_failure = canvas.public_environment_state()
+        self.assertIsNotNone(after_failure)
+        self.assertEqual(
+            before["environment_revision"],
+            after_failure["environment_revision"],
+        )
+        self.assertNotIn("environment_owner", canvas._progressive_outputs)
+        failed_request = gateway.requests[-1]
+        self.assertEqual("auxiliary", failed_request.agent.id)
+        self.assertIn("B000ITEM01", failed_request.problem)
+
+        repaired = await canvas.step(
+            json.dumps(
+                {
+                    "action": "modify_agent",
+                    "agent_id": "auxiliary",
+                    "contract": "Use the preserved result to select the next item.",
+                }
+            )
+        )
+
+        self.assertTrue(repaired.accepted, repaired.feedback)
+        self.assertEqual(
+            ["search[blue steel table]", "click[B000ITEM01]"],
+            session.actions,
+        )
+        self.assertIn("environment_owner", canvas._progressive_outputs)
+        after_repair = canvas.public_environment_state()
+        self.assertIsNotNone(after_repair)
+        self.assertEqual(2, after_repair["environment_revision"])
+
+    async def test_continue_refreshes_transitive_tool_free_predecessors(
+        self,
+    ) -> None:
+        session = _WebShopSession()
+        gateway = SequenceGateway(
+            [
+                "Extract the requested blue steel table constraints.",
+                "Use those constraints for a product search.",
+                "search[blue steel table]",
+                "The new public result contains B000ITEM01.",
+                "Inspect B000ITEM01 next.",
+                "click[B000ITEM01]",
+            ]
+        )
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="Buy a blue steel table.",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=("add_subgraph", "continue", "finish"),
+            max_agents=3,
+            max_agents_per_subgraph=3,
+        )
+        added = await canvas.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "node_1",
+                            "model_id": "m",
+                            "contract": "Interpret the public task constraints.",
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        },
+                        {
+                            "agent_id": "node_2",
+                            "model_id": "m",
+                            "contract": "Turn upstream evidence into a next-step artifact.",
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        },
+                        {
+                            "agent_id": "node_3",
+                            "model_id": "m",
+                            "contract": "Take one admissible WebShop action.",
+                            "execution_mode": "react",
+                            "allowed_tools": [environment.tool_id],
+                        },
+                    ],
+                    "relations": [
+                        {
+                            "source_id": "node_1",
+                            "target_id": "node_2",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        },
+                        {
+                            "source_id": "node_2",
+                            "target_id": "node_3",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        },
+                    ],
+                    "output_agent_id": "node_3",
+                }
+            )
+        )
+        self.assertTrue(added.accepted, added.feedback)
+
+        continued = await canvas.step('{"action":"continue"}')
+
+        self.assertTrue(continued.accepted, continued.feedback)
+        self.assertEqual(
+            ["node_1", "node_2", "node_3"],
+            list(continued.execution.executed_agent_ids),
+        )
+        self.assertEqual(
+            ["search[blue steel table]", "click[B000ITEM01]"],
+            session.actions,
+        )
+        second_node_1_request = [
+            request for request in gateway.requests if request.agent.id == "node_1"
+        ][-1]
+        self.assertIn("B000ITEM01", second_node_1_request.problem)
+        second_owner_request = [
+            request for request in gateway.requests if request.agent.id == "node_3"
+        ][-1]
+        self.assertEqual(
+            ["node_2"],
+            [message.source_agent_id for message in second_owner_request.upstream],
+        )
+        self.assertIn("B000ITEM01", second_owner_request.upstream[0].content)
+
     def test_no_progress_opens_subgraph_augmentation_not_another_scalar_owner(
         self,
     ) -> None:
@@ -141,8 +1406,8 @@ class WebShopMultiAgentSubgraphTests(unittest.IsolatedAsyncioTestCase):
         }
 
         self.assertEqual(
-            ("modify_agent",),
-            canvas.model_admissible_action_types(),
+            {"modify_agent", "add_subgraph"},
+            set(canvas.model_admissible_action_types()),
         )
 
         no_progress["public_progress"]["no_progress"][
@@ -397,7 +1662,10 @@ class WebShopMultiAgentSubgraphTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertFalse(duplicate_owner.accepted)
-        self.assertIn("requires exactly one Agent owner", duplicate_owner.feedback)
+        self.assertIn(
+            "requires exactly one Agent with execution_mode='react'",
+            duplicate_owner.feedback,
+        )
         self.assertEqual(baseline_revision, canvas.graph.revision)
         self.assertFalse(canvas.graph.has_node("second_owner"))
         self.assertEqual(baseline_actions, session.actions)
