@@ -1158,7 +1158,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, len(repair_gateway.requests))
         self.assertEqual([], repair_session.actions)
 
-    async def test_webshop_live_relation_domain_excludes_stateful_reciprocal_block(
+    async def test_webshop_live_relation_domain_keeps_owner_as_sink(
         self,
     ) -> None:
         class WebShopSession(FakeSession):
@@ -1205,7 +1205,6 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(
             {
-                (True, False),
                 (False, True),
             },
             {
@@ -1230,8 +1229,8 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
 
         one_way = await canvas.step(
             '{"action":"set_relation","source_id":"actor",'
-            '"target_id":"peer","source_to_target":true,'
-            '"target_to_source":false}'
+            '"target_id":"peer","source_to_target":false,'
+            '"target_to_source":true}'
         )
         self.assertTrue(one_way.accepted)
         independent_candidate = {

@@ -883,6 +883,11 @@ _WEBSHOP_OPTION_LABELS = frozenset(
         # SkillFlow parser only lists ``style``.  Treat the observed label as
         # the same public option group; no task/evaluator value is introduced.
         "style name",
+        # PROJECT_NECESSARY_ADAPTATION: WebShop's renderer exposes this exact
+        # public option label for big/tall apparel.  SkillFlow's parser does
+        # not list it, so without the label the following values are silently
+        # folded into the preceding option group.
+        "special size",
         "configuration",
         "pattern",
         "quantity",
@@ -995,6 +1000,13 @@ _WEBSHOP_OPTION_UNIT_DIMENSIONS = MappingProxyType(
         "cm": "centimeter",
         "centimeter": "centimeter",
         "centimeters": "centimeter",
+        # PROJECT_NECESSARY_ADAPTATION: WebShop watch-band options use mm even
+        # when the public instruction spells the case size as bare ``size
+        # 42``.  This is a comparison projection only; native click strings
+        # remain unchanged.
+        "mm": "millimeter",
+        "millimeter": "millimeter",
+        "millimeters": "millimeter",
         "count": "count",
         "ct": "count",
         "pc": "count",
@@ -1025,6 +1037,15 @@ _WEBSHOP_CANONICAL_APPAREL_SIZES = frozenset(
         "2xl",
         "3xl",
     }
+)
+
+# Bare ``small``/``medium``/``large`` can be product adjectives (for example,
+# ``small end table``), so they still require an explicit size label or a
+# joint option phrase.  Extended size spellings are unambiguous public option
+# values in SkillFlow's canonical apparel inventory and may be retained from
+# the instruction without introducing a product-category lexicon.
+_WEBSHOP_UNAMBIGUOUS_APPAREL_SIZES = (
+    _WEBSHOP_CANONICAL_APPAREL_SIZES - {"small", "medium", "large"}
 )
 
 
@@ -1914,6 +1935,32 @@ def _webshop_model_visible_actions(
         observation=observation,
         receipts=receipts,
     )
+    # SkillFlow's exact-option guard identifies a candidate whose visible
+    # option group cannot satisfy an explicit task value.  In the stepwise
+    # Canvas setting, continuing to inspect tabs or select an unrelated option
+    # cannot repair that same-group contradiction and only consumes the fixed
+    # environment budget.  Keep native actions/evaluator semantics untouched,
+    # but expose both real recovery scopes when WebShop makes them available:
+    # ``< Prev>`` returns to the current result set, while ``Back to Search``
+    # permits a refined query.  Hiding the latter traps the policy in a result
+    # set that may not contain the explicitly requested option.
+    if (
+        purchase.get("in_product_scope") is True
+        and purchase.get("unmatched_required_option_groups")
+    ):
+        recovery_actions = tuple(
+            action
+            for action in native_actions
+            if (
+                (match := re.fullmatch(
+                    r"click\[(.*)\]", action, flags=re.IGNORECASE
+                ))
+                is not None
+                and _webshop_norm(match.group(1)) in {"prev", "back to search"}
+            )
+        )
+        if recovery_actions:
+            return recovery_actions, groups, selected
     required_targets = purchase.get("required_option_targets", {})
     required_constraints = purchase.get("required_option_constraints", {})
     protected_groups: set[str] = set()
@@ -2476,10 +2523,12 @@ def _webshop_natural_color_requirements(
         ),
         re.compile(
             r"\b(?:color|colour)(?:\s+option)?"
-            r"(?:\s+(?:should be|is|of))?\s+"
+            r"(?:\s+(?:should be|is|was|were|of))?\s+"
             r"([a-z0-9][a-z0-9()|&+/'-]*"
-            r"(?:\s+[a-z0-9][a-z0-9()|&+/'-]*){0,2})"
-            r"(?=,|;|\.|\s+and price\b|$)"
+            r"(?:\s+[a-z0-9][a-z0-9()|&+/'-]*){0,5}?)"
+            r"(?=\s+(?:size|fit type|style|pattern|quantity|pack|count|"
+            r"dimensions?|width|height|material|item shape|shape)\b"
+            r"|,|;|\.|\s+and price\b|$)"
         ),
         re.compile(
             r"\b([a-z][a-z0-9-]*(?:\s+[a-z0-9()|&+./'-]+){0,1}) "
@@ -2645,12 +2694,24 @@ def _webshop_textual_option_value_matches(
             )
             if phrase.strip()
         ]
-        if required_phrases and all(
+        # SkillFlow permits containment for one public base-color word.  Do
+        # not extend that rule to a coded or multi-token option: doing so made
+        # ``lavender 012 (pink)`` accept ``lt lavender 012 (pink)`` and erased
+        # an explicit option binding from the task.
+        if (
+            required_phrases
+            and (
+                len(required_phrases) > 1
+                or required_phrases[0] in _WEBSHOP_COLOR_WORDS
+                or len(required_phrases[0].split()) == 1
+            )
+            and all(
             re.search(
                 rf"(?:^| ){re.escape(phrase)}(?: |$)", visible_normalized
             )
             is not None
             for phrase in required_phrases
+            )
         ):
             return True
         required_colors = _webshop_color_signature(required_value)
@@ -2686,11 +2747,25 @@ def _webshop_textual_option_value_matches(
                     )
                     for segment in (_webshop_norm(raw_segment),)
                 )
-            return (
+            if (
                 re.search(
                     rf"(?:^| ){re.escape(number)}(?: |$)", visible
                 )
                 is not None
+            ):
+                return True
+            # WebShop renders Apple Watch case-size choices with an explicit
+            # millimetre suffix while public goals often say only ``size 42``.
+            # Within the already-bound ``size`` option group, match the same
+            # numeric value to a visible millimetre token.  Other physical
+            # dimensions remain unit-sensitive so apparel size 8 cannot bind
+            # to an unrelated 8 oz option.
+            canonical_number = _webshop_canonical_number(number)
+            return any(
+                dimension == "millimeter" and value == canonical_number
+                for dimension, value, _ in _webshop_measurement_signatures(
+                    visible_value
+                )
             )
     return False
 
@@ -2848,7 +2923,18 @@ def _webshop_instruction_option_requirements(
                         for color in _WEBSHOP_COLOR_WORDS
                     )
                 )
-                if (has_size_label or adjacent_color) and size not in {
+                bare_unambiguous_size = bool(
+                    size in _WEBSHOP_UNAMBIGUOUS_APPAREL_SIZES
+                    and re.search(
+                        rf"(?:^| ){size_pattern}(?: |$)", task_normalized
+                    )
+                    is not None
+                )
+                if (
+                    has_size_label
+                    or adjacent_color
+                    or bare_unambiguous_size
+                ) and size not in {
                     _webshop_norm(value) for value in size_phrases
                 }:
                     size_phrases.append(size)
@@ -3340,17 +3426,17 @@ def _webshop_repeated_search_requires_reformulation(
     query: str,
     receipts: Sequence[Mapping[str, object]],
 ) -> bool:
-    """Distinguish blind repetition from result-list restoration.
+    """Require a changed query after an exact normalized query was observed.
 
-    SkillFlow records reusing a query after ``Back to Search`` as public
-    history rather than an intrinsic error.  In the original WebShop UI, the
-    same query is the only native way to restore its result list.  Permit that
-    recovery only after a candidate ASIN from the prior result set was opened;
-    otherwise require a changed normalized query.
+    SkillFlow retains every search in the public ReAct history.  WebShop also
+    exposes ``< Prev>`` to restore the current result list; ``Back to Search``
+    instead returns to the query form.  Reissuing an identical query there
+    deterministically recreates the same candidate set and can consume the
+    entire action budget after an explicit candidate mismatch.  Preserve the
+    native search action, but require its public query text to change.
     """
 
-    latest_match_index: Optional[int] = None
-    for index, receipt in enumerate(receipts):
+    for receipt in receipts:
         if receipt.get("state_advanced") is not True:
             continue
         action = receipt.get("action")
@@ -3358,15 +3444,8 @@ def _webshop_repeated_search_requires_reformulation(
             continue
         match = re.fullmatch(r"search\[(.*)\]", action, flags=re.IGNORECASE)
         if match is not None and _webshop_norm(match.group(1)) == query:
-            latest_match_index = index
-    if latest_match_index is None:
-        return False
-    return not any(
-        receipt.get("state_advanced") is True
-        and isinstance(receipt.get("action"), str)
-        and _webshop_action_asin(receipt["action"]) is not None
-        for receipt in receipts[latest_match_index + 1 :]
-    )
+            return True
+    return False
 
 
 def _webshop_conflicting_option_action(

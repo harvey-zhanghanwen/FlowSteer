@@ -2634,9 +2634,12 @@ def director_live_stateful_add_subgraph_relation_candidates(
 
     SkillFlow serializes one mutable WebShop episode through one owner.  The
     remaining Agents may be independent, communicate in either one-way
-    direction, or communicate reciprocally with each other.  A reciprocal
-    edge incident to the stateful owner is omitted because FlowSteer's bounded
-    reciprocal block executes both members and cannot serialize that resource.
+    direction, or communicate reciprocally with each other.  The stateful owner
+    is the side-effect sink: an owner-incident relation may only carry a
+    tool-free artifact into the owner before its one environment action.  An
+    owner-to-successor edge would instead mix the prior public-state snapshot
+    used to start the graph revision with the owner's newly produced receipt,
+    crossing SkillFlow's Action--Observation--feedback causal boundary.
     """
 
     domain = action_target_domains.get("add_subgraph")
@@ -2688,6 +2691,19 @@ def director_live_stateful_add_subgraph_relation_candidates(
         for target_id in endpoint_ids[source_index + 1 :]:
             if source_id not in new_agent_ids and target_id not in new_agent_ids:
                 continue
+            if owner_id in {source_id, target_id}:
+                auxiliary_id = (
+                    target_id if source_id == owner_id else source_id
+                )
+                candidates.append(
+                    {
+                        "source_id": auxiliary_id,
+                        "target_id": owner_id,
+                        "source_to_target": True,
+                        "target_to_source": False,
+                    }
+                )
+                continue
             candidates.extend(
                 (
                     {
@@ -2704,15 +2720,14 @@ def director_live_stateful_add_subgraph_relation_candidates(
                     },
                 )
             )
-            if owner_id not in {source_id, target_id}:
-                candidates.append(
-                    {
-                        "source_id": source_id,
-                        "target_id": target_id,
-                        "source_to_target": True,
-                        "target_to_source": True,
-                    }
-                )
+            candidates.append(
+                {
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "source_to_target": True,
+                    "target_to_source": True,
+                }
+            )
     return tuple(candidates)
 
 
@@ -3259,9 +3274,20 @@ def director_live_action_parameter_json_schema_text(
                         normalized_agents,
                     )
                 )
+                relation_endpoint_pairs = {
+                    frozenset((candidate["source_id"], candidate["target_id"]))
+                    for candidate in relation_candidates
+                }
                 schema["properties"]["relations"] = {
                     "type": "array",
-                    "maxItems": max(1, len(normalized_agents) - 1),
+                    # One relation chooses one direction (or a reciprocal block)
+                    # for an unordered endpoint pair.  Count every exposed pair
+                    # incident to at least one Agent declared by this ADD, rather
+                    # than deriving the bound only from the number of new Agents.
+                    # This preserves the one-pair initial two-Agent component and
+                    # lets a later multi-Agent ADD connect all of its new Agents
+                    # to existing Canvas nodes in the same executable unit.
+                    "maxItems": len(relation_endpoint_pairs),
                     "uniqueItems": True,
                     "items": {
                         "anyOf": [
@@ -3283,14 +3309,52 @@ def director_live_action_parameter_json_schema_text(
                         ]
                     },
                 }
+                stateful_owner_id = domain.get(
+                    "stateful_tool_owner_agent_id"
+                )
+                if not isinstance(stateful_owner_id, str):
+                    _, _, registered_profiles = (
+                        _live_role_free_add_subgraph_field_domain(domain)
+                    )
+                    stateful_profiles = (
+                        _live_role_free_stateful_owner_profiles(
+                            domain,
+                            registered_profiles,
+                        )
+                    )
+                    if stateful_profiles is None:
+                        raise ValueError(
+                            "add_subgraph stateful owner profile is missing"
+                        )
+                    owner_profile = stateful_profiles[0]
+                    owner_ids = [
+                        agent["agent_id"]
+                        for agent in normalized_agents
+                        if (
+                            agent.get("execution_mode"),
+                            tuple(agent.get("allowed_tools", ())),
+                        )
+                        == owner_profile
+                    ]
+                    if len(owner_ids) != 1:
+                        raise ValueError(
+                            "add_subgraph stateful owner declaration is invalid"
+                        )
+                    stateful_owner_id = owner_ids[0]
+                schema["properties"]["output_agent_id"] = {
+                    "anyOf": [
+                        {"const": stateful_owner_id},
+                        {"type": "null"},
+                    ]
+                }
             else:
                 relation_items = schema["properties"]["relations"]["items"]
                 for branch in relation_items["anyOf"]:
                     branch["properties"]["source_id"] = {"enum": endpoint_ids}
                     branch["properties"]["target_id"] = {"enum": endpoint_ids}
-            schema["properties"]["output_agent_id"] = {
-                "anyOf": [{"enum": endpoint_ids}, {"type": "null"}]
-            }
+                schema["properties"]["output_agent_id"] = {
+                    "anyOf": [{"enum": endpoint_ids}, {"type": "null"}]
+                }
     elif action == "modify_agent":
         if modify_field not in _LIVE_MUTABLE_AGENT_FIELDS:
             raise ValueError("modify_agent v3 parameter phase requires a live field")

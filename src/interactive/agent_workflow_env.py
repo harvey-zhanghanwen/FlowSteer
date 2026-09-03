@@ -1103,6 +1103,7 @@ class AgentWorkflowEnv:
             ),
             "single_stateful_owner_required": True,
             "reciprocal_environment_actor_relation_allowed": False,
+            "environment_actor_must_be_execution_sink": True,
             "action_input_semantics": "incoming_directed_artifacts_only",
             "tool_free_agent_environment_action_semantics": (
                 "produces_artifact_only"
@@ -1547,6 +1548,36 @@ class AgentWorkflowEnv:
             and self.runtime.dataset_id.casefold() == "webshop"
         )
 
+    def _stateful_owner_feedback_dirty_closure(
+        self,
+        dirty_agent_ids: set[str],
+    ) -> set[str]:
+        """Refresh every routed input when an edit reschedules the owner.
+
+        FlowSteer executes an accepted Canvas edit before returning its
+        feedback.  SkillFlow then conditions the next WebShop action on the
+        latest public Action--Observation state.  Consequently, once a graph
+        edit makes the unique stateful owner dirty, every directed ancestor
+        that can advise that owner must also be recomputed from the same
+        current state.  Otherwise an unchanged predecessor can contribute a
+        cached action proposal from an earlier environment revision at a
+        newly-created fan-in.
+
+        An edit that does not reach the owner keeps the ordinary incremental
+        cache semantics, so an independent auxiliary Agent does not consume
+        an additional environment turn.
+        """
+
+        dirty = set(dirty_agent_ids)
+        if not self._uses_atomic_stateful_execution_profile():
+            return dirty
+        owner_ids = self._required_tool_actor_ids()
+        if len(owner_ids) != 1 or owner_ids[0] not in dirty:
+            return dirty
+        owner_id = owner_ids[0]
+        dirty.update(self._directed_ancestor_ids(self._graph, owner_id))
+        return self._graph.dirty_closure(dirty)
+
     def _initial_stateful_subgraph_profiles(
         self,
     ) -> Optional[
@@ -1744,6 +1775,31 @@ class AgentWorkflowEnv:
                     f"stateful Tool {self.required_tool_id!r} owner "
                     f"{owner_id!r} cannot execute inside a reciprocal Agent block"
                 )
+        owner_successors = self._directed_successors(graph, owner_id)
+        if owner_successors:
+            # SkillFlow rebuilds the Supervisor input immediately after every
+            # WebShop Action--Observation transition.  FlowSteer's Runtime
+            # supplies one immutable problem snapshot to a whole graph
+            # execution, so a post-owner successor would receive that stale
+            # pre-action snapshot alongside the newer routed Tool receipt.
+            # Keep the stateful owner as the side-effect sink: arbitrary
+            # tool-free DAG/parallel/reciprocal collaboration may fan in, then
+            # one environment action returns directly to the Canvas/Director.
+            return (
+                f"stateful Tool {self.required_tool_id!r} owner {owner_id!r} "
+                "must be an execution sink so every Action--Observation "
+                "transition returns to the Director before another Agent "
+                "executes; outgoing targets: "
+                + ", ".join(repr(value) for value in owner_successors)
+            )
+        if (
+            graph.output_agent_id is not None
+            and graph.output_agent_id != owner_id
+        ):
+            return (
+                f"stateful Tool {self.required_tool_id!r} owner {owner_id!r} "
+                "must be the Output Agent because it is the execution sink"
+            )
         return None
 
     def model_admissible_action_types(self) -> Tuple[str, ...]:
@@ -2304,6 +2360,8 @@ class AgentWorkflowEnv:
                         source_to_target=source_to_target,
                         target_to_source=target_to_source,
                     ):
+                        continue
+                    if self._stateful_candidate_admission_issue(candidate) is not None:
                         continue
                     encoded_source_id = source_id
                     encoded_target_id = target_id
@@ -3069,9 +3127,16 @@ class AgentWorkflowEnv:
         active_lineage = set(self._active_semantic_lineage_ids())
         if self._graph.output_agent_id in active_lineage:
             return ()
+        stateful_owner_ids = (
+            set(self._required_tool_actor_ids())
+            if self._uses_atomic_stateful_execution_profile()
+            else set()
+        )
         admitted: list[str] = []
         for node in self._graph.nodes:
             if node.id == self._graph.output_agent_id:
+                continue
+            if stateful_owner_ids and node.id not in stateful_owner_ids:
                 continue
             if self._uses_semantic_lineage_protocol():
                 role_family = (node.role_family or "").casefold()
@@ -5693,6 +5758,10 @@ class AgentWorkflowEnv:
             action,
         )
         self._graph = candidate
+        if not isolated_execution_scope:
+            dirty_agents = self._stateful_owner_feedback_dirty_closure(
+                set(dirty_agents)
+            )
         current_agent_ids = {node.id for node in self._graph.nodes}
         self._retain_current_failure_state(current_agent_ids)
         # One accepted edit is one FlowSteer execute-and-feedback boundary.

@@ -31,6 +31,120 @@ def _transition(
 
 
 class WebShopConstraintRecoveryV17Tests(unittest.TestCase):
+    def test_bare_watch_size_matches_visible_millimeter_option(self) -> None:
+        goal = (
+            "buy a size 42 white smartwatch band that works with my apple "
+            "watch, and price lower than 20 dollars"
+        )
+        page = (
+            "Instruction: [SEP] "
+            + goal
+            + " [SEP] Back to Search [SEP] < Prev [SEP] size "
+            "[SEP] 38mm | 40mm | 41mm [SEP] 42mm | 44mm | 45mm "
+            "[SEP] color [SEP] Black [SEP] White [SEP] Demo Watch Band "
+            "[SEP] Price: $12 [SEP] Description [SEP] Features "
+            "[SEP] Reviews [SEP] Buy Now"
+        )
+        native = (
+            "click[38mm | 40mm | 41mm]",
+            "click[42mm | 44mm | 45mm]",
+            "click[Black]",
+            "click[White]",
+            "click[Buy Now]",
+        )
+
+        visible, groups, _ = _webshop_model_visible_actions(
+            task_instruction=goal,
+            observation=page,
+            receipts=(),
+            native_actions=native,
+        )
+        constraint = _webshop_required_option_constraints(goal, groups)[
+            "size"
+        ]
+
+        self.assertEqual(
+            ["42mm | 44mm | 45mm"], constraint["acceptable_values"]
+        )
+        self.assertEqual(
+            ["38mm | 40mm | 41mm"], constraint["contradicted_values"]
+        )
+        self.assertIn("click[42mm | 44mm | 45mm]", visible)
+        self.assertNotIn("click[38mm | 40mm | 41mm]", visible)
+
+        selected = (
+            _transition(
+                1, "click[42mm | 44mm | 45mm]", page, page
+            ),
+            _transition(2, "click[White]", page, page),
+        )
+        ready, _, _ = _webshop_model_visible_actions(
+            task_instruction=goal,
+            observation=page,
+            receipts=selected,
+            native_actions=native,
+            remaining_action_budget=1,
+        )
+        self.assertEqual(("click[Buy Now]",), ready)
+
+    def test_special_size_is_parsed_and_coded_color_stays_exact(self) -> None:
+        goal = (
+            'find a big shirt with 20" neck and 34" sleeve. the color '
+            "should be lavender 012(pink), and price lower than 110 dollars"
+        )
+        page = (
+            "Instruction: [SEP] "
+            + goal
+            + " [SEP] Back to Search [SEP] < Prev [SEP] special size "
+            "[SEP] tall [SEP] big [SEP] size [SEP] 20\" neck 34\" sleeve "
+            "[SEP] color [SEP] lt lavender 012 (pink) "
+            "[SEP] lavender 012 (pink) [SEP] Demo Shirt [SEP] Price: $40 "
+            "[SEP] Buy Now"
+        )
+
+        groups, _ = _webshop_parse_product_options(page)
+        constraints = _webshop_required_option_constraints(goal, groups)
+
+        self.assertEqual(["tall", "big"], groups["special size"])
+        self.assertEqual(
+            ["big"], constraints["special size"]["acceptable_values"]
+        )
+        self.assertEqual(
+            ["lavender 012 (pink)"],
+            constraints["color"]["acceptable_values"],
+        )
+
+    def test_natural_color_value_stops_before_next_attribute_label(self) -> None:
+        goal = (
+            "find shoes with color black size 13, and price lower than 70 "
+            "dollars"
+        )
+        page = (
+            "Instruction: [SEP] "
+            + goal
+            + " [SEP] Back to Search [SEP] < Prev [SEP] color [SEP] Black "
+            "[SEP] Brown [SEP] size [SEP] 12 [SEP] 13 [SEP] Demo Shoes "
+            "[SEP] Price: $30 [SEP] Buy Now"
+        )
+        groups, _ = _webshop_parse_product_options(page)
+        constraints = _webshop_required_option_constraints(goal, groups)
+
+        self.assertEqual(["Black"], constraints["color"]["acceptable_values"])
+        self.assertEqual(["13"], constraints["size"]["acceptable_values"])
+
+    def test_natural_color_accepts_public_copular_was(self) -> None:
+        goal = "find a bag whose color was black, and price lower than 40 dollars"
+        page = (
+            "Instruction: [SEP] "
+            + goal
+            + " [SEP] Back to Search [SEP] < Prev [SEP] color [SEP] Black "
+            "[SEP] Blue [SEP] Demo Bag [SEP] Price: $20 [SEP] Buy Now"
+        )
+        groups, _ = _webshop_parse_product_options(page)
+        constraints = _webshop_required_option_constraints(goal, groups)
+
+        self.assertEqual(["Black"], constraints["color"]["acceptable_values"])
+
     def test_joint_textual_size_and_color_binding_is_group_aware(self) -> None:
         goal = (
             "i want a medium gray long sleeve hoodie, and price lower than "
@@ -122,6 +236,81 @@ class WebShopConstraintRecoveryV17Tests(unittest.TestCase):
 
         self.assertNotIn(
             "size", _webshop_required_option_constraints(goal, groups)
+        )
+
+    def test_unambiguous_bare_extended_apparel_size_is_retained(self) -> None:
+        goal = (
+            "get an xx-small hoodie with polyester quality, and price lower "
+            "than 50 dollars"
+        )
+        absent_groups = {
+            "size": [
+                "Small",
+                "Medium",
+                "Large",
+                "X-Large",
+                "XX-Large",
+                "3X-Large",
+            ]
+        }
+
+        absent = _webshop_required_option_constraints(goal, absent_groups)[
+            "size"
+        ]
+        self.assertEqual(["xx small"], absent["requirement_surfaces"])
+        self.assertEqual([], absent["acceptable_values"])
+        self.assertEqual("no_visible_match", absent["status"])
+
+        present = _webshop_required_option_constraints(
+            goal,
+            {"size": ["XX-Small", *absent_groups["size"]]},
+        )["size"]
+        self.assertEqual(["XX-Small"], present["acceptable_values"])
+
+    def test_absent_explicit_option_exposes_both_native_recovery_scopes(
+        self,
+    ) -> None:
+        goal = (
+            "find size 7.5 camo colored walking shoes that are non-slip, and "
+            "price lower than 70 dollars"
+        )
+        page = (
+            "Instruction: [SEP] "
+            + goal
+            + " [SEP] Back to Search [SEP] < Prev [SEP] color "
+            "[SEP] a1-blue [SEP] a1-pink [SEP] size [SEP] 7 [SEP] 7.5 "
+            "[SEP] Demo Shoes [SEP] Price: $30 [SEP] Description "
+            "[SEP] Features [SEP] Reviews [SEP] Buy Now"
+        )
+        native = (
+            "click[Back to Search]",
+            "click[< Prev]",
+            "click[a1-blue]",
+            "click[a1-pink]",
+            "click[7]",
+            "click[7.5]",
+            "click[Description]",
+            "click[Features]",
+            "click[Reviews]",
+            "click[Buy Now]",
+        )
+
+        visible, groups, _ = _webshop_model_visible_actions(
+            task_instruction=goal,
+            observation=page,
+            receipts=(),
+            native_actions=native,
+        )
+
+        self.assertEqual(
+            "no_visible_match",
+            _webshop_required_option_constraints(goal, groups)["color"][
+                "status"
+            ],
+        )
+        self.assertEqual(
+            ("click[Back to Search]", "click[< Prev]"),
+            visible,
         )
 
     def test_explicit_task_attributes_survive_absent_candidate_values(self) -> None:
@@ -493,7 +682,7 @@ class WebShopConstraintRecoveryV17Tests(unittest.TestCase):
 
         self.assertEqual(["5.5"], constraint["acceptable_values"])
 
-    def test_absent_same_dimension_requirement_masks_only_conflicts(self) -> None:
+    def test_absent_same_dimension_requirement_leaves_current_candidate(self) -> None:
         goal = (
             "find sugar free barbecue marinade in the 18 ounce size, and "
             "price lower than 60 dollars"
@@ -525,7 +714,8 @@ class WebShopConstraintRecoveryV17Tests(unittest.TestCase):
         self.assertEqual(
             ["12 Ounce (Pack of 1)"], constraint["contradicted_values"]
         )
-        self.assertIn("click[6 Pack]", visible)
+        self.assertEqual(("click[Back to Search]",), visible)
+        self.assertNotIn("click[6 Pack]", visible)
         self.assertNotIn("click[12 Ounce (Pack of 1)]", visible)
         self.assertNotIn("click[Buy Now]", visible)
         self.assertEqual(
@@ -538,7 +728,9 @@ class WebShopConstraintRecoveryV17Tests(unittest.TestCase):
             ),
         )
 
-    def test_query_reuse_requires_candidate_progress(self) -> None:
+    def test_exact_query_reuse_requires_reformulation_after_candidate_progress(
+        self,
+    ) -> None:
         goal = "find a blue bottle"
         start = "WebShop [SEP] Search"
         results = (
@@ -566,13 +758,14 @@ class WebShopConstraintRecoveryV17Tests(unittest.TestCase):
                 receipts=searched,
             ),
         )
-        self.assertIsNone(
+        self.assertEqual(
+            "repeated_search_query",
             _webshop_action_precondition_failure(
                 action="search[blue bottle]",
                 task_instruction=goal,
                 observation=start,
                 receipts=progressed,
-            )
+            ),
         )
 
     def test_restored_results_mask_opened_candidate_when_alternatives_exist(

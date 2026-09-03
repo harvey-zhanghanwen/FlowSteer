@@ -158,6 +158,9 @@ class WebShopMultiAgentSubgraphTests(unittest.IsolatedAsyncioTestCase):
             projected["environment_actor_directed_ancestor_ids"],
         )
         self.assertEqual(1, projected["environment_actor_in_degree"])
+        self.assertTrue(
+            projected["environment_actor_must_be_execution_sink"]
+        )
         self.assertEqual(
             [],
             projected[
@@ -184,6 +187,106 @@ class WebShopMultiAgentSubgraphTests(unittest.IsolatedAsyncioTestCase):
             relation_domain["stateful_action_input_semantics"],
         )
         self.assertNotIn("relation_execution_effects", relation_domain)
+
+    async def test_stateful_owner_outgoing_relation_is_not_in_live_domain(
+        self,
+    ) -> None:
+        session = _WebShopSession()
+        gateway = SequenceGateway([])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "environment_owner",
+                    "m",
+                    "Take one public environment action.",
+                    execution_mode="react",
+                    allowed_tools=(environment.tool_id,),
+                ),
+                AgentNode(
+                    "advisor",
+                    "m",
+                    "Produce an artifact from the current public state.",
+                ),
+            ],
+            output_agent_id="environment_owner",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            graph=graph,
+            problem="Buy a blue steel table.",
+            execute_on_edit=False,
+            required_tool_id=environment.tool_id,
+            allowed_actions=("set_relation", "set_output", "finish"),
+            max_agents=3,
+            max_agents_per_subgraph=2,
+        )
+
+        candidates = canvas.model_admissible_action_targets()[
+            "set_relation"
+        ]["candidates"]
+        self.assertIn(
+            {
+                "source_id": "advisor",
+                "target_id": "environment_owner",
+                "source_to_target": True,
+                "target_to_source": False,
+            },
+            candidates,
+        )
+        self.assertNotIn(
+            {
+                "source_id": "environment_owner",
+                "target_id": "advisor",
+                "source_to_target": True,
+                "target_to_source": False,
+            },
+            candidates,
+        )
+
+        rejected = await canvas.step(
+            json.dumps(
+                {
+                    "action": "set_relation",
+                    "source_id": "environment_owner",
+                    "target_id": "advisor",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+            )
+        )
+        self.assertFalse(rejected.accepted)
+        self.assertIn("must be an execution sink", rejected.feedback)
+        self.assertEqual(0, canvas.graph.revision)
+
+        rejected_output = await canvas.step(
+            json.dumps(
+                {
+                    "action": "set_output",
+                    "agent_id": "advisor",
+                }
+            )
+        )
+        self.assertFalse(rejected_output.accepted)
+        self.assertIn("must be the Output Agent", rejected_output.feedback)
+        self.assertEqual("environment_owner", canvas.graph.output_agent_id)
 
     def test_stateful_auxiliary_profiles_are_strictly_tool_free(self) -> None:
         session = _WebShopSession()
@@ -589,14 +692,16 @@ class WebShopMultiAgentSubgraphTests(unittest.IsolatedAsyncioTestCase):
                 valid_agents,
             )
         )
-        self.assertTrue(relation_candidates)
-        self.assertFalse(
-            any(
-                candidate["target_to_source"] is True
-                and "node_2"
-                in {candidate["source_id"], candidate["target_id"]}
-                for candidate in relation_candidates
-            )
+        self.assertEqual(
+            (
+                {
+                    "source_id": "node_1",
+                    "target_id": "node_2",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                },
+            ),
+            relation_candidates,
         )
         parameter_schema = json.loads(
             director_live_action_parameter_json_schema_text(
@@ -608,6 +713,10 @@ class WebShopMultiAgentSubgraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             1,
             parameter_schema["properties"]["relations"]["maxItems"],
+        )
+        self.assertEqual(
+            {"anyOf": [{"const": "node_2"}, {"type": "null"}]},
+            parameter_schema["properties"]["output_agent_id"],
         )
         with self.assertRaisesRegex(ValueError, "exactly one stateful Tool owner"):
             director_live_action_parameter_json_schema_text(
@@ -624,6 +733,121 @@ class WebShopMultiAgentSubgraphTests(unittest.IsolatedAsyncioTestCase):
                     },
                 ],
             )
+
+    def test_existing_owner_two_new_advisors_expose_all_relation_pairs(
+        self,
+    ) -> None:
+        domains = {
+            "add_subgraph": {
+                "min_new_agents": 1,
+                "max_new_agents": 2,
+                "existing_agent_ids": ["environment_owner"],
+                "model_ids": ["m"],
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+                "optional_agent_fields": [
+                    "role_family",
+                    "artifact_type",
+                    "completion_condition",
+                ],
+                "registered_execution_profiles": [
+                    {
+                        "execution_mode": "reasoning",
+                        "allowed_tools": [],
+                    }
+                ],
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
+                "stateful_tool_owner_agent_id": "environment_owner",
+                "semantic_protocol": "none",
+            }
+        }
+        advisors = [
+            {
+                "agent_id": "node_1",
+                "model_id": "m",
+                "contract": "Inspect the current public state for constraints.",
+                "execution_mode": "reasoning",
+                "allowed_tools": [],
+            },
+            {
+                "agent_id": "node_2",
+                "model_id": "m",
+                "contract": "Check the proposed environment action.",
+                "execution_mode": "reasoning",
+                "allowed_tools": [],
+            },
+        ]
+
+        relation_candidates = (
+            director_live_stateful_add_subgraph_relation_candidates(
+                domains,
+                advisors,
+            )
+        )
+        endpoint_pairs = {
+            frozenset((candidate["source_id"], candidate["target_id"]))
+            for candidate in relation_candidates
+        }
+        self.assertEqual(
+            {
+                frozenset(("environment_owner", "node_1")),
+                frozenset(("environment_owner", "node_2")),
+                frozenset(("node_1", "node_2")),
+            },
+            endpoint_pairs,
+        )
+        self.assertEqual(
+            {
+                ("node_1", "environment_owner", True, False),
+                ("node_2", "environment_owner", True, False),
+            },
+            {
+                (
+                    candidate["source_id"],
+                    candidate["target_id"],
+                    candidate["source_to_target"],
+                    candidate["target_to_source"],
+                )
+                for candidate in relation_candidates
+                if "environment_owner"
+                in {candidate["source_id"], candidate["target_id"]}
+            },
+        )
+
+        parameter_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=advisors,
+            )
+        )
+        self.assertEqual(
+            3,
+            parameter_schema["properties"]["relations"]["maxItems"],
+        )
+        self.assertEqual(
+            {
+                "anyOf": [
+                    {"const": "environment_owner"},
+                    {"type": "null"},
+                ]
+            },
+            parameter_schema["properties"]["output_agent_id"],
+        )
 
     async def test_empty_canvas_atomic_subgraph_routes_once_to_stateful_owner(
         self,
@@ -1319,6 +1543,151 @@ class WebShopMultiAgentSubgraphTests(unittest.IsolatedAsyncioTestCase):
             [message.source_agent_id for message in second_owner_request.upstream],
         )
         self.assertIn("B000ITEM01", second_owner_request.upstream[0].content)
+
+    async def test_fan_in_edit_refreshes_existing_owner_ancestors(self) -> None:
+        class AgentAwareGateway(SequenceGateway):
+            def __init__(self) -> None:
+                super().__init__([])
+                self.calls_by_agent: dict[str, int] = {}
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                call = self.calls_by_agent.get(request.agent.id, 0)
+                self.calls_by_agent[request.agent.id] = call + 1
+                if request.agent.id == "environment_owner":
+                    output = (
+                        "search[blue steel table]"
+                        if call == 0
+                        else "click[B000ITEM01]"
+                    )
+                elif request.agent.id == "existing_advisor":
+                    output = (
+                        "Search for a blue steel table."
+                        if call == 0
+                        else "The latest result exposes B000ITEM01; inspect it."
+                    )
+                else:
+                    output = "Independently verify B000ITEM01 against the goal."
+                return AgentResponse(
+                    output,
+                    {"provider_request_id": f"provider-{len(self.requests)}"},
+                )
+
+        session = _WebShopSession()
+        gateway = AgentAwareGateway()
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=4,
+            stepwise_director=True,
+        )
+        registry = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [ModelSpec("m", "fake")],
+        )
+        runtime = AgentRuntime(
+            registry,
+            gateway,
+            execution_adapters={"react": environment.execution_adapter},
+            tool_registry=environment.tool_registry,
+            dataset_id="webshop",
+        )
+        canvas = AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            problem="Buy a blue steel table.",
+            execute_on_edit=True,
+            required_tool_id=environment.tool_id,
+            allowed_actions=("add_subgraph", "finish"),
+            max_agents=3,
+            max_agents_per_subgraph=2,
+        )
+        initial = await canvas.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "existing_advisor",
+                            "model_id": "m",
+                            "contract": "Propose an action from public state.",
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        },
+                        {
+                            "agent_id": "environment_owner",
+                            "model_id": "m",
+                            "contract": "Take one admissible WebShop action.",
+                            "execution_mode": "react",
+                            "allowed_tools": [environment.tool_id],
+                        },
+                    ],
+                    "relations": [
+                        {
+                            "source_id": "existing_advisor",
+                            "target_id": "environment_owner",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    ],
+                    "output_agent_id": "environment_owner",
+                }
+            )
+        )
+        self.assertTrue(initial.accepted, initial.feedback)
+        self.assertEqual(["search[blue steel table]"], session.actions)
+
+        augmented = await canvas.step(
+            json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [
+                        {
+                            "agent_id": "new_advisor",
+                            "model_id": "m",
+                            "contract": "Check the next action independently.",
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        }
+                    ],
+                    "relations": [
+                        {
+                            "source_id": "new_advisor",
+                            "target_id": "environment_owner",
+                            "source_to_target": True,
+                            "target_to_source": False,
+                        }
+                    ],
+                }
+            )
+        )
+
+        self.assertTrue(augmented.accepted, augmented.feedback)
+        assert augmented.execution is not None
+        self.assertEqual(
+            {"existing_advisor", "environment_owner", "new_advisor"},
+            set(augmented.execution.executed_agent_ids),
+        )
+        self.assertNotIn(
+            "existing_advisor", augmented.execution.reused_agent_ids
+        )
+        self.assertEqual(2, gateway.calls_by_agent["existing_advisor"])
+        self.assertEqual(
+            ["search[blue steel table]", "click[B000ITEM01]"],
+            session.actions,
+        )
+        owner_requests = [
+            request
+            for request in gateway.requests
+            if request.agent.id == "environment_owner"
+        ]
+        self.assertEqual(2, len(owner_requests))
+        routed = {
+            message.source_agent_id: message.content
+            for message in owner_requests[-1].upstream
+        }
+        self.assertIn("B000ITEM01", routed["existing_advisor"])
+        self.assertIn("B000ITEM01", routed["new_advisor"])
 
     def test_no_progress_opens_subgraph_augmentation_not_another_scalar_owner(
         self,
