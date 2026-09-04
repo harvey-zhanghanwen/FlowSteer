@@ -1962,6 +1962,22 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(multilingual.accepted, multilingual.feedback)
 
+        missing_artifact = await env.step(
+            json.dumps(
+                {
+                    "action": "add_agent",
+                    "agent_id": "d",
+                    "model_id": "balanced",
+                    "contract": (
+                        "Consume the evidence from node_a. Expected artifact: "
+                        "None; this Agent only consumes the input."
+                    ),
+                }
+            )
+        )
+        self.assertFalse(missing_artifact.accepted)
+        self.assertIn("no output artifact", missing_artifact.feedback)
+
     async def test_scalar_add_agent_domain_exposes_live_models_and_contract_boundary(
         self,
     ) -> None:

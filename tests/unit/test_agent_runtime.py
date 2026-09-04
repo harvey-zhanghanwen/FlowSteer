@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 
 from src.interactive.agent_graph import AgentGraph, AgentGraphValidationError, AgentNode, AgentRelation
 from src.interactive.agent_runtime import (
+    ARTIFACT_QUALITY_PUBLIC_TEXT_V1,
+    ARTIFACT_QUALITY_PUBLIC_TEXT_V2,
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
     AgentRequest,
     AgentResponse,
@@ -117,6 +121,87 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         "reasoning_node",
                         "m1",
                         "Answer without a Tool.",
+                    ),
+                )
+            )
+
+    def test_heterogeneous_model_capabilities_bind_execution_profiles(self) -> None:
+        catalog = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [
+                ModelSpec(
+                    "tool-model",
+                    "fake",
+                    metadata={
+                        "text_capable": "true",
+                        "tool_capable": "true",
+                        "tool_capability_scope": "webshop.environment",
+                    },
+                ),
+                ModelSpec(
+                    "text-model",
+                    "fake",
+                    metadata={
+                        "text_capable": "true",
+                        "tool_capable": "false",
+                    },
+                ),
+            ],
+        )
+        gateway = RecordingGateway()
+        tool_registry = self._stateful_tool_registry()
+        reasoning = ("reasoning", ())
+        react = ("react", ("webshop.environment",))
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            execution_adapters={
+                "react": ReasoningExecutionAdapter(gateway),
+            },
+            tool_registry=tool_registry,
+            dataset_id="webshop",
+            execution_profile_allowlist=(reasoning, react),
+        )
+
+        self.assertEqual(
+            (reasoning, react),
+            runtime.registered_execution_profiles_for_model("tool-model"),
+        )
+        self.assertEqual(
+            (reasoning,),
+            runtime.registered_execution_profiles_for_model("text-model"),
+        )
+        self.assertEqual(
+            (
+                ("text-model", "reasoning", ()),
+                ("tool-model", "reasoning", ()),
+                ("tool-model", "react", ("webshop.environment",)),
+            ),
+            runtime.model_execution_profiles(),
+        )
+        runtime.validate_execution_contracts(
+            (
+                AgentNode(
+                    "tool_node",
+                    "tool-model",
+                    "Use the admitted Tool and return a complete artifact.",
+                    execution_mode="react",
+                    allowed_tools=("webshop.environment",),
+                ),
+            )
+        )
+        with self.assertRaisesRegex(
+            AgentRuntimeError,
+            "does not admit execution profile",
+        ):
+            runtime.validate_execution_contracts(
+                (
+                    AgentNode(
+                        "invalid_tool_node",
+                        "text-model",
+                        "Use the admitted Tool and return a complete artifact.",
+                        execution_mode="react",
+                        allowed_tools=("webshop.environment",),
                     ),
                 )
             )
@@ -235,6 +320,128 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         provenance = result.output_metadata["b"]["input_artifact_provenance"][0]
         self.assertEqual("m1", provenance["source_model_id"])
         self.assertEqual("stop", provenance["source_finish_reason"])
+
+    async def test_structured_evidence_profile_reuses_producer_context_path(
+        self,
+    ) -> None:
+        class StopGateway(RecordingGateway):
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(
+                    f"artifact from {request.agent.id}",
+                    {"finish_reason": "stop"},
+                )
+
+        gateway = StopGateway()
+        runtime = AgentRuntime(
+            registry(),
+            gateway,
+            artifact_communication_profile=(
+                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2
+            ),
+        )
+        graph = AgentGraph(
+            [
+                AgentNode("a", "m1", "Produce an intermediate artifact."),
+                AgentNode("b", "m2", "Use the routed artifact."),
+            ],
+            [AgentRelation("a", "b", True, False)],
+            output_agent_id="b",
+        )
+
+        result = await runtime.execute(
+            graph,
+            "question",
+            run_id="structured-context",
+        )
+        request_b = next(
+            item for item in gateway.requests if item.agent.id == "b"
+        )
+        routed = request_b.upstream[0]
+
+        self.assertEqual("m1", routed.source_model_id)
+        self.assertEqual("reasoning", routed.source_execution_mode)
+        self.assertEqual("stop", routed.source_finish_reason)
+        self.assertIsNotNone(routed.artifact_version)
+        provenance = result.output_metadata["b"]["input_artifact_provenance"][0]
+        self.assertEqual("m1", provenance["source_model_id"])
+        self.assertEqual(routed.artifact_version, provenance["artifact_version"])
+
+    async def test_generic_multihop_preserves_nested_computation_provenance(
+        self,
+    ) -> None:
+        """Port FlowSteer's generic multi-hop provenance regression."""
+
+        catalog = registry()
+        first_receipt = {
+            "tool_id": "public_search",
+            "request": {"query": "first entity"},
+            "result": {"ok": True, "document_id": "doc-1"},
+        }
+        second_receipt = {
+            "tool_id": "calculator",
+            "request": {"expression": "7+1"},
+            "result": {"ok": True, "value": 8},
+        }
+
+        class ComputationGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                if request.agent.id == "first":
+                    return AgentResponse(
+                        "First public result",
+                        {"tool_receipts": [first_receipt, first_receipt]},
+                    )
+                if request.agent.id == "second":
+                    return AgentResponse(
+                        "Second public result",
+                        {"tool_receipts": [second_receipt]},
+                    )
+                return AgentResponse("Final public result")
+
+        gateway = ComputationGateway()
+        graph = AgentGraph(
+            [
+                AgentNode("first", "m1", "produce a public artifact"),
+                AgentNode("second", "m2", "use the first artifact"),
+                AgentNode("third", "m1", "use the second artifact"),
+            ],
+            [
+                AgentRelation("first", "second", True, False),
+                AgentRelation("second", "third", True, False),
+            ],
+            output_agent_id="third",
+        )
+
+        result = await AgentRuntime(
+            catalog,
+            gateway,
+            artifact_communication_profile=(
+                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+            ),
+        ).execute(graph, "question", run_id="generic-multihop")
+
+        third_request = next(
+            item for item in gateway.requests if item.agent.id == "third"
+        )
+        second_envelope = third_request.upstream[0]
+        self.assertEqual(
+            [second_receipt],
+            [dict(item) for item in second_envelope.tool_receipts],
+        )
+        self.assertEqual(1, len(second_envelope.input_artifact_provenance))
+        first_provenance = dict(
+            second_envelope.input_artifact_provenance[0]
+        )
+        self.assertEqual("first", first_provenance["source_agent_id"])
+        self.assertEqual(
+            result.output_metadata["first"]["artifact_version"],
+            first_provenance["artifact_version"],
+        )
+        self.assertEqual([first_receipt], first_provenance["tool_receipts"])
 
     async def test_runtime_routes_target_keyed_public_failure_continuation(
         self,
@@ -1025,6 +1232,198 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(("a",), second.executed_agent_ids)
         self.assertEqual(("a",), third.reused_agent_ids)
         self.assertEqual("complete artifact", third.final_answer)
+
+    async def test_public_text_quality_rejects_length_termination(self) -> None:
+        catalog = registry()
+
+        class LengthGateway:
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(
+                    "A non-empty but truncated public artifact",
+                    {"finish_reason": "length"},
+                )
+
+        runtime = AgentRuntime(
+            catalog,
+            LengthGateway(),
+            artifact_quality_profile=ARTIFACT_QUALITY_PUBLIC_TEXT_V1,
+        )
+        graph = AgentGraph(
+            [AgentNode("output", "m1", "Produce the complete response.")],
+            output_agent_id="output",
+        )
+
+        with self.assertRaises(AgentRuntimeError) as caught:
+            await runtime.execute(graph, "question")
+
+        failure = caught.exception.failure_records[0]
+        self.assertEqual("CompletionArtifactQualityError", failure.error_type)
+        receipt = failure.metadata["artifact_quality_receipt"]
+        self.assertEqual("invalid", receipt["status"])
+        self.assertIn(
+            "provider_length_termination",
+            receipt["error_codes"],
+        )
+        self.assertNotIn("artifact", receipt)
+
+    async def test_public_text_quality_rejects_incomplete_leadin(self) -> None:
+        catalog = registry()
+
+        class LeadinGateway:
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(
+                    "结合会诊意见，接下来的治疗计划如下：",
+                    {"finish_reason": "stop"},
+                )
+
+        runtime = AgentRuntime(
+            catalog,
+            LeadinGateway(),
+            artifact_quality_profile=ARTIFACT_QUALITY_PUBLIC_TEXT_V2,
+        )
+        graph = AgentGraph(
+            [AgentNode("output", "m1", "Produce the complete response.")],
+            output_agent_id="output",
+        )
+
+        with self.assertRaises(AgentRuntimeError) as caught:
+            await runtime.execute(graph, "question")
+
+        failure = caught.exception.failure_records[0]
+        self.assertEqual("CompletionArtifactQualityError", failure.error_type)
+        receipt = failure.metadata["artifact_quality_receipt"]
+        self.assertIn(
+            "incomplete_heading_or_leadin",
+            receipt["error_codes"],
+        )
+
+    async def test_public_text_quality_accepts_complete_chinese_response(self) -> None:
+        catalog = registry()
+
+        class CompleteGateway:
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(
+                    "建议尽快由临床团队当面评估，并携带现有检查结果。",
+                    {"finish_reason": "stop"},
+                )
+
+        runtime = AgentRuntime(
+            catalog,
+            CompleteGateway(),
+            artifact_quality_profile=ARTIFACT_QUALITY_PUBLIC_TEXT_V2,
+        )
+        graph = AgentGraph(
+            [AgentNode("output", "m1", "Produce the complete response.")],
+            output_agent_id="output",
+        )
+
+        result = await runtime.execute(graph, "question")
+
+        receipt = result.output_metadata["output"][
+            "artifact_quality_receipt"
+        ]
+        self.assertEqual("valid", receipt["status"])
+        self.assertEqual(1, receipt["sentence_boundary_count"])
+
+    async def test_public_text_quality_v1_keeps_historical_unicode_behavior(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class HistoricalGateway:
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(
+                    "接下来的治疗计划如下：",
+                    {"finish_reason": "stop"},
+                )
+
+        runtime = AgentRuntime(
+            catalog,
+            HistoricalGateway(),
+            artifact_quality_profile=ARTIFACT_QUALITY_PUBLIC_TEXT_V1,
+        )
+        graph = AgentGraph(
+            [AgentNode("output", "m1", "Produce the complete response.")],
+            output_agent_id="output",
+        )
+
+        result = await runtime.execute(graph, "question")
+        receipt = result.output_metadata["output"][
+            "artifact_quality_receipt"
+        ]
+        self.assertEqual("public_text_quality_v1", receipt["profile"])
+        self.assertEqual("valid", receipt["status"])
+        self.assertEqual(0, receipt["sentence_boundary_count"])
+
+    async def test_repeated_artifact_does_not_reach_downstream_agent(self) -> None:
+        catalog = registry()
+
+        class RepetitionGateway:
+            def __init__(self) -> None:
+                self.called: list[str] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.called.append(request.agent.id)
+                if request.agent.id == "producer":
+                    repeated = " ".join(f"token{index}" for index in range(24))
+                    return AgentResponse((repeated + " ") * 10)
+                return AgentResponse("This consumer must not execute.")
+
+        gateway = RepetitionGateway()
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            artifact_quality_profile=ARTIFACT_QUALITY_PUBLIC_TEXT_V1,
+        )
+        graph = AgentGraph(
+            [
+                AgentNode("producer", "m1", "Produce an evidence artifact."),
+                AgentNode("consumer", "m2", "Use the evidence artifact."),
+            ],
+            [AgentRelation("producer", "consumer", True, False)],
+            output_agent_id="consumer",
+        )
+
+        with self.assertRaises(AgentRuntimeError) as caught:
+            await runtime.execute(graph, "question")
+
+        self.assertEqual(["producer"], gateway.called)
+        receipt = caught.exception.failure_records[0].metadata[
+            "artifact_quality_receipt"
+        ]
+        self.assertIn("repeated_token_ngram", receipt["error_codes"])
+
+    async def test_long_structured_json_is_not_misclassified_as_run_on(self) -> None:
+        catalog = registry()
+        structured = json.dumps(list(range(1500)))
+
+        class StructuredGateway:
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                del request
+                return AgentResponse(structured, {"finish_reason": "stop"})
+
+        runtime = AgentRuntime(
+            catalog,
+            StructuredGateway(),
+            artifact_quality_profile=ARTIFACT_QUALITY_PUBLIC_TEXT_V1,
+        )
+        graph = AgentGraph(
+            [AgentNode("output", "m1", "Return the structured artifact.")],
+            output_agent_id="output",
+        )
+
+        result = await runtime.execute(graph, "question")
+
+        self.assertEqual(structured, result.final_answer)
+        receipt = result.output_metadata["output"][
+            "artifact_quality_receipt"
+        ]
+        self.assertEqual("valid", receipt["status"])
+        self.assertTrue(receipt["structured_json"])
 
     async def test_reciprocal_component_is_reused_only_as_a_complete_block(self) -> None:
         catalog = registry()

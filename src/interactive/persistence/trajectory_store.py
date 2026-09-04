@@ -7,6 +7,7 @@ import json
 import math
 import os
 from pathlib import Path
+from threading import RLock
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional
 
 try:  # Linux production path; fallback keeps unit tests portable.
@@ -19,6 +20,22 @@ from .ids import canonical_json, stable_id
 
 class DuplicateEventError(ValueError):
     pass
+
+
+_PROCESS_PATH_LOCKS_GUARD = RLock()
+_PROCESS_PATH_LOCKS: dict[Path, RLock] = {}
+
+
+def _process_lock_for_path(path: Path) -> RLock:
+    """Return the process-wide lock shared by every store for one file."""
+
+    canonical_path = path.resolve(strict=False)
+    with _PROCESS_PATH_LOCKS_GUARD:
+        lock = _PROCESS_PATH_LOCKS.get(canonical_path)
+        if lock is None:
+            lock = RLock()
+            _PROCESS_PATH_LOCKS[canonical_path] = lock
+        return lock
 
 
 def _to_dict(record: Any) -> Dict[str, Any]:
@@ -45,6 +62,7 @@ class AppendOnlyJsonlStore:
         self.record_kind = record_kind
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.touch(exist_ok=True)
+        self._thread_lock = _process_lock_for_path(self.path)
 
     def _validate_envelope(self, event: Any, line_number: int) -> Dict[str, Any]:
         if not isinstance(event, dict):
@@ -70,18 +88,23 @@ class AppendOnlyJsonlStore:
     def _read_events(self, handle: Any, *, recover_torn_tail: bool) -> list[Dict[str, Any]]:
         handle.seek(0)
         contents = handle.read()
-        lines = contents.splitlines(keepends=True)
+        # JSONL records are delimited only by the physical LF byte.  Python's
+        # str.splitlines() additionally treats Unicode NEL, U+2028, and U+2029
+        # as boundaries even though those code points are legal inside a JSON
+        # string.  Model output can contain them verbatim, so split only on LF.
+        lines = contents.split("\n")
         parsed: list[Dict[str, Any]] = []
         offset = 0
         for index, line in enumerate(lines):
             line_number = index + 1
+            has_physical_newline = index < len(lines) - 1
             if not line.strip():
-                offset += len(line)
+                offset += len(line) + int(has_physical_newline)
                 continue
             try:
                 event = json.loads(line)
             except json.JSONDecodeError as exc:
-                is_torn_tail = index == len(lines) - 1 and not line.endswith("\n")
+                is_torn_tail = index == len(lines) - 1 and not contents.endswith("\n")
                 if recover_torn_tail and is_torn_tail:
                     valid_prefix = contents[:offset]
                     handle.seek(0)
@@ -92,7 +115,7 @@ class AppendOnlyJsonlStore:
                     break
                 raise ValueError(f"invalid JSONL at line {line_number}: {exc}") from exc
             parsed.append(self._validate_envelope(event, line_number))
-            offset += len(line)
+            offset += len(line) + int(has_physical_newline)
         return parsed
 
     def _existing_events(self, handle: Any) -> Dict[str, str]:
@@ -134,34 +157,53 @@ class AppendOnlyJsonlStore:
             "content_hash": content_hash,
             "payload": payload,
         }
-        with self.path.open("r+", encoding="utf-8") as handle:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                existing = self._existing_events(handle)
-                if resolved_id in existing:
-                    incoming = canonical_json(
-                        {"record_kind": self.record_kind, "payload": payload}
-                    )
-                    if existing[resolved_id] != incoming:
-                        raise DuplicateEventError(
-                            f"event ID {resolved_id} already has a different payload"
-                        )
-                    if idempotent:
-                        return resolved_id
-                    raise DuplicateEventError(f"event already exists: {resolved_id}")
-                handle.seek(0, os.SEEK_END)
-                handle.write(canonical_json(envelope) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            finally:
+        with self._thread_lock:
+            with self.path.open("r+", encoding="utf-8") as handle:
                 if fcntl is not None:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    existing = self._existing_events(handle)
+                    if resolved_id in existing:
+                        incoming = canonical_json(
+                            {"record_kind": self.record_kind, "payload": payload}
+                        )
+                        if existing[resolved_id] != incoming:
+                            raise DuplicateEventError(
+                                f"event ID {resolved_id} already has a different payload"
+                            )
+                        if idempotent:
+                            return resolved_id
+                        raise DuplicateEventError(
+                            f"event already exists: {resolved_id}"
+                        )
+                    handle.seek(0, os.SEEK_END)
+                    handle.write(canonical_json(envelope) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return resolved_id
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
-        with self.path.open("r", encoding="utf-8") as handle:
-            yield from self._read_events(handle, recover_torn_tail=False)
+        # FlowSteer evaluation can finish several AgentGraph tasks concurrently.
+        # Read one complete snapshot under the same advisory lock used by the
+        # append path; otherwise a reader can parse a writer's partial final
+        # line and incorrectly reject an otherwise valid trajectory.  Release
+        # the lock before yielding so a slow consumer never blocks append.
+        with self._thread_lock:
+            with self.path.open("r", encoding="utf-8") as handle:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+                try:
+                    events = self._read_events(
+                        handle,
+                        recover_torn_tail=False,
+                    )
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        yield from events
 
     def payloads(self) -> Iterator[Dict[str, Any]]:
         for event in self:

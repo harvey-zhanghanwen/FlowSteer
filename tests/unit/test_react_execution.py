@@ -112,6 +112,90 @@ class SequenceGateway:
 
 
 class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_opt_in_completion_domain_is_enforced_after_parse(self) -> None:
+        class SearchFirstAdapter(ToolReactExecutionAdapter):
+            def _state_conditioned_action_domain(
+                self,
+                request: AgentRequest,
+                observations: list[dict[str, object]],
+            ) -> tuple[frozenset[tuple[str, str]], bool]:
+                del request
+                if any(
+                    item.get("observation_status") == "success"
+                    for item in observations
+                ):
+                    return frozenset(), True
+                return frozenset({("wiki.search", "search")}), False
+
+        gateway = SequenceGateway(
+            [
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "premature"},
+                    resource_id=None,
+                ),
+                action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "published algorithm"},
+                    resource_id="wiki.search",
+                ),
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "Ada Lovelace"},
+                    resource_id=None,
+                ),
+            ]
+        )
+        adapter = SearchFirstAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=3,
+            max_tool_calls=1,
+            enforce_state_conditioned_completion_admission=True,
+        )
+
+        response = await adapter.execute(request())
+
+        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual(
+            "state_completion_not_admitted",
+            response.metadata["react_trace"][0]["public_error_code"],
+        )
+        self.assertEqual(1, response.metadata["tool_calls"])
+
+    async def test_completion_domain_enforcement_is_opt_in(self) -> None:
+        class SearchFirstAdapter(ToolReactExecutionAdapter):
+            def _state_conditioned_action_domain(
+                self,
+                request: AgentRequest,
+                observations: list[dict[str, object]],
+            ) -> tuple[frozenset[tuple[str, str]], bool]:
+                del request, observations
+                return frozenset({("wiki.search", "search")}), False
+
+        gateway = SequenceGateway(
+            [
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "historical completion"},
+                    resource_id=None,
+                )
+            ]
+        )
+
+        response = await SearchFirstAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=1,
+            max_tool_calls=1,
+        ).execute(request())
+
+        self.assertEqual("historical completion", response.text)
+
     async def test_empty_action_domain_fails_before_any_model_call(self) -> None:
         class ExhaustedAdapter(ToolReactExecutionAdapter):
             def _state_conditioned_action_domain(

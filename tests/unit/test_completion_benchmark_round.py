@@ -21,6 +21,45 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 
 
+def test_bounded_direct_react_exhaustion_uses_live_configured_turn_count() -> None:
+    failures: list[dict[str, object]] = []
+    assert _MODULE._bounded_direct_react_exhaustion_task_ids(failures) == set()
+
+    failures.append(
+        {
+            "task_id": "healthbench-professional:example",
+            "condition": "direct_local_qwen35_9b",
+            "stage": "generation_or_evaluator",
+            "error": (
+                "AgentRuntimeError: gateway failed: react agent 'direct' "
+                "exhausted 8 turns without a valid completion"
+            ),
+        }
+    )
+    assert _MODULE._bounded_direct_react_exhaustion_task_ids(failures) == {
+        "healthbench-professional:example"
+    }
+
+
+def test_bounded_direct_react_exhaustion_filters_condition_stage_and_tasks() -> None:
+    base = {
+        "task_id": "healthbench-professional:kept",
+        "condition": "direct_local_qwen35_9b",
+        "stage": "generation_or_evaluator",
+        "error": "react agent 'direct' exhausted 6 turns without a valid completion",
+    }
+    failures = [
+        base,
+        {**base, "task_id": "healthbench-professional:wrong-stage", "stage": "evaluator_invalid"},
+        {**base, "task_id": "healthbench-professional:wrong-condition", "condition": "agentgraph"},
+        {**base, "task_id": "healthbench-professional:other", "error": "provider timeout"},
+    ]
+    assert _MODULE._bounded_direct_react_exhaustion_task_ids(
+        failures,
+        task_ids={"healthbench-professional:kept"},
+    ) == {"healthbench-professional:kept"}
+
+
 def _evaluation_config(dataset_key: str) -> dict:
     config = deepcopy(load_yaml(_ROOT / "config" / "evaluation_hotpotqa_round_01.yaml"))
     config.pop("hotpotqa_evaluation")
@@ -296,6 +335,56 @@ def test_healthbench_react_paired_profile_matches_direct_tool_condition():
             }
         ],
         [],
+    ):
+        invalid = deepcopy(config)
+        invalid["healthbench_tool_runtime"][
+            "execution_profile_allowlist"
+        ] = invalid_profile
+        _assert_config_rejected(
+            invalid,
+            "healthbench_tool_runtime.execution_profile_allowlist",
+        )
+
+
+def test_healthbench_react_tool_availability_condition_allows_reasoning_fallback():
+    config = _healthbench_authoritative_config()
+    config["healthbench_professional_evaluation"][
+        "protocol_equivalent_to_direct"
+    ] = False
+    config["healthbench_tool_runtime"]["execution_profile_allowlist"] = [
+        {
+            "execution_mode": "reasoning",
+            "allowed_tools": [],
+        },
+        {
+            "execution_mode": "react",
+            "allowed_tools": ["healthbench-authoritative.search"],
+        },
+    ]
+
+    _MODULE.validate_completion_benchmark_config(config)
+
+    for invalid_profile in (
+        [
+            {
+                "execution_mode": "react",
+                "allowed_tools": ["healthbench-authoritative.search"],
+            }
+        ],
+        [
+            {
+                "execution_mode": "reasoning",
+                "allowed_tools": [],
+            },
+            {
+                "execution_mode": "react",
+                "allowed_tools": [],
+            },
+            {
+                "execution_mode": "react",
+                "allowed_tools": ["healthbench-authoritative.search"],
+            },
+        ],
     ):
         invalid = deepcopy(config)
         invalid["healthbench_tool_runtime"][
@@ -2378,6 +2467,31 @@ def test_healthbench_retrieval_report_requires_measured_paired_identity():
             "chat_template_enable_thinking"
         ],
     )
+    thinking_model_calls = deepcopy(model_calls)
+    for field in ("requested_sampling",):
+        thinking_model_calls[0][field].update(
+            max_tokens=int(action_sampling["max_tokens"]) + 512,
+            visible_max_tokens=int(action_sampling["max_tokens"]),
+            thinking_budget=512,
+        )
+    thinking_model_calls[0]["metadata"]["requested_sampling"].update(
+        max_tokens=int(action_sampling["max_tokens"]) + 512,
+        visible_max_tokens=int(action_sampling["max_tokens"]),
+        thinking_budget=512,
+    )
+    thinking_receipt = _MODULE._react_scientific_sampling_receipt(
+        thinking_model_calls,
+        base_seed=base_seed,
+        coordinate=coordinate,
+        max_action_tokens=int(action_sampling["max_tokens"]),
+        expected_top_k=action_sampling["top_k"],
+        expected_repetition_penalty=action_sampling["repetition_penalty"],
+        expected_chat_template_enable_thinking=action_sampling[
+            "chat_template_enable_thinking"
+        ],
+        expected_thinking_budget=512,
+    )
+    assert thinking_receipt["verified"] is True
     execution = {
         "metadata": {"response": {"model_calls": model_calls}},
     }

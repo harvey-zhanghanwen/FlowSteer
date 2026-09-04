@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from src.interactive.agent_graph import AgentNode
 from src.interactive.agent_runtime import (
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
     AgentRequest,
     CommunicationCondition,
@@ -40,6 +41,7 @@ def request(
     semantic_protocol: str = "none",
     communication_condition: CommunicationCondition = CommunicationCondition.NORMAL,
     artifact_communication_profile: str = "legacy",
+    model_metadata: dict[str, str] | None = None,
 ) -> AgentRequest:
     provider = ProviderSpec(
         "provider",
@@ -51,7 +53,11 @@ def request(
         "model",
         "provider",
         model_name="remote-model-id",
-        metadata={"temperature": "0.2", "max_tokens": "512"},
+        metadata={
+            "temperature": "0.2",
+            "max_tokens": "512",
+            **(model_metadata or {}),
+        },
     )
     return AgentRequest(
         request_id="run:1:agent:single",
@@ -113,6 +119,18 @@ class MessageTests(unittest.TestCase):
             source_role_family="evidence",
             source_completion_condition="Return one supported artifact.",
             source_finish_reason="stop",
+            input_artifact_provenance=(
+                {
+                    "source_agent_id": "retriever",
+                    "artifact_version": "retriever-v1",
+                    "tool_receipts": [
+                        {
+                            "tool_id": "public_search",
+                            "result": {"document_id": "doc-1"},
+                        }
+                    ],
+                },
+            ),
         )
         agent_request = replace(
             request(
@@ -134,6 +152,9 @@ class MessageTests(unittest.TestCase):
         self.assertIn("source_finish_reason: stop", visible)
         self.assertIn("source_contract_provenance:", visible)
         self.assertIn("Collect the evidence required by the task.", visible)
+        self.assertIn("input_artifact_provenance:", visible)
+        self.assertIn('"artifact_version":"retriever-v1"', visible)
+        self.assertIn('"document_id":"doc-1"', visible)
         self.assertIn("provenance describing why its artifact", messages[0]["content"])
 
     def test_versioned_revision_uses_same_peer_envelope(self) -> None:
@@ -166,6 +187,348 @@ class MessageTests(unittest.TestCase):
         self.assertIn("source_model_id: model-peer", visible)
         self.assertIn("source_contract_provenance:\nReview the current candidate.", visible)
 
+    def test_healthbench_structured_evidence_projects_only_cited_receipt_rows(
+        self,
+    ) -> None:
+        evidence_span = "Supported guidance for the requested population."
+        artifact = json.dumps(
+            {
+                "schema_version": "healthbench.structured-evidence.v1",
+                "status": "supported",
+                "summary": "One supported finding.",
+                "evidence_items": [
+                    {
+                        "supported_claim": "The requested finding is supported.",
+                        "conditions_or_qualifiers": "For the requested population.",
+                        "document_id": "doc-cited",
+                        "source": "NCBI PubMed",
+                        "title": "Cited source",
+                        "date": "2025",
+                        "url": "https://example.invalid/cited",
+                        "evidence_span": evidence_span,
+                    }
+                ],
+                "uncertainties": [],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        receipt = {
+            "tool_id": "healthbench-authoritative.search",
+            "tool_version": "large-version-string-that-must-not-be-rendered",
+            "error_type": None,
+            "started_at_monotonic": 10.0,
+            "ended_at_monotonic": 11.0,
+            "request": {
+                "action": "search",
+                "arguments": {"query": "requested clinical relation"},
+            },
+            "result": {
+                "completed": True,
+                "value": {
+                    "operation": "search",
+                    "query": "requested clinical relation",
+                    "evidence": [
+                        {
+                            "document_id": "doc-cited",
+                            "source": "NCBI PubMed",
+                            "title": "Cited source",
+                            "date": "2025",
+                            "url": "https://example.invalid/cited",
+                            "excerpt": evidence_span + " Additional body text.",
+                        },
+                        {
+                            "document_id": "doc-unrelated",
+                            "source": "Other source",
+                            "title": "Unrelated source",
+                            "date": None,
+                            "url": None,
+                            "excerpt": "UNRELATED RAW RESULT BODY",
+                        },
+                    ],
+                    "frozen_corpus": {"corpus_rows": 999999},
+                },
+            },
+        }
+        duplicate_with_different_timing = {
+            **receipt,
+            "started_at_monotonic": 20.0,
+            "ended_at_monotonic": 21.0,
+        }
+        upstream = UpstreamMessage(
+            "searcher",
+            "agent",
+            artifact,
+            artifact_type="evidence",
+            artifact_version="searcher-v1",
+            source_execution_mode="react",
+            tool_receipts=(receipt, duplicate_with_different_timing),
+        )
+        problem = render_model_visible_conversation(
+            ({"role": "user", "content": "What does the evidence support?"},)
+        )
+        agent_request = replace(
+            request(
+                problem=problem,
+                artifact_communication_profile=(
+                    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2
+                ),
+            ),
+            upstream=(upstream,),
+        )
+
+        visible = build_agent_messages(agent_request)[-1]["content"]
+
+        self.assertIn(
+            "tool_receipt_projection: "
+            "artifact-referenced-healthbench-evidence-v1",
+            visible,
+        )
+        self.assertIn("tool_receipt_projection_status: complete", visible)
+        self.assertEqual(1, visible.count('"tool_id":"healthbench-authoritative.search"'))
+        self.assertIn('"document_id":"doc-cited"', visible)
+        self.assertIn('"query":"requested clinical relation"', visible)
+        self.assertNotIn("doc-unrelated", visible)
+        self.assertNotIn("UNRELATED RAW RESULT BODY", visible)
+        self.assertNotIn("frozen_corpus", visible)
+        self.assertNotIn("started_at_monotonic", visible)
+        self.assertNotIn("large-version-string-that-must-not-be-rendered", visible)
+        self.assertEqual(2, len(agent_request.upstream[0].tool_receipts))
+        self.assertEqual(
+            "UNRELATED RAW RESULT BODY",
+            agent_request.upstream[0].tool_receipts[0]["result"]["value"][
+                "evidence"
+            ][1]["excerpt"],
+        )
+
+    def test_healthbench_structured_profile_compacts_nested_provenance(self) -> None:
+        evidence_span = "A bounded exact evidence span."
+        evidence_artifact = json.dumps(
+            {
+                "schema_version": "healthbench.structured-evidence.v1",
+                "status": "supported",
+                "summary": "Bound evidence.",
+                "evidence_items": [
+                    {
+                        "supported_claim": "A supported claim.",
+                        "conditions_or_qualifiers": "One qualifier.",
+                        "document_id": "doc-nested",
+                        "source": "Source",
+                        "title": "Nested title",
+                        "date": None,
+                        "url": None,
+                        "evidence_span": evidence_span,
+                    }
+                ],
+                "uncertainties": [],
+            },
+            sort_keys=True,
+        )
+        receipt = {
+            "tool_id": "healthbench-authoritative.search",
+            "error_type": None,
+            "latency_ms": 54321.0,
+            "request": {
+                "action": "search",
+                "arguments": {"query": "nested relation"},
+            },
+            "result": {
+                "completed": True,
+                "value": {
+                    "operation": "search",
+                    "query": "nested relation",
+                    "evidence": [
+                        {
+                            "document_id": "doc-nested",
+                            "source": "Source",
+                            "title": "Nested title",
+                            "date": None,
+                            "url": None,
+                            "excerpt": evidence_span,
+                        },
+                        {
+                            "document_id": "nested-unrelated",
+                            "source": "Source",
+                            "title": "Noise",
+                            "date": None,
+                            "url": None,
+                            "excerpt": "NESTED UNRELATED BODY",
+                        },
+                    ],
+                },
+            },
+        }
+        provenance = {
+            "source_agent_id": "searcher",
+            "target_agent_id": "synthesizer",
+            "message_type": "artifact",
+            "artifact_type": "evidence",
+            "artifact_version": "searcher-v1",
+            "source_execution_mode": "react",
+            "artifact": evidence_artifact,
+            "artifact_body": evidence_artifact,
+            "content": evidence_artifact,
+            "source_contract": "A long nested contract is backend provenance.",
+            "request_or_dependency": "A repeated nested dependency.",
+            "tool_receipts": [receipt],
+            "input_artifact_provenance": [],
+        }
+        duplicate_provenance = {
+            **provenance,
+            "tool_receipts": [{**receipt, "latency_ms": 99999.0}],
+        }
+        upstream = UpstreamMessage(
+            "synthesizer",
+            "agent",
+            "A downstream synthesis.",
+            artifact_version="synthesizer-v1",
+            source_execution_mode="reasoning",
+            input_artifact_provenance=(provenance, duplicate_provenance),
+        )
+        problem = render_model_visible_conversation(
+            ({"role": "user", "content": "Use the synthesis."},)
+        )
+        agent_request = replace(
+            request(
+                problem=problem,
+                artifact_communication_profile=(
+                    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2
+                ),
+            ),
+            upstream=(upstream,),
+        )
+
+        visible = build_agent_messages(agent_request)[-1]["content"]
+
+        self.assertIn(
+            "input_artifact_provenance_projection: compact-structured-evidence-v2",
+            visible,
+        )
+        self.assertIn('"artifact_version":"searcher-v1"', visible)
+        self.assertEqual(
+            1,
+            visible.count('"artifact_version":"searcher-v1"'),
+        )
+        self.assertIn('"document_id":"doc-nested"', visible)
+        self.assertNotIn('"artifact_body"', visible)
+        self.assertNotIn('"content"', visible)
+        self.assertNotIn('"tool_receipts"', visible)
+        self.assertNotIn("source_contract", visible)
+        self.assertNotIn("request_or_dependency", visible)
+        self.assertNotIn("latency_ms", visible)
+        self.assertNotIn("nested-unrelated", visible)
+        self.assertNotIn("NESTED UNRELATED BODY", visible)
+        self.assertEqual(receipt, provenance["tool_receipts"][0])
+
+    def test_structured_evidence_profile_is_healthbench_scoped(self) -> None:
+        receipt = {
+            "tool_id": "healthbench-authoritative.search",
+            "error_type": None,
+            "request": {"action": "search", "arguments": {"query": "q"}},
+            "result": {
+                "completed": True,
+                "value": {
+                    "operation": "search",
+                    "query": "q",
+                    "evidence": [],
+                },
+            },
+        }
+        upstream = UpstreamMessage(
+            "source",
+            "agent",
+            "plain non-HealthBench artifact",
+            source_execution_mode="react",
+            tool_receipts=(receipt,),
+        )
+        agent_request = replace(
+            request(
+                artifact_communication_profile=(
+                    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2
+                )
+            ),
+            upstream=(upstream,),
+        )
+
+        visible = build_agent_messages(agent_request)[-1]["content"]
+
+        self.assertIn('"tool_id":"healthbench-authoritative.search"', visible)
+        self.assertNotIn("artifact-referenced-healthbench-evidence-v1", visible)
+
+    def test_healthbench_projection_requires_explicit_completed_receipt(
+        self,
+    ) -> None:
+        evidence_span = "Evidence from an incomplete receipt."
+        artifact = json.dumps(
+            {
+                "schema_version": "healthbench.structured-evidence.v1",
+                "status": "supported",
+                "summary": "A candidate summary.",
+                "evidence_items": [
+                    {
+                        "supported_claim": "A candidate claim.",
+                        "conditions_or_qualifiers": "",
+                        "document_id": "doc-incomplete",
+                        "source": "Source",
+                        "title": "Title",
+                        "date": None,
+                        "url": None,
+                        "evidence_span": evidence_span,
+                    }
+                ],
+                "uncertainties": [],
+            }
+        )
+        incomplete_receipt = {
+            "tool_id": "healthbench-authoritative.search",
+            "error_type": None,
+            "request": {"action": "search", "arguments": {"query": "q"}},
+            "result": {
+                "value": {
+                    "operation": "search",
+                    "query": "q",
+                    "evidence": [
+                        {
+                            "document_id": "doc-incomplete",
+                            "source": "Source",
+                            "title": "Title",
+                            "date": None,
+                            "url": None,
+                            "excerpt": evidence_span,
+                        }
+                    ],
+                }
+            },
+        }
+        upstream = UpstreamMessage(
+            "searcher",
+            "agent",
+            artifact,
+            source_execution_mode="react",
+            tool_receipts=(incomplete_receipt,),
+        )
+        problem = render_model_visible_conversation(
+            ({"role": "user", "content": "Use completed evidence only."},)
+        )
+        agent_request = replace(
+            request(
+                problem=problem,
+                artifact_communication_profile=(
+                    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2
+                ),
+            ),
+            upstream=(upstream,),
+        )
+
+        visible = build_agent_messages(agent_request)[-1]["content"]
+
+        self.assertIn(
+            "tool_receipt_projection_status: unavailable-no-receipt-match",
+            visible,
+        )
+        self.assertNotIn("evidence_receipts:", visible)
+        self.assertNotIn('"operation":"search"', visible)
+
     def test_healthbench_conversation_preserves_native_roles_and_content(self) -> None:
         problem = render_model_visible_conversation(
             (
@@ -192,9 +555,244 @@ class MessageTests(unittest.TestCase):
             messages[0]["content"],
         )
         self.assertIn("ambiguous shorthand", messages[0]["content"])
+        self.assertIn("entity-property binding", messages[0]["content"])
+        self.assertIn("do not introduce a new decisive claim", messages[0]["content"])
         self.assertIn("do not endorse unsafe content", messages[0]["content"])
         self.assertIn("must not expose Agent IDs", messages[0]["content"])
         self.assertNotIn("rubric", "\n".join(item["content"] for item in messages))
+
+    def test_versioned_healthbench_protocol_treats_contract_as_instruction(self) -> None:
+        problem = render_model_visible_conversation(
+            ({"role": "user", "content": "What level should be used?"},)
+        )
+        messages = build_agent_messages(
+            request(
+                problem=problem,
+                model_metadata={
+                    "healthbench_execution_protocol": "contract-is-not-evidence.v2"
+                },
+            )
+        )
+        system = messages[0]["content"]
+
+        self.assertIn("contract describes work to perform, not evidence", system)
+        self.assertIn("answer every explicit part", system)
+        self.assertNotIn("rubric", system.casefold())
+
+    def test_v3_healthbench_react_output_complete_is_user_facing(self) -> None:
+        problem = render_model_visible_conversation(
+            (
+                {"role": "user", "content": "Explain the options."},
+                {"role": "assistant", "content": "Which aspect matters most?"},
+                {
+                    "role": "user",
+                    "content": "Compare both options and give next steps.",
+                },
+            )
+        )
+        system = build_agent_messages(
+            request(
+                problem=problem,
+                execution_mode="react",
+                is_output_agent=True,
+                model_metadata={
+                    "healthbench_execution_protocol": (
+                        "contract-is-not-evidence.output-complete.v3"
+                    )
+                },
+            )
+        )[0]["content"]
+
+        self.assertIn("StructuredAction JSON object", system)
+        self.assertIn("contract describes work to perform, not evidence", system)
+        self.assertIn("arguments must contain only the admitted `query` field", system)
+        self.assertIn("`arguments.value` must be the complete, self-contained", system)
+        self.assertIn("answers every explicit request", system)
+        self.assertIn("final user message of the original conversation", system)
+        self.assertIn("must not expose AgentGraph", system)
+        self.assertIn("use a short query", system)
+        self.assertIn("broaden it by removing restrictive terms", system)
+
+    def test_v3_healthbench_output_suffix_is_strictly_version_and_role_scoped(
+        self,
+    ) -> None:
+        problem = render_model_visible_conversation(
+            ({"role": "user", "content": "Compare both options."},)
+        )
+        v2_output = build_agent_messages(
+            request(
+                problem=problem,
+                execution_mode="react",
+                is_output_agent=True,
+                model_metadata={
+                    "healthbench_execution_protocol": "contract-is-not-evidence.v2"
+                },
+            )
+        )[0]["content"]
+        v3_non_output = build_agent_messages(
+            request(
+                problem=problem,
+                execution_mode="react",
+                is_output_agent=False,
+                model_metadata={
+                    "healthbench_execution_protocol": (
+                        "contract-is-not-evidence.output-complete.v3"
+                    )
+                },
+            )
+        )[0]["content"]
+        qa_output = build_agent_messages(
+            request(
+                problem="Which city hosted the event?",
+                execution_mode="react",
+                is_output_agent=True,
+                semantic_protocol="qa_verified_answer_lineage_v2",
+                model_metadata={
+                    "healthbench_execution_protocol": (
+                        "contract-is-not-evidence.output-complete.v3"
+                    )
+                },
+            )
+        )[0]["content"]
+
+        suffix = "`arguments.value` must be the complete, self-contained"
+        self.assertNotIn(suffix, v2_output)
+        self.assertNotIn(suffix, v3_non_output)
+        self.assertNotIn(suffix, qa_output)
+        self.assertNotIn("use a short query", v2_output)
+        self.assertIn("use a short query", v3_non_output)
+        self.assertIn("contract describes work to perform, not evidence", v3_non_output)
+
+    def test_v4_healthbench_protocol_binds_every_explicit_answer_slot(self) -> None:
+        problem = render_model_visible_conversation(
+            (
+                {
+                    "role": "user",
+                    "content": (
+                        "Explain AC and distinguish the procedural locations."
+                    ),
+                },
+            )
+        )
+        system = build_agent_messages(
+            request(
+                problem=problem,
+                execution_mode="reasoning",
+                is_output_agent=False,
+                model_metadata={
+                    "healthbench_execution_protocol": (
+                        "contract-is-not-evidence.output-complete.slot-binding.v4"
+                    )
+                },
+            )
+        )[0]["content"]
+
+        self.assertIn("each explicit noun phrase and unresolved abbreviation", system)
+        self.assertIn("exact entity, attribute, condition, and procedural stage", system)
+        self.assertIn("never substitute a related but different property", system)
+        self.assertIn("access or entry site", system)
+        self.assertIn("target or tip position", system)
+        self.assertIn("coverage or treatment level", system)
+        self.assertNotIn("rubric", system.casefold())
+
+    def test_v4_healthbench_react_output_retains_complete_action_suffix(self) -> None:
+        problem = render_model_visible_conversation(
+            ({"role": "user", "content": "Address every requested item."},)
+        )
+        system = build_agent_messages(
+            request(
+                problem=problem,
+                execution_mode="react",
+                is_output_agent=True,
+                model_metadata={
+                    "healthbench_execution_protocol": (
+                        "contract-is-not-evidence.output-complete.slot-binding.v4"
+                    )
+                },
+            )
+        )[0]["content"]
+
+        self.assertIn("`arguments.value` must be the complete, self-contained", system)
+        self.assertIn("answers every explicit request", system)
+        self.assertIn("each explicit noun phrase and unresolved abbreviation", system)
+
+    def test_v4_slot_binding_is_versioned_and_healthbench_scoped(self) -> None:
+        problem = render_model_visible_conversation(
+            ({"role": "user", "content": "Explain AC."},)
+        )
+        v3_system = build_agent_messages(
+            request(
+                problem=problem,
+                model_metadata={
+                    "healthbench_execution_protocol": (
+                        "contract-is-not-evidence.output-complete.v3"
+                    )
+                },
+            )
+        )[0]["content"]
+        non_healthbench_system = build_agent_messages(
+            request(
+                problem="Explain AC.",
+                model_metadata={
+                    "healthbench_execution_protocol": (
+                        "contract-is-not-evidence.output-complete.slot-binding.v4"
+                    )
+                },
+            )
+        )[0]["content"]
+
+        slot_binding = "each explicit noun phrase and unresolved abbreviation"
+        self.assertNotIn(slot_binding, v3_system)
+        self.assertNotIn("access or entry site", v3_system)
+        self.assertNotIn(slot_binding, non_healthbench_system)
+        self.assertNotIn("access or entry site", non_healthbench_system)
+
+    def test_v5_healthbench_protocol_closes_tool_and_output_semantics(self) -> None:
+        problem = render_model_visible_conversation(
+            ({"role": "user", "content": "Translate this treatment plan."},)
+        )
+        system = build_agent_messages(
+            request(
+                problem=problem,
+                execution_mode="react",
+                is_output_agent=True,
+                model_metadata={
+                    "healthbench_execution_protocol": (
+                        "contract-is-not-evidence.output-complete."
+                        "slot-binding.closure.v5"
+                    )
+                },
+            )
+        )[0]["content"]
+
+        self.assertIn("evidence-derived finding", system)
+        self.assertIn("never complete with a query, keyword list", system)
+        self.assertIn("Resolve internal contradictions", system)
+        self.assertIn("urgent or in-person evaluation", system)
+        self.assertIn("adding the necessary safety correction", system)
+        self.assertIn("apply the correction", system)
+        self.assertIn("`arguments.value` must be the complete", system)
+        self.assertNotIn("rubric", system.casefold())
+
+        v4_system = build_agent_messages(
+            request(
+                problem=problem,
+                model_metadata={
+                    "healthbench_execution_protocol": (
+                        "contract-is-not-evidence.output-complete.slot-binding.v4"
+                    )
+                },
+            )
+        )[0]["content"]
+        self.assertNotIn("evidence-derived finding", v4_system)
+
+    def test_legacy_healthbench_catalog_keeps_v1_execution_protocol(self) -> None:
+        problem = render_model_visible_conversation(
+            ({"role": "user", "content": "What level should be used?"},)
+        )
+        system = build_agent_messages(request(problem=problem))[0]["content"]
+
+        self.assertNotIn("contract describes work to perform, not evidence", system)
 
     def test_semantic_lineage_projects_only_artifact_referenced_read_receipts(
         self,
@@ -1004,7 +1602,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(response.metadata["reasoning_content_present"], True)
         self.assertEqual(response.metadata["reasoning_content_characters"], 22)
         self.assertEqual(response.metadata["reasoning_tokens"], 11)
-        self.assertNotIn("private reasoning body", json.dumps(response.metadata))
+        self.assertNotIn(
+            "private reasoning body",
+            json.dumps(dict(response.metadata)),
+        )
 
     def test_skillflow_response_schema_is_forwarded(self) -> None:
         item = request()

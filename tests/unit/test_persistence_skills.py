@@ -5,7 +5,11 @@ import json
 import math
 import tempfile
 from pathlib import Path
+import threading
 import unittest
+from unittest.mock import patch
+
+import src.interactive.persistence.trajectory_store as trajectory_store_module
 
 from src.interactive.persistence import (
     AppendOnlyJsonlStore,
@@ -77,6 +81,106 @@ def candidate_skill(**evidence_overrides: object) -> SkillRecord:
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_unicode_line_separators_inside_payload_are_not_jsonl_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "events.jsonl"
+            store = AppendOnlyJsonlStore(path, "event")
+            embedded_separators = "NEL:\u0085 LS:\u2028 PS:\u2029"
+            store.append({"value": embedded_separators})
+
+            # Preserve torn-tail recovery after a valid record containing
+            # characters that str.splitlines() incorrectly treats as lines.
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write('{"torn"')
+            store.append({"value": "after recovery"})
+
+            self.assertEqual(
+                [embedded_separators, "after recovery"],
+                [payload["value"] for payload in store.payloads()],
+            )
+
+    def test_reader_waits_for_complete_concurrent_append(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            real_root = Path(temp) / "real"
+            real_root.mkdir()
+            alias_root = Path(temp) / "alias"
+            alias_root.symlink_to(real_root, target_is_directory=True)
+            path = real_root / "events.jsonl"
+            writer_store = AppendOnlyJsonlStore(path, "event")
+            reader_store = AppendOnlyJsonlStore(alias_root / "events.jsonl", "event")
+            half_written = threading.Event()
+            allow_finish = threading.Event()
+            reader_started = threading.Event()
+            reader_finished = threading.Event()
+            errors: list[BaseException] = []
+            original_open = Path.open
+
+            class SplitWriteHandle:
+                def __init__(self, handle):
+                    self._handle = handle
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return self._handle.__exit__(*args)
+
+                def __getattr__(self, name):
+                    return getattr(self._handle, name)
+
+                def write(self, value):
+                    midpoint = max(1, len(value) // 2)
+                    written = self._handle.write(value[:midpoint])
+                    self._handle.flush()
+                    half_written.set()
+                    if not allow_finish.wait(timeout=5.0):
+                        raise TimeoutError("test did not release split JSONL write")
+                    return written + self._handle.write(value[midpoint:])
+
+            def controlled_open(path_value, mode="r", *args, **kwargs):
+                handle = original_open(path_value, mode, *args, **kwargs)
+                if path_value == path and mode == "r+":
+                    return SplitWriteHandle(handle)
+                return handle
+
+            def append_record() -> None:
+                try:
+                    writer_store.append({"value": "x" * 100_000})
+                except BaseException as exc:  # pragma: no cover - assertion path
+                    errors.append(exc)
+
+            def read_records() -> None:
+                reader_started.set()
+                try:
+                    list(reader_store.payloads())
+                except BaseException as exc:  # pragma: no cover - assertion path
+                    errors.append(exc)
+                finally:
+                    reader_finished.set()
+
+            with (
+                patch.object(Path, "open", controlled_open),
+                patch.object(trajectory_store_module, "fcntl", None),
+            ):
+                writer = threading.Thread(target=append_record)
+                writer.start()
+                self.assertTrue(half_written.wait(timeout=5.0))
+                reader = threading.Thread(target=read_records)
+                reader.start()
+                self.assertTrue(reader_started.wait(timeout=5.0))
+                self.assertFalse(reader_finished.wait(timeout=0.05))
+                allow_finish.set()
+                writer.join(timeout=5.0)
+                reader.join(timeout=5.0)
+
+            self.assertFalse(writer.is_alive())
+            self.assertFalse(reader.is_alive())
+            self.assertEqual([], errors)
+            self.assertEqual(
+                [{"value": "x" * 100_000}],
+                list(reader_store.payloads()),
+            )
+
     def test_stable_id_and_idempotent_jsonl_append(self) -> None:
         self.assertEqual(stable_id("event", {"b": 2, "a": 1}), stable_id("event", {"a": 1, "b": 2}))
         with tempfile.TemporaryDirectory() as temp:

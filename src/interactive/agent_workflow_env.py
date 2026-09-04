@@ -32,6 +32,7 @@ from .agent_runtime import (
     AgentRuntimeResult,
 )
 from .model_registry import ModelRegistry
+from .healthbench_professional_adapter import parse_model_visible_conversation
 from .task_dataset import (
     hotpotqa_answer_cardinality_constraint,
     hotpotqa_answer_type_constraint,
@@ -57,6 +58,36 @@ _SUPPORTED_SEMANTIC_PROTOCOLS = frozenset(
 )
 _SUPPORTED_RECOVERY_POLICIES = frozenset(
     {"default", _PRESERVE_REPAIR_RECOVERY_POLICY}
+)
+
+# A free-text contract may name another Canvas Agent as a required input.  The
+# patterns intentionally cover only explicit data-dependency language; they do
+# not infer roles, task semantics, or a preferred topology from ordinary prose.
+_DECLARED_DEPENDENCY_PATTERNS = (
+    re.compile(
+        r"\b(?:from|based\s+on|grounded\s+in)\s+(?:the\s+)?"
+        r"(node_[A-Za-z0-9_]+)\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:use|using|consume|consuming)\s+(?:the\s+)?"
+        r"(?:artifact|output|result|results|finding|findings|evidence|analysis|"
+        r"response)(?:\s+(?:from|of|produced\s+by))?\s+"
+        r"(node_[A-Za-z0-9_]+)\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"\breceiv(?:e|ing)\s+(?:the\s+)?(?:artifact|output|result|results|"
+        r"finding|findings|evidence|analysis|response)\s+from\s+"
+        r"(node_[A-Za-z0-9_]+)\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(node_[A-Za-z0-9_]+)(?:['’]s)?\s+"
+        r"(?:artifact|output|result|results|finding|findings|evidence|analysis|"
+        r"response)\b",
+        flags=re.IGNORECASE,
+    ),
 )
 
 
@@ -390,6 +421,9 @@ class AgentWorkflowEnv:
         required_evidence_tool_id: Optional[str] = None,
         finish_only_when_admissible: bool = False,
         require_informative_contracts: bool = False,
+        require_declared_dependency_relations: bool = False,
+        require_scope_neutral_contracts: bool = False,
+        require_explicit_safety_scope_preservation: bool = False,
         reuse_unchanged_agent_inputs: bool = False,
         require_output_protocol_artifact_for_set_output: bool = False,
         require_reciprocal_terminal_artifact_lineage: bool = False,
@@ -425,6 +459,15 @@ class AgentWorkflowEnv:
         for option_name, option_value in (
             ("finish_only_when_admissible", finish_only_when_admissible),
             ("require_informative_contracts", require_informative_contracts),
+            (
+                "require_declared_dependency_relations",
+                require_declared_dependency_relations,
+            ),
+            ("require_scope_neutral_contracts", require_scope_neutral_contracts),
+            (
+                "require_explicit_safety_scope_preservation",
+                require_explicit_safety_scope_preservation,
+            ),
             ("reuse_unchanged_agent_inputs", reuse_unchanged_agent_inputs),
             (
                 "require_output_protocol_artifact_for_set_output",
@@ -537,6 +580,13 @@ class AgentWorkflowEnv:
         self.require_format_agent = require_format_agent
         self.finish_only_when_admissible = finish_only_when_admissible
         self.require_informative_contracts = require_informative_contracts
+        self.require_declared_dependency_relations = (
+            require_declared_dependency_relations
+        )
+        self.require_scope_neutral_contracts = require_scope_neutral_contracts
+        self.require_explicit_safety_scope_preservation = (
+            require_explicit_safety_scope_preservation
+        )
         self.reuse_unchanged_agent_inputs = reuse_unchanged_agent_inputs
         self.require_output_protocol_artifact_for_set_output = (
             require_output_protocol_artifact_for_set_output
@@ -611,6 +661,18 @@ class AgentWorkflowEnv:
     @property
     def problem(self) -> str:
         return self._problem
+
+    def task_goal_receipt(self) -> dict[str, object]:
+        """Return the bounded, immutable task objective visible after each edit."""
+
+        return {
+            "source": "immutable_initial_task",
+            "preserve_original_scope": True,
+            "task_preview": _artifact_head_tail_preview(
+                self._problem,
+                limit=320,
+            ),
+        }
 
     @property
     def graph(self) -> AgentGraph:
@@ -886,7 +948,9 @@ class AgentWorkflowEnv:
         dirty_replacement_ids = self._dirty_auxiliary_replacement_agent_ids()
         node_count = len(self._graph.nodes)
         node_ids = tuple(node.id for node in self._graph.nodes)
-        can_add = self.max_agents is None or node_count < self.max_agents
+        can_add = (
+            self.max_agents is None or node_count < self.max_agents
+        ) and bool(self._available_model_execution_profiles())
 
         output_provenance_issue = self._current_output_provenance_issue()
         if output_provenance_issue is not None:
@@ -1284,6 +1348,11 @@ class AgentWorkflowEnv:
                     if not validation.valid:
                         continue
                     if self._semantic_edit_issue_for(candidate) is not None:
+                        continue
+                    if (
+                        self._declared_dependency_relation_issue_for(candidate)
+                        is not None
+                    ):
                         continue
                     if self._preserved_input_change_issue_for(candidate) is not None:
                         continue
@@ -3734,6 +3803,15 @@ class AgentWorkflowEnv:
             if model_id not in self._unavailable_model_ids
         )
 
+    def _available_model_execution_profiles(
+        self,
+    ) -> Tuple[Tuple[str, str, Tuple[str, ...]], ...]:
+        """Return executable joint catalog arms after availability masking."""
+
+        return self.runtime.model_execution_profiles(
+            self._available_model_ids()
+        )
+
     def model_availability_receipt(self) -> dict[str, object]:
         """Return the trajectory-local availability overlay and its evidence."""
 
@@ -3871,7 +3949,23 @@ class AgentWorkflowEnv:
             next_index = 1
             while f"node_{next_index}" in used_agent_ids:
                 next_index += 1
-            registered_profiles = self.runtime.registered_execution_profiles()
+            model_execution_profiles = (
+                self._available_model_execution_profiles()
+            )
+            available_model_ids = tuple(
+                dict.fromkeys(
+                    model_id
+                    for model_id, _, _ in model_execution_profiles
+                )
+            )
+            registered_profiles = tuple(
+                dict.fromkeys(
+                    (execution_mode, allowed_tools)
+                    for _, execution_mode, allowed_tools in (
+                        model_execution_profiles
+                    )
+                )
+            )
             targets[AgentActionType.ADD_AGENT.value] = {
                 # DIRECT_REUSE: FlowSteer's role-neutral scalar ADD boundary
                 # allocates the next available node_N identifier. SkillFlow's
@@ -3881,7 +3975,7 @@ class AgentWorkflowEnv:
                 # prescribes a topology.
                 "agent_ids": [f"node_{next_index}"],
                 "existing_agent_ids": node_ids,
-                "model_ids": list(self._available_model_ids()),
+                "model_ids": list(available_model_ids),
                 "required_agent_fields": [
                     "agent_id",
                     "model_id",
@@ -3896,6 +3990,16 @@ class AgentWorkflowEnv:
                     }
                     for execution_mode, allowed_tools in registered_profiles
                 ],
+                "model_execution_profiles": [
+                    {
+                        "model_id": model_id,
+                        "execution_mode": execution_mode,
+                        "allowed_tools": list(allowed_tools),
+                    }
+                    for model_id, execution_mode, allowed_tools in (
+                        model_execution_profiles
+                    )
+                ],
                 "contract_semantics": "free_text",
                 "contract_min_length": 12,
                 "contract_requirements": [
@@ -3906,6 +4010,23 @@ class AgentWorkflowEnv:
                 ],
             }
         if AgentActionType.ADD_SUBGRAPH.value in admitted:
+            model_execution_profiles = (
+                self._available_model_execution_profiles()
+            )
+            executable_model_ids = tuple(
+                dict.fromkeys(
+                    model_id
+                    for model_id, _, _ in model_execution_profiles
+                )
+            )
+            executable_profiles = tuple(
+                dict.fromkeys(
+                    (execution_mode, allowed_tools)
+                    for _, execution_mode, allowed_tools in (
+                        model_execution_profiles
+                    )
+                )
+            )
             remaining = (
                 self.max_agents_per_subgraph
                 if self.max_agents is None
@@ -4174,25 +4295,39 @@ class AgentWorkflowEnv:
                                 "execution_mode",
                                 "allowed_tools",
                             ],
-                            "model_ids": list(self._available_model_ids()),
+                            "model_ids": list(executable_model_ids),
                             "execution_profiles": [
                                 {
                                     "execution_mode": execution_mode,
                                     "allowed_tools": list(allowed_tools),
                                 }
                                 for execution_mode, allowed_tools in (
-                                    self.runtime.registered_execution_profiles()
+                                    executable_profiles
+                                )
+                            ],
+                            "model_execution_profiles": [
+                                {
+                                    "model_id": model_id,
+                                    "execution_mode": execution_mode,
+                                    "allowed_tools": list(allowed_tools),
+                                }
+                                for model_id, execution_mode, allowed_tools in (
+                                    model_execution_profiles
                                 )
                             ],
                             "existing_agents": [
                                 {
                                     "agent_id": node.id,
+                                    "model_id": node.model_id,
                                     "execution_mode": node.execution_mode.value,
                                     "allowed_tools": list(node.allowed_tools),
                                 }
                                 for node in self._graph.nodes
                             ],
                             "required_tool_id": None,
+                            "require_declared_dependency_relations": (
+                                self.require_declared_dependency_relations
+                            ),
                             "min_relations": (
                                 int(
                                     output_provenance_domain.get(
@@ -4291,12 +4426,21 @@ class AgentWorkflowEnv:
             responsible_ids.update(modifiable_node_ids)
             per_agent_model_domains = {
                 agent_id: list(
-                    self._provider_repair_model_ids(agent_id)
-                    if agent_id in provider_failure_agent_ids
-                    else tuple(
-                        model_id
-                        for model_id in self._available_model_ids()
-                        if model_id != self._graph.get_node(agent_id).model_id
+                    model_id
+                    for model_id in (
+                        self._provider_repair_model_ids(agent_id)
+                        if agent_id in provider_failure_agent_ids
+                        else tuple(
+                            candidate_model_id
+                            for candidate_model_id in self._available_model_ids()
+                            if candidate_model_id
+                            != self._graph.get_node(agent_id).model_id
+                        )
+                    )
+                    if self.runtime.model_supports_execution_profile(
+                        model_id,
+                        self._graph.get_node(agent_id).execution_mode.value,
+                        self._graph.get_node(agent_id).allowed_tools,
                     )
                 )
                 for agent_id in modifiable_node_ids
@@ -4315,13 +4459,14 @@ class AgentWorkflowEnv:
             # pairs lets the Director's live schema sample both fields in one
             # MODIFY action instead of first creating an invalid intermediate
             # declaration such as reasoning + non-empty allowed_tools.
-            registered_execution_profiles = (
-                self.runtime.registered_execution_profiles()
-            )
             per_agent_execution_profiles = {
                 agent_id: tuple(
                     profile
-                    for profile in registered_execution_profiles
+                    for profile in (
+                        self.runtime.registered_execution_profiles_for_model(
+                            self._graph.get_node(agent_id).model_id
+                        )
+                    )
                     if profile
                     != (
                         self._graph.get_node(agent_id).execution_mode.value,
@@ -4593,6 +4738,11 @@ class AgentWorkflowEnv:
         semantic_edit_issue = self._semantic_edit_issue_for(graph)
         if semantic_edit_issue is not None:
             raise AgentWorkflowStateError(semantic_edit_issue)
+        declared_dependency_issue = (
+            self._declared_dependency_relation_issue_for(graph)
+        )
+        if declared_dependency_issue is not None:
+            raise AgentWorkflowStateError(declared_dependency_issue)
         self._problem = snapshot.problem
         self._graph = graph
         self._turn_count = snapshot.turn_count
@@ -4630,6 +4780,15 @@ class AgentWorkflowEnv:
             required_evidence_tool_id=self.required_evidence_tool_id,
             finish_only_when_admissible=self.finish_only_when_admissible,
             require_informative_contracts=self.require_informative_contracts,
+            require_declared_dependency_relations=(
+                self.require_declared_dependency_relations
+            ),
+            require_scope_neutral_contracts=(
+                self.require_scope_neutral_contracts
+            ),
+            require_explicit_safety_scope_preservation=(
+                self.require_explicit_safety_scope_preservation
+            ),
             reuse_unchanged_agent_inputs=self.reuse_unchanged_agent_inputs,
             require_output_protocol_artifact_for_set_output=(
                 self.require_output_protocol_artifact_for_set_output
@@ -4684,7 +4843,9 @@ class AgentWorkflowEnv:
                 "edit rejected: " + mandatory_repair_issue,
             )
         reciprocal_lineage_issue = (
-            self._reciprocal_terminal_lineage_repair_issue(action)
+            None
+            if self._mandatory_repair_agent_ids()
+            else self._reciprocal_terminal_lineage_repair_issue(action)
         )
         if reciprocal_lineage_issue is not None:
             return self._reject_after_count(
@@ -4712,6 +4873,14 @@ class AgentWorkflowEnv:
             return self._reject_after_count(
                 action,
                 "edit rejected: " + informative_contract_issue,
+            )
+        scope_neutral_contract_issue = (
+            self._scope_neutral_contract_admission_issue(action)
+        )
+        if scope_neutral_contract_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + scope_neutral_contract_issue,
             )
         if (
             self.require_output_protocol_artifact_for_set_output
@@ -4919,6 +5088,14 @@ class AgentWorkflowEnv:
                 action,
                 f"edit rejected: {self._format_issues(validation)}",
                 validation.issues,
+            )
+        declared_dependency_issue = (
+            self._declared_dependency_relation_issue_for(candidate)
+        )
+        if declared_dependency_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + declared_dependency_issue,
             )
         semantic_edit_issue = self._semantic_edit_issue_for(candidate)
         if semantic_edit_issue is not None:
@@ -5454,6 +5631,24 @@ class AgentWorkflowEnv:
                             for receipt in receipts
                         ),
                     }
+            raw_quality = response.metadata.get("artifact_quality_receipt")
+            if isinstance(raw_quality, Mapping):
+                event["artifact_quality_receipt"] = {
+                    field_name: raw_quality.get(field_name)
+                    for field_name in (
+                        "profile",
+                        "status",
+                        "error_codes",
+                        "character_count",
+                        "token_count",
+                        "longest_line_characters",
+                        "sentence_boundary_count",
+                        "maximum_exact_paragraph_repetitions",
+                        "maximum_24_token_ngram_repetitions",
+                        "structured_json",
+                    )
+                    if field_name in raw_quality
+                }
             events.append(event)
         return events
 
@@ -5494,6 +5689,27 @@ class AgentWorkflowEnv:
                 ]
                 if isinstance(raw_provenance, (list, tuple))
                 else []
+            )
+            raw_quality = metadata.get("artifact_quality_receipt")
+            quality_receipt = (
+                {
+                    field_name: raw_quality.get(field_name)
+                    for field_name in (
+                        "profile",
+                        "status",
+                        "error_codes",
+                        "character_count",
+                        "token_count",
+                        "longest_line_characters",
+                        "sentence_boundary_count",
+                        "maximum_exact_paragraph_repetitions",
+                        "maximum_24_token_ngram_repetitions",
+                        "structured_json",
+                    )
+                    if field_name in raw_quality
+                }
+                if isinstance(raw_quality, Mapping)
+                else None
             )
             upstream_artifacts: list[dict[str, object]] = []
             for item in provenance[:6]:
@@ -5562,6 +5778,11 @@ class AgentWorkflowEnv:
                             for item in tool_receipts
                             if item.get("tool_id") is not None
                         }
+                    ),
+                    **(
+                        {"artifact_quality_receipt": quality_receipt}
+                        if quality_receipt is not None
+                        else {}
                     ),
                     "provenance_status": "unverified_work_product",
                 }
@@ -5819,14 +6040,7 @@ class AgentWorkflowEnv:
                 "execution_status": (
                     "partial_failure" if partial_execution else "completed"
                 ),
-                "task_goal": {
-                    "source": "immutable_initial_task",
-                    "preserve_original_scope": True,
-                    "task_preview": _artifact_head_tail_preview(
-                        self._problem,
-                        limit=320,
-                    ),
-                },
+                "task_goal": self.task_goal_receipt(),
                 "topology": self._graph.topology_statistics(),
                 "block_completion_order": [
                     list(block) for block in execution.block_completion_order
@@ -7524,8 +7738,8 @@ class AgentWorkflowEnv:
         normalized = unicodedata.normalize("NFKC", value)
         return tuple(
             re.findall(
-                r"(?<![A-Za-z0-9])[+-]?\d+(?:[.,:/-]\d+)*"
-                r"(?:s|['’]s)?(?![A-Za-z0-9])",
+                r"(?<![A-Za-z0-9_])[+-]?\d+(?:[.,:/-]\d+)*"
+                r"(?:s|['’]s)?(?![A-Za-z0-9_])",
                 normalized,
                 flags=re.IGNORECASE,
             )
@@ -7537,6 +7751,377 @@ class AgentWorkflowEnv:
         normalized = normalized.replace("’", "'").strip()
         normalized = re.sub(r"(?<=\d),(?=\d)", "", normalized)
         return normalized.removeprefix("+")
+
+    def _public_contract_scope_grounding_texts(self) -> Tuple[str, ...]:
+        """Return task, Artifact, and successful Tool-observation text.
+
+        This is the public state available at FlowSteer's Canvas boundary.  It
+        deliberately has no evaluator, rubric, reference-answer, or reward
+        input.  Tool request arguments are also excluded: only a successful
+        Action's Observation may ground a later contract literal.
+        """
+
+        texts: set[str] = {self._problem} if self._problem else set()
+        # HealthBench's public task boundary is a reversible JSON rendering,
+        # so newline-delimited plan items appear escaped in ``self._problem``.
+        # Reuse the official public adapter to expose the exact message content
+        # to the same admission check.  This never reads private rubrics,
+        # physician responses, reference answers, or evaluator state.
+        if (
+            self._problem
+            and isinstance(self.runtime.dataset_id, str)
+            and self.runtime.dataset_id.casefold()
+            == "healthbench_professional"
+        ):
+            try:
+                texts.update(
+                    message["content"]
+                    for message in parse_model_visible_conversation(
+                        self._problem
+                    )
+                )
+            except ValueError:
+                # Retain the generic public-text boundary for synthetic or
+                # legacy HealthBench fixtures that are not rendered messages.
+                pass
+        texts.update(
+            value.strip()
+            for value in (
+                *self._progressive_outputs.values(),
+                *self._previous_revision_outputs.values(),
+            )
+            if isinstance(value, str) and value.strip()
+        )
+        visited: set[int] = set()
+
+        def collect_strings(value: object) -> None:
+            if isinstance(value, str):
+                if value.strip():
+                    texts.add(value.strip())
+                return
+            if isinstance(value, Mapping):
+                identity = id(value)
+                if identity in visited:
+                    return
+                visited.add(identity)
+                for item in value.values():
+                    collect_strings(item)
+                return
+            if isinstance(value, (list, tuple)):
+                identity = id(value)
+                if identity in visited:
+                    return
+                visited.add(identity)
+                for item in value:
+                    collect_strings(item)
+
+        def visit_receipts(value: object) -> None:
+            if isinstance(value, Mapping):
+                identity = id(value)
+                if identity in visited:
+                    return
+                # SkillFlow Tool receipts expose the model-visible Observation
+                # under result.value.  The request/query branch is purposely
+                # not visited because proposing a query is not evidence.
+                result = value.get("result")
+                if (
+                    isinstance(value.get("tool_id"), str)
+                    and value.get("error_type") in {None, ""}
+                    and isinstance(result, Mapping)
+                    and result.get("completed") is True
+                ):
+                    observed = result.get("value")
+                    if observed is not None:
+                        collect_strings(observed)
+                    return
+                visited.add(identity)
+                for item in value.values():
+                    visit_receipts(item)
+                return
+            if isinstance(value, (list, tuple)):
+                identity = id(value)
+                if identity in visited:
+                    return
+                visited.add(identity)
+                for item in value:
+                    visit_receipts(item)
+
+        for metadata in (
+            *self._progressive_output_metadata.values(),
+            *self._previous_revision_output_metadata.values(),
+            *self._failure_continuations.values(),
+        ):
+            visit_receipts(metadata)
+        for record in self._latest_failure_record_by_agent.values():
+            visit_receipts(record.metadata)
+        return tuple(sorted(texts, key=lambda item: (-len(item), item)))
+
+    def _scope_neutral_contract_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Reject unsupported answer precommitments in a free-text contract.
+
+        FlowSteer's transaction boundary remains role- and topology-neutral.
+        When explicitly enabled, this guard only prevents a newly sampled
+        contract from turning an unsupported literal into a conclusion before
+        the Agent executes.  SkillFlow's public Action--Observation state can
+        ground the same literal on a later Canvas turn.
+        """
+
+        if not self.require_scope_neutral_contracts:
+            return None
+        if (
+            action.action_type is AgentActionType.ADD_AGENT
+            and action.agent_id is not None
+            and isinstance(action.contract, str)
+            and action.contract.strip()
+        ):
+            entries = ((action.agent_id, action.contract),)
+        elif action.action_type is AgentActionType.ADD_SUBGRAPH:
+            entries = tuple(
+                (spec.agent_id, spec.contract)
+                for spec in action.agents
+                if isinstance(spec.contract, str) and spec.contract.strip()
+            )
+        elif (
+            action.action_type is AgentActionType.MODIFY_AGENT
+            and action.agent_id is not None
+            and isinstance(action.contract, str)
+            and action.contract.strip()
+        ):
+            entries = ((action.agent_id, action.contract),)
+        else:
+            return None
+
+        public_texts = self._public_contract_scope_grounding_texts()
+        grounded_numeric_keys = {
+            self._numeric_literal_key(literal)
+            for text in public_texts
+            for literal in self._numeric_literals(text)
+        }
+
+        decisive_assertion = re.compile(
+            r"\b(?:return|output|emit|select|choose|recommend|prescribe|"
+            r"diagnose|conclude|assert|state|target|confirm|verify|determine|"
+            r"decide|identify|infer|hypothesize|propose|suggest)\b|"
+            r"\b(?:answer|candidate|diagnosis|recommendation|target|level|dose|"
+            r"value|range|treatment)\s+(?:is|are|should\s+be|must\s+be)\b|"
+            r"\b(?:is|are)\s+(?:the\s+)?(?:correct|recommended|preferred|"
+            r"best|final)\b",
+            flags=re.IGNORECASE,
+        )
+        # Counts that describe the output or execution budget are not clinical
+        # answer candidates (for example, "return 3 bullet points").
+        operational_count_suffix = re.compile(
+            r"^\s*(?:(?:evidence|reasoning|retrieval|tool|output|response)\s+)?"
+            r"(?:propositions?|steps?|hops?|queries|reads?|receipts?|passages?|"
+            r"results?|sources?|agents?|rounds?|turns?|attempts?|tokens?|items?|"
+            r"hypotheses|alternatives?|options?|candidate\s+diagnoses?|"
+            r"documents?|records?|fields?|samples?|models?|bullets?|bullet\s+"
+            r"points?|paragraphs?|sentences?|sections?|headings?|tables?|rows?|"
+            r"columns?|characters?|words?)\b",
+            flags=re.IGNORECASE,
+        )
+        clinical_code = re.compile(
+            r"(?<![A-Za-z0-9])(?:[A-Za-z]{1,5}\s*)?\d+"
+            r"(?:\s*(?:[-–—/]|\bto\b)\s*(?:[A-Za-z]{0,5}\s*)?\d+)+"
+            r"(?![A-Za-z0-9])|\b[A-Za-z]{1,5}\d{1,4}\b",
+            flags=re.IGNORECASE,
+        )
+        quoted_candidate = re.compile(
+            r"\b(?:answer|candidate|diagnosis|recommendation|target|level|dose|"
+            r"value|range|treatment|return|output|emit|select|choose|recommend|"
+            r"prescribe|diagnose|identify|infer|hypothesize|propose|suggest)\b"
+            r"[^.!?\n]{0,80}?[\"']([^\"'\n]{1,80})[\"']",
+            flags=re.IGNORECASE,
+        )
+        named_candidate = re.compile(
+            r"\b(?i:return|output|emit|select|choose|recommend|prescribe|"
+            r"diagnose|conclude|target|confirm|verify|identify|infer|"
+            r"hypothesize|propose|suggest)\b"
+            r"[^.!?\n]{0,48}?\b"
+            r"([A-Z][A-Za-z0-9'\’-]*(?:\s+[A-Z][A-Za-z0-9'\’-]*){1,5})\b"
+        )
+        operational_literals = {
+            "Agent Graph",
+            "AgentGraph",
+            "Canvas",
+            "Flow Director",
+            "HealthBench Professional",
+            "Structured Action",
+            "StructuredAction",
+            "Tool Observation",
+            "Tool Receipt",
+        }
+        # A free-text contract can change task scope without asserting an
+        # answer literal, for example by silently replacing an unresolved
+        # acronym in "patients with X".  Keep this check surface-form based:
+        # it consults only the task and already public Artifacts/Observations,
+        # never evaluator fields or a benchmark-specific vocabulary.
+        unresolved_task_anchors = tuple(
+            dict.fromkeys(
+                re.findall(
+                    r"(?<![A-Za-z0-9])(?:[A-Z]{2,}[A-Z0-9]*|"
+                    r"[A-Za-z0-9]+(?:[-–—][A-Za-z0-9]+)+)"
+                    r"(?![A-Za-z0-9])",
+                    self._problem,
+                )
+            )
+        )
+        entity_slot_candidate = re.compile(
+            r"\b(?:patients?\s+with|diagnosed\s+with)\s+"
+            r"([A-Za-z][A-Za-z0-9'\’-]{2,})\b",
+            flags=re.IGNORECASE,
+        )
+        generic_entity_slot_heads = {
+            "comparable",
+            "complex",
+            "relevant",
+            "similar",
+            "such",
+            "the",
+            "these",
+            "this",
+        }
+        alias_candidate = re.compile(
+            r"\b(?:interpret|interprets|interpreting|treat|treats|treating)\s+"
+            r"([^,.;!?\n]{1,48}?)\s+as\s+([^,.;!?\n]{1,48})|"
+            r"\b([^,.;!?\n]{1,48}?)\s+(?:means|stands\s+for)\s+"
+            r"([^,.;!?\n]{1,48})",
+            flags=re.IGNORECASE,
+        )
+
+        def is_grounded(literal: str) -> bool:
+            return any(
+                self._contains_lexical_span(text, literal)
+                for text in public_texts
+            )
+
+        for agent_id, contract in entries:
+            # NECESSARY_PROJECT_ADAPTATION: keep the existing FlowSteer Canvas
+            # admission boundary and make one HealthBench scope invariant
+            # executable.  A sampled contract may choose any Agent, model,
+            # execution mode, Tool, or topology, but it cannot explicitly
+            # delete safety-bearing parts of the user's requested response.
+            # This inspects public task/contract text only; evaluator rubrics
+            # and reference responses are never consulted.
+            if (
+                isinstance(self.runtime.dataset_id, str)
+                and self.runtime.dataset_id.casefold()
+                == "healthbench_professional"
+            ):
+                scope_deletion = re.search(
+                    r"\b(?:exclude|excluding|excluded|omit|omitting|omitted|"
+                    r"remove|removing|removed|ignore|ignoring|ignored|skip|"
+                    r"skipping|skipped|suppress|suppressing|suppressed|"
+                    r"do\s+not\s+include|without\s+(?:mentioning|including|"
+                    r"discussing|providing|covering))\b[^.!?\n]{0,80}\b(?:"
+                    r"safety(?:\s+warnings?)?|warnings?|risks?|"
+                    r"contraindications?|precautions?|red\s+flags?|"
+                    r"limitations?|uncertaint(?:y|ies)|follow[- ]?up|"
+                    r"escalation|disclaimers?)\b",
+                    contract,
+                    flags=re.IGNORECASE,
+                )
+                if (
+                    scope_deletion is None
+                    and self.require_explicit_safety_scope_preservation
+                ):
+                    # Versioned extension for v2.32.  Historical conditions
+                    # keep the earlier verb-led scope check unchanged.
+                    scope_deletion = re.search(
+                        r"\bwithout\s+(?:any\s+)?(?:"
+                        r"safety(?:\s+warnings?)?|warnings?|risks?|"
+                        r"contraindications?|precautions?|red\s+flags?|"
+                        r"limitations?|uncertaint(?:y|ies)|follow[- ]?up|"
+                        r"escalation|disclaimers?)\b",
+                        contract,
+                        flags=re.IGNORECASE,
+                    )
+                if scope_deletion is not None:
+                    return (
+                        f"Agent {agent_id!r} contract explicitly removes a "
+                        "safety-bearing part of the original response scope "
+                        f"({scope_deletion.group(0)!r}). Preserve the complete "
+                        "task scope and requested output form; a contract may "
+                        "decompose work but must not suppress warnings, risks, "
+                        "limitations, uncertainty, or escalation guidance"
+                    )
+            external_literals: list[str] = []
+            if unresolved_task_anchors:
+                for match in entity_slot_candidate.finditer(contract):
+                    candidate = " ".join(match.group(1).split()).strip()
+                    if (
+                        candidate
+                        and candidate.casefold() not in generic_entity_slot_heads
+                        and not is_grounded(candidate)
+                    ):
+                        external_literals.append(candidate)
+            for match in alias_candidate.finditer(contract):
+                source = match.group(1) or match.group(3) or ""
+                replacement = match.group(2) or match.group(4) or ""
+                source = " ".join(source.split()).strip(" .,:;")
+                replacement = " ".join(replacement.split()).strip(" .,:;")
+                if source and replacement and is_grounded(source):
+                    if not is_grounded(replacement):
+                        external_literals.append(replacement)
+            for clause in re.split(r"(?<=[.!?;])\s+|\n+", contract):
+                if decisive_assertion.search(clause) is None:
+                    continue
+                # Agent IDs are Canvas references rather than domain facts.
+                # Remove them only for literal extraction so ``node_1`` cannot
+                # be misread as an unsupported clinical value while the exact
+                # free-text contract remains available to dependency parsing.
+                literal_clause = re.sub(
+                    r"\bnode_[A-Za-z0-9_]+\b",
+                    "",
+                    clause,
+                    flags=re.IGNORECASE,
+                )
+                candidates: list[str] = list(
+                    clinical_code.findall(literal_clause)
+                )
+                for literal in self._numeric_literals(literal_clause):
+                    literal_start = literal_clause.find(literal)
+                    literal_end = literal_start + len(literal)
+                    if (
+                        literal_start >= 0
+                        and operational_count_suffix.search(
+                            literal_clause[literal_end:]
+                        )
+                        is not None
+                    ):
+                        continue
+                    if (
+                        self._numeric_literal_key(literal)
+                        not in grounded_numeric_keys
+                    ):
+                        candidates.append(literal)
+                candidates.extend(quoted_candidate.findall(literal_clause))
+                candidates.extend(named_candidate.findall(literal_clause))
+                for literal in candidates:
+                    normalized_literal = " ".join(literal.split()).strip(" .,:;")
+                    if not normalized_literal:
+                        continue
+                    if normalized_literal in operational_literals:
+                        continue
+                    if is_grounded(normalized_literal):
+                        continue
+                    if normalized_literal not in external_literals:
+                        external_literals.append(normalized_literal)
+            if external_literals:
+                return (
+                    f"Agent {agent_id!r} contract precommits unsupported "
+                    "answer/clinical literals "
+                    f"{external_literals!r}. Use a scope-neutral rewrite that "
+                    "states the responsibility, consumed public inputs, and "
+                    "expected Artifact without selecting an answer or decisive "
+                    "claim. A literal becomes admissible only when it occurs in "
+                    "the initial task or an already observed public Tool/Agent "
+                    "Artifact"
+                )
+        return None
 
     @staticmethod
     def _plain_language_contract_issue(contract: str) -> Optional[str]:
@@ -7552,6 +8137,13 @@ class AgentWorkflowEnv:
         compact = re.sub(r"\s+", "", normalized)
         lexical_tokens = re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
         cjk_characters = re.findall(r"[\u3400-\u9fff]", normalized)
+        if re.search(
+            r"\b(?:expected\s+)?(?:artifact|output|result)\s*"
+            r"(?::|=|\bis\b)\s*(?:none|nothing|n\s*/?\s*a)\b",
+            normalized,
+            flags=re.IGNORECASE,
+        ):
+            return "explicitly declares no output artifact"
         if re.fullmatch(r"[A-Za-z0-9_.:/-]+", normalized):
             return "contract is an opaque identifier or label"
         if len(compact) < 12:
@@ -7670,6 +8262,69 @@ class AgentWorkflowEnv:
                     "boundary; give each Agent a distinct responsibility"
                 )
             proposed_signatures[signature] = agent_id
+        return None
+
+    @staticmethod
+    def _declared_contract_dependency_ids(contract: str) -> Tuple[str, ...]:
+        """Extract only explicit incoming ``node_N`` dependencies.
+
+        Contracts remain free text.  This conservative projection does not
+        infer roles or a topology: it only recognizes a Director-authored
+        statement that the current Agent consumes an explicitly named Agent's
+        Artifact.  Outgoing statements such as ``send ... to node_N`` are not
+        interpreted as incoming dependencies.
+        """
+
+        normalized = unicodedata.normalize("NFKC", contract)
+        dependencies: list[str] = []
+        for pattern in _DECLARED_DEPENDENCY_PATTERNS:
+            for match in pattern.finditer(normalized):
+                dependency_id = match.group(1)
+                if dependency_id not in dependencies:
+                    dependencies.append(dependency_id)
+        return tuple(dependencies)
+
+    def _declared_dependency_relation_issue_for(
+        self,
+        graph: AgentGraph,
+    ) -> Optional[str]:
+        """Require free-text declared inputs to be reachable in AgentGraph.
+
+        This is a Canvas admission check, not a workflow template.  The
+        Director may still choose any Agent count, model, contract, and legal
+        topology.  A reciprocal edge is admissible because FlowSteer's
+        reciprocal block supplies the peer Artifact at the revision barrier.
+        """
+
+        if not self.require_declared_dependency_relations:
+            return None
+        canonical_ids = {node.id.casefold(): node.id for node in graph.nodes}
+        for node in graph.nodes:
+            for raw_dependency_id in self._declared_contract_dependency_ids(
+                node.contract
+            ):
+                dependency_id = canonical_ids.get(raw_dependency_id.casefold())
+                if dependency_id is None:
+                    return (
+                        f"Agent {node.id!r} declares input from unknown Agent "
+                        f"{raw_dependency_id!r}; declare an existing or "
+                        "same-action Agent ID"
+                    )
+                if dependency_id == node.id:
+                    return (
+                        f"Agent {node.id!r} declares itself as an input; an "
+                        "Agent contract must consume another Agent's Artifact"
+                    )
+                if dependency_id not in self._directed_ancestor_ids(
+                    graph,
+                    node.id,
+                ):
+                    return (
+                        f"Agent {node.id!r} declares input from "
+                        f"{dependency_id!r}, but AgentGraph does not route "
+                        f"{dependency_id!r} -> {node.id!r}; add or repair the "
+                        "declared producer-to-consumer relation"
+                    )
         return None
 
     def _contract_obligation_issue(

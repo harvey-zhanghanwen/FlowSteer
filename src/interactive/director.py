@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from itertools import product
+from itertools import combinations, product
 import json
 import os
 import random
@@ -97,6 +97,28 @@ DIRECTOR_SYSTEM_PROMPT_V15 = DIRECTOR_SYSTEM_PROMPT_V14 + """
 
 A pre-execution contract must not assert an unobserved domain fact or predetermine the task conclusion. If the task is ambiguous or internally inconsistent, resolve the ambiguity from available evidence or preserve the uncertainty instead of silently choosing an interpretation. A checking or correction artifact is useful only when grounded in the task or independent evidence, and any correction must be routed to the Agent that produces the user-facing response. For high-stakes content, a request to translate, summarize, or format does not verify the embedded claims; preserve the requested form while checking contradictions and material safety risks."""
 
+# v16 preserves the role- and topology-neutral v15 search space. It clarifies
+# the existing FlowSteer relation semantics and requires grounded correction
+# before FINISH when public Canvas artifacts expose a material conflict.
+DIRECTOR_SYSTEM_PROMPT_V16 = DIRECTOR_SYSTEM_PROMPT_V15 + """
+
+Use a directed producer-to-consumer relation when one contract depends on a completed upstream artifact. Use a bidirectional relation only when both contracts can independently produce an initial artifact and then perform one bounded peer revision. Before finish, if public Canvas feedback exposes a material conflict between the Output artifact and a routed upstream artifact, repair the responsible Agent or route a grounded correction to the Output Agent."""
+
+# v17 returns to the shorter v15 relation-neutral baseline.  It adds only the
+# task-scope preservation required by the observed HealthBench contract/query
+# drift; roles, topology, Agent count, models, and execution modes stay open.
+DIRECTOR_SYSTEM_PROMPT_V17 = DIRECTOR_SYSTEM_PROMPT_V15 + """
+
+Keep unresolved names, abbreviations, quantities, time points, and the requested answer slot verbatim in Agent contracts and Tool tasks. Do not expand or replace them unless the task or an observed artifact supplies the meaning."""
+
+# v18 combines the existing v16 relation/conflict policy with the existing
+# v17 public-task anchor clause under a new immutable version.  This avoids
+# changing either historical prompt while keeping roles, Agent count, models,
+# execution modes, relations, and topology open.
+DIRECTOR_SYSTEM_PROMPT_V18 = DIRECTOR_SYSTEM_PROMPT_V16 + """
+
+Keep unresolved names, abbreviations, quantities, time points, and the requested answer slot verbatim in Agent contracts and Tool tasks. Do not expand or replace them unless the task or an observed artifact supplies the meaning."""
+
 LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
 
 Use only action types listed in admissible_action_types, model_id values from model_catalog, and exact tool_id values from tool_catalog. add_agent adds one Agent with a free-text contract. A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange.
@@ -150,6 +172,9 @@ DIRECTOR_PROMPT_VERSION_V12 = "agentgraph.director.minimal-neutral.v12"
 DIRECTOR_PROMPT_VERSION_V13 = "agentgraph.director.minimal-neutral.v13"
 DIRECTOR_PROMPT_VERSION_V14 = "agentgraph.director.minimal-neutral.v14"
 DIRECTOR_PROMPT_VERSION_V15 = "agentgraph.director.minimal-neutral.v15"
+DIRECTOR_PROMPT_VERSION_V16 = "agentgraph.director.minimal-neutral.v16"
+DIRECTOR_PROMPT_VERSION_V17 = "agentgraph.director.minimal-neutral.v17"
+DIRECTOR_PROMPT_VERSION_V18 = "agentgraph.director.minimal-neutral.v18"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
 SCALAR_DIRECTOR_PROMPT_VERSION_V3 = (
     "agentgraph.director.minimal-neutral-scalar.v3"
@@ -618,6 +643,9 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         DIRECTOR_PROMPT_VERSION_V13: DIRECTOR_SYSTEM_PROMPT_V13,
         DIRECTOR_PROMPT_VERSION_V14: DIRECTOR_SYSTEM_PROMPT_V14,
         DIRECTOR_PROMPT_VERSION_V15: DIRECTOR_SYSTEM_PROMPT_V15,
+        DIRECTOR_PROMPT_VERSION_V16: DIRECTOR_SYSTEM_PROMPT_V16,
+        DIRECTOR_PROMPT_VERSION_V17: DIRECTOR_SYSTEM_PROMPT_V17,
+        DIRECTOR_PROMPT_VERSION_V18: DIRECTOR_SYSTEM_PROMPT_V18,
         SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_PROMPT_VERSION_V3: SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_PROMPT_VERSION_V4: SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
@@ -693,6 +721,9 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         DIRECTOR_SYSTEM_PROMPT_V13,
         DIRECTOR_SYSTEM_PROMPT_V14,
         DIRECTOR_SYSTEM_PROMPT_V15,
+        DIRECTOR_SYSTEM_PROMPT_V16,
+        DIRECTOR_SYSTEM_PROMPT_V17,
+        DIRECTOR_SYSTEM_PROMPT_V18,
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
@@ -895,8 +926,11 @@ DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION_V12 = (
 DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION_V13 = (
     "agentgraph.live-action-target-domains.v13"
 )
-DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION = (
+DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION_V14 = (
     "agentgraph.live-action-target-domains.v14"
+)
+DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION = (
+    "agentgraph.live-action-target-domains.v15"
 )
 DIRECTOR_ACTION_JSON_SCHEMA_TEXT = json.dumps(
     DIRECTOR_ACTION_JSON_SCHEMA,
@@ -1205,6 +1239,63 @@ def _live_execution_profiles(
     return tuple(profiles)
 
 
+def _live_model_execution_profiles(
+    value: object,
+    *,
+    model_ids: Sequence[str],
+    execution_profiles: Sequence[tuple[str, tuple[str, ...]]],
+    label: str,
+) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+    """Validate the heterogeneous model/execution/Tool capability domain.
+
+    Older FlowSteer domains omitted this field because their model pools were
+    homogeneous.  Absence therefore retains the historical cross product;
+    when present, the exact Runtime projection is authoritative.
+    """
+
+    if value is None:
+        return tuple(
+            (model_id, execution_mode, allowed_tools)
+            for model_id in model_ids
+            for execution_mode, allowed_tools in execution_profiles
+        )
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError(f"{label} must be a non-empty joint capability domain")
+    model_domain = set(model_ids)
+    profile_domain = set(execution_profiles)
+    normalized: list[tuple[str, str, tuple[str, ...]]] = []
+    for raw_item in value:
+        if not isinstance(raw_item, Mapping) or set(raw_item) != {
+            "model_id",
+            "execution_mode",
+            "allowed_tools",
+        }:
+            raise ValueError(f"{label} contains a malformed capability entry")
+        model_id = raw_item.get("model_id")
+        profile = _live_execution_profiles(
+            (
+                {
+                    "execution_mode": raw_item.get("execution_mode"),
+                    "allowed_tools": raw_item.get("allowed_tools"),
+                },
+            ),
+            label=label,
+        )[0]
+        if model_id not in model_domain or profile not in profile_domain:
+            raise ValueError(f"{label} contains an out-of-domain capability")
+        item = (model_id, profile[0], profile[1])
+        if item in normalized:
+            raise ValueError(f"{label} contains duplicate capabilities")
+        normalized.append(item)
+    if set(model_ids) != {item[0] for item in normalized}:
+        raise ValueError(f"{label} omits a live model")
+    if set(execution_profiles) != {
+        (item[1], item[2]) for item in normalized
+    }:
+        raise ValueError(f"{label} omits a registered execution profile")
+    return tuple(normalized)
+
+
 def _live_free_contract_profile_domain(
     domain: Mapping[str, Any],
 ) -> Mapping[str, Any]:
@@ -1256,6 +1347,12 @@ def _live_free_contract_profile_domain(
         domain.get("execution_profiles"),
         label="add_subgraph.execution_profiles",
     )
+    model_execution_profiles = _live_model_execution_profiles(
+        domain.get("model_execution_profiles"),
+        model_ids=model_ids,
+        execution_profiles=execution_profiles,
+        label="add_subgraph.model_execution_profiles",
+    )
     if domain.get("required_tool_id") is not None:
         raise ValueError(
             "tool-free free-contract ADD requires required_tool_id=null"
@@ -1267,11 +1364,10 @@ def _live_free_contract_profile_domain(
     existing_agents: list[dict[str, Any]] = []
     existing_ids: list[str] = []
     for raw_agent in raw_existing_agents:
-        if not isinstance(raw_agent, Mapping) or set(raw_agent) != {
-            "agent_id",
-            "execution_mode",
-            "allowed_tools",
-        }:
+        if not isinstance(raw_agent, Mapping) or set(raw_agent) not in (
+            {"agent_id", "execution_mode", "allowed_tools"},
+            {"agent_id", "model_id", "execution_mode", "allowed_tools"},
+        ):
             raise ValueError(
                 "add_subgraph existing Agent profile entry is malformed"
             )
@@ -1296,10 +1392,20 @@ def _live_free_contract_profile_domain(
             raise ValueError(
                 "add_subgraph existing Agent profile is outside the Runtime domain"
             )
+        model_id = raw_agent.get("model_id")
+        if model_id is not None and (
+            model_id not in model_ids
+            or (model_id, profile[0], profile[1])
+            not in model_execution_profiles
+        ):
+            raise ValueError(
+                "add_subgraph existing Agent model/profile is outside the live domain"
+            )
         existing_ids.append(agent_id)
         existing_agents.append(
             {
                 "agent_id": agent_id,
+                **({"model_id": model_id} if model_id is not None else {}),
                 "execution_mode": profile[0],
                 "allowed_tools": list(profile[1]),
             }
@@ -1329,6 +1435,14 @@ def _live_free_contract_profile_domain(
         or not 0 <= min_relations <= max_relations <= 3
     ):
         raise ValueError("add_subgraph live relation-count domain is invalid")
+    require_declared_dependency_relations = domain.get(
+        "require_declared_dependency_relations",
+        False,
+    )
+    if type(require_declared_dependency_relations) is not bool:
+        raise ValueError(
+            "add_subgraph require_declared_dependency_relations must be boolean"
+        )
     raw_output_provenance = domain.get("output_provenance")
     output_provenance: Optional[dict[str, Any]] = None
     if raw_output_provenance is not None:
@@ -1458,10 +1572,14 @@ def _live_free_contract_profile_domain(
         "required_fields": tuple(required_fields),
         "model_ids": model_ids,
         "execution_profiles": execution_profiles,
+        "model_execution_profiles": model_execution_profiles,
         "existing_agents": tuple(existing_agents),
         "existing_agent_ids": tuple(existing_ids),
         "min_relations": min_relations,
         "max_relations": max_relations,
+        "require_declared_dependency_relations": (
+            require_declared_dependency_relations
+        ),
         "output_provenance": output_provenance,
     }
 
@@ -1798,6 +1916,12 @@ def _live_scalar_add_agent_domain(
         domain.get("registered_execution_profiles"),
         label="add_agent.registered_execution_profiles",
     )
+    _live_model_execution_profiles(
+        domain.get("model_execution_profiles"),
+        model_ids=model_ids,
+        execution_profiles=profiles,
+        label="add_agent.model_execution_profiles",
+    )
     contract_min_length = domain.get("contract_min_length")
     if type(contract_min_length) is not int or contract_min_length < 1:
         raise ValueError("add_agent contract minimum length is invalid")
@@ -2001,15 +2125,27 @@ def _director_live_free_contract_declarations_schema(
         )
     branches: list[Mapping[str, Any]] = []
     for sequence in sequences:
-        positional_schemas = [
-            _live_free_contract_agent_schema(
-                state["required_fields"],
-                state["model_ids"],
-                agent_id=new_agent_ids[position],
-                execution_profile=profile,
+        positional_schemas: list[Mapping[str, Any]] = []
+        for position, profile in enumerate(sequence):
+            compatible_model_ids = tuple(
+                model_id
+                for model_id, execution_mode, allowed_tools in state[
+                    "model_execution_profiles"
+                ]
+                if (execution_mode, allowed_tools) == profile
             )
-            for position, profile in enumerate(sequence)
-        ]
+            if not compatible_model_ids:
+                raise ValueError(
+                    "add_subgraph profile has no compatible live model"
+                )
+            positional_schemas.append(
+                _live_free_contract_agent_schema(
+                    state["required_fields"],
+                    compatible_model_ids,
+                    agent_id=new_agent_ids[position],
+                    execution_profile=profile,
+                )
+            )
         branches.append(
             {
                 "type": "array",
@@ -2519,6 +2655,123 @@ def director_live_add_subgraph_role_selection_from_text(
     return tuple(normalized)
 
 
+def _live_declared_dependency_edges(
+    domain: Mapping[str, Any],
+    agents: Sequence[Mapping[str, Any]],
+) -> tuple[tuple[str, str], ...]:
+    """Project explicit incoming dependencies from committed ADD contracts.
+
+    The Canvas owns the conservative free-text grammar.  Reuse that exact
+    projection here so constrained decoding and authoritative admission cannot
+    disagree about which ``node_*`` references declare an input.  This helper
+    only binds an explicitly named producer to its consumer; it does not infer
+    a role, an Agent order, or any other topology.
+    """
+
+    if domain.get("require_declared_dependency_relations", False) is not True:
+        return ()
+    endpoint_ids = [*domain["existing_agent_ids"]]
+    endpoint_ids.extend(agent.get("agent_id") for agent in agents)
+    canonical_ids = {
+        agent_id.casefold(): agent_id
+        for agent_id in endpoint_ids
+        if isinstance(agent_id, str)
+    }
+    required_edges: list[tuple[str, str]] = []
+    for agent in agents:
+        consumer_id = agent.get("agent_id")
+        contract = agent.get("contract")
+        if not isinstance(consumer_id, str) or not isinstance(contract, str):
+            raise ValueError(
+                "add_subgraph declared dependency requires valid Agent declarations"
+            )
+        for raw_producer_id in AgentWorkflowEnv._declared_contract_dependency_ids(
+            contract
+        ):
+            producer_id = canonical_ids.get(raw_producer_id.casefold())
+            if producer_id is None:
+                raise ValueError(
+                    f"Agent {consumer_id!r} declares input from unknown Agent "
+                    f"{raw_producer_id!r}"
+                )
+            if producer_id == consumer_id:
+                raise ValueError(
+                    f"Agent {consumer_id!r} declares itself as an input"
+                )
+            edge = (producer_id, consumer_id)
+            if edge not in required_edges:
+                required_edges.append(edge)
+    return tuple(required_edges)
+
+
+def _relation_candidate_directed_edges(
+    candidate: Mapping[str, Any],
+) -> frozenset[tuple[str, str]]:
+    """Return the concrete directions carried by one two-bit relation."""
+
+    source_id = candidate.get("source_id")
+    target_id = candidate.get("target_id")
+    source_to_target = candidate.get("source_to_target")
+    target_to_source = candidate.get("target_to_source")
+    if (
+        not isinstance(source_id, str)
+        or not isinstance(target_id, str)
+        or source_id == target_id
+        or type(source_to_target) is not bool
+        or type(target_to_source) is not bool
+        or not (source_to_target or target_to_source)
+    ):
+        raise ValueError("relation candidate is malformed")
+    edges: set[tuple[str, str]] = set()
+    if source_to_target:
+        edges.add((source_id, target_id))
+    if target_to_source:
+        edges.add((target_id, source_id))
+    return frozenset(edges)
+
+
+def _filter_live_relation_candidates_for_declared_dependencies(
+    candidates: Sequence[Mapping[str, Any]],
+    required_edges: Sequence[tuple[str, str]],
+) -> tuple[dict[str, Any], ...]:
+    """Remove a reverse-only encoding for every explicitly declared input.
+
+    An unrelated pair remains a free topology choice.  A reciprocal relation
+    also remains available because it contains the required producer-to-
+    consumer direction and FlowSteer's revision phase exchanges both Artifacts.
+    """
+
+    requirements_by_pair: dict[
+        tuple[str, str], set[tuple[str, str]]
+    ] = {}
+    for edge in required_edges:
+        requirements_by_pair.setdefault(tuple(sorted(edge)), set()).add(edge)
+    filtered: list[dict[str, Any]] = []
+    for raw_candidate in candidates:
+        candidate = dict(raw_candidate)
+        pair = tuple(
+            sorted((candidate.get("source_id"), candidate.get("target_id")))
+        )
+        required_for_pair = requirements_by_pair.get(pair, set())
+        if required_for_pair and not required_for_pair.issubset(
+            _relation_candidate_directed_edges(candidate)
+        ):
+            continue
+        filtered.append(candidate)
+    available_edges = {
+        edge
+        for candidate in filtered
+        for edge in _relation_candidate_directed_edges(candidate)
+    }
+    missing = tuple(edge for edge in required_edges if edge not in available_edges)
+    if missing:
+        raise ValueError(
+            "add_subgraph declared dependency has no live relation candidate: "
+            f"{list(missing)!r}"
+        )
+    return tuple(filtered)
+
+
 def _live_free_contract_add_subgraph_agents(
     action_target_domains: Mapping[str, Any],
     agents: Sequence[Mapping[str, Any]],
@@ -2595,6 +2848,14 @@ def _live_free_contract_add_subgraph_agents(
             raise ValueError(
                 "add_subgraph Agent execution profile is outside the live domain"
             )
+        if (
+            model_id,
+            profile[0],
+            profile[1],
+        ) not in state["model_execution_profiles"]:
+            raise ValueError(
+                "add_subgraph Agent model/execution profile is outside the live domain"
+            )
         sampled_profiles.append(profile)
         normalized.append(agent)
     profile_sequence = tuple(sampled_profiles)
@@ -2610,6 +2871,36 @@ def _live_free_contract_add_subgraph_agents(
         if profile_sequence != selected_sequence:
             raise ValueError(
                 "add_subgraph Agent declarations changed their selected profiles"
+            )
+    required_edges = _live_declared_dependency_edges(domain, normalized)
+    required_pairs = {tuple(sorted(edge)) for edge in required_edges}
+    if len(required_pairs) > state["max_relations"]:
+        raise ValueError(
+            "add_subgraph declared dependencies exceed the live relation capacity"
+        )
+    if required_edges and _live_add_subgraph_isolated_boundary(domain):
+        raise ValueError(
+            "add_subgraph isolated execution cannot satisfy a declared dependency"
+        )
+    output_provenance = state.get("output_provenance")
+    if (
+        required_edges
+        and isinstance(output_provenance, Mapping)
+        and output_provenance.get("mode")
+        == "required_new_terminal_consumer"
+    ):
+        available_edges = {
+            (producer_id, agent["agent_id"])
+            for producer_id in output_provenance["eligible_input_agent_ids"]
+            for agent in normalized
+        }
+        missing = tuple(
+            edge for edge in required_edges if edge not in available_edges
+        )
+        if missing:
+            raise ValueError(
+                "add_subgraph Output closure cannot directly route declared "
+                f"dependencies {list(missing)!r}"
             )
     return tuple(normalized)
 
@@ -2822,6 +3113,10 @@ def director_live_add_subgraph_relation_candidates(
         if _live_add_subgraph_isolated_boundary(domain):
             return ()
         state = _live_free_contract_profile_domain(domain)
+        required_edges = _live_declared_dependency_edges(
+            domain,
+            normalized_agents,
+        )
         ordered_new_ids = tuple(agent["agent_id"] for agent in normalized_agents)
         new_ids = set(ordered_new_ids)
         output_provenance = state.get("output_provenance")
@@ -2833,7 +3128,7 @@ def director_live_add_subgraph_relation_candidates(
             # The provenance-safe closure is one atomic FlowSteer executable
             # unit: a current Artifact flows into the same-action Output sink.
             # No medical role or fixed upstream topology is selected here.
-            return tuple(
+            candidates = tuple(
                 {
                     "source_id": source_id,
                     "target_id": output_id,
@@ -2844,6 +3139,10 @@ def director_live_add_subgraph_relation_candidates(
                     "eligible_input_agent_ids"
                 ]
                 for output_id in ordered_new_ids
+            )
+            return _filter_live_relation_candidates_for_declared_dependencies(
+                candidates,
+                required_edges,
             )
         endpoint_ids = [*state["existing_agent_ids"], *ordered_new_ids]
         candidates: list[dict[str, Any]] = []
@@ -2876,7 +3175,10 @@ def director_live_add_subgraph_relation_candidates(
                             "target_to_source": True,
                         }
                     )
-        return tuple(candidates)
+        return _filter_live_relation_candidates_for_declared_dependencies(
+            candidates,
+            required_edges,
+        )
     if not verified_qa_semantic_protocol(domain.get("semantic_protocol")):
         return ()
     if _live_add_subgraph_isolated_boundary(domain):
@@ -3012,6 +3314,123 @@ def director_live_add_subgraph_relation_candidates(
         for candidate in candidates
         if candidate["target_id"] not in preserved_input_ids
     )
+
+
+def _exact_relation_candidate_schema(
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind one relation record exactly as exposed by the live Canvas."""
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "source_id",
+            "target_id",
+            "source_to_target",
+            "target_to_source",
+        ],
+        "properties": {
+            key: {"const": value} for key, value in candidate.items()
+        },
+    }
+
+
+def _distinct_relation_pair_array_schema(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    min_items: int,
+    max_items: int,
+    required_directed_edges: Sequence[tuple[str, str]] = (),
+) -> dict[str, Any]:
+    """Admit only canonical arrays with distinct unordered endpoint pairs.
+
+    ``uniqueItems`` cannot reject ``A -> B`` plus ``B -> A`` because those are
+    different JSON objects even though the Canvas treats them as one endpoint
+    pair.  The live candidate set is therefore grouped by unordered pair and
+    the bounded array domain is enumerated in its deterministic Canvas order.
+    Relation order has no execution semantics, so this removes only duplicate
+    encodings and does not select a topology.
+    """
+
+    requirements_by_pair: dict[
+        tuple[str, str], set[tuple[str, str]]
+    ] = {}
+    for raw_edge in required_directed_edges:
+        if (
+            not isinstance(raw_edge, (list, tuple))
+            or len(raw_edge) != 2
+            or any(not isinstance(agent_id, str) for agent_id in raw_edge)
+            or raw_edge[0] == raw_edge[1]
+        ):
+            raise ValueError("required directed relation edge is malformed")
+        edge = (raw_edge[0], raw_edge[1])
+        requirements_by_pair.setdefault(tuple(sorted(edge)), set()).add(edge)
+
+    grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for candidate in candidates:
+        source_id = candidate.get("source_id")
+        target_id = candidate.get("target_id")
+        if not isinstance(source_id, str) or not isinstance(target_id, str):
+            raise ValueError("relation candidate endpoints must be strings")
+        candidate_edges = _relation_candidate_directed_edges(candidate)
+        pair = tuple(sorted((source_id, target_id)))
+        if not requirements_by_pair.get(pair, set()).issubset(candidate_edges):
+            continue
+        grouped.setdefault(pair, []).append(candidate)
+    missing_pairs = tuple(
+        pair for pair in requirements_by_pair if pair not in grouped
+    )
+    if missing_pairs:
+        raise ValueError(
+            "declared dependency relation is unavailable for endpoint pairs "
+            f"{list(missing_pairs)!r}"
+        )
+    if not grouped:
+        if min_items != 0 or requirements_by_pair:
+            raise ValueError("relation domain requires an unavailable edge")
+        return {"type": "array", "maxItems": 0}
+
+    bounded_max = min(max_items, len(grouped))
+    if min_items < 0 or min_items > bounded_max:
+        raise ValueError("relation cardinality exceeds distinct endpoint pairs")
+    group_schemas = [
+        (
+            pair,
+            {
+                "anyOf": [
+                    _exact_relation_candidate_schema(candidate)
+                    for candidate in pair_candidates
+                ]
+            },
+        )
+        for pair, pair_candidates in grouped.items()
+    ]
+    branches: list[dict[str, Any]] = []
+    for item_count in range(min_items, bounded_max + 1):
+        if item_count == 0:
+            if not requirements_by_pair:
+                branches.append({"type": "array", "maxItems": 0})
+            continue
+        for selected_groups in combinations(group_schemas, item_count):
+            if not set(requirements_by_pair).issubset(
+                pair for pair, _ in selected_groups
+            ):
+                continue
+            branches.append(
+                {
+                    "type": "array",
+                    "minItems": item_count,
+                    "maxItems": item_count,
+                    "prefixItems": [schema for _, schema in selected_groups],
+                    "items": False,
+                }
+            )
+    if not branches:
+        raise ValueError(
+            "declared dependencies exceed the live relation-array domain"
+        )
+    return branches[0] if len(branches) == 1 else {"oneOf": branches}
 
 
 def director_live_add_subgraph_agent_declarations_from_text(
@@ -3280,6 +3699,12 @@ def director_live_action_parameter_json_schema_text(
             director_state_conditioned_sampling_json_schema_text("add_agent")
         )
         branches: list[dict[str, Any]] = []
+        model_execution_profiles = _live_model_execution_profiles(
+            domain.get("model_execution_profiles"),
+            model_ids=model_ids,
+            execution_profiles=execution_profiles,
+            label="add_agent.model_execution_profiles",
+        )
         for execution_mode, allowed_tools in execution_profiles:
             branch = json.loads(json.dumps(base_schema))
             for field_name in (
@@ -3297,7 +3722,19 @@ def director_live_action_parameter_json_schema_text(
                 "allowed_tools",
             ]
             branch["properties"]["agent_id"] = {"enum": list(agent_ids)}
-            branch["properties"]["model_id"] = {"enum": list(model_ids)}
+            compatible_model_ids = [
+                model_id
+                for model_id, candidate_mode, candidate_tools in (
+                    model_execution_profiles
+                )
+                if (candidate_mode, candidate_tools)
+                == (execution_mode, allowed_tools)
+            ]
+            if not compatible_model_ids:
+                raise ValueError("add_agent profile has no compatible live model")
+            branch["properties"]["model_id"] = {
+                "enum": compatible_model_ids
+            }
             branch["properties"]["contract"] = {
                 "type": "string",
                 "minLength": contract_min_length,
@@ -3333,6 +3770,10 @@ def director_live_action_parameter_json_schema_text(
         schema["properties"]["agents"] = {"const": list(normalized_agents)}
         if free_contract_execution_profile_mode(domain):
             state = _live_free_contract_profile_domain(domain)
+            required_dependency_edges = _live_declared_dependency_edges(
+                domain,
+                normalized_agents,
+            )
             relation_candidates = director_live_add_subgraph_relation_candidates(
                 action_target_domains,
                 normalized_agents,
@@ -3358,7 +3799,13 @@ def director_live_action_parameter_json_schema_text(
                         "required Output closure must declare one new consumer"
                     )
                 positional_relation_schemas: list[dict[str, Any]] = []
+                covered_required_edges: set[tuple[str, str]] = set()
                 for component in required_ingress_components:
+                    required_for_component = {
+                        edge
+                        for edge in required_dependency_edges
+                        if edge[0] in component and edge[1] == output_ids[0]
+                    }
                     component_candidates = tuple(
                         candidate
                         for candidate in relation_candidates
@@ -3366,11 +3813,15 @@ def director_live_action_parameter_json_schema_text(
                         and candidate.get("target_id") == output_ids[0]
                         and candidate.get("source_to_target") is True
                         and candidate.get("target_to_source") is False
+                        and required_for_component.issubset(
+                            _relation_candidate_directed_edges(candidate)
+                        )
                     )
                     if not component_candidates:
                         raise ValueError(
                             "required Output closure component has no live ingress"
                         )
+                    covered_required_edges.update(required_for_component)
                     positional_relation_schemas.append(
                         {
                             "anyOf": [
@@ -3392,6 +3843,11 @@ def director_live_action_parameter_json_schema_text(
                             ]
                         }
                     )
+                if set(required_dependency_edges) != covered_required_edges:
+                    raise ValueError(
+                        "required Output closure does not cover every declared "
+                        "dependency"
+                    )
                 required_count = len(required_ingress_components)
                 schema["properties"]["relations"] = {
                     "type": "array",
@@ -3401,31 +3857,14 @@ def director_live_action_parameter_json_schema_text(
                     "items": False,
                 }
             elif relation_candidates and state["max_relations"] > 0:
-                schema["properties"]["relations"] = {
-                    "type": "array",
-                    "minItems": state["min_relations"],
-                    "maxItems": state["max_relations"],
-                    "uniqueItems": True,
-                    "items": {
-                        "anyOf": [
-                            {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "required": [
-                                    "source_id",
-                                    "target_id",
-                                    "source_to_target",
-                                    "target_to_source",
-                                ],
-                                "properties": {
-                                    key: {"const": value}
-                                    for key, value in candidate.items()
-                                },
-                            }
-                            for candidate in relation_candidates
-                        ]
-                    },
-                }
+                schema["properties"]["relations"] = (
+                    _distinct_relation_pair_array_schema(
+                        relation_candidates,
+                        min_items=state["min_relations"],
+                        max_items=state["max_relations"],
+                        required_directed_edges=required_dependency_edges,
+                    )
+                )
             else:
                 if state["min_relations"] != 0:
                     raise ValueError(
@@ -4461,6 +4900,12 @@ class AgentGraphOrchestrator:
         payload: dict[str, Any] = {
             "current_graph": env.graph.to_dict(),
             "topology_statistics": env.graph.topology_statistics(),
+            # Keep the objective, current state and latest Action feedback in
+            # the same revision-local Observation.  The bounded preview reuses
+            # the Env receipt already emitted by execute-on-edit feedback, so
+            # rejected edits cannot make the objective disappear and the full
+            # task still has one immutable source in the initial transcript.
+            "task_goal": env.task_goal_receipt(),
             "canvas_feedback": _director_neutral_feedback_projection(
                 snapshot.last_feedback
             ),
@@ -4719,6 +5164,8 @@ class AgentGraphOrchestrator:
             SCALAR_DIRECTOR_PROMPT_VERSION_V4,
             SCALAR_DIRECTOR_PROMPT_VERSION_V5,
             DIRECTOR_PROMPT_VERSION_V15,
+            DIRECTOR_PROMPT_VERSION_V16,
+            DIRECTOR_PROMPT_VERSION_V18,
         }:
             return copied
         return self._compact_qa_historical_messages(copied)
@@ -4789,14 +5236,23 @@ class AgentGraphOrchestrator:
         ):
             # SkillFlow keeps the sampled invalid Action in the trajectory but
             # presents only its canonical failure Observation to the next
-            # policy turn. Replace the pre-action Canvas observation in place
-            # so a rejected answer-bearing contract cannot become an imitation
-            # target or semantic anchor in the persistent Director transcript.
-            redacted = list(messages)
-            redacted[-1] = {
+            # policy turn. Preserve the immutable task/catalog P0 and replace
+            # only a later revision Observation.  On a first-turn rejection
+            # there is no later Observation yet, so append one.  The invalid
+            # assistant Action remains absent and therefore cannot become an
+            # imitation target or semantic anchor.
+            current_observation = {
                 "role": "user",
                 "content": self._observation_message(observation),
             }
+            redacted = list(messages[:2])
+            continuation = list(messages[2:])
+            if continuation and continuation[-1].get("role") == "user":
+                continuation[-1] = current_observation
+            else:
+                continuation.append(current_observation)
+            continuation = continuation[-2 * self.history_window :]
+            redacted.extend(continuation)
             return encode_director_transcript(
                 tuple(self._compact_historical_messages(redacted))
             )
@@ -4909,6 +5365,7 @@ __all__ = [
     "DIRECTOR_ACTION_JSON_SCHEMA_TEXT",
     "DIRECTOR_ACTION_SCHEMA_VERSION",
     "DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION",
+    "DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION_V14",
     "DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION_V13",
     "DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE",
     "DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION",
@@ -4924,12 +5381,18 @@ __all__ = [
     "DIRECTOR_SYSTEM_PROMPT_V13",
     "DIRECTOR_SYSTEM_PROMPT_V14",
     "DIRECTOR_SYSTEM_PROMPT_V15",
+    "DIRECTOR_SYSTEM_PROMPT_V16",
+    "DIRECTOR_SYSTEM_PROMPT_V17",
+    "DIRECTOR_SYSTEM_PROMPT_V18",
     "DIRECTOR_PROMPT_VERSION",
     "DIRECTOR_PROMPT_VERSION_V11",
     "DIRECTOR_PROMPT_VERSION_V12",
     "DIRECTOR_PROMPT_VERSION_V13",
     "DIRECTOR_PROMPT_VERSION_V14",
     "DIRECTOR_PROMPT_VERSION_V15",
+    "DIRECTOR_PROMPT_VERSION_V16",
+    "DIRECTOR_PROMPT_VERSION_V17",
+    "DIRECTOR_PROMPT_VERSION_V18",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT",
     "SCALAR_DIRECTOR_PROMPT_VERSION",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT_V3",

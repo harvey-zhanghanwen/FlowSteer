@@ -24,8 +24,10 @@ from src.interactive.director import (
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
     DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
     DIRECTOR_PROMPT_VERSION,
+    DIRECTOR_PROMPT_VERSION_V18,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
     DIRECTOR_SYSTEM_PROMPT,
+    DIRECTOR_SYSTEM_PROMPT_V18,
     HOTPOTQA_DIRECTOR_PROMPT_VERSION,
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
@@ -302,6 +304,14 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             director_system_prompt_for_version(DIRECTOR_PROMPT_VERSION),
         )
         self.assertIs(
+            DIRECTOR_SYSTEM_PROMPT_V18,
+            director_system_prompt_for_version(DIRECTOR_PROMPT_VERSION_V18),
+        )
+        self.assertIn("directed producer-to-consumer relation", DIRECTOR_SYSTEM_PROMPT_V18)
+        self.assertIn("Keep unresolved names", DIRECTOR_SYSTEM_PROMPT_V18)
+        self.assertNotIn("Doctor", DIRECTOR_SYSTEM_PROMPT_V18)
+        self.assertNotIn("Verifier", DIRECTOR_SYSTEM_PROMPT_V18)
+        self.assertIs(
             LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
             director_system_prompt_for_version(
                 "agentgraph.director.minimal-neutral.v9"
@@ -472,6 +482,10 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             transcript_messages(initial_prompt)[-1]
         )
         self.assertEqual(5, initial_state["remaining_rounds"])
+        self.assertEqual(
+            "preserve and answer the complete task",
+            initial_state["task_goal"]["task_preview"],
+        )
         self.assertFalse(initial_state["finish_admissibility"]["admissible"])
 
         action = (
@@ -488,6 +502,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         )
         state = observation_payload(transcript_messages(continued)[-1])
         self.assertEqual(4, state["remaining_rounds"])
+        self.assertEqual(initial_state["task_goal"], state["task_goal"])
         self.assertEqual("node_1", state["current_artifact_receipts"][0]["agent_id"])
         self.assertIn("agent_call_receipts", state["canvas_feedback"])
         self.assertIn(
@@ -905,7 +920,11 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("Shirley", continued)
         messages = transcript_messages(continued)
-        self.assertEqual(2, len(messages))
+        self.assertEqual(3, len(messages))
+        initial_messages = transcript_messages(initial_prompt)
+        self.assertEqual(initial_messages[0], messages[0])
+        self.assertEqual(initial_messages[1], messages[1])
+        self.assertIn("Dame Judi Dench", messages[1]["content"])
         state = observation_payload(messages[-1])
         self.assertEqual(1, len(state["recent_rejected_actions"]))
         self.assertIn(
@@ -2033,10 +2052,29 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("DO_NOT_REPLAY", continued)
         messages = transcript_messages(continued)
-        self.assertEqual(2, len(messages))
+        self.assertEqual(3, len(messages))
+        initial_messages = transcript_messages(initial_prompt)
+        self.assertEqual(initial_messages[0], messages[0])
+        self.assertEqual(initial_messages[1], messages[1])
         continued_state = observation_payload(messages[-1])
         self.assertIn("action_target_domains", continued_state)
         self.assertEqual(1, len(continued_state["recent_rejected_actions"]))
+
+        rejected_again = await env.step(sampled_action)
+        self.assertFalse(rejected_again.accepted)
+        continued_again = orchestrator.continue_prompt(
+            continued,
+            sampled_action,
+            env,
+            (),
+        )
+        self.assertNotIn("DO_NOT_REPLAY", continued_again)
+        messages_again = transcript_messages(continued_again)
+        self.assertEqual(3, len(messages_again))
+        self.assertEqual(initial_messages[0], messages_again[0])
+        self.assertEqual(initial_messages[1], messages_again[1])
+        repeated_state = observation_payload(messages_again[-1])
+        self.assertEqual(2, len(repeated_state["recent_rejected_actions"]))
 
     def test_generic_scalar_v3_binds_neutral_id_model_and_contract(self) -> None:
         domains = {
@@ -2563,7 +2601,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             request["action_target_domain_version"],
         )
         self.assertEqual(
-            "agentgraph.live-action-target-domains.v14",
+            "agentgraph.live-action-target-domains.v15",
             DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
         )
         initial_retriever_domain = env.model_admissible_action_targets()[

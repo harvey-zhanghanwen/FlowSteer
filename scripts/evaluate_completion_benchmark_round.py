@@ -21,6 +21,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -181,10 +182,45 @@ _HEALTHBENCH_DIRECT_GENERATION_IDENTITY_SCHEMA = (
 _HEALTHBENCH_REACT_SAMPLING_RECEIPT_SCHEMA = (
     "flowsteer.healthbench.react-scientific-sampling-receipt.v1"
 )
+_BOUNDED_REACT_EXHAUSTION = re.compile(
+    r"\breact agent .+ exhausted [1-9]\d* turns without a valid completion\b",
+    flags=re.IGNORECASE,
+)
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _bounded_direct_react_exhaustion_task_ids(
+    failures: Sequence[Mapping[str, Any]],
+    *,
+    task_ids: Optional[set[str]] = None,
+) -> set[str]:
+    """Return Direct task IDs with a recorded bounded ReAct exhaustion.
+
+    The ReAct horizon is configuration-owned, so the receipt matcher must not
+    embed one historical turn count.  Recomputing this set from the live
+    failure list also makes a newly recorded terminal failure visible in the
+    same collection attempt rather than only after a process restart.
+    """
+
+    matched: set[str] = set()
+    for item in failures:
+        task_id = item.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        if task_ids is not None and task_id not in task_ids:
+            continue
+        if (
+            item.get("condition") != "direct_local_qwen35_9b"
+            or item.get("stage") != "generation_or_evaluator"
+            or _BOUNDED_REACT_EXHAUSTION.search(str(item.get("error", "")))
+            is None
+        ):
+            continue
+        matched.add(task_id)
+    return matched
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -374,8 +410,26 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                     )
                 ).strip()
             )
-            checks["healthbench.protocol_equivalent_to_direct"] = (
-                bounded.get("protocol_equivalent_to_direct") is True
+            protocol_equivalent_to_direct = bounded.get(
+                "protocol_equivalent_to_direct"
+            )
+            raw_execution_profile_allowlist = (
+                tool_runtime.get("execution_profile_allowlist")
+                if isinstance(tool_runtime, Mapping)
+                else None
+            )
+            # A strict paired ReAct condition keeps every Graph executor on
+            # the Direct profile.  A Tool-availability condition may also
+            # expose ordinary reasoning so the Flow-Director can decide which
+            # Agents actually need retrieval.  The latter must be reported as
+            # a descriptive, non-equivalent protocol rather than silently
+            # claiming a paired causal comparison.
+            checks["healthbench.protocol_equivalent_to_direct"] = bool(
+                protocol_equivalent_to_direct is True
+                or (
+                    protocol_equivalent_to_direct is False
+                    and isinstance(raw_execution_profile_allowlist, list)
+                )
             )
             configured_tool_mode = (
                 tool_runtime.get("mode")
@@ -414,20 +468,25 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                 and tool_runtime.get("condition_id")
                 == experiment.get("condition_id")
             )
-            if (
-                isinstance(tool_runtime, Mapping)
-                and "execution_profile_allowlist" in tool_runtime
-            ):
+            if isinstance(raw_execution_profile_allowlist, list):
+                direct_profile = {
+                    "execution_mode": direct_execution_mode,
+                    "allowed_tools": list(
+                        bounded.get("direct_allowed_tools", ())
+                    ),
+                }
+                admitted_profiles = [direct_profile]
+                if protocol_equivalent_to_direct is False:
+                    admitted_profiles.insert(
+                        0,
+                        {
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        },
+                    )
                 checks[
                     "healthbench_tool_runtime.execution_profile_allowlist"
-                ] = tool_runtime.get("execution_profile_allowlist") == [
-                    {
-                        "execution_mode": direct_execution_mode,
-                        "allowed_tools": list(
-                            bounded.get("direct_allowed_tools", ())
-                        ),
-                    }
-                ]
+                ] = raw_execution_profile_allowlist == admitted_profiles
         else:
             checks["healthbench_tool_runtime.disabled"] = not isinstance(
                 tool_runtime, Mapping
@@ -1490,6 +1549,20 @@ def _healthbench_direct_generation_identity(
             "chat_template_enable_thinking as true or false"
         )
     chat_template_enable_thinking = raw_enable_thinking.strip().lower() == "true"
+    thinking_budget: int | None = None
+    raw_thinking_budget = model.metadata.get("thinking_budget")
+    if raw_thinking_budget is not None:
+        try:
+            thinking_budget = int(raw_thinking_budget)
+        except (TypeError, ValueError) as exc:
+            raise CompletionBenchmarkRoundError(
+                "HealthBench Qwen model catalog thinking_budget must be an integer"
+            ) from exc
+        if not chat_template_enable_thinking or thinking_budget < 1:
+            raise CompletionBenchmarkRoundError(
+                "HealthBench Qwen thinking_budget requires enabled thinking and "
+                "must be positive"
+            )
     generation_identity = {
         "schema_version": _HEALTHBENCH_DIRECT_GENERATION_IDENTITY_SCHEMA,
         "dataset_key": "healthbench_professional",
@@ -1523,6 +1596,11 @@ def _healthbench_direct_generation_identity(
                 "repetition_penalty": repetition_penalty,
                 "max_tokens": max_action_tokens,
                 "chat_template_enable_thinking": chat_template_enable_thinking,
+                **(
+                    {"thinking_budget": thinking_budget}
+                    if thinking_budget is not None
+                    else {}
+                ),
             },
         },
     }
@@ -1574,8 +1652,30 @@ def _healthbench_direct_generation_identity(
             "web_minimum_interval_seconds": float(
                 web["minimum_interval_seconds"]
             ),
+            # These affect which public observations are available to Direct
+            # and therefore belong to its resume/compatibility identity.  The
+            # defaults reproduce the historical no-retry runtime.
+            "web_max_retries": int(web.get("max_retries", 0)),
+            "web_retry_backoff_seconds": float(
+                web.get("retry_backoff_seconds", 1.0)
+            ),
         }
     return generation_identity
+
+
+def _healthbench_direct_identity_compatibility_value(
+    value: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Normalize only the two fields absent from historical no-retry receipts."""
+
+    normalized = dict(value)
+    retrieval = value.get("authoritative_retrieval")
+    if isinstance(retrieval, Mapping):
+        normalized_retrieval = dict(retrieval)
+        normalized_retrieval.setdefault("web_max_retries", 0)
+        normalized_retrieval.setdefault("web_retry_backoff_seconds", 1.0)
+        normalized["authoritative_retrieval"] = normalized_retrieval
+    return normalized
 
 
 def _react_scientific_sampling_receipt(
@@ -1587,6 +1687,7 @@ def _react_scientific_sampling_receipt(
     expected_top_k: int | None,
     expected_repetition_penalty: float | None,
     expected_chat_template_enable_thinking: bool,
+    expected_thinking_budget: int | None = None,
 ) -> Mapping[str, Any]:
     """Validate and project every SkillFlow-style ReAct generation receipt."""
 
@@ -1617,7 +1718,7 @@ def _react_scientific_sampling_receipt(
             step_index=turn,
             phase=GenerationPhase.ACTION,
         )
-        expected_sampling = {
+        expected_scientific_sampling = {
             "temperature": 1.0,
             "top_p": 1.0,
             "top_k": expected_top_k,
@@ -1625,6 +1726,22 @@ def _react_scientific_sampling_receipt(
             "seed": expected_seed,
             "chat_template_enable_thinking": (
                 expected_chat_template_enable_thinking
+            ),
+        }
+        expected_provider_sampling = {
+            **expected_scientific_sampling,
+            "max_tokens": (
+                max_action_tokens + expected_thinking_budget
+                if expected_thinking_budget is not None
+                else max_action_tokens
+            ),
+            **(
+                {
+                    "visible_max_tokens": max_action_tokens,
+                    "thinking_budget": expected_thinking_budget,
+                }
+                if expected_thinking_budget is not None
+                else {}
             ),
         }
         receipt_sampling = sampling.get("requested_sampling")
@@ -1647,19 +1764,19 @@ def _react_scientific_sampling_receipt(
             and isinstance(receipt_sampling, Mapping)
             and all(
                 receipt_sampling.get(key) == value
-                for key, value in expected_sampling.items()
+                for key, value in expected_scientific_sampling.items()
             )
             and isinstance(outer_sampling, Mapping)
             and all(
                 outer_sampling.get(key) == value
-                for key, value in expected_sampling.items()
+                for key, value in expected_provider_sampling.items()
             )
             and isinstance(response_metadata, Mapping)
             and response_metadata.get("generation_seed") == expected_seed
             and isinstance(response_sampling, Mapping)
             and all(
                 response_sampling.get(key) == value
-                for key, value in expected_sampling.items()
+                for key, value in expected_provider_sampling.items()
             )
             and response_sampling.get("repetition_penalty")
             == expected_repetition_penalty
@@ -1695,8 +1812,11 @@ def _persisted_healthbench_direct_identity_matches(
 ) -> bool:
     """Fail closed on resume unless persisted raw receipts reproduce identity."""
 
+    persisted_identity = value.get("direct_generation_identity")
     if (
-        value.get("direct_generation_identity") != expected_identity
+        not isinstance(persisted_identity, Mapping)
+        or _healthbench_direct_identity_compatibility_value(persisted_identity)
+        != _healthbench_direct_identity_compatibility_value(expected_identity)
         or value.get("generation_identity_verified") is not True
     ):
         return False
@@ -1724,6 +1844,7 @@ def _persisted_healthbench_direct_identity_matches(
             expected_chat_template_enable_thinking=bool(
                 requested["chat_template_enable_thinking"]
             ),
+            expected_thinking_budget=requested.get("thinking_budget"),
         )
     except (KeyError, TypeError, ValueError, CompletionBenchmarkRoundError):
         return False
@@ -1825,6 +1946,9 @@ async def _direct_one(
                 ),
                 expected_chat_template_enable_thinking=bool(
                     expected_sampling["chat_template_enable_thinking"]
+                ),
+                expected_thinking_budget=expected_sampling.get(
+                    "thinking_budget"
                 ),
             )
             executions = [
@@ -2148,15 +2272,11 @@ async def _collect_direct(
         retrieval_direct
         and bounded.get("freeze_direct_react_exhaustion_as_strict_zero") is True
     )
-    frozen_terminal_failure_ids = {
-        str(item.get("task_id"))
-        for item in failures
+    frozen_terminal_failure_ids = (
+        _bounded_direct_react_exhaustion_task_ids(failures)
         if freeze_react_exhaustion
-        and item.get("condition") == "direct_local_qwen35_9b"
-        and item.get("stage") == "generation_or_evaluator"
-        and "exhausted 6 turns without a valid completion"
-        in str(item.get("error", ""))
-    }
+        else set()
+    )
 
     def expected_generation_identity(task: TaskRecord) -> Mapping[str, Any] | None:
         if not retrieval_direct:
@@ -2351,6 +2471,11 @@ async def _collect_direct(
     )
 
     def checkpoint() -> None:
+        current_frozen_terminal_failure_ids = (
+            _bounded_direct_react_exhaustion_task_ids(failures)
+            if freeze_react_exhaustion
+            else set()
+        )
         manifest["direct_progress"] = {
             "completed": len(by_task),
             "pending_evaluator_retries": len(pending_by_task),
@@ -2368,7 +2493,7 @@ async def _collect_direct(
                 for item in failures
             ),
             "frozen_react_terminal_failures": len(
-                frozen_terminal_failure_ids
+                current_frozen_terminal_failure_ids
             ),
         }
         _write_json(manifest_path, manifest)
@@ -3586,6 +3711,66 @@ def _trajectory_react_model_call_groups(
     return tuple(groups), execution_count
 
 
+def _execution_profile_receipts(
+    trajectory: Mapping[str, Any],
+) -> tuple[tuple[Mapping[str, Any], ...], int, int]:
+    """Project executor profiles and response receipts from persisted calls."""
+
+    receipts: list[Mapping[str, Any]] = []
+    execution_count = 0
+    invalid_count = 0
+    turns = trajectory.get("turns")
+    if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+        return (), 0, 0
+    for turn in turns:
+        if not isinstance(turn, Mapping):
+            continue
+        executions = turn.get("executions")
+        if not isinstance(executions, Sequence) or isinstance(
+            executions,
+            (str, bytes),
+        ):
+            continue
+        for execution in executions:
+            execution_count += 1
+            if not isinstance(execution, Mapping):
+                invalid_count += 1
+                continue
+            metadata = execution.get("metadata")
+            request = (
+                metadata.get("request") if isinstance(metadata, Mapping) else None
+            )
+            response = (
+                metadata.get("response") if isinstance(metadata, Mapping) else None
+            )
+            agent = request.get("agent") if isinstance(request, Mapping) else None
+            execution_mode = (
+                agent.get("execution_mode") if isinstance(agent, Mapping) else None
+            )
+            allowed_tools = (
+                agent.get("allowed_tools") if isinstance(agent, Mapping) else None
+            )
+            if (
+                execution_mode not in {"reasoning", "react"}
+                or not isinstance(allowed_tools, Sequence)
+                or isinstance(allowed_tools, (str, bytes))
+                or not all(isinstance(tool_id, str) for tool_id in allowed_tools)
+                or not isinstance(response, Mapping)
+            ):
+                invalid_count += 1
+                continue
+            receipts.append(
+                {
+                    "profile": {
+                        "execution_mode": execution_mode,
+                        "allowed_tools": list(allowed_tools),
+                    },
+                    "response": response,
+                }
+            )
+    return tuple(receipts), execution_count, invalid_count
+
+
 def _graph_generation_identity_check(
     trajectory: Mapping[str, Any],
     direct_identity: Mapping[str, Any],
@@ -3623,26 +3808,150 @@ def _graph_generation_identity_check(
         return {
             "verified": False,
             "director_sampling_verified": False,
+            "executor_profile_receipt_status": "not_checked",
+            "executor_execution_receipt_count": 0,
+            "executor_profile_distribution": {},
             "executor_react_sampling_status": "not_checked",
             "executor_react_model_call_group_count": 0,
         }
-    groups, execution_count = _trajectory_react_model_call_groups(trajectory)
-    if not groups or len(groups) != execution_count:
+    raw_allowlist = direct_identity.get("agentgraph_execution_profile_allowlist")
+    if not isinstance(raw_allowlist, Sequence) or isinstance(
+        raw_allowlist,
+        (str, bytes),
+    ):
+        raw_allowlist = (
+            {
+                "execution_mode": direct_identity.get("execution_mode"),
+                "allowed_tools": tool.get("resource_ids", ()),
+            },
+        )
+    admitted_profiles: list[Mapping[str, Any]] = []
+    for raw_profile in raw_allowlist:
+        if not isinstance(raw_profile, Mapping):
+            continue
+        execution_mode = raw_profile.get("execution_mode")
+        allowed_tools = raw_profile.get("allowed_tools")
+        if (
+            execution_mode in {"reasoning", "react"}
+            and isinstance(allowed_tools, Sequence)
+            and not isinstance(allowed_tools, (str, bytes))
+            and all(isinstance(tool_id, str) for tool_id in allowed_tools)
+        ):
+            admitted_profiles.append(
+                {
+                    "execution_mode": execution_mode,
+                    "allowed_tools": list(allowed_tools),
+                }
+            )
+    receipts, execution_count, invalid_count = _execution_profile_receipts(
+        trajectory
+    )
+    # Historical strict paired-ReAct trajectories predate the persisted
+    # request.profile projection.  They can be normalized without ambiguity
+    # only when the allowlist contains exactly that one ReAct profile and
+    # every execution still carries its complete model-call receipt.
+    if (
+        (not receipts or invalid_count)
+        and len(admitted_profiles) == 1
+        and admitted_profiles[0]["execution_mode"] == "react"
+    ):
+        legacy_groups, legacy_execution_count = (
+            _trajectory_react_model_call_groups(trajectory)
+        )
+        if (
+            legacy_groups
+            and len(legacy_groups) == legacy_execution_count == execution_count
+        ):
+            receipts = tuple(
+                {
+                    "profile": admitted_profiles[0],
+                    "response": {
+                        "execution_mode": "react",
+                        "model_calls": model_calls,
+                    },
+                }
+                for model_calls in legacy_groups
+            )
+            invalid_count = 0
+    if (
+        not admitted_profiles
+        or not receipts
+        or len(receipts) != execution_count
+        or invalid_count
+    ):
         return {
             "verified": False,
             "director_sampling_verified": True,
+            "executor_profile_receipt_status": "missing_or_invalid",
+            "executor_execution_receipt_count": len(receipts),
+            "executor_profile_distribution": {},
             "executor_react_sampling_status": (
                 "missing_react_execution_receipt"
-                if not groups
-                else "mixed_or_non_react_execution_receipt"
+                if not receipts
+                else "not_checked"
             ),
-            "executor_react_model_call_group_count": len(groups),
+            "executor_react_model_call_group_count": 0,
         }
+    profile_distribution: Counter[str] = Counter()
+    react_groups: list[Sequence[Mapping[str, Any]]] = []
+    for receipt in receipts:
+        profile = receipt["profile"]
+        response = receipt["response"]
+        profile_key = json.dumps(profile, sort_keys=True, separators=(",", ":"))
+        profile_distribution[profile_key] += 1
+        if profile not in admitted_profiles:
+            return {
+                "verified": False,
+                "director_sampling_verified": True,
+                "executor_profile_receipt_status": "profile_not_admitted",
+                "executor_execution_receipt_count": len(receipts),
+                "executor_profile_distribution": dict(profile_distribution),
+                "executor_react_sampling_status": "not_checked",
+                "executor_react_model_call_group_count": len(react_groups),
+            }
+        if profile["execution_mode"] == "reasoning":
+            requested_sampling = response.get("requested_sampling")
+            if not (
+                response.get("request_status") == "completed"
+                and response.get("generation_seed") == scientific.get("base_seed")
+                and isinstance(requested_sampling, Mapping)
+                and requested_sampling.get("seed") == scientific.get("base_seed")
+            ):
+                return {
+                    "verified": False,
+                    "director_sampling_verified": True,
+                    "executor_profile_receipt_status": (
+                        "invalid_reasoning_execution_receipt"
+                    ),
+                    "executor_execution_receipt_count": len(receipts),
+                    "executor_profile_distribution": dict(profile_distribution),
+                    "executor_react_sampling_status": "not_checked",
+                    "executor_react_model_call_group_count": len(react_groups),
+                }
+            continue
+        model_calls = response.get("model_calls")
+        if (
+            response.get("execution_mode") != "react"
+            or not isinstance(model_calls, Sequence)
+            or isinstance(model_calls, (str, bytes))
+            or not model_calls
+            or not all(isinstance(item, Mapping) for item in model_calls)
+        ):
+            return {
+                "verified": False,
+                "director_sampling_verified": True,
+                "executor_profile_receipt_status": "invalid_react_execution_receipt",
+                "executor_execution_receipt_count": len(receipts),
+                "executor_profile_distribution": dict(profile_distribution),
+                "executor_react_sampling_status": "invalid",
+                "executor_react_model_call_group_count": len(react_groups),
+            }
+        react_groups.append(model_calls)
     try:
         coordinate = ScientificSamplingCoordinate.from_value(
             scientific["coordinate"]
         )
-        for model_calls in groups:
+        for model_calls in react_groups:
             _react_scientific_sampling_receipt(
                 model_calls,
                 base_seed=scientific["base_seed"],
@@ -3655,19 +3964,28 @@ def _graph_generation_identity_check(
                 expected_chat_template_enable_thinking=bool(
                     requested["chat_template_enable_thinking"]
                 ),
+                expected_thinking_budget=requested.get("thinking_budget"),
             )
     except (KeyError, TypeError, ValueError, CompletionBenchmarkRoundError):
         return {
             "verified": False,
             "director_sampling_verified": True,
+            "executor_profile_receipt_status": "invalid_react_sampling_receipt",
+            "executor_execution_receipt_count": len(receipts),
+            "executor_profile_distribution": dict(profile_distribution),
             "executor_react_sampling_status": "invalid",
-            "executor_react_model_call_group_count": len(groups),
+            "executor_react_model_call_group_count": len(react_groups),
         }
     return {
         "verified": True,
         "director_sampling_verified": True,
-        "executor_react_sampling_status": "verified",
-        "executor_react_model_call_group_count": len(groups),
+        "executor_profile_receipt_status": "verified",
+        "executor_execution_receipt_count": len(receipts),
+        "executor_profile_distribution": dict(profile_distribution),
+        "executor_react_sampling_status": (
+            "verified" if react_groups else "not_applicable_no_react_execution"
+        ),
+        "executor_react_model_call_group_count": len(react_groups),
     }
 
 
@@ -3723,6 +4041,9 @@ def _paired_generation_identity_receipt(
             else {
                 "verified": False,
                 "director_sampling_verified": False,
+                "executor_profile_receipt_status": "not_checked",
+                "executor_execution_receipt_count": 0,
+                "executor_profile_distribution": {},
                 "executor_react_sampling_status": "not_checked",
                 "executor_react_model_call_group_count": 0,
             }
@@ -3736,6 +4057,15 @@ def _paired_generation_identity_receipt(
                 "paired_identity_verified": direct_verified and graph_verified,
                 "agentgraph_director_sampling_verified": graph_check[
                     "director_sampling_verified"
+                ],
+                "agentgraph_executor_profile_receipt_status": graph_check[
+                    "executor_profile_receipt_status"
+                ],
+                "agentgraph_executor_execution_receipt_count": graph_check[
+                    "executor_execution_receipt_count"
+                ],
+                "agentgraph_executor_profile_distribution": graph_check[
+                    "executor_profile_distribution"
                 ],
                 "agentgraph_executor_react_sampling_status": graph_check[
                     "executor_react_sampling_status"
@@ -4620,11 +4950,14 @@ async def run_completion_benchmark_round(
         and len(direct) != len(active)
     ):
         missing_count = len(active) - len(direct)
-        frozen_failure_count = int(
-            manifest.get("direct_progress", {}).get(
-                "frozen_react_terminal_failures", 0
-            )
+        frozen_failure_ids = _bounded_direct_react_exhaustion_task_ids(
+            failures,
+            task_ids={task.task_id for task in active},
         )
+        frozen_failure_count = len(frozen_failure_ids)
+        manifest.setdefault("direct_progress", {})[
+            "frozen_react_terminal_failures"
+        ] = frozen_failure_count
         if not (
             bounded.get("freeze_direct_react_exhaustion_as_strict_zero") is True
             and missing_count == frozen_failure_count

@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import unittest
 
+from jsonschema import Draft202012Validator
 import yaml
 
 from src.interactive.agent_action_parser import AgentActionParser
@@ -234,16 +235,27 @@ class HealthBenchFreeContractSubgraphDomainTests(unittest.TestCase):
             )
         )
         relations = final_schema["properties"]["relations"]
-        self.assertEqual(1, relations["maxItems"])
+        relation_validator = Draft202012Validator(relations)
+        forward = {
+            "source_id": "node_1",
+            "target_id": "node_2",
+            "source_to_target": True,
+            "target_to_source": False,
+        }
+        reverse = {
+            "source_id": "node_2",
+            "target_id": "node_1",
+            "source_to_target": True,
+            "target_to_source": False,
+        }
+        self.assertTrue(relation_validator.is_valid([]))
+        self.assertTrue(relation_validator.is_valid([forward]))
+        self.assertFalse(relation_validator.is_valid([forward, reverse]))
         output_domain = final_schema["properties"]["output_agent_id"]["anyOf"][0][
             "enum"
         ]
         self.assertEqual(["node_1", "node_2"], output_domain)
-        endpoint_values = set(output_domain)
-        for branch in relations["items"]["anyOf"]:
-            properties = branch["properties"]
-            endpoint_values.add(properties["source_id"]["const"])
-            endpoint_values.add(properties["target_id"]["const"])
+        relation_schema_text = json.dumps(relations, sort_keys=True)
         for pseudo_node in (
             "input_data",
             "task",
@@ -251,7 +263,7 @@ class HealthBenchFreeContractSubgraphDomainTests(unittest.TestCase):
             "system_prompt",
             "output_agent",
         ):
-            self.assertNotIn(pseudo_node, endpoint_values)
+            self.assertNotIn(pseudo_node, relation_schema_text)
 
     def test_profile_first_receipt_is_bound_to_selection_and_declaration(self) -> None:
         actions = ("add_subgraph",)

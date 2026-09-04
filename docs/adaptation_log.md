@@ -1287,3 +1287,195 @@ change was made during profile selection.
   passing, zero failures. No training, backward, optimizer update, GRPO, LoRA,
   MACE, Bayesian update, Skill injection/evolution, memory, Web search, or
   medical Tool call ran.
+
+## 2026-09-02: HealthBench fixed-20 v2.27 public-state admission repair
+
+- Preserved the v2.16 fixed panel, task order, seed, scientific sampling
+  schedule, Direct condition, four-model catalog and official OpenAI
+  simple-evals reference grader. v2.27 has an independent condition and
+  artifact namespace; no earlier trajectory or score is relabelled.
+- Directly ported FlowSteer's nested `input_artifact_provenance` envelope and
+  renderer. A Tool receipt remains directly attributed to the Agent that made
+  the call, while a later Artifact retains the earlier routed path as nested
+  provenance. Exact duplicate public receipts and envelopes are removed.
+- Extended the existing scope-neutral Canvas admission to reject unsupported
+  entity-slot substitutions, including single lowercase replacements, unless
+  the initial task or a successful public Tool/Agent Artifact establishes the
+  surface. The rule is role- and topology-neutral and reads no evaluator data.
+- Added an opt-in retrieval admission for complete acronym/hyphenated entity
+  surfaces. A partial token match is no longer counted as relevant evidence;
+  the same ReAct Agent may issue a non-duplicate reformulation within the
+  unchanged budget, and exhaustion admits an explicit insufficient-evidence
+  completion rather than an unsupported fact.
+- Added opt-in public text quality admission to the common Agent Runtime for
+  reasoning and ReAct outputs. Provider truncation, explicit incomplete
+  output, over-limit text, invalid/control characters, abnormal tokens, exact
+  paragraph repetition, repeated token n-grams and extreme run-on text create
+  a producer-scoped `CompletionArtifactQualityError`. The invalid Artifact is
+  retained in the call receipt but is not routed downstream, truncated, or
+  rewritten.
+- Kept `preserve -> diagnose -> repair -> augment`: valid upstream Artifacts,
+  relations and Tool receipts remain in Canvas state; the existing failure
+  recovery path identifies the producer for `MODIFY_AGENT` or augmentation.
+  No fixed Doctor/Researcher/Verifier/Formatter workflow, Agent count, edge or
+  topology was added. ReAct remains an execution mode.
+- Added targeted regressions for multi-hop provenance, model-visible nested
+  provenance, scope substitution, evidence-anchor coverage, budget exhaustion,
+  quality rejection and structured JSON non-regression. The focused suites
+  passed before prepare-only validation.
+- Prepare-only succeeded for all 20 fixed tasks and recorded all registry
+  checks true, `training_enabled=false`, and `optimizer_updates=0`. It made no
+  model, Tool, Web or grader call. Consequently v2.27 has no new official
+  metric yet and remains `prepared`, not `evaluated`.
+
+## 2026-09-04: HealthBench v2.28 dependency-consistent structured-evidence flow
+
+- Preserved the v2.27 provenance, scope, retrieval and Artifact-quality gates
+  and the existing fixed-20 and full-525 populations. v2.28 changes only two
+  opt-in information-flow controls; it does not prescribe a medical role,
+  Agent count, model assignment, relation, topology or Output identity.
+- Directly reused FlowSteer's atomic Canvas transaction, directed
+  producer-to-consumer Artifact routing and reciprocal initial-draft/revision
+  barrier. A reciprocal pair remains two independent initial Artifacts followed
+  by one bounded peer revision; v2.28 does not create or reinterpret edges.
+- Directly reused SkillFlow's public Action--Observation and Tool-receipt
+  boundary. Complete Tool receipts, provider observations and nested Artifact
+  provenance remain in the request, trajectory and backend record throughout
+  the run.
+- Added a conservative free-text incoming-dependency admission. When enabled,
+  an explicit dependence on a named `node_*` Artifact/output/result/finding/
+  evidence/analysis/response requires that producer to reach the consumer in
+  the directed Canvas. Unknown, self and reverse-only dependencies are
+  rejected; outgoing `send/route ... to node_*` prose is ignored. Reciprocal
+  exchange remains legal because it contains the required direction.
+- Added a receipt-bound `healthbench.structured-evidence.v1` Artifact for
+  non-Output HealthBench ReAct completions under the v2 communication profile.
+  It retains a substantive summary, evidence claims and qualifiers, exact
+  document metadata and evidence spans, plus uncertainties. Evidence identity
+  and normalized spans must bind to successful authoritative-search receipts;
+  invented or mismatched evidence is rejected.
+- Added a compact model-visible projection of the structured Artifact. Only
+  evidence cited by the Artifact and compact nested lineage are shown to the
+  next model; unrelated result bodies, duplicated Artifact bodies, timing,
+  corpus statistics, Tool versions and raw nested receipts are not replayed.
+  This does not discard information: the full receipts and provenance remain
+  in the trajectory/backend record.
+- Kept Direct and terminal Output as complete natural-language responses.
+  `request.is_output_agent`, rather than a role or topology label, defines the
+  Output boundary. ReAct is only an execution mode, and non-HealthBench
+  communication remains unchanged.
+- Added the isolated fixed-20 and full-525 v2.28 configurations. Targeted
+  no-API tests cover their invariants, profile routing, intermediate/Output
+  schema separation, exact receipt binding, compact cited-row and nested-
+  provenance projection, and non-HealthBench isolation. This log records only
+  the implemented and tested state: no v2.28 live model/Tool/grader evaluation
+  or score is claimed.
+- Training, backward, optimizer update, GRPO, LoRA, MACE, Bayesian update and
+  Skill retrieval/evolution remain disabled.
+- The v2.28 fixed-20 and full-525 manifests completed prepare-only validation
+  with the same ordered task IDs as v2.27. A live Stable Zero run was not
+  started on 2026-09-04 because physical GPU 0 had only about 21 GiB free while
+  two task-external Qwen3.5 services remained resident. Three bounded startup
+  checks of a task-owned 32K SGLang Director exited before readiness: standard
+  loading lacked memory for the hybrid state cache, an explicit minimal cache
+  still lacked prefill/KV headroom, and SGLang's CPU weight-offload path failed
+  for Qwen3.5 with a cross-device LayerNorm error. Port 8025 was closed and GPU
+  memory returned to its pre-check level after each failure. No selected task,
+  Tool, Executor, Web search, provider or grader request was issued, so no new
+  score is claimed and the v2.27 full-525 result remains the latest completed
+  official-evaluator result.
+- After the user authorized a different rollout GPU, v2.28 completed a two-task
+  Stable Zero canary and the full fixed-20 development panel through the
+  already-running GPU-2 SGLang `supervisor_theta`. The server receipt reported
+  the same Qwen3.5-9B base-policy version (`default`), 32K context and native
+  token receipts; the manifest records `effective_rollout_physical=2` rather
+  than relabelling the run as GPU 0.
+- The full fixed-20 v2.28 AgentGraph result is 20/20 evaluator-valid, 20/20
+  explicit FINISH, zero max-rounds/terminal failures, raw official score
+  `0.3008484848484848`, and primary length-adjusted score
+  `0.2684364548484849`. Its strict Direct comparator is `0.08081736482471777`
+  raw and `0.09263322482471775` length-adjusted on the 20-task denominator;
+  17 Direct records are evaluator-valid and three ReAct turn-exhaustion cases
+  are frozen strict zero under the declared protocol.
+- On exactly the same 20 task IDs, the completed v2.27 full-525 trajectories
+  score `0.33636363636363636` raw and `0.30554361636363636`
+  length-adjusted. Thus v2.28 changes the matched-panel means by
+  `-0.03551515151515152` and `-0.03710716151515152`, respectively. The
+  structured evidence transfer is verified in live rendered requests, but the
+  treatment does not pass the score-promotion criterion and is not promoted
+  over v2.27.
+- v2.28 naturally selected 7 one-Agent, 3 two-Agent, 8 three-Agent and 2
+  four-Agent graphs. Twelve tasks carried at least one receipt-bound structured
+  evidence Artifact, and two final graphs included a reciprocal relation.
+  Multi-Agent graphs averaged `0.36130536130536134` raw versus
+  `0.18857142857142858` for one-Agent graphs on this small panel; this is a
+  descriptive post-hoc slice, not a causal or benchmark-wide claim.
+- Live failure inspection separates transport correctness from answer quality.
+  One structured Artifact was transferred once and in full, but retrieval about
+  regional anaesthesia was over-generalized to interventional pain guidance;
+  another case failed earlier when the Director expanded an ambiguous acronym
+  without public evidence and then selected a one-Agent no-Tool repair. These
+  remain evidence for a future scope/evidence-sufficiency treatment rather than
+  a sample-specific medical workflow. No training or Skill update occurred.
+
+## 2026-09-04: HealthBench v2.29--v2.32 low-score regression repair
+
+- Froze eight low-scoring public-test task IDs as a post-development regression
+  panel. This panel is used only to reject or promote architecture candidates;
+  it is not an unbiased benchmark score and does not replace the completed
+  v2.27 525-task result.
+- v2.29 completed all eight AgentGraph trajectories and official evaluations.
+  Relative to v2.28 on the same panel, signed raw mean moved from
+  `-0.7173056723` to `-0.1469931723` and signed length-adjusted mean moved from
+  `-0.7174747223` to `-0.1637327973`; official dataset-level clipping leaves
+  the eight-task aggregate at zero. This is an overall-condition comparison,
+  not an attribution to one guard.
+- v2.31 preserved all eight complete Director/Canvas trajectories, but the
+  official grader returned `403 insufficient_quota` on six terminal calls.
+  Only two evaluator-valid Graph rows exist and both are negative
+  (`-1.125`, `-1.142857` raw); the other six are N/A, not zero. The two valid
+  failures expose retrieval/query scope drift and explicit suppression of
+  warnings. A third saved trajectory collapses a complete 267-character
+  translation into a 48-character Chinese lead-in ending in `：`.
+- Added immutable `public_text_quality_v2` to reject lone headings/lead-ins in
+  reasoning as well as ReAct, including full-width punctuation, while keeping
+  published v1 behavior unchanged. Added an opt-in HealthBench contract guard
+  for the observed `without disclaimers or warnings` form while keeping the
+  prior verb-led scope guard unchanged. Both failures retain valid
+  upstream Artifacts and return through `preserve -> diagnose -> repair ->
+  augment`; no Agent is deleted automatically.
+- Restored `require_relevant_evidence=true` and added the opt-in public-task
+  query-anchor admission. A query such as the observed unrelated stent/diarrhea
+  search cannot execute when it preserves no substantive surface from the
+  supplied conversation; the same ReAct Agent receives a public repair
+  Observation. The rule reads no rubric, reference answer, reward, or private
+  metadata.
+- Reused the already implemented v2.28 receipt-bound structured-evidence
+  schema for non-Output ReAct Artifacts. This prevents a successful Tool call
+  from being treated as sufficient evidence unless the claimed evidence span
+  and provenance bind to that receipt. Agent communication still transfers the
+  full Artifact; terminal Output remains natural language.
+- Added opt-in enforcement of the measured state-conditioned completion
+  domain, closing the case where a provider ignored constrained decoding and
+  completed before the required public search. When a structured Artifact
+  reports insufficient evidence and one distinct search remains, the same
+  ReAct Agent now receives public continuation feedback instead of publishing
+  the unresolved state.
+- Selected new immutable v18, which composes the existing role-neutral v16
+  conflict/relation policy and v17 public task-anchor clause without changing
+  either historical prompt. No Agent
+  role, Agent count, model, relation, topology, or medical workflow is fixed.
+- Focused no-API verification passed through the current revision: 527 tests
+  plus 114 subtests, including historical profile isolation, CJK completion,
+  non-Latin task input, completion-domain enforcement, refined-search
+  continuation and free-topology prompt checks. The v2.32 eight-task
+  prepare-only manifest completed successfully.
+- The final v2.32 official grader preflight made only the synthetic
+  non-benchmark check and again failed on 2026-09-04 19:26 +08:00 with three
+  `403 insufficient_quota` responses. Consequently Direct,
+  Director, Agent, Tool, Web/PubMed and full evaluation were not started. No
+  v2.32 score is predicted or fabricated; the next safe operation is the same
+  preflight after quota recovery, followed by this fixed eight-task panel.
+- No training, backward, optimizer update, GRPO, LoRA, MACE, Bayesian update,
+  Skill injection/evolution, fixed medical role inventory, or fixed topology
+  was introduced.

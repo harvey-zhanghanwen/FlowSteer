@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 import json
+import re
 from types import MappingProxyType
 from typing import Awaitable, Collection, Dict, List, Mapping, MutableMapping, Optional, Protocol, Sequence, Set, Tuple, Union
 import uuid
@@ -37,12 +38,154 @@ ARTIFACT_COMMUNICATION_LEGACY = "legacy"
 ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1 = (
     "producer_context_exact_dedup_v1"
 )
+ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2 = (
+    "producer_context_structured_evidence_v2"
+)
+_ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_PROFILES = frozenset(
+    {
+        ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
+        ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
+    }
+)
 _ARTIFACT_COMMUNICATION_PROFILES = frozenset(
     {
         ARTIFACT_COMMUNICATION_LEGACY,
-        ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
+        *_ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_PROFILES,
     }
 )
+
+ARTIFACT_QUALITY_NONE = "none"
+ARTIFACT_QUALITY_PUBLIC_TEXT_V1 = "public_text_quality_v1"
+ARTIFACT_QUALITY_PUBLIC_TEXT_V2 = "public_text_quality_v2"
+_ARTIFACT_QUALITY_PROFILES = frozenset(
+    {
+        ARTIFACT_QUALITY_NONE,
+        ARTIFACT_QUALITY_PUBLIC_TEXT_V1,
+        ARTIFACT_QUALITY_PUBLIC_TEXT_V2,
+    }
+)
+_PUBLIC_TEXT_MAX_CHARACTERS_V1 = 12_000
+
+
+def _public_text_quality_receipt(
+    text: str,
+    metadata: Mapping[str, object],
+    *,
+    profile: str,
+) -> Mapping[str, object]:
+    """Measure truncation and lexical degeneration on a public Artifact.
+
+    The check is intentionally semantic-free: it does not consult the task,
+    evaluator, rubric, reference response, Agent role, or graph topology.  It
+    detects only provider truncation, invalid characters, excessive length,
+    exact paragraph repetition, repeated token n-grams, and extreme run-on
+    output.  The immutable v2 profile additionally detects unmistakably
+    incomplete headings/lead-ins and CJK sentence boundaries.  The Artifact
+    is rejected as a whole; it is never truncated or rewritten by Runtime.
+    """
+
+    error_codes: list[str] = []
+    finish_reason = metadata.get("finish_reason")
+    if isinstance(finish_reason, str) and finish_reason.casefold() == "length":
+        error_codes.append("provider_length_termination")
+    if metadata.get("artifact_complete") is False:
+        error_codes.append("provider_incomplete_artifact")
+    if len(text) > _PUBLIC_TEXT_MAX_CHARACTERS_V1:
+        error_codes.append("artifact_character_limit_exceeded")
+    if "\ufffd" in text or any(
+        ord(character) < 32 and character not in "\n\r\t"
+        for character in text
+    ):
+        error_codes.append("invalid_text_character")
+    if re.search(r"\S{513,}", text) is not None:
+        error_codes.append("abnormally_long_token")
+
+    if profile == ARTIFACT_QUALITY_PUBLIC_TEXT_V2:
+        stripped_text = text.strip()
+        nonempty_lines = [
+            line.strip() for line in text.splitlines() if line.strip()
+        ]
+        # v2 adds one surface-completeness check without changing the
+        # published v1 condition.  A lone heading or introductory clause
+        # ending in a colon cannot be the complete public Artifact promised by
+        # a free-text contract.  The existing SkillFlow-style failure path
+        # returns the typed failure to the Director for repair.
+        heading_only = bool(
+            len(nonempty_lines) == 1
+            and re.fullmatch(r"#{1,6}\s+[^\r\n]+", nonempty_lines[0])
+        )
+        incomplete_leadin = bool(
+            len(nonempty_lines) == 1
+            and stripped_text.endswith((":", "："))
+        )
+        if heading_only or incomplete_leadin:
+            error_codes.append("incomplete_heading_or_leadin")
+
+    normalized_paragraphs = [
+        " ".join(paragraph.split()).casefold()
+        for paragraph in re.split(r"\n\s*\n", text)
+        if len(" ".join(paragraph.split())) >= 80
+    ]
+    paragraph_counts: dict[str, int] = {}
+    for paragraph in normalized_paragraphs:
+        paragraph_counts[paragraph] = paragraph_counts.get(paragraph, 0) + 1
+    maximum_paragraph_repetitions = max(paragraph_counts.values(), default=0)
+    if maximum_paragraph_repetitions >= 3:
+        error_codes.append("repeated_paragraph")
+
+    tokens = re.findall(r"[\w'-]+|[^\w\s]", text.casefold())
+    window_size = 24
+    window_counts: dict[Tuple[str, ...], int] = {}
+    if len(tokens) >= 192:
+        for index in range(0, len(tokens) - window_size + 1):
+            window = tuple(tokens[index : index + window_size])
+            window_counts[window] = window_counts.get(window, 0) + 1
+    maximum_ngram_repetitions = max(window_counts.values(), default=0)
+    if maximum_ngram_repetitions >= 3:
+        error_codes.append("repeated_token_ngram")
+
+    lines = text.splitlines() or [text]
+    longest_line_characters = max((len(line) for line in lines), default=0)
+    sentence_boundary_pattern = (
+        r"[.!?。！？](?:\s|$)?"
+        if profile == ARTIFACT_QUALITY_PUBLIC_TEXT_V2
+        else r"[.!?](?:\s|$)?"
+    )
+    sentence_boundaries = len(re.findall(sentence_boundary_pattern, text))
+    structured_json = False
+    if text.lstrip().startswith(("{", "[")):
+        try:
+            json.loads(text)
+        except (TypeError, ValueError):
+            pass
+        else:
+            structured_json = True
+    if (
+        longest_line_characters > 5_000
+        and sentence_boundaries < 4
+        and not structured_json
+    ):
+        error_codes.append("run_on_text")
+
+    distinct_error_codes = list(dict.fromkeys(error_codes))
+    return MappingProxyType(
+        {
+            "profile": profile,
+            "status": "invalid" if distinct_error_codes else "valid",
+            "error_codes": distinct_error_codes,
+            "character_count": len(text),
+            "token_count": len(tokens),
+            "longest_line_characters": longest_line_characters,
+            "sentence_boundary_count": sentence_boundaries,
+            "maximum_exact_paragraph_repetitions": (
+                maximum_paragraph_repetitions
+            ),
+            "maximum_24_token_ngram_repetitions": (
+                maximum_ngram_repetitions
+            ),
+            "structured_json": structured_json,
+        }
+    )
 
 
 def _communication_condition(
@@ -86,6 +229,7 @@ class UpstreamMessage:
     source_role_family: Optional[str] = None
     source_completion_condition: Optional[str] = None
     source_finish_reason: Optional[str] = None
+    input_artifact_provenance: Tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -140,10 +284,25 @@ class UpstreamMessage:
             not isinstance(item, Mapping) for item in self.tool_receipts
         ):
             raise TypeError("tool_receipts must be a tuple of mappings")
+        if not isinstance(self.input_artifact_provenance, tuple) or any(
+            not isinstance(item, Mapping)
+            for item in self.input_artifact_provenance
+        ):
+            raise TypeError(
+                "input_artifact_provenance must be a tuple of mappings"
+            )
         object.__setattr__(
             self,
             "tool_receipts",
             tuple(MappingProxyType(dict(item)) for item in self.tool_receipts),
+        )
+        object.__setattr__(
+            self,
+            "input_artifact_provenance",
+            tuple(
+                MappingProxyType(dict(item))
+                for item in self.input_artifact_provenance
+            ),
         )
 
     @property
@@ -179,6 +338,9 @@ class UpstreamMessage:
             "request_or_dependency": self.request_or_dependency,
             "dependency": self.request_or_dependency,
             "tool_receipts": [dict(item) for item in self.tool_receipts],
+            "input_artifact_provenance": [
+                dict(item) for item in self.input_artifact_provenance
+            ],
         }
 
 
@@ -320,6 +482,21 @@ def _tool_receipts_from_metadata(
     )
 
 
+def _input_artifact_provenance_from_metadata(
+    metadata: Mapping[str, object],
+) -> Tuple[Mapping[str, object], ...]:
+    """Read nested, source-bound provenance without flattening its graph path."""
+
+    raw = metadata.get("input_artifact_provenance", ())
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(
+        MappingProxyType(dict(item))
+        for item in raw
+        if isinstance(item, Mapping)
+    )
+
+
 def _environment_revision_from_metadata(
     metadata: Mapping[str, object],
 ) -> Optional[int]:
@@ -346,9 +523,8 @@ def _producer_context(
 ) -> Dict[str, Optional[str]]:
     """Project the existing Agent declaration into one routed artifact."""
 
-    if (
-        artifact_communication_profile
-        != ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+    if artifact_communication_profile not in (
+        _ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_PROFILES
     ):
         return {}
     return {
@@ -632,6 +808,7 @@ class AgentRuntime:
         dataset_id: Optional[str] = None,
         semantic_protocol: str = "none",
         artifact_communication_profile: str = ARTIFACT_COMMUNICATION_LEGACY,
+        artifact_quality_profile: str = ARTIFACT_QUALITY_NONE,
         execution_profile_allowlist: Optional[
             Sequence[Tuple[str, Sequence[str]]]
         ] = None,
@@ -654,6 +831,8 @@ class AgentRuntime:
             raise ValueError("unsupported AgentRuntime semantic_protocol")
         if artifact_communication_profile not in _ARTIFACT_COMMUNICATION_PROFILES:
             raise ValueError("unsupported AgentRuntime artifact communication profile")
+        if artifact_quality_profile not in _ARTIFACT_QUALITY_PROFILES:
+            raise ValueError("unsupported AgentRuntime artifact quality profile")
         self.model_registry = model_registry
         self.gateway = gateway
         adapters: Dict[str, AgentExecutionAdapter] = {
@@ -674,6 +853,7 @@ class AgentRuntime:
         self.dataset_id = None if dataset_id is None else dataset_id.strip()
         self.semantic_protocol = semantic_protocol
         self.artifact_communication_profile = artifact_communication_profile
+        self.artifact_quality_profile = artifact_quality_profile
         self._execution_profile_allowlist = (
             self._validate_execution_profile_allowlist(
                 execution_profile_allowlist
@@ -796,6 +976,88 @@ class AgentRuntime:
         allowed = set(self._execution_profile_allowlist)
         return tuple(profile for profile in registered if profile in allowed)
 
+    def model_supports_execution_profile(
+        self,
+        model_id: str,
+        execution_mode: str,
+        allowed_tools: Sequence[str],
+    ) -> bool:
+        """Return whether catalog metadata admits one executable model/profile.
+
+        FlowSteer's original Runtime assumed a homogeneous model pool and
+        exposed model IDs separately from execution profiles.  Heterogeneous
+        AgentGraph catalogs need the same SkillFlow capability admission at
+        the joint boundary.  Explicit ``false`` metadata is authoritative;
+        catalogs without capability metadata retain legacy compatibility.
+        """
+
+        model = self.model_registry.require_model(model_id)
+        metadata = model.metadata
+        if metadata.get("text_capable", "true").casefold() == "false":
+            return False
+        if execution_mode == "coding":
+            coding_capable = metadata.get("coding_capable")
+            if (
+                coding_capable is not None
+                and coding_capable.casefold() != "true"
+            ):
+                return False
+        if execution_mode == "react":
+            tool_capable = metadata.get("tool_capable")
+            if tool_capable is not None and tool_capable.casefold() != "true":
+                return False
+        canonical_tools = tuple(allowed_tools)
+        if not canonical_tools:
+            return True
+        tool_capable = metadata.get("tool_capable")
+        if tool_capable is not None and tool_capable.casefold() != "true":
+            return False
+        raw_scope = metadata.get("tool_capability_scope")
+        if raw_scope:
+            admitted_tools = {
+                tool_id.strip()
+                for tool_id in raw_scope.split(",")
+                if tool_id.strip()
+            }
+            if not set(canonical_tools) <= admitted_tools:
+                return False
+        return True
+
+    def registered_execution_profiles_for_model(
+        self,
+        model_id: str,
+    ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+        """Project exact Runtime profiles compatible with one model arm."""
+
+        return tuple(
+            profile
+            for profile in self.registered_execution_profiles()
+            if self.model_supports_execution_profile(
+                model_id,
+                profile[0],
+                profile[1],
+            )
+        )
+
+    def model_execution_profiles(
+        self,
+        model_ids: Optional[Sequence[str]] = None,
+    ) -> Tuple[Tuple[str, str, Tuple[str, ...]], ...]:
+        """Return the live model/execution/Tool joint capability domain."""
+
+        selected_model_ids = (
+            self.model_registry.model_ids
+            if model_ids is None
+            else tuple(model_ids)
+        )
+        return tuple(
+            (model_id, execution_mode, allowed_tools)
+            for model_id in selected_model_ids
+            for execution_mode, allowed_tools in (
+                self.registered_execution_profiles_for_model(model_id)
+            )
+        )
+
     @staticmethod
     def _component_cache_eligible(
         component: Tuple[str, ...],
@@ -888,7 +1150,7 @@ class AgentRuntime:
                             "artifact_version": (
                                 message.artifact_version
                                 if self.artifact_communication_profile
-                                == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+                                in _ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_PROFILES
                                 else None
                             ),
                             "source_model_id": message.source_model_id,
@@ -923,6 +1185,7 @@ class AgentRuntime:
                 "artifact_communication_profile": (
                     self.artifact_communication_profile
                 ),
+                "artifact_quality_profile": self.artifact_quality_profile,
                 "communication_condition": communication_condition.value,
                 "component_agent_ids": list(component),
                 "agents": agents,
@@ -1538,6 +1801,15 @@ class AgentRuntime:
                     f"{(mode_value, tuple(node.allowed_tools))!r} is outside "
                     "the active execution_profile_allowlist"
                 )
+            if not self.model_supports_execution_profile(
+                node.model_id,
+                mode_value,
+                node.allowed_tools,
+            ):
+                raise AgentRuntimeError(
+                    f"agent {node.id!r} model {node.model_id!r} does not admit "
+                    f"execution profile {(mode_value, tuple(node.allowed_tools))!r}"
+                )
             if not node.allowed_tools:
                 continue
             if mode_value == "reasoning":
@@ -1796,6 +2068,11 @@ class AgentRuntime:
                 tool_receipts=_tool_receipts_from_metadata(
                     retriever_draft_metadata
                 ),
+                input_artifact_provenance=(
+                    _input_artifact_provenance_from_metadata(
+                        retriever_draft_metadata
+                    )
+                ),
                 artifact_version=retriever_draft_request.request_id,
                 **_producer_context(
                     nodes[retriever_id],
@@ -1861,6 +2138,11 @@ class AgentRuntime:
                     tool_receipts=_tool_receipts_from_metadata(
                         reasoner_draft_metadata
                     ),
+                    input_artifact_provenance=(
+                        _input_artifact_provenance_from_metadata(
+                            reasoner_draft_metadata
+                        )
+                    ),
                     artifact_version=reasoner_draft_request.request_id,
                     **_producer_context(
                         nodes[reasoner_id],
@@ -1910,6 +2192,11 @@ class AgentRuntime:
                     ),
                     tool_receipts=_tool_receipts_from_metadata(
                         retriever_revision_metadata
+                    ),
+                    input_artifact_provenance=(
+                        _input_artifact_provenance_from_metadata(
+                            retriever_revision_metadata
+                        )
                     ),
                     artifact_version=retriever_revision_request.request_id,
                     **_producer_context(
@@ -2013,6 +2300,11 @@ class AgentRuntime:
                 tool_receipts=_tool_receipts_from_metadata(
                     reasoner_draft_metadata
                 ),
+                input_artifact_provenance=(
+                    _input_artifact_provenance_from_metadata(
+                        reasoner_draft_metadata
+                    )
+                ),
                 artifact_version=reasoner_draft_request.request_id,
                 **_producer_context(
                     nodes[reasoner_id],
@@ -2078,6 +2370,11 @@ class AgentRuntime:
                     tool_receipts=_tool_receipts_from_metadata(
                         verifier_initial_metadata
                     ),
+                    input_artifact_provenance=(
+                        _input_artifact_provenance_from_metadata(
+                            verifier_initial_metadata
+                        )
+                    ),
                     artifact_version=verifier_initial_request.request_id,
                     **_producer_context(
                         nodes[verifier_id],
@@ -2127,6 +2424,11 @@ class AgentRuntime:
                     ),
                     tool_receipts=_tool_receipts_from_metadata(
                         reasoner_revision_metadata
+                    ),
+                    input_artifact_provenance=(
+                        _input_artifact_provenance_from_metadata(
+                            reasoner_revision_metadata
+                        )
                     ),
                     artifact_version=reasoner_revision_request.request_id,
                     **_producer_context(
@@ -2193,6 +2495,18 @@ class AgentRuntime:
             self._invoke(left_draft_request, calls, cancelled_failure_records),
             self._invoke(right_draft_request, calls, cancelled_failure_records),
         )
+        # Reuse FlowSteer's standard response binding before either draft is
+        # routed to its peer.  This keeps the peer message tied to the exact
+        # public artifacts consumed by the producing Agent instead of losing
+        # that lineage at the reciprocal-component boundary.
+        left_draft_metadata = self._response_output_metadata(
+            left_draft_request,
+            left_draft,
+        )
+        right_draft_metadata = self._response_output_metadata(
+            right_draft_request,
+            right_draft,
+        )
 
         left_revision_request = self._request(
             agent=nodes[left_id],
@@ -2208,13 +2522,20 @@ class AgentRuntime:
                 request_or_dependency=nodes[left_id].contract,
                 artifact_type=getattr(nodes[right_id], "artifact_type", "text"),
                 environment_revision=_environment_revision_from_metadata(
-                    right_draft.metadata
+                    right_draft_metadata
                 ),
-                tool_receipts=_tool_receipts_from_metadata(right_draft.metadata),
+                tool_receipts=_tool_receipts_from_metadata(
+                    right_draft_metadata
+                ),
+                input_artifact_provenance=(
+                    _input_artifact_provenance_from_metadata(
+                        right_draft_metadata
+                    )
+                ),
                 artifact_version=right_draft_request.request_id,
                 **_producer_context(
                     nodes[right_id],
-                    right_draft.metadata,
+                    right_draft_metadata,
                     artifact_communication_profile=(
                         self.artifact_communication_profile
                     ),
@@ -2243,13 +2564,20 @@ class AgentRuntime:
                 request_or_dependency=nodes[right_id].contract,
                 artifact_type=getattr(nodes[left_id], "artifact_type", "text"),
                 environment_revision=_environment_revision_from_metadata(
-                    left_draft.metadata
+                    left_draft_metadata
                 ),
-                tool_receipts=_tool_receipts_from_metadata(left_draft.metadata),
+                tool_receipts=_tool_receipts_from_metadata(
+                    left_draft_metadata
+                ),
+                input_artifact_provenance=(
+                    _input_artifact_provenance_from_metadata(
+                        left_draft_metadata
+                    )
+                ),
                 artifact_version=left_draft_request.request_id,
                 **_producer_context(
                     nodes[left_id],
-                    left_draft.metadata,
+                    left_draft_metadata,
                     artifact_communication_profile=(
                         self.artifact_communication_profile
                     ),
@@ -2319,6 +2647,11 @@ class AgentRuntime:
                         ),
                         tool_receipts=_tool_receipts_from_metadata(
                             output_metadata.get(source_id, {})
+                        ),
+                        input_artifact_provenance=(
+                            _input_artifact_provenance_from_metadata(
+                                output_metadata.get(source_id, {})
+                            )
                         ),
                         artifact_version=(
                             str(
@@ -2497,11 +2830,24 @@ class AgentRuntime:
         # an Agent role or alter the generated content.
         metadata["generated_as_output_agent"] = request.is_output_agent
         metadata["generated_as_format_agent"] = request.is_format_agent
+        raw_tool_receipts = metadata.get("tool_receipts")
+        if isinstance(raw_tool_receipts, (list, tuple)):
+            # Directly reuse FlowSteer's public-receipt normalization: remove
+            # exact duplicates without changing error/result semantics.
+            distinct_tool_receipts: list[dict[str, object]] = []
+            for receipt in raw_tool_receipts:
+                if not isinstance(receipt, Mapping):
+                    continue
+                serialized_receipt = dict(receipt)
+                if serialized_receipt not in distinct_tool_receipts:
+                    distinct_tool_receipts.append(serialized_receipt)
+            metadata["tool_receipts"] = distinct_tool_receipts
         inputs = list(request.upstream)
         if request.peer_draft is not None:
             inputs.append(request.peer_draft)
         input_artifact_versions: dict[str, str] = {}
         input_artifact_provenance: list[dict[str, object]] = []
+        distinct_inputs: list[UpstreamMessage] = []
         for message in inputs:
             if message.artifact_version is not None:
                 previous = input_artifact_versions.get(message.source_agent_id)
@@ -2516,7 +2862,11 @@ class AgentRuntime:
                 input_artifact_versions[message.source_agent_id] = (
                     message.artifact_version
                 )
-            input_artifact_provenance.append(message.to_dict())
+            serialized_message = message.to_dict()
+            if serialized_message in input_artifact_provenance:
+                continue
+            input_artifact_provenance.append(serialized_message)
+            distinct_inputs.append(message)
         metadata["input_artifact_versions"] = input_artifact_versions
         metadata["input_artifact_provenance"] = input_artifact_provenance
         if self.semantic_protocol in {
@@ -2533,7 +2883,7 @@ class AgentRuntime:
             # SkillFlow's public Tool receipts; it does not add a workflow or
             # retrieval policy to the Director prompt.
             lineage_tool_receipts: list[dict[str, object]] = []
-            for message in inputs:
+            for message in distinct_inputs:
                 for receipt in message.tool_receipts:
                     serialized = dict(receipt)
                     if serialized not in lineage_tool_receipts:
@@ -2699,6 +3049,25 @@ class AgentRuntime:
             if isinstance(raw_response, AgentResponse)
             else AgentResponse(raw_response)
         )
+        artifact_quality_receipt: Mapping[str, object] | None = None
+        if self.artifact_quality_profile in {
+            ARTIFACT_QUALITY_PUBLIC_TEXT_V1,
+            ARTIFACT_QUALITY_PUBLIC_TEXT_V2,
+        }:
+            artifact_quality_receipt = _public_text_quality_receipt(
+                response.text,
+                response.metadata,
+                profile=self.artifact_quality_profile,
+            )
+            response = AgentResponse(
+                response.text,
+                {
+                    **dict(response.metadata),
+                    "artifact_quality_receipt": dict(
+                        artifact_quality_receipt
+                    ),
+                },
+            )
         # SkillFlow records the sampled provider turn before treating an empty
         # completion as a failed execution boundary.  Preserve that receipt,
         # but never publish whitespace-only content as a semantic Artifact:
@@ -2731,10 +3100,48 @@ class AgentRuntime:
                 failure_records=(record,),
                 pending_agent_ids=(request.agent.id,),
             )
+        if (
+            artifact_quality_receipt is not None
+            and artifact_quality_receipt.get("status") == "invalid"
+        ):
+            error_codes = tuple(
+                str(item)
+                for item in artifact_quality_receipt.get("error_codes", ())
+                if isinstance(item, str)
+            )
+            failure_metadata = MappingProxyType(
+                {
+                    **dict(response.metadata),
+                    **dict(input_artifact_metadata()),
+                    "public_error_code": "completion_artifact_quality_invalid",
+                    "artifact_complete": False,
+                }
+            )
+            record = AgentFailureRecord(
+                request_id=request.request_id,
+                agent_id=request.agent.id,
+                phase=request.phase,
+                graph_revision=request.graph_revision,
+                error_type="CompletionArtifactQualityError",
+                message=(
+                    "Agent completion Artifact failed public text quality "
+                    f"admission: {', '.join(error_codes)}"
+                ),
+                metadata=failure_metadata,
+            )
+            raise AgentRuntimeError(
+                f"agent {request.agent.id!r} produced an invalid completion "
+                "Artifact",
+                failure_records=(record,),
+                pending_agent_ids=(request.agent.id,),
+            )
         return response
 
 
 __all__ = [
+    "ARTIFACT_QUALITY_NONE",
+    "ARTIFACT_QUALITY_PUBLIC_TEXT_V1",
+    "ARTIFACT_QUALITY_PUBLIC_TEXT_V2",
     "AgentCallRecord",
     "AgentFailureRecord",
     "AgentGateway",

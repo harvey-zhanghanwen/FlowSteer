@@ -141,6 +141,7 @@ class ToolReactExecutionAdapter:
         max_tool_calls: int,
         max_action_tokens: int = 512,
         execution_mode: str = "react",
+        enforce_state_conditioned_completion_admission: bool = False,
         sampling_base_seed: int | None = None,
         sampling_coordinate: ScientificSamplingCoordinate | None = None,
     ) -> None:
@@ -156,6 +157,10 @@ class ToolReactExecutionAdapter:
             raise ValueError("max_action_tokens must be a positive integer")
         if execution_mode not in {"react", "coding"}:
             raise ValueError("execution_mode must be react or coding")
+        if type(enforce_state_conditioned_completion_admission) is not bool:
+            raise TypeError(
+                "enforce_state_conditioned_completion_admission must be bool"
+            )
         if (sampling_base_seed is None) != (sampling_coordinate is None):
             raise ValueError(
                 "sampling_base_seed and sampling_coordinate must be supplied together"
@@ -191,6 +196,9 @@ class ToolReactExecutionAdapter:
         # 4096-token completion allowance can exceed an 8K context window.
         self._max_action_tokens = max_action_tokens
         self._execution_mode = execution_mode
+        self._enforce_state_conditioned_completion_admission = (
+            enforce_state_conditioned_completion_admission
+        )
         self._sampling_base_seed = sampling_base_seed
         self._sampling_coordinate = sampling_coordinate
         # AgentRuntime's timeout boundary normalizes CancelledError.  Preserve
@@ -792,6 +800,24 @@ class ToolReactExecutionAdapter:
 
             entry["structured_action"] = action.to_value()
             if action.kind is ActionKind.COMPLETE:
+                if (
+                    self._enforce_state_conditioned_completion_admission
+                    and not completion_admitted
+                ):
+                    # The live state domain is authoritative for completion as
+                    # well as Tool dispatch.  Keep this opt-in so historical
+                    # conditions retain their published behavior.
+                    observation = MappingProxyType(
+                        {
+                            "observation_status": "schema_invalid",
+                            "public_error_code": "state_completion_not_admitted",
+                            "executed_action": action.to_value(),
+                        }
+                    )
+                    entry.update(observation)
+                    trace.append(entry)
+                    observations.append(observation)
+                    continue
                 if not isinstance(action.arguments, dict) or "value" not in action.arguments:
                     observation = MappingProxyType(
                         {

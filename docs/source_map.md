@@ -758,3 +758,84 @@ No training, backward pass, optimizer update, GRPO, LoRA, MACE, Bayesian
 update, Skill injection/evolution, memory, Web search, or medical Tool was
 enabled in v2.15. ReAct remains an optional per-Agent execution mode, not an
 Agent role; this no-Tool condition happened to admit only `reasoning` profiles.
+
+### HealthBench v2.27 provenance, scope, retrieval and Artifact quality repair
+
+This inference-only condition starts from the completed fixed-20 v2.16
+architecture profile because it has the highest completed same-panel score in
+the local development evidence. It freezes that panel, sampling schedule,
+Direct condition, four-model Executor catalog and official reference grader.
+It does not replace the formal 525-task best-profile pointer before a complete
+same-protocol evaluation exists.
+
+| Boundary | Source and classification |
+| --- | --- |
+| Nested `input_artifact_provenance` on routed and reciprocal communication envelopes | **Direct FlowSteer reuse** from `/ssd1/iclr/1/FlowSteer/src/interactive/agent_runtime.py::_input_artifact_provenance_from_metadata`, `_artifact_envelope`, `_response_output_metadata`, and its generic multi-hop regression. Direct Tool receipts remain attributed to the producing Agent; earlier hops remain nested instead of being flattened into a later Agent's Tool use. |
+| Model-visible nested provenance in `openai_gateway._format_upstream` | **Direct FlowSteer reuse** of the corresponding standard communication-envelope renderer. Exact duplicate receipts and envelopes are removed using FlowSteer's public-receipt normalization; no Artifact is summarized, rewritten, or semantically filtered. |
+| `agentgraph.director.minimal-neutral.v17` | **Existing project reuse** of the already implemented compact v17 prompt. It preserves unresolved names, abbreviations, quantities, time points and answer slots without prescribing Doctor, Researcher, Verifier, Formatter, Agent count, relation or topology. |
+| Entity-slot substitution admission | **Necessary project adaptation** inside the existing FlowSteer Canvas transaction guard. It rejects an unsupported replacement in public contract forms such as `patients with X` or `A stands for B` only when the replacement is absent from the initial task and all successful public Tool/Agent Artifacts. It reads no rubric, reference response, reward or evaluator result. |
+| Complete named-entity retrieval admission | **Necessary HealthBench Tool-adapter adaptation** over the existing SkillFlow MedRAG plus NCBI PubMed ReAct path. A non-empty result is not counted as relevant when it matches only part of an unresolved acronym/hyphenated entity; the same Agent may reformulate within its existing Tool budget, and budget exhaustion permits an explicit insufficient-evidence completion. This is surface-form coverage, not a learned semantic relevance claim. |
+| `public_text_quality_v1` Artifact admission | **Necessary generic Runtime adaptation over SkillFlow's typed completion-failure boundary**. It applies equally to reasoning and ReAct outputs and measures provider length termination, explicit incomplete status, character limit, invalid/control characters, abnormal tokens, exact paragraph repetition, repeated 24-token n-grams and extreme run-on text. Invalid Artifacts are rejected as producer-scoped `CompletionArtifactQualityError`; they are never truncated or routed downstream. |
+| `preserve -> diagnose -> repair -> augment` after quality rejection | **Direct reuse of the existing project recovery policy and FlowSteer incremental execute-on-edit loop**. The failure receipt names the responsible Agent and exposes compact quality metrics, so the Director modifies or augments the current graph without deleting valid upstream Artifacts. |
+
+The prepare-only run created the exact 20-task manifest with all dataset
+registry checks true, `training_enabled=false`, and `optimizer_updates=0`.
+No model, Tool, Web, grader, training, backward, optimizer, LoRA, GRPO, MACE,
+Bayesian or Skill-evolution call was made during this verification. A new
+official score is **not yet available**; the condition is prepared, not
+evaluated.
+
+### HealthBench v2.28 dependency-consistent structured-evidence flow
+
+v2.28 retains the v2.27 provenance, scope, retrieval and Artifact-quality
+boundaries while adding two opt-in information-flow controls. The fixed-20 and
+full-525 profiles remain role- and topology-neutral: the Director still chooses
+the Agent declarations, models, execution modes, relations and Output identity.
+
+| Boundary | Source and classification |
+| --- | --- |
+| Atomic Canvas transaction and producer-to-consumer routing | **Direct FlowSteer reuse.** An accepted `ADD_SUBGRAPH` remains one validated Canvas transaction, and a directed `source -> target` relation routes the source Artifact to the target. No medical role, fixed Agent count or fixed graph motif is added. |
+| Reciprocal initial-draft/revision exchange | **Direct FlowSteer reuse.** A reciprocal relation still means that both peers first produce independently and then each performs the existing bounded revision from the other's Artifact. Because both directed routes are present, a declared incoming peer dependency is compatible with this barrier; v2.28 does not reinterpret the reciprocal edge or impose one. |
+| Action--Observation and Tool receipts | **Direct SkillFlow reuse.** ReAct retains the public Action--Observation loop and successful Tool receipts. Complete receipts, provider observations and nested Artifact provenance remain in the request/trajectory/backend record; they are not replaced by a summary. |
+| Explicit incoming dependency admission | **Necessary project-specific adaptation.** With `require_declared_dependency_relations=true`, the free-text contract guard conservatively recognizes only explicit incoming references to a `node_*` Artifact/output/result/finding/evidence/analysis/response. Unknown or self dependencies and a producer without a directed path to the consumer are rejected. Outgoing forms such as `send ... to node_*` are not treated as incoming dependencies, so the guard does not infer a role or topology from general prose. |
+| Receipt-bound structured-evidence Artifact | **Necessary project-specific adaptation.** Under `producer_context_structured_evidence_v2`, a non-Output HealthBench ReAct completion uses `healthbench.structured-evidence.v1` with `status`, a substantive `summary`, bounded `evidence_items`, and `uncertainties`. Each claimed evidence item carries the supported claim and qualifiers plus receipt-bound document identity and an evidence span; identifiers and metadata must exactly match a successful `healthbench-authoritative.search` receipt, and the normalized span must occur in its excerpt. Unsupported or invented evidence is rejected instead of being routed downstream. |
+| Compact model-visible projection | **Necessary project-specific adaptation.** Downstream prompts receive the substantive structured Artifact plus only cited receipt rows and compact nested lineage. Uncited result bodies, duplicated Artifact aliases, timing, corpus statistics, Tool-version noise and raw nested receipts are omitted from this projection. A failed binding never falls back to replaying the whole receipt. This is a presentation boundary only: the complete receipt-bearing trajectory remains intact. |
+| Direct and terminal Output boundary | **Unchanged behavior.** Direct remains a complete natural-language assistant response, and `request.is_output_agent=true` keeps the terminal Output as complete user-readable natural text. The internal structured-evidence schema is not exposed as the final answer. ReAct remains an execution mode, not an Agent role. Non-HealthBench communication keeps its prior renderer even if the profile name is present. |
+
+The two isolated profiles are
+`config/evaluation_healthbench_professional_mixed_all_thinking_v2_28_heldout20_declared_dependency_structured_evidence.yaml`
+and
+`config/evaluation_healthbench_professional_mixed_all_thinking_v2_28_full525_declared_dependency_structured_evidence.yaml`.
+Implementation is present for the configuration/runtime admission, structured
+schema and receipt binding, and compact projection paths. Targeted no-API tests
+cover the v2.28 configuration invariants, producer-context profile routing,
+intermediate-versus-Output schema boundary, exact receipt binding, cited-row
+projection, nested-provenance compaction and non-HealthBench isolation. No live
+model, Tool or grader evaluation has been run for v2.28, so this entry makes no
+score claim. Training, backward, optimizer update, GRPO, LoRA, MACE, Bayesian
+update and Skill retrieval/evolution remain disabled.
+
+### HealthBench v2.29--v2.32 low-score regression and completion repair
+
+The eight task IDs in these profiles are a fixed, post-development regression
+panel selected from low-scoring v2.27/v2.28 cases. They are not an unbiased
+test sample and are never reported as a replacement for the 525-task result.
+
+| Boundary | Source and classification |
+| --- | --- |
+| `schema_invalid` completion feedback followed by same-Agent continuation | **Thin SkillFlow reuse.** The control flow follows SkillFlow `src/skillev/runtime/bounded_agent.py::_validate_completion` and `src/skillev/rollout/engine.py`: an invalid public completion becomes an Observation and the same Agent continues. The project keeps the equivalent hook in `ToolReactExecutionAdapter._completion_error`; hidden reasoning is never published as an Artifact. |
+| Provider truncation, repetition, and incomplete heading/lead-in admission | **Necessary generic Runtime adaptation.** The new immutable `public_text_quality_v2` extends v1 by rejecting a one-line Markdown heading or a one-line lead-in ending in either `:` or Unicode `：`, and by recognizing CJK terminal punctuation. The published `public_text_quality_v1` behavior is unchanged. The check is surface-only, applies to reasoning and ReAct, and does not inspect the task rubric, reference response, Agent role, or topology. The Artifact remains in the call receipt but is not routed downstream. |
+| Explicit removal of warnings/risks in a HealthBench contract | **Necessary task-adapter correction at the existing FlowSteer Canvas admission boundary.** The existing verb-led guard remains unchanged. v2.32 opts into `require_explicit_safety_scope_preservation`, which also covers the observed direct form `without disclaimers or warnings`; it reads only the public task and sampled contract. It does not supply a medical workflow or an answer. |
+| Receipt-bound intermediate evidence | **Existing v2.28 project adaptation reused unchanged.** `producer_context_structured_evidence_v2` requires non-Output HealthBench ReAct completions to bind every cited `document_id`, source identity, and evidence span to an actual successful Tool receipt. Output Agents remain natural-language responders. |
+| Relevant-evidence, task-query scope, and insufficient-evidence continuation | **Existing v2.27 evidence-anchor check plus a minimal HealthBench adaptation of FlowSteer's QA query-scope boundary.** `require_relevant_evidence=true` is restored after it was inadvertently omitted from v2.29--v2.31. The opt-in `require_task_query_anchor` check rejects a retrieval query with no substantive lexical anchor in the model-visible conversation and returns public same-Agent repair feedback; JSON scaffolding such as `role` is excluded, so tasks without comparable ASCII anchors remain admitted. If a receipt-bound Artifact reports `status=insufficient` while a distinct search remains available, v2.32 uses the same SkillFlow continuation boundary for one refinement instead of publishing the incomplete evidence state. None of these checks expands synonyms, infers a diagnosis, uses a rubric, or inspects ground truth. |
+| State-conditioned completion admission | **Thin versioned completion of the existing FlowSteer/SkillFlow Runtime boundary.** Tool actions already fail closed when absent from the measured state-conditioned domain. v2.32 opts into the same post-parse check for completion, so a provider that bypasses constrained decoding cannot complete before the public retrieval state admits it. The historical default remains unchanged. |
+| Incremental Canvas, model selection, graph relations, and terminal identity | **Direct FlowSteer reuse.** One accepted `ADD_SUBGRAPH` transaction is executed before the next Director action. Agent number, model, free-text contract, reasoning/ReAct mode, directed or reciprocal relation, and unique Output identity remain sampled choices. No Doctor/Researcher/Verifier/Formatter chain is required. |
+| v18 neutral Director policy and compact history | **Versioned composition of existing project policies.** v18 combines v16's producer-to-consumer/conflict rule with v17's unresolved public-name and quantity preservation clause. It uses the compact historical-observation projection already enabled for v15/v16, without changing historical v16 or v17 behavior. Agent roles, Agent count, models, execution modes, relations and topology remain open. |
+
+The v2.32 configuration is
+`config/evaluation_healthbench_professional_mixed_all_thinking_v2_32_low8_receipt_bound_completion.yaml`.
+Its prepare-only manifest freezes the same eight task IDs with all training,
+GRPO, LoRA, MACE, Bayesian and Skill paths disabled. The official evaluator
+preflight currently fails with provider `403 insufficient_quota`; therefore no
+v2.32 model, Tool, Director or AgentGraph rollout has been started and no score
+is claimed.

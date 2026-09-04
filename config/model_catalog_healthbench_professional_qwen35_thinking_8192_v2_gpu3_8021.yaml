@@ -1,0 +1,34 @@
+# Qwen3.5-9B policy catalog for the versioned HealthBench Professional V2
+# condition. SkillFlow's hidden-thinking and visible-response budgets are
+# represented separately; the OpenAI-compatible SGLang adapter sends their sum
+# as provider max_tokens and persists both components in each model receipt.
+providers:
+  - provider_id: "local-qwen35-healthbench-thinking-8192-v2-gpu3-8021"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:8021/v1"
+    max_concurrency: 8
+
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-qwen35-healthbench-thinking-8192-v2-gpu3-8021"
+    model_name: "supervisor_theta"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    context_window: 32768
+    metadata:
+      family: "qwen"
+      profile: "provider=local;instruction=chat;thinking=enabled;capabilities=text;version=healthbench-v2"
+      text_capable: "true"
+      tool_capable: "false"
+      coding_capable: "false"
+      chat_template_enable_thinking: "true"
+      # Visible response allowance and hidden reasoning allowance are separate.
+      max_tokens: "4096"
+      thinking_budget: "4096"
+      sampling_backend: "sglang"
+      deployment_locality: "local"
+      supports_top_k: "true"
+      top_k: "-1"
+      supports_repetition_penalty: "true"
+      repetition_penalty: "1.10"

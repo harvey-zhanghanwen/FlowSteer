@@ -23,7 +23,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
-from src.interactive.agent_runtime import AgentRuntime
+from src.interactive.agent_runtime import (
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
+    AgentRuntime,
+)
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.config_loader import (
     ConfigurationError,
@@ -65,6 +68,9 @@ from src.interactive.healthbench_tool_adapter import (
     open_healthbench_medrag_tool_registry,
 )
 from src.interactive.healthbench_evidence_adapter import (
+    AUTHORITATIVE_QUERY_MAX_CONTENT_TOKENS,
+    HEALTHBENCH_COMPLETION_QUALITY_PROFILE_V1,
+    HEALTHBENCH_COMPLETION_QUALITY_PROFILE_V2,
     HealthBenchAuthoritativeReactExecutionAdapter,
     PubMedEUtilitiesClient,
     open_healthbench_authoritative_tool_registry,
@@ -915,6 +921,61 @@ def _healthbench_tool_runtime_settings(
         raise ConfigurationError(
             "healthbench_tool_runtime.tool_timeout_seconds must be positive"
         )
+    max_query_content_tokens = section.get(
+        "max_query_content_tokens",
+        AUTHORITATIVE_QUERY_MAX_CONTENT_TOKENS,
+    )
+    if (
+        type(max_query_content_tokens) is not int
+        or not 1
+        <= max_query_content_tokens
+        <= AUTHORITATIVE_QUERY_MAX_CONTENT_TOKENS
+    ):
+        raise ConfigurationError(
+            "healthbench_tool_runtime.max_query_content_tokens must be a "
+            "positive integer no greater than "
+            f"{AUTHORITATIVE_QUERY_MAX_CONTENT_TOKENS}"
+        )
+    max_completion_artifact_characters = section.get(
+        "max_completion_artifact_characters"
+    )
+    if max_completion_artifact_characters is not None and (
+        type(max_completion_artifact_characters) is not int
+        or max_completion_artifact_characters < 1
+    ):
+        raise ConfigurationError(
+            "healthbench_tool_runtime.max_completion_artifact_characters "
+            "must be a positive integer or null"
+        )
+    require_complete_natural_language_artifact = section.get(
+        "require_complete_natural_language_artifact",
+        False,
+    )
+    if type(require_complete_natural_language_artifact) is not bool:
+        raise ConfigurationError(
+            "healthbench_tool_runtime."
+            "require_complete_natural_language_artifact must be bool"
+        )
+    enforce_state_conditioned_completion_admission = section.get(
+        "enforce_state_conditioned_completion_admission",
+        False,
+    )
+    if type(enforce_state_conditioned_completion_admission) is not bool:
+        raise ConfigurationError(
+            "healthbench_tool_runtime."
+            "enforce_state_conditioned_completion_admission must be bool"
+        )
+    completion_quality_profile = section.get(
+        "completion_quality_profile",
+        HEALTHBENCH_COMPLETION_QUALITY_PROFILE_V1,
+    )
+    if completion_quality_profile not in {
+        HEALTHBENCH_COMPLETION_QUALITY_PROFILE_V1,
+        HEALTHBENCH_COMPLETION_QUALITY_PROFILE_V2,
+    }:
+        raise ConfigurationError(
+            "healthbench_tool_runtime.completion_quality_profile is unsupported"
+        )
     settings = {
         "source_key": source_key,
         "mode": runtime_mode,
@@ -925,6 +986,17 @@ def _healthbench_tool_runtime_settings(
         "max_turns": int(section["max_turns_per_agent_call"]),
         "max_tool_calls": int(section["max_tool_calls_per_agent_call"]),
         "tool_timeout_seconds": float(timeout_seconds),
+        "max_query_content_tokens": max_query_content_tokens,
+        "max_completion_artifact_characters": (
+            max_completion_artifact_characters
+        ),
+        "require_complete_natural_language_artifact": (
+            require_complete_natural_language_artifact
+        ),
+        "completion_quality_profile": completion_quality_profile,
+        "enforce_state_conditioned_completion_admission": (
+            enforce_state_conditioned_completion_admission
+        ),
     }
     raw_profile_allowlist = section.get("execution_profile_allowlist")
     if raw_profile_allowlist is not None:
@@ -997,6 +1069,31 @@ def _healthbench_tool_runtime_settings(
             raise ConfigurationError(
                 "healthbench_tool_runtime.require_initial_search must be bool"
             )
+        require_relevant_evidence = section.get(
+            "require_relevant_evidence",
+            False,
+        )
+        if type(require_relevant_evidence) is not bool:
+            raise ConfigurationError(
+                "healthbench_tool_runtime.require_relevant_evidence must be bool"
+            )
+        require_task_query_anchor = section.get(
+            "require_task_query_anchor",
+            False,
+        )
+        if type(require_task_query_anchor) is not bool:
+            raise ConfigurationError(
+                "healthbench_tool_runtime.require_task_query_anchor must be bool"
+            )
+        require_refinement_on_insufficient_evidence = section.get(
+            "require_refinement_on_insufficient_evidence",
+            False,
+        )
+        if type(require_refinement_on_insufficient_evidence) is not bool:
+            raise ConfigurationError(
+                "healthbench_tool_runtime."
+                "require_refinement_on_insufficient_evidence must be bool"
+            )
         web = _mapping(
             section.get("authoritative_web_search"),
             "healthbench_tool_runtime.authoritative_web_search",
@@ -1047,9 +1144,31 @@ def _healthbench_tool_runtime_settings(
                     "healthbench_tool_runtime.authoritative_web_search."
                     f"{field_name} must be positive"
                 )
+        max_retries = web.get("max_retries", 0)
+        if type(max_retries) is not int or max_retries < 0:
+            raise ConfigurationError(
+                "healthbench_tool_runtime.authoritative_web_search."
+                "max_retries must be a non-negative integer"
+            )
+        retry_backoff_seconds = web.get("retry_backoff_seconds", 1.0)
+        if (
+            isinstance(retry_backoff_seconds, bool)
+            or not isinstance(retry_backoff_seconds, (int, float))
+            or not math.isfinite(float(retry_backoff_seconds))
+            or float(retry_backoff_seconds) < 0
+        ):
+            raise ConfigurationError(
+                "healthbench_tool_runtime.authoritative_web_search."
+                "retry_backoff_seconds must be a finite non-negative number"
+            )
         settings.update(
             max_successful_queries=max_successful_queries,
             require_initial_search=require_initial_search,
+            require_relevant_evidence=require_relevant_evidence,
+            require_task_query_anchor=require_task_query_anchor,
+            require_refinement_on_insufficient_evidence=(
+                require_refinement_on_insufficient_evidence
+            ),
             authoritative_web_search={
                 "provider": "ncbi_pubmed_eutils",
                 "base_url": base_url.rstrip("/"),
@@ -1061,6 +1180,8 @@ def _healthbench_tool_runtime_settings(
                 "minimum_interval_seconds": float(
                     web["minimum_interval_seconds"]
                 ),
+                "max_retries": max_retries,
+                "retry_backoff_seconds": float(retry_backoff_seconds),
             },
         )
     return settings
@@ -2312,6 +2433,13 @@ class LiveSmokeBackend:
                     artifact_communication_profile=(
                         self.runtime.artifact_communication_profile
                     ),
+                    artifact_quality_profile=(
+                        getattr(
+                            self.runtime,
+                            "artifact_quality_profile",
+                            "none",
+                        )
+                    ),
                 )
             except BaseException:
                 prepared.cleanup()
@@ -2381,10 +2509,17 @@ class LiveSmokeBackend:
                     minimum_interval_seconds=float(
                         web["minimum_interval_seconds"]
                     ),
+                    max_retries=int(web["max_retries"]),
+                    retry_backoff_seconds=float(
+                        web["retry_backoff_seconds"]
+                    ),
                 )
                 opened = open_healthbench_authoritative_tool_registry(
                     **common_open_arguments,
                     pubmed_client=pubmed_client,
+                    max_query_content_tokens=int(
+                        healthbench_settings["max_query_content_tokens"]
+                    ),
                 )
             else:
                 opened = open_healthbench_medrag_tool_registry(
@@ -2401,15 +2536,57 @@ class LiveSmokeBackend:
                     "max_action_tokens": tool_action_tokens,
                     "sampling_base_seed": sampling_base_seed,
                     "sampling_coordinate": sampling_coordinate,
+                    "enforce_state_conditioned_completion_admission": bool(
+                        healthbench_settings[
+                            "enforce_state_conditioned_completion_admission"
+                        ]
+                    ),
                 }
                 if authoritative:
                     adapter = HealthBenchAuthoritativeReactExecutionAdapter(
                         **adapter_arguments,
+                        require_structured_evidence_artifact=(
+                            self.runtime.artifact_communication_profile
+                            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2
+                        ),
+                        require_complete_natural_language_artifact=bool(
+                            healthbench_settings[
+                                "require_complete_natural_language_artifact"
+                            ]
+                        ),
+                        completion_quality_profile=str(
+                            healthbench_settings[
+                                "completion_quality_profile"
+                            ]
+                        ),
                         require_initial_search=bool(
                             healthbench_settings["require_initial_search"]
                         ),
+                        require_relevant_evidence=bool(
+                            healthbench_settings[
+                                "require_relevant_evidence"
+                            ]
+                        ),
+                        require_task_query_anchor=bool(
+                            healthbench_settings[
+                                "require_task_query_anchor"
+                            ]
+                        ),
+                        require_refinement_on_insufficient_evidence=bool(
+                            healthbench_settings[
+                                "require_refinement_on_insufficient_evidence"
+                            ]
+                        ),
                         max_successful_searches=int(
                             healthbench_settings["max_successful_queries"]
+                        ),
+                        max_query_content_tokens=int(
+                            healthbench_settings["max_query_content_tokens"]
+                        ),
+                        max_completion_artifact_characters=(
+                            healthbench_settings[
+                                "max_completion_artifact_characters"
+                            ]
                         ),
                     )
                 else:
@@ -2426,6 +2603,13 @@ class LiveSmokeBackend:
                     semantic_protocol=semantic_protocol,
                     artifact_communication_profile=(
                         self.runtime.artifact_communication_profile
+                    ),
+                    artifact_quality_profile=(
+                        getattr(
+                            self.runtime,
+                            "artifact_quality_profile",
+                            "none",
+                        )
                     ),
                     execution_profile_allowlist=(
                         healthbench_settings.get(
@@ -2819,6 +3003,9 @@ class LiveSmokeBackend:
             timeout_seconds=execution_timeout_seconds,
             artifact_communication_profile=str(
                 graph_config.get("artifact_communication_profile", "legacy")
+            ),
+            artifact_quality_profile=str(
+                graph_config.get("artifact_quality_profile", "none")
             ),
         )
         evidence_store = EvidenceStore(_resolve(root, str(storage["root"])))
@@ -3638,6 +3825,24 @@ class LiveSmokeBackend:
                 ),
                 require_informative_contracts=bool(
                     graph_config.get("require_informative_contracts", False)
+                ),
+                require_declared_dependency_relations=bool(
+                    graph_config.get(
+                        "require_declared_dependency_relations",
+                        False,
+                    )
+                ),
+                require_scope_neutral_contracts=bool(
+                    graph_config.get(
+                        "require_scope_neutral_contracts",
+                        False,
+                    )
+                ),
+                require_explicit_safety_scope_preservation=bool(
+                    graph_config.get(
+                        "require_explicit_safety_scope_preservation",
+                        False,
+                    )
                 ),
                 reuse_unchanged_agent_inputs=bool(
                     graph_config.get("reuse_unchanged_agent_inputs", False)

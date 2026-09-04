@@ -1,0 +1,236 @@
+schema_version: flowsteer.agentgraph.config.v1
+execution_timeout: 180.0
+
+experiment:
+  name: healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic
+  phase: healthbench_professional_evaluation
+  training_enabled: false
+  seed: 20260825
+  condition_id: healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic
+  sampling_schedule_purpose: healthbench_professional_public_test_mixed_all_thinking_v2_6
+  catalog_order_namespace: healthbench_professional_mixed_all_thinking_v2_6_heldout20_baseline
+  prompt_version: agentgraph.director.minimal-neutral.v15
+  tool_version: none
+  output_dir: artifacts/healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic/evaluation
+
+data:
+  catalog_path: config/datasets_healthbench_professional_official_v1.yaml
+  registry_path: config/datasets_runtime_healthbench_professional_official_v1.yaml
+  registry_dataset_key: healthbench_professional
+  train_path: data/healthbench_professional_official_v1/train.jsonl
+  validation_path: data/healthbench_professional_official_v1/validation.jsonl
+  test_path: data/healthbench_professional_official_v1/test.jsonl
+  enforce_split_isolation: true
+  task_schema_version: flowsteer.agentgraph.task.v1
+
+healthbench_professional_evaluation:
+  dataset_key: healthbench_professional
+  stage: development
+  split: test
+  benchmark_slice: public_test
+  selection: task_ids
+  sample_count: 20
+  task_ids:
+    - healthbench-professional:b436aa3e35424fb868cbd87172dd7dfb
+    - healthbench-professional:35b9ab1e8dc0ef2244dde26f4872d185
+    - healthbench-professional:c8ff5c99cc87bca185aa0432259deeff
+    - healthbench-professional:c3fc32bce9986b51c688e46c988116fe
+    - healthbench-professional:503b75b4cba8e5abd656cd2512a449bb
+    - healthbench-professional:dedf5543d9d7e5d4db33212e68ab6937
+    - healthbench-professional:a79240f2ad2bc52983bd65c417842661
+    - healthbench-professional:8c50707e96f619c4387209337a1d585d
+    - healthbench-professional:12beaf3375f3ce85e04b651cf88de389
+    - healthbench-professional:4f118b7f2841f4816f4b8d4b989e4500
+    - healthbench-professional:d07578daa48030c376c70d3e9bd81d48
+    - healthbench-professional:cfe155549d2470c9f6ffaa06097f7add
+    - healthbench-professional:846f8c4d59d4ccbe9a14d2b20c7f175e
+    - healthbench-professional:34e392723b3c5e4a18ffef591999b2ca
+    - healthbench-professional:43195fe0fc4d3af8a379242fb06582dd
+    - healthbench-professional:27780da4d1b342caf1b83f5bdf726ba1
+    - healthbench-professional:282e788a7f8be989ae55aa236fcd9f88
+    - healthbench-professional:458add9eb24073846f7864852018af56
+    - healthbench-professional:815c97141ca6bf23359012d8879c1c4f
+    - healthbench-professional:c1633d335487b8a56df1f7a993ce3be0
+  stable_zero_sample_count: 1
+  rollouts_per_task: 1
+  concurrency: 4
+  task_timeout_seconds: 900.0
+  direct_model_id: qwen3.5-9b-local
+  direct_protocol: healthbench_professional_full_conversation_response_v2
+  protocol_equivalent_to_direct: false
+  direct_contract: >-
+    Continue the supplied conversation with one complete, direct, concise,
+    self-contained assistant response. Preserve every explicit user requirement
+    and requested output form. Do not repeat the conversation or restate the
+    same recommendation in multiple sections.
+  direct_generation_seed: 20260825
+  direct_reused_from: artifacts/healthbench_professional_mixed_all_thinking_v2_6/evaluation/direct_predictions.jsonl
+
+healthbench_tool_runtime:
+  enabled: false
+
+storage:
+  schema_version: flowsteer.completion_benchmark.round.v1
+  root: artifacts/healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic/evaluation/evidence
+  selected_tasks_path: artifacts/healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic/evaluation/selected_tasks.jsonl
+  direct_predictions_path: artifacts/healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic/evaluation/direct_predictions.jsonl
+  trajectories_path: artifacts/healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic/evaluation/agentgraph_trajectories.jsonl
+  failures_path: artifacts/healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic/evaluation/collection_failures.jsonl
+  paired_results_path: artifacts/healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic/evaluation/paired_results.jsonl
+  wrong_demos_path: artifacts/healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic/evaluation/wrong_demos.jsonl
+  manifest_path: artifacts/healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic/evaluation/run_manifest.json
+  preflight_receipt_path: artifacts/healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic/evaluation/preflight_receipt.json
+  report_json_path: reports/healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic/evaluation_report.json
+  report_markdown_path: reports/healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic/evaluation_report.md
+
+director:
+  base_model: ${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}
+  tokenizer_path: ${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}
+  backend: sglang
+  api_base: http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1
+  served_model_name: supervisor_theta
+  behavior_policy_version: qwen35-9b-base-healthbench-professional-mixed-all-thinking-v2-6
+  behavior_adapter_name: null
+  behavior_adapter_checkpoint: null
+  updated_policy_version: unused-evaluation-only
+  expected_server_weight_version: default
+  prompt_profile: minimal
+  dtype: bfloat16
+  max_context_tokens: 32768
+  two_phase_generation: true
+  max_reasoning_tokens: 2048
+  max_action_tokens: 4096
+  repetition_penalty: 1.1
+  chat_template_enable_thinking: true
+  action_decoding: json_schema
+  action_schema_version: agentgraph.canvas-action-json-schema.v1
+  sampling_schema_version: agentgraph.model-admissible-action-mask.v3
+  sampling_action_profile: model_admissible_canvas_actions
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 3
+  execute_on_edit: true
+  history_window: 4
+  lora:
+    enabled: false
+
+agent_graph:
+  max_agents: 8
+  max_agents_per_subgraph: 3
+  max_relations_per_subgraph: 2
+  contract_type: free_text
+  relation_encoding: two_bit
+  actions:
+    - add_subgraph
+    - modify_agent
+    - delete_agent
+    - set_relation
+    - set_output
+    - finish
+  executor_selection: director_catalog_choice
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  require_format_agent: false
+  finish_only_when_admissible: true
+  require_informative_contracts: true
+  require_output_protocol_artifact_for_set_output: true
+  require_reciprocal_terminal_artifact_lineage: true
+  reuse_unchanged_agent_inputs: true
+  artifact_communication_profile: producer_context_exact_dedup_v1
+  semantic_protocol_by_source:
+    healthbench_professional: none
+  recovery_policy: preserve_diagnose_repair_augment
+  terminal_protocol_by_source:
+    healthbench_professional: none
+  model_catalog_path: config/model_catalog_healthbench_professional_mixed_all_thinking_v1.yaml
+
+evaluation:
+  healthbench_grader_mode: openai_simple_evals_healthbench_professional_reference
+  healthbench_judge_model: healthbench-professional-reference-grader
+  healthbench_judge_catalog_path: config/model_catalog_healthbench_professional_grader_v1.yaml
+  healthbench_private_cases_path: data/healthbench_professional_official_v1/private_cases.jsonl
+  healthbench_official_source_root: /ssd1/iclr/1/.tmp/openai-simple-evals-healthbench-professional
+  healthbench_official_source_revision: 652c89d
+  healthbench_worker_interpreter: /home/test/SKILLEV/skillflow-bayesian-improve-deploy/.venv-serve311/bin/python
+  healthbench_reasoning_effort: low
+  healthbench_length_adjustment_center: 2000.0
+  healthbench_length_adjustment_penalty_per_500_chars: 0.0147
+  healthbench_request_timeout_seconds: 180.0
+  healthbench_worker_timeout_seconds: 600.0
+  healthbench_max_parse_attempts: 2
+  healthbench_max_provider_attempts: 3
+  max_environment_steps: 20
+  swebench_harness_enabled: false
+  invalid_evaluator_action: persist_and_exclude
+
+grpo:
+  enabled: false
+  objective: action_masked_one_pass
+  group_key:
+    - task_id
+    - condition_id
+    - policy_version
+  samples_per_problem: 1
+  advantage_epsilon: 1.0e-08
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 0
+  max_optimizer_updates: 0
+  learning_rate: 0.0
+  gradient_checkpointing: false
+  max_grad_norm: 0.0
+
+policy_sync:
+  enabled: false
+  api_base: http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}
+  adapter_name_prefix: unused_healthbench_professional_mixed_all_thinking_v2_11_short_horizon_diagnostic_
+  request_timeout_seconds: 120
+  max_retries: 0
+  retry_backoff_seconds: 1
+
+exploration:
+  enabled: false
+  strategy: none
+  forced_probe_rollouts: 0
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+  library_version: none
+
+gpu:
+  learner_physical: 3
+  rollout_physical: 0
+  gradient_replica_physical: 5
+  learner_device: cuda:3
+  rollout_engine: sglang
+  gradient_replica_device: cuda:5
+  supervisor_gpu_id: 0
+  supervisor_api_base: http://127.0.0.1:8015/v1
+  training_enabled: false
+  oom_policy:
+    status: inactive-evaluation-only
+    micro_batch_size: 1
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [1]
+    retry_on_cuda_oom: false
+    split_items_across_learner_and_replica: false
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: false
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: false
+  require_version_compatible_skills: true

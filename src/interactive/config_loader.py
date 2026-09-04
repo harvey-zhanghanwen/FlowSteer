@@ -171,6 +171,9 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
     for option_name in (
         "finish_only_when_admissible",
         "require_informative_contracts",
+        "require_declared_dependency_relations",
+        "require_scope_neutral_contracts",
+        "require_explicit_safety_scope_preservation",
         "reuse_unchanged_agent_inputs",
         "require_output_protocol_artifact_for_set_output",
         "require_reciprocal_terminal_artifact_lineage",
@@ -187,9 +190,19 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
     if artifact_communication_profile not in {
         "legacy",
         "producer_context_exact_dedup_v1",
+        "producer_context_structured_evidence_v2",
     }:
         raise ConfigurationError(
             "agent_graph.artifact_communication_profile is unsupported"
+        )
+    artifact_quality_profile = graph.get("artifact_quality_profile", "none")
+    if artifact_quality_profile not in {
+        "none",
+        "public_text_quality_v1",
+        "public_text_quality_v2",
+    }:
+        raise ConfigurationError(
+            "agent_graph.artifact_quality_profile is unsupported"
         )
     max_agents = graph.get("max_agents")
     if isinstance(max_agents, bool) or not isinstance(max_agents, int) or max_agents < 1:

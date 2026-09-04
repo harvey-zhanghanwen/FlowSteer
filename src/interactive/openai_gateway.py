@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 from scripts.prompts.prompt import FORMAT_PROMPT
 
 from .agent_runtime import (
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
     AgentRequest,
     AgentResponse,
@@ -42,7 +43,117 @@ MASKED_UPSTREAM_CONTENT = "[UPSTREAM CONTENT MASKED FOR COMMUNICATION DIAGNOSTIC
 # and expects a complete assistant response. This is a task execution boundary,
 # not a medical Agent role or workflow template. It contains no rubric,
 # reference response, benchmark answer, or evaluator state.
-HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL = """Treat diagnoses, plans, drug identities, doses, trial or guideline claims, and routed Agent artifacts as unverified until supported by the supplied conversation or reliable evidence available to this execution. Resolve ambiguous shorthand, entity binding, and internal contradictions before committing to an interpretation; if support is insufficient, state the uncertainty or ask the necessary clarification instead of inventing a fact. When clinically relevant, check red flags, contraindications, interactions, dosing, follow-up, and urgent escalation, and do not endorse unsafe content merely because the user asks to translate, summarize, or reformat it. Preserve the user's language, scope, requested output form, and clinically important quantities. A review must identify concrete support, conflict, or insufficiency rather than treating model agreement as verification. The user-facing response must be self-contained and must not expose Agent IDs, contracts, artifact labels, provenance headings, or workflow instructions."""
+HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL = """Treat diagnoses, plans, drug identities, doses, trial or guideline claims, and routed Agent artifacts as unverified until supported by the supplied conversation or reliable evidence available to this execution. Resolve ambiguous shorthand, entity binding, and internal contradictions before committing to an interpretation; if support is insufficient, state the uncertainty or ask the necessary clarification instead of inventing a fact. When using a Tool, preserve unresolved names and abbreviations from the task verbatim in the query; do not replace them with an inferred expansion. In a completed Artifact, distinguish observed support from inference or missing evidence. Compare material claims across the conversation and routed artifacts. When a supported upstream claim is consistent with the task, preserve its entity-property binding, quantity, unit, time condition, diagnosis, and billing code; replace it only when the conversation or routed evidence contains a concrete conflict, and do not introduce a new decisive claim without such support. When clinically relevant, check red flags, contraindications, interactions, dosing, follow-up, and urgent escalation, and do not endorse unsafe content merely because the user asks to translate, summarize, or reformat it. Preserve the user's language, scope, requested output form, and clinically important quantities. A review must identify concrete support, conflict, or insufficiency rather than treating model agreement as verification. The user-facing response must be self-contained and must not expose Agent IDs, contracts, artifact labels, provenance headings, or workflow instructions."""
+
+# NECESSARY_PROJECT_ADAPTATION: v2 keeps the role- and topology-neutral
+# HealthBench boundary above and makes one already-declared Canvas invariant
+# explicit to the Executor.  A Director-authored contract is an instruction,
+# not an evidence source.  Model metadata selects this version so historical
+# catalogs keep their exact rendered prompt when reconstructed.
+HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL_V2 = (
+    HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL
+    + " The Agent contract describes work to perform, not evidence or an "
+    "established clinical conclusion. Never copy a diagnosis, expansion, "
+    "quantity, level, treatment, or recommendation from the contract merely "
+    "because it appears there; derive material claims from the conversation, "
+    "a successful Tool Observation, or a routed artifact with matching "
+    "evidence. Before completing, answer every explicit part of the user's "
+    "request and do not let an incomplete upstream artifact narrow it."
+)
+
+_HEALTHBENCH_EXECUTION_PROTOCOL_V2_METADATA = "contract-is-not-evidence.v2"
+
+# NECESSARY_PROJECT_ADAPTATION: v3 keeps the v2 contract/evidence boundary and
+# adds a terminal semantic invariant only for a HealthBench ReAct Output Agent.
+# The suffix is separate from v2 so completed v1/v2 conditions reconstruct the
+# exact prompts they originally used.
+_HEALTHBENCH_EXECUTION_PROTOCOL_V3_METADATA = (
+    "contract-is-not-evidence.output-complete.v3"
+)
+
+HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL_V3 = (
+    HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL_V2
+    + " When choosing a literature search, use a short query that preserves "
+    "the exact unresolved condition, intervention, trial, guideline, drug, "
+    "or abbreviation from the conversation and adds only the relation needed "
+    "for the task. If a search returns no relevant result, broaden it by "
+    "removing restrictive terms instead of adding unrelated terms."
+)
+
+# NECESSARY_PROJECT_ADAPTATION: v4 preserves every v3 execution boundary and
+# adds a role- and topology-neutral answer-slot binding invariant observed in
+# the held-out HealthBench canary.  It applies to every HealthBench Agent so an
+# intermediate artifact cannot silently narrow an unresolved item before it
+# reaches the Output Agent.  Historical v1-v3 catalogs still render their exact
+# original protocol text.
+_HEALTHBENCH_EXECUTION_PROTOCOL_V4_METADATA = (
+    "contract-is-not-evidence.output-complete.slot-binding.v4"
+)
+
+HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL_V4 = (
+    HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL_V3
+    + " Before completing, cover each explicit noun phrase and unresolved "
+    "abbreviation in the final user message; do not silently omit one because "
+    "an upstream artifact did. Bind every decisive value to the exact entity, "
+    "attribute, condition, and procedural stage asked about, and never "
+    "substitute a related but different property. For a procedure, explicitly "
+    "distinguish the access or entry site, target or tip position, and coverage "
+    "or treatment level."
+)
+
+# NECESSARY_PROJECT_ADAPTATION: v5 preserves the v4 task/evidence boundary and
+# makes three failure classes observed in public HealthBench trajectories
+# explicit at the existing SkillFlow Executor boundary.  It remains a
+# role- and topology-neutral execution protocol: the Director still chooses
+# every Agent, relation, model, Tool, and Output identity.
+_HEALTHBENCH_EXECUTION_PROTOCOL_V5_METADATA = (
+    "contract-is-not-evidence.output-complete.slot-binding.closure.v5"
+)
+
+HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL_V5 = (
+    HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL_V4
+    + " After a successful Tool Observation, complete with an "
+    "evidence-derived finding or an explicit statement that the evidence is "
+    "insufficient; never complete with a query, keyword list, heading, or "
+    "retrieval plan. Before producing a user-facing response, compare the "
+    "original conversation, routed findings, and proposed response once. "
+    "Resolve internal contradictions that can change disposition or safety, "
+    "and preserve the strongest supported requirement for urgent or in-person "
+    "evaluation without weakening its necessity or timing. If a requested "
+    "translation, summary, or reformatting would reproduce unsafe instructions, "
+    "preserve the requested form while adding the necessary safety correction. "
+    "If an intermediate review identifies a concrete error, apply the correction "
+    "in the requested deliverable instead of returning the review report."
+)
+
+_HEALTHBENCH_OUTPUT_REACT_PROTOCOL_V3 = (
+    " For this HealthBench Professional ReAct Output Agent, keep the "
+    "StructuredAction JSON protocol above. A tool action is only a retrieval "
+    "request: its arguments must contain only the admitted `query` field, not "
+    "an answer, evidence artifact, plan, or analysis. When choosing the "
+    "complete action, `arguments.value` must be the complete, self-contained, "
+    "user-facing assistant response that answers every explicit request in the "
+    "final user message of the original conversation. It must not be merely a "
+    "retrieval plan, evidence artifact, or internal analysis, and it must not "
+    "expose AgentGraph, Agent IDs, contracts, or workflow state."
+)
+
+
+def _healthbench_execution_protocol(request: AgentRequest) -> str:
+    """Resolve the versioned HealthBench Executor boundary from the catalog."""
+
+    protocol_version = request.model.metadata.get(
+        "healthbench_execution_protocol"
+    )
+    if protocol_version == _HEALTHBENCH_EXECUTION_PROTOCOL_V5_METADATA:
+        return HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL_V5
+    if protocol_version == _HEALTHBENCH_EXECUTION_PROTOCOL_V4_METADATA:
+        return HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL_V4
+    if protocol_version == _HEALTHBENCH_EXECUTION_PROTOCOL_V3_METADATA:
+        return HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL_V3
+    if protocol_version == _HEALTHBENCH_EXECUTION_PROTOCOL_V2_METADATA:
+        return HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL_V2
+    return HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL
 
 
 def _number(metadata: Mapping[str, str], key: str, default: float) -> float:
@@ -269,12 +380,311 @@ def _successful_read_receipt_projection(
     return tuple(selected)
 
 
+_HEALTHBENCH_SEARCH_TOOL_ID = "healthbench-authoritative.search"
+_HEALTHBENCH_STRUCTURED_EVIDENCE_SCHEMA_V1 = (
+    "healthbench.structured-evidence.v1"
+)
+_HEALTHBENCH_STRUCTURED_EVIDENCE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "summary",
+        "evidence_items",
+        "uncertainties",
+    }
+)
+_PRODUCER_CONTEXT_PROFILES = frozenset(
+    {
+        ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
+        ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
+    }
+)
+
+
+def _uses_producer_context(artifact_communication_profile: str) -> bool:
+    return artifact_communication_profile in _PRODUCER_CONTEXT_PROFILES
+
+
+def _healthbench_structured_evidence_references(
+    artifact: str,
+) -> tuple[dict[str, object], ...] | None:
+    """Parse only the versioned, public HealthBench evidence Artifact shape."""
+
+    try:
+        value = json.loads(artifact)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, Mapping) or not (
+        _HEALTHBENCH_STRUCTURED_EVIDENCE_FIELDS <= set(value)
+    ):
+        return None
+    if (
+        value.get("schema_version")
+        != _HEALTHBENCH_STRUCTURED_EVIDENCE_SCHEMA_V1
+    ):
+        return None
+    if not isinstance(value.get("status"), str):
+        return None
+    if not isinstance(value.get("summary"), str):
+        return None
+    uncertainties = value.get("uncertainties")
+    if not isinstance(uncertainties, list) or any(
+        not isinstance(item, str) for item in uncertainties
+    ):
+        return None
+    evidence_items = value.get("evidence_items")
+    if not isinstance(evidence_items, list):
+        return None
+
+    references: list[dict[str, object]] = []
+    seen_references: set[tuple[str, str]] = set()
+    for item in evidence_items:
+        if not isinstance(item, Mapping):
+            return None
+        document_id = item.get("document_id")
+        evidence_span = item.get("evidence_span")
+        if (
+            not isinstance(document_id, str)
+            or not document_id.strip()
+            or not isinstance(evidence_span, str)
+            or not evidence_span.strip()
+        ):
+            return None
+        reference_key = (document_id.strip(), evidence_span.strip())
+        if reference_key in seen_references:
+            continue
+        seen_references.add(reference_key)
+        references.append(
+            {
+                "document_id": reference_key[0],
+                "evidence_span": reference_key[1],
+                "source": item.get("source"),
+                "title": item.get("title"),
+                "date": item.get("date"),
+                "url": item.get("url"),
+            }
+        )
+    return tuple(references)
+
+
+def _is_healthbench_search_receipt(receipt: Mapping[str, object]) -> bool:
+    return receipt.get("tool_id") == _HEALTHBENCH_SEARCH_TOOL_ID
+
+
+def _healthbench_evidence_receipt_projection(
+    receipts: Sequence[Mapping[str, object]],
+    *,
+    artifact: str,
+) -> tuple[tuple[dict[str, object], ...], int | None]:
+    """Return compact receipt facts for evidence explicitly cited by Artifact.
+
+    Complete receipts remain immutable on ``AgentRequest`` and in persisted
+    execution records.  This projection is derived from successful search
+    receipts, contains no timing or unrelated result bodies, and never falls
+    back to replaying every search result when the Artifact is malformed.
+    """
+
+    references = _healthbench_structured_evidence_references(artifact)
+    if references is None:
+        return (), None
+
+    candidates: list[tuple[str, str, Mapping[str, object]]] = []
+    for receipt in receipts:
+        if not _is_healthbench_search_receipt(receipt):
+            continue
+        if receipt.get("error_type") is not None:
+            continue
+        request = receipt.get("request")
+        result = receipt.get("result")
+        if not isinstance(request, Mapping) or request.get("action") != "search":
+            continue
+        if not isinstance(result, Mapping) or result.get("completed") is not True:
+            continue
+        value = result.get("value", result)
+        if not isinstance(value, Mapping) or value.get("operation") != "search":
+            continue
+        query = value.get("query")
+        if not isinstance(query, str) or not query.strip():
+            arguments = request.get("arguments")
+            query = (
+                arguments.get("query")
+                if isinstance(arguments, Mapping)
+                else None
+            )
+        if not isinstance(query, str) or not query.strip():
+            continue
+        evidence = value.get("evidence")
+        if not isinstance(evidence, list):
+            continue
+        for result_item in evidence:
+            if isinstance(result_item, Mapping):
+                candidates.append(
+                    (
+                        str(receipt.get("tool_id")),
+                        " ".join(query.split()),
+                        result_item,
+                    )
+                )
+
+    projected: list[dict[str, object]] = []
+    seen_projection: set[str] = set()
+    for reference in references:
+        for tool_id, query, result_item in candidates:
+            if result_item.get("document_id") != reference["document_id"]:
+                continue
+            if any(
+                reference.get(field_name) != result_item.get(field_name)
+                for field_name in ("source", "title", "date", "url")
+            ):
+                continue
+            excerpt = result_item.get("excerpt")
+            evidence_span = reference["evidence_span"]
+            normalized_excerpt = (
+                " ".join(excerpt.split()) if isinstance(excerpt, str) else ""
+            )
+            normalized_span = (
+                " ".join(evidence_span.split())
+                if isinstance(evidence_span, str)
+                else ""
+            )
+            if (
+                not normalized_span
+                or normalized_span not in normalized_excerpt
+            ):
+                continue
+            compact = {
+                "tool_id": tool_id,
+                "query": query,
+                "document_id": result_item.get("document_id"),
+                "source": result_item.get("source"),
+                "title": result_item.get("title"),
+                "date": result_item.get("date"),
+                "url": result_item.get("url"),
+                "evidence_span": evidence_span,
+            }
+            serialized = json.dumps(
+                compact,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if serialized not in seen_projection:
+                seen_projection.add(serialized)
+                projected.append(compact)
+            break
+    return tuple(projected), len(references)
+
+
+def _healthbench_projection_status(
+    matched_count: int,
+    reference_count: int | None,
+) -> str:
+    if reference_count is None:
+        return "unavailable-invalid-structured-artifact"
+    if reference_count == 0:
+        return "complete-no-evidence-references"
+    if matched_count == reference_count:
+        return "complete"
+    if matched_count:
+        return "partial"
+    return "unavailable-no-receipt-match"
+
+
+_COMPACT_PROVENANCE_FIELDS = (
+    "source_agent_id",
+    "target_agent_id",
+    "message_type",
+    "artifact_type",
+    "artifact_version",
+    "graph_revision",
+    "environment_revision",
+    "source_model_id",
+    "source_execution_mode",
+    "source_finish_reason",
+)
+
+
+def _compact_healthbench_input_provenance(
+    provenance_items: Sequence[Mapping[str, object]],
+) -> tuple[dict[str, object], ...]:
+    """Remove recursive receipt bodies and duplicate Artifact aliases."""
+
+    compact_items: list[dict[str, object]] = []
+    seen_items: set[str] = set()
+    for provenance in provenance_items:
+        compact = {
+            field_name: provenance[field_name]
+            for field_name in _COMPACT_PROVENANCE_FIELDS
+            if field_name in provenance and provenance[field_name] is not None
+        }
+        artifact = provenance.get("artifact")
+        if not isinstance(artifact, str):
+            artifact = provenance.get("artifact_body")
+        if not isinstance(artifact, str):
+            artifact = provenance.get("content")
+        if isinstance(artifact, str):
+            compact["artifact"] = artifact
+
+        raw_receipts = provenance.get("tool_receipts")
+        receipts = (
+            tuple(
+                receipt
+                for receipt in raw_receipts
+                if isinstance(receipt, Mapping)
+            )
+            if isinstance(raw_receipts, (list, tuple))
+            else ()
+        )
+        if receipts and any(
+            _is_healthbench_search_receipt(receipt) for receipt in receipts
+        ):
+            projection, reference_count = (
+                _healthbench_evidence_receipt_projection(
+                    receipts,
+                    artifact=artifact if isinstance(artifact, str) else "",
+                )
+            )
+            compact["tool_receipt_projection"] = (
+                "artifact-referenced-healthbench-evidence-v1"
+            )
+            compact["tool_receipt_projection_status"] = (
+                _healthbench_projection_status(
+                    len(projection),
+                    reference_count,
+                )
+            )
+            if projection:
+                compact["evidence_receipts"] = list(projection)
+
+        raw_nested = provenance.get("input_artifact_provenance")
+        if isinstance(raw_nested, (list, tuple)):
+            nested = _compact_healthbench_input_provenance(
+                tuple(
+                    item for item in raw_nested if isinstance(item, Mapping)
+                )
+            )
+            if nested:
+                compact["input_artifact_provenance"] = list(nested)
+
+        serialized = json.dumps(
+            compact,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if serialized not in seen_items:
+            seen_items.add(serialized)
+            compact_items.append(compact)
+    return tuple(compact_items)
+
+
 def _format_upstream(
     messages: Sequence[UpstreamMessage],
     condition: CommunicationCondition,
     *,
     include_dependency: bool = True,
     project_artifact_read_receipts: bool = False,
+    project_healthbench_structured_evidence: bool = False,
     artifact_communication_profile: str = "legacy",
 ) -> str:
     if not messages:
@@ -283,8 +693,7 @@ def _format_upstream(
     seen_exact_envelopes: set[str] = set()
     for item in messages:
         if (
-            artifact_communication_profile
-            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+            _uses_producer_context(artifact_communication_profile)
             and item.artifact_version is not None
         ):
             try:
@@ -311,10 +720,7 @@ def _format_upstream(
             envelope.append(f"graph_revision: {item.graph_revision}")
         if item.environment_revision is not None:
             envelope.append(f"environment_revision: {item.environment_revision}")
-        if (
-            artifact_communication_profile
-            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
-        ):
+        if _uses_producer_context(artifact_communication_profile):
             if item.artifact_version is not None:
                 envelope.append(f"artifact_version: {item.artifact_version}")
             if item.source_model_id is not None:
@@ -347,15 +753,60 @@ def _format_upstream(
             envelope.append(
                 f"request_or_dependency: {item.request_or_dependency}"
             )
-        visible_tool_receipts = (
-            _successful_read_receipt_projection(
+        healthbench_projection_candidate = (
+            project_healthbench_structured_evidence
+            and bool(item.tool_receipts)
+            and (
+                item.source_execution_mode == "react"
+                or any(
+                    _is_healthbench_search_receipt(receipt)
+                    for receipt in item.tool_receipts
+                )
+            )
+        )
+        if healthbench_projection_candidate:
+            evidence_projection, reference_count = (
+                _healthbench_evidence_receipt_projection(
+                    item.tool_receipts,
+                    artifact=item.artifact,
+                )
+            )
+            envelope.append(
+                "tool_receipt_projection: "
+                "artifact-referenced-healthbench-evidence-v1"
+            )
+            envelope.append(
+                "tool_receipt_projection_status: "
+                + _healthbench_projection_status(
+                    len(evidence_projection),
+                    reference_count,
+                )
+            )
+            if evidence_projection:
+                envelope.append(
+                    "evidence_receipts: "
+                    + json.dumps(
+                        list(evidence_projection),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            visible_tool_receipts: tuple[dict[str, object], ...] = ()
+        elif project_artifact_read_receipts:
+            visible_tool_receipts = _successful_read_receipt_projection(
                 item.tool_receipts,
                 artifact=item.artifact,
             )
-            if project_artifact_read_receipts
-            else tuple(dict(receipt) for receipt in item.tool_receipts)
-        )
-        if project_artifact_read_receipts and item.tool_receipts:
+        else:
+            visible_tool_receipts = tuple(
+                dict(receipt) for receipt in item.tool_receipts
+            )
+        if (
+            project_artifact_read_receipts
+            and item.tool_receipts
+            and not healthbench_projection_candidate
+        ):
             envelope.append(
                 "tool_receipt_projection: artifact-referenced-successful-reads"
             )
@@ -364,6 +815,31 @@ def _format_upstream(
                 "tool_receipts: "
                 + json.dumps(
                     list(visible_tool_receipts),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        if item.input_artifact_provenance:
+            if project_healthbench_structured_evidence:
+                visible_input_provenance = (
+                    _compact_healthbench_input_provenance(
+                        item.input_artifact_provenance
+                    )
+                )
+                envelope.append(
+                    "input_artifact_provenance_projection: "
+                    "compact-structured-evidence-v2"
+                )
+            else:
+                visible_input_provenance = tuple(
+                    dict(provenance)
+                    for provenance in item.input_artifact_provenance
+                )
+            envelope.append(
+                "input_artifact_provenance: "
+                + json.dumps(
+                    list(visible_input_provenance),
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
@@ -702,6 +1178,18 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         except ValueError:
             # Every non-HealthBench task retains the existing text transport.
             healthbench_messages = None
+    if (
+        healthbench_messages is not None
+        and execution_mode == "react"
+        and request.is_output_agent
+        and request.model.metadata.get("healthbench_execution_protocol")
+        in {
+            _HEALTHBENCH_EXECUTION_PROTOCOL_V3_METADATA,
+            _HEALTHBENCH_EXECUTION_PROTOCOL_V4_METADATA,
+            _HEALTHBENCH_EXECUTION_PROTOCOL_V5_METADATA,
+        }
+    ):
+        protocol += _HEALTHBENCH_OUTPUT_REACT_PROTOCOL_V3
     if request.is_format_agent:
         # FlowSteer's Format Operator normally receives the problem and the
         # computed solution under its fixed extraction prompt.  Do not inject
@@ -721,10 +1209,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             f"Agent ID: {request.agent.id}\nContract:\n{request.agent.contract}\n\n"
             f"Execution protocol (takes precedence):\n{protocol}"
         )
-        if (
-            request.artifact_communication_profile
-            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
-        ):
+        if _uses_producer_context(request.artifact_communication_profile):
             system += (
                 "\n\nA routed source contract is provenance describing why its "
                 "artifact was produced. Follow this Agent's own contract; use "
@@ -734,7 +1219,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         system += (
             "\n\nHealthBench Professional execution protocol "
             "(takes precedence over an Agent contract):\n"
-            + HEALTHBENCH_PROFESSIONAL_EXECUTION_PROTOCOL
+            + _healthbench_execution_protocol(request)
         )
     upstream_text = _format_upstream(
         request.upstream,
@@ -743,6 +1228,11 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         project_artifact_read_receipts=(
             semantic_lineage
             and semantic_role in {"reasoner", "verifier"}
+        ),
+        project_healthbench_structured_evidence=(
+            healthbench_messages is not None
+            and request.artifact_communication_profile
+            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2
         ),
         artifact_communication_profile=(
             request.artifact_communication_profile
@@ -840,13 +1330,15 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             f"revision.\n\nYour draft:\n{request.own_draft}\n\n"
             "Peer artifact envelope:\n"
         )
-        if (
-            request.artifact_communication_profile
-            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
-        ):
+        if _uses_producer_context(request.artifact_communication_profile):
             phase = phase_prefix + _format_upstream(
                 (request.peer_draft,),
                 request.communication_condition,
+                project_healthbench_structured_evidence=(
+                    healthbench_messages is not None
+                    and request.artifact_communication_profile
+                    == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2
+                ),
                 artifact_communication_profile=(
                     request.artifact_communication_profile
                 ),

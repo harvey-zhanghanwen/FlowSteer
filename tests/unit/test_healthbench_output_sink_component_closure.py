@@ -5,7 +5,11 @@ import unittest
 from collections.abc import Iterable, Mapping
 
 from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
-from src.interactive.agent_runtime import AgentRuntimeResult
+from src.interactive.agent_runtime import (
+    AgentFailureRecord,
+    AgentRuntimeResult,
+    ExecutionPhase,
+)
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.director import (
     _live_new_agent_ids,
@@ -35,6 +39,7 @@ def _env(
     max_agents: int,
     max_relations_per_subgraph: int = 2,
     require_reciprocal_terminal_artifact_lineage: bool = False,
+    recovery_policy: str = "default",
 ) -> AgentWorkflowEnv:
     env = AgentWorkflowEnv(
         _registry(),
@@ -56,6 +61,7 @@ def _env(
         require_reciprocal_terminal_artifact_lineage=(
             require_reciprocal_terminal_artifact_lineage
         ),
+        recovery_policy=recovery_policy,
     )
     env.reset(
         "A healthcare conversation requiring a complete assistant response",
@@ -681,6 +687,65 @@ class HealthBenchUpstreamReciprocalLineageRecoveryTests(
                     ("set_relation",),
                     env.model_admissible_action_types(),
                 )
+
+    async def test_measured_runtime_repair_preempts_stale_lineage_gate(self) -> None:
+        env = _env(
+            _upstream_reciprocal_lineage_graph(),
+            max_agents=5,
+            max_relations_per_subgraph=2,
+            require_reciprocal_terminal_artifact_lineage=True,
+            recovery_policy="preserve_diagnose_repair_augment",
+        )
+        _seed_upstream_reciprocal_lineage_state(
+            env,
+            include_peer_b_at_merge=False,
+        )
+        env._record_failure_state(
+            (
+                AgentFailureRecord(
+                    request_id="peer-b-react-exhaustion",
+                    agent_id="peer_b",
+                    phase=ExecutionPhase.SINGLE,
+                    graph_revision=env.graph.revision,
+                    error_type="ReactExecutionError",
+                    message="react agent 'peer_b' exhausted 6 turns",
+                    metadata={
+                        "react_trace": [
+                            {
+                                "turn": 6,
+                                "observation_status": "schema_invalid",
+                                "public_error_code": "state_action_not_admitted",
+                            }
+                        ]
+                    },
+                ),
+            ),
+            current_agent_ids={node.id for node in env.graph.nodes},
+        )
+        self.assertEqual(("peer_b",), env._mandatory_repair_agent_ids())
+        self.assertEqual(("modify_agent",), env.model_admissible_action_types())
+        action = env.parser.parse(
+            '{"action":"modify_agent","agent_id":"peer_b",'
+            '"contract":"Repair the failed execution and return one complete artifact."}'
+        )
+        self.assertIsNone(env._mandatory_repair_admission_issue(action))
+        self.assertIsNotNone(
+            env._reciprocal_terminal_lineage_repair_issue(action)
+        )
+
+        def unexpected_lineage_gate(_action):
+            raise AssertionError(
+                "reciprocal lineage gate must wait for measured Runtime repair"
+            )
+
+        env._reciprocal_terminal_lineage_repair_issue = unexpected_lineage_gate
+        env._informative_contract_admission_issue = (
+            lambda _action: "stop after recovery-priority admission"
+        )
+        result = await env.step(action)
+
+        self.assertFalse(result.accepted)
+        self.assertIn("stop after recovery-priority admission", result.feedback)
 
     async def test_admitted_peer_relation_then_dirty_closure_allows_finish(
         self,
