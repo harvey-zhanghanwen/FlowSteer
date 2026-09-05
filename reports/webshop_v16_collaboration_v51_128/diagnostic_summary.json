@@ -1,0 +1,33 @@
+{
+  "count": 128,
+  "failure_classes": [
+    {
+      "class": "no_purchase",
+      "count": 13
+    },
+    {
+      "class": "partial_with_purchased_product_details",
+      "count": 1
+    },
+    {
+      "class": "partial_without_purchased_product_details",
+      "count": 71
+    },
+    {
+      "class": "success",
+      "count": 43
+    }
+  ],
+  "repeated_query_episodes": 15,
+  "extra_repeated_queries": 20,
+  "versus_v16": {
+    "higher": 18,
+    "lower": 16,
+    "equal": 94
+  },
+  "versus_v50": {
+    "higher": 26,
+    "lower": 9,
+    "equal": 93
+  }
+}
