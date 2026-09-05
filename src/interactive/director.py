@@ -119,6 +119,23 @@ DIRECTOR_SYSTEM_PROMPT_V18 = DIRECTOR_SYSTEM_PROMPT_V16 + """
 
 Keep unresolved names, abbreviations, quantities, time points, and the requested answer slot verbatim in Agent contracts and Tool tasks. Do not expand or replace them unless the task or an observed artifact supplies the meaning."""
 
+# v19 reuses SkillFlow's task/public-observation continuation and FlowSteer's
+# edit -> execute -> feedback boundary. It consolidates the v18 invariants
+# rather than appending another domain policy. The only new guidance concerns
+# task/premise separation and the distinction between missing and contrary
+# evidence. These are free-contract instructions, not role or topology gates.
+DIRECTOR_SYSTEM_PROMPT_V19 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only actions, targets and parameters admitted by admissible_action_types and action_target_domains, model_id values from model_catalog, and exact tool_id values from tool_catalog. add_subgraph adds one functional subgraph of one to three Agents as one transaction. Each accepted edit executes once; inspect its real Canvas validation, execution feedback and current artifacts before the next action. execution_mode describes execution, not role: reasoning, react with admitted Tools and an executable profile, or coding when admitted by the Runtime.
+
+Write distinct free-text contracts stating responsibility, required inputs, expected artifact and completion condition. Preserve the relation the original conversation asks about, its necessary context, scope, language and output form; do not answer a neighboring question. Keep unresolved names, abbreviations, quantities and time points verbatim unless the conversation or an observed artifact supplies their meaning. Distinguish the user's request from unverified premises; a contract is not evidence and must not add facts or predetermine a conclusion. Translation, summarization or formatting does not verify embedded claims: preserve the requested form without suppressing material contradictions or risks.
+
+A directed relation routes a producer artifact to its consumer. Use bidirectional communication only when both contracts can independently produce initial artifacts and then perform one bounded peer revision. Declare each unordered endpoint pair once, using source_to_target and target_to_source to encode its directions. All endpoints and output_agent_id must name existing Agents or Agents declared in that action. Keep Agent roles, count, models and topology open; use distinct work or unresolved evidence to guide collaboration, without duplicate contracts, actions or content or unlisted Skills.
+
+A search that finds no support does not establish that an entity, term or update does not exist. Preserve uncertainty and inspect available sources before making such a conclusion. When public artifacts conflict, repair the responsible work or obtain a grounded correction and route it to the Output producer; do not discard valid evidence because another Agent disagrees.
+
+The Output artifact must answer the original request completely and directly, not provide an intermediate query or evidence list. When adding its producer, set output_agent_id in that transaction. A later set_output only selects an already complete user-facing artifact; it does not execute again. Avoid internal artifact labels and repetition, not necessary answer content. Preserve useful artifacts when repairing or augmenting the graph. Use finish only when finish_admissibility is present and admissible; when the Output is adequate and no material public conflict remains, finish."""
+
 LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
 
 Use only action types listed in admissible_action_types, model_id values from model_catalog, and exact tool_id values from tool_catalog. add_agent adds one Agent with a free-text contract. A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange.
@@ -175,6 +192,7 @@ DIRECTOR_PROMPT_VERSION_V15 = "agentgraph.director.minimal-neutral.v15"
 DIRECTOR_PROMPT_VERSION_V16 = "agentgraph.director.minimal-neutral.v16"
 DIRECTOR_PROMPT_VERSION_V17 = "agentgraph.director.minimal-neutral.v17"
 DIRECTOR_PROMPT_VERSION_V18 = "agentgraph.director.minimal-neutral.v18"
+DIRECTOR_PROMPT_VERSION_V19 = "agentgraph.director.minimal-neutral.v19"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
 SCALAR_DIRECTOR_PROMPT_VERSION_V3 = (
     "agentgraph.director.minimal-neutral-scalar.v3"
@@ -646,6 +664,7 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         DIRECTOR_PROMPT_VERSION_V16: DIRECTOR_SYSTEM_PROMPT_V16,
         DIRECTOR_PROMPT_VERSION_V17: DIRECTOR_SYSTEM_PROMPT_V17,
         DIRECTOR_PROMPT_VERSION_V18: DIRECTOR_SYSTEM_PROMPT_V18,
+        DIRECTOR_PROMPT_VERSION_V19: DIRECTOR_SYSTEM_PROMPT_V19,
         SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_PROMPT_VERSION_V3: SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_PROMPT_VERSION_V4: SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
@@ -724,6 +743,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         DIRECTOR_SYSTEM_PROMPT_V16,
         DIRECTOR_SYSTEM_PROMPT_V17,
         DIRECTOR_SYSTEM_PROMPT_V18,
+        DIRECTOR_SYSTEM_PROMPT_V19,
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
@@ -5166,6 +5186,7 @@ class AgentGraphOrchestrator:
             DIRECTOR_PROMPT_VERSION_V15,
             DIRECTOR_PROMPT_VERSION_V16,
             DIRECTOR_PROMPT_VERSION_V18,
+            DIRECTOR_PROMPT_VERSION_V19,
         }:
             return copied
         return self._compact_qa_historical_messages(copied)
@@ -5384,6 +5405,7 @@ __all__ = [
     "DIRECTOR_SYSTEM_PROMPT_V16",
     "DIRECTOR_SYSTEM_PROMPT_V17",
     "DIRECTOR_SYSTEM_PROMPT_V18",
+    "DIRECTOR_SYSTEM_PROMPT_V19",
     "DIRECTOR_PROMPT_VERSION",
     "DIRECTOR_PROMPT_VERSION_V11",
     "DIRECTOR_PROMPT_VERSION_V12",
@@ -5393,6 +5415,7 @@ __all__ = [
     "DIRECTOR_PROMPT_VERSION_V16",
     "DIRECTOR_PROMPT_VERSION_V17",
     "DIRECTOR_PROMPT_VERSION_V18",
+    "DIRECTOR_PROMPT_VERSION_V19",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT",
     "SCALAR_DIRECTOR_PROMPT_VERSION",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT_V3",

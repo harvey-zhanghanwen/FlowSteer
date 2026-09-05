@@ -25,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
 from src.interactive.agent_runtime import (
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
     AgentRuntime,
 )
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
@@ -2547,7 +2548,10 @@ class LiveSmokeBackend:
                         **adapter_arguments,
                         require_structured_evidence_artifact=(
                             self.runtime.artifact_communication_profile
-                            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2
+                            in {
+                                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
+                                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+                            }
                         ),
                         require_complete_natural_language_artifact=bool(
                             healthbench_settings[

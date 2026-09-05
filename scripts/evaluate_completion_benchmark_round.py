@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter
+from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import json
@@ -23,6 +24,7 @@ import os
 from pathlib import Path
 import re
 import sys
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 
@@ -1604,6 +1606,8 @@ def _healthbench_direct_generation_identity(
             },
         },
     }
+    if "direct_artifact_communication_profile" in bounded:
+        generation_identity["artifact_communication_profile"] = bounded["direct_artifact_communication_profile"]
     if "execution_profile_allowlist" in tool_runtime:
         generation_identity["agentgraph_execution_profile_allowlist"] = [
             {
@@ -1851,6 +1855,132 @@ def _persisted_healthbench_direct_identity_matches(
     return value.get("scientific_sampling_receipt") == verified
 
 
+def _healthbench_direct_reference(config, root, selected):
+    """Read-only, fail-closed reuse of an unchanged historical Direct control.
+
+    Extends the existing HotpotQA Direct reuse boundary, not its generation
+    pipeline. Original condition IDs, raw sampling and grader receipts survive.
+    """
+    section, bounded = _evaluation_section(config)
+    if "direct_reference_config" not in bounded:
+        return None
+
+    def require(check, reason):
+        if not check:
+            raise CompletionBenchmarkRoundError("Direct reference rejected: " + reason)
+
+    source_path = _resolve(root, bounded["direct_reference_config"]).resolve()
+    source = load_yaml(source_path)
+    source_root = source_path.parent.parent
+    source_paths = _paths(source, source_root)
+    manifest_path = _resolve(root, bounded["direct_reference_manifest"]).resolve()
+    manifest = _load_json_mapping(manifest_path, "Direct reference manifest")
+    require(Path(manifest["config_path"]).resolve() == source_path, "source config")
+    for name, field in (("direct", "direct_reused_from"), ("failures", "direct_failures_reused_from"), ("manifest", "direct_reference_manifest")):
+        require(_resolve(root, bounded[field]).resolve() == source_paths[name].resolve()
+                == Path(manifest["artifacts"][name]).resolve(), "source " + name)
+        require(_paths(config, root)[name].resolve() != source_paths[name].resolve(), "output overlaps source")
+    require(bounded["dataset_key"] == "healthbench_professional"
+            and bounded["direct_execution_mode"] == "react", "unsupported control")
+    source_profile = source["agent_graph"].get("artifact_communication_profile", "legacy")
+    require(bounded.get("direct_artifact_communication_profile") == source_profile,
+            "Direct communication profile must remain frozen")
+    # Only these explicitly Graph-only/provenance fields may differ. Every
+    # other setting, including tools, completion admission and evaluator, stays.
+    ignored = {
+        "experiment": ("name", "condition_id", "prompt_version", "output_dir"),
+        "director": ("behavior_policy_version",),
+        "agent_graph": ("artifact_communication_profile",),
+        "healthbench_tool_runtime": ("condition_id",),
+        "policy_sync": ("adapter_name_prefix",),
+        section: ("direct_reference_config", "direct_reference_manifest", "direct_reused_from",
+                  "direct_failures_reused_from", "direct_artifact_communication_profile"),
+    }
+    def control_settings(value):
+        normalized = deepcopy(value)
+        normalized.pop("storage", None)
+        for name, fields in ignored.items():
+            for field in fields:
+                normalized.get(name, {}).pop(field, None)
+        return normalized
+    require(control_settings(source) == control_settings(config), "generation/evaluator config changed")
+    for key in ("train_path", "validation_path", "test_path"):
+        require(_resolve(source_root, source["data"][key]).resolve()
+                == _resolve(root, config["data"][key]).resolve(), "dataset path " + key)
+    private_key = "healthbench_private_cases_path"
+    require(_resolve(source_root, source["evaluation"][private_key]).resolve()
+            == _resolve(root, config["evaluation"][private_key]).resolve(), "evaluator cases")
+    for name, key in (("agent_graph", "model_catalog_path"), ("evaluation", "healthbench_judge_catalog_path")):
+        require(load_model_registry(_resolve(source_root, source[name][key])).to_dict()
+                == load_model_registry(_resolve(root, config[name][key])).to_dict(), "model/provider catalog")
+    source_tasks = [task.to_dict() for task in iter_task_records(source_paths["selected"], expected_split=bounded["split"])]
+    require(source_tasks == [task.to_dict() for task in selected], "ordered tasks/input changed")
+    task_ids = [task.task_id for task in selected]
+    require(manifest["selected_task_ids"] == task_ids
+            and manifest["sample_count"] == len(task_ids) == bounded["sample_count"], "task denominator")
+    resource = manifest["runtime_resource"]
+    for key, value in {
+        "effective_rollout_physical": int(os.environ.get("FLOWSTEER_ROLLOUT_GPU", config["gpu"]["rollout_physical"])),
+        "supervisor_port": int(os.environ.get("FLOWSTEER_SUPERVISOR_PORT", "8015")),
+        "context_length": int(os.environ.get("FLOWSTEER_SUPERVISOR_CONTEXT_LENGTH", config["director"]["max_context_tokens"])),
+        "mem_fraction_static": float(os.environ.get("FLOWSTEER_SUPERVISOR_MEM_FRACTION", "0.82")),
+        "evaluation_concurrency": bounded["concurrency"],
+        "task_timeout_seconds": bounded["task_timeout_seconds"],
+    }.items():
+        require(resource.get(key) == value, "effective runtime " + key)
+    backend = SimpleNamespace(config=source, registry=load_model_registry(
+        _resolve(source_root, source["agent_graph"]["model_catalog_path"])))
+    judge = load_model_registry(_resolve(source_root, source["evaluation"]["healthbench_judge_catalog_path"])).require_model(
+        source["evaluation"]["healthbench_judge_model"]).model_name
+    records = _read_jsonl(source_paths["direct"])
+    by_id = _by_task(records)
+    require(len(by_id) == len(records), "duplicate Direct task")
+    for task in selected:
+        value = by_id.get(task.task_id)
+        if value is None:
+            continue
+        seed = int(bounded.get("direct_generation_seed", config["experiment"]["seed"]))
+        identity = _healthbench_direct_generation_identity(backend, task,
+            model_id=bounded["direct_model_id"], protocol=bounded["direct_protocol"],
+            contract=bounded["direct_contract"], seed=seed,
+            coordinate=_direct_scientific_sampling_coordinate(source, task, base_seed=seed))
+        evaluation = value.get("evaluation", {})
+        require(value.get("task") == task.to_dict()
+                and value.get("runtime_condition_id") == source["experiment"]["condition_id"]
+                and all(value.get(key) == expected for key, expected in {
+                    "model_id": bounded["direct_model_id"], "protocol": bounded["direct_protocol"],
+                    "generation_seed": seed, "tool_version": source["experiment"]["tool_version"],
+                    "tool_resource_ids": bounded["direct_allowed_tools"]}.items())
+                and value.get("simple_baseline_topology") == "single_react_agent"
+                and isinstance(value.get("final_answer"), str)
+                and _persisted_healthbench_direct_identity_matches(value, identity)
+                and evaluation.get("valid") is True
+                and evaluation.get("evaluator_version") == evaluator_version_for(task)
+                and evaluation.get("details", {}).get("judge_model") == judge,
+                "Direct prediction/sampling/grader receipt " + task.task_id)
+    failures = [value for value in _read_jsonl(source_paths["failures"])
+                if value.get("task_id") in _bounded_direct_react_exhaustion_task_ids([value])]
+    require(source["healthbench_tool_runtime"]["max_turns_per_agent_call"] == 6
+            and all("exhausted 6 turns without a valid completion" in value["error"] for value in failures), "frozen Direct horizon")
+    failure_ids = {value["task_id"] for value in failures}
+    progress = manifest["direct_progress"]
+    require(len(failures) == len(failure_ids) and set(by_id).isdisjoint(failure_ids) and set(by_id) | failure_ids == set(task_ids)
+            and progress["completed"] == len(by_id)
+            and progress["frozen_react_terminal_failures"] == len(failure_ids)
+            and progress["strict_zero_terminal_failures"] == len(failure_ids)
+            and progress["pending_evaluator_retries"] == 0, "incomplete/overlapping control denominator")
+    receipt = {"reused": True, "source": str(source_paths["direct"]),
+               "source_manifest": str(manifest_path), "source_config": str(source_path),
+               "source_condition_id": source["experiment"]["condition_id"],
+               "target_condition_id": config["experiment"]["condition_id"],
+               "direct_artifact_communication_profile": source_profile,
+               "mode": "unchanged_historical_direct_control", "valid_count": len(by_id),
+               "strict_zero_count": len(failure_ids), "sample_count": len(task_ids)}
+    return {"source_server_runtime": resource["sglang_server_runtime"],
+            "records": {key: {**value, "reuse_receipt": receipt} for key, value in by_id.items()},
+            "failures": [{**value, "reuse_receipt": receipt} for value in failures], "receipt": receipt}
+
+
 async def _direct_one(
     backend: LiveSmokeBackend,
     task: TaskRecord,
@@ -1897,6 +2027,11 @@ async def _direct_one(
             sampling_coordinate=sampling_coordinate,
         )
         try:
+            direct_profile = bounded.get("direct_artifact_communication_profile")
+            if direct_profile is not None:
+                if task_runtime is backend.runtime:
+                    raise CompletionBenchmarkRoundError("Direct profile override requires task-owned runtime")
+                task_runtime.artifact_communication_profile = direct_profile
             if tool_registry is None:
                 raise CompletionBenchmarkRoundError(
                     "HealthBench Direct ReAct Agent has no configured evidence "
@@ -2243,10 +2378,28 @@ async def _collect_direct(
     failures: list[dict[str, Any]],
     manifest: dict[str, Any],
     manifest_path: Path,
+    direct_reference: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, dict[str, Any]]:
     """Checkpoint and resume the paired Direct condition task-by-task."""
 
     _, bounded = _evaluation_section(config)
+    reference = direct_reference
+    if "direct_reference_config" in bounded:
+        if not isinstance(reference, Mapping):
+            raise CompletionBenchmarkRoundError("Direct reference was not validated before API preflight")
+        selected_ids = {task.task_id for task in selected}
+        by_task = {key: value for key, value in reference["records"].items() if key in selected_ids}
+        for value in reference["failures"]:
+            if value["task_id"] in selected_ids and value not in failures:
+                failures.append(value)
+        hotpot_round._persist_ordered(path, selected, by_task)
+        manifest["direct_progress"] = {
+            "completed": len(by_task), "pending_evaluator_retries": 0,
+            "reused_from": reference["receipt"]["source"], "reused_records": len(by_task),
+            "newly_collected_records": 0, "failed_attempts": len(selected_ids - set(by_task)),
+            "frozen_react_terminal_failures": len(selected_ids - set(by_task))}
+        _write_json(manifest_path, manifest)
+        return by_task
     experiment = _mapping(config["experiment"], "experiment")
     model_id = str(bounded["direct_model_id"])
     protocol = str(bounded["direct_protocol"])
@@ -3290,6 +3443,7 @@ def _paired_rows(
                         if direct_value
                         else None
                     ),
+                    "reuse_receipt": direct_value.get("reuse_receipt") if direct_value else None,
                 },
                 "agentgraph": {
                     "available": graph_value is not None,
@@ -3774,6 +3928,8 @@ def _execution_profile_receipts(
 def _graph_generation_identity_check(
     trajectory: Mapping[str, Any],
     direct_identity: Mapping[str, Any],
+    *,
+    graph_condition_id: Optional[str] = None,
 ) -> Mapping[str, Any]:
     """Verify the Graph arm used the paired catalog, Tool and sampling coordinate."""
 
@@ -3795,7 +3951,7 @@ def _graph_generation_identity_check(
         and isinstance(director_sampling, Mapping)
         and isinstance(versions, Mapping)
         and trajectory.get("sampling_receipt_verified") is True
-        and trajectory.get("condition_id") == direct_identity.get("condition_id")
+        and trajectory.get("condition_id") == (graph_condition_id or direct_identity.get("condition_id"))
         and versions.get("model_catalog") == model.get("catalog_id")
         and versions.get("tool") == tool.get("tool_version")
         and director_sampling.get("algorithm")
@@ -4035,8 +4191,16 @@ def _paired_generation_identity_receipt(
             and _persisted_healthbench_direct_identity_matches(direct, identity)
         )
         trajectory = trajectories_by_task.get(task_id)
+        reuse = direct.get("reuse_receipt", {}) if isinstance(direct, Mapping) else {}
+        reference_graph_condition = (
+            config["experiment"]["condition_id"]
+            if isinstance(reuse, Mapping) and "direct_reference_config" in bounded
+            and reuse.get("source_condition_id") == (identity or {}).get("condition_id")
+            and reuse.get("target_condition_id") == config["experiment"]["condition_id"]
+            and reuse.get("mode") == "unchanged_historical_direct_control" else None
+        )
         graph_check = (
-            _graph_generation_identity_check(trajectory, identity)
+            _graph_generation_identity_check(trajectory, identity, graph_condition_id=reference_graph_condition)
             if direct_verified and isinstance(trajectory, Mapping)
             else {
                 "verified": False,
@@ -4727,6 +4891,7 @@ async def run_completion_benchmark_round(
     dataset_registry_validation = _validate_runtime_dataset_registry(config, root)
     paths = _paths(config, root)
     selected = _select_tasks(config, root, paths["selected"])
+    direct_reference = _healthbench_direct_reference(config, root, selected)
     failures = _read_jsonl(paths["failures"])
     gpu = _mapping(config["gpu"], "gpu")
     director_config = _mapping(config["director"], "director")
@@ -4779,6 +4944,7 @@ async def run_completion_benchmark_round(
         "training_enabled": False,
         "optimizer_updates": 0,
         "direct_only": direct_only,
+        "direct_reference": direct_reference["receipt"] if direct_reference else None,
         "agentgraph_execution_profile_allowlist": (
             list(
                 config["healthbench_tool_runtime"].get(
@@ -4873,6 +5039,12 @@ async def run_completion_benchmark_round(
                 allow_backend_default_max_running_requests
             ),
         )
+        if direct_reference is not None and any(
+            sglang_server_runtime.get(key) != direct_reference["source_server_runtime"].get(key)
+            for key in ("weight_version", "context_length", "attention_backend", "sampling_backend",
+                        "enable_deterministic_inference", "max_running_requests")
+        ):
+            raise CompletionBenchmarkRoundError("Direct reference rejected: live server generation settings changed")
         evaluator_preflight = await _run_evaluator_preflight(
             backend,
             config,
@@ -4942,6 +5114,7 @@ async def run_completion_benchmark_round(
         failures,
         manifest,
         paths["manifest"],
+        direct_reference=direct_reference,
     )
     _atomic_jsonl(paths["failures"], failures)
     if (

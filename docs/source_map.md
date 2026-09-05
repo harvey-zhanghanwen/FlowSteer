@@ -861,3 +861,27 @@ is claimed.
   existing synthetic fixture, without creating a model backend. Its one-call
   retry bound applies only to the diagnostic; the saved evaluation's transient
   retry bound remains three.
+
+### 2026-09-05: v2.33 task-context and model-visible evidence correction
+
+| Boundary | Actual source / reuse classification |
+| --- | --- |
+| Original task, one action, public Observation, next state | **Direct reuse:** SkillFlow `src/skillev/runtime/bounded_agent.py::BoundedAgent.execute_turn` and `src/skillev/rollout/engine.py::RolloutEngine.run`; FlowSteer `src/interactive/workflow_env.py::InteractiveWorkflowEnv.step/_step_internal`. No alternate Supervisor, scheduler or execution loop is introduced. |
+| Free contracts, finite reciprocal exchange, unique Output | **Unchanged project adaptation required by MD sections 3 and 4.1.** `AgentRuntime`, Canvas admission and `ADD_SUBGRAPH` incremental execution are reused. Only the new communication profile is registered in the existing allowlists and runtime factory. |
+| Compact Director v19 | **Necessary versioned prompt adaptation:** `src/interactive/director.py`. Reuses the existing action domains and compact observation history; keeps the requested relation/context separate from unverified premises, treats missing evidence as uncertainty, and routes grounded corrections to Output. v18 and other historical prompts remain unchanged; no fixed medical role or topology. |
+| Public search evidence independent of producer completion | **Thin adaptation:** SkillFlow `training/environment.py::GenericTaskEnvironment.step/_search_external_corpus/_compress_memory_items` and its bounded public Observations; existing FlowSteer `_format_upstream` and receipt-binding helpers. `openai_gateway.py` v3 projects bounded, deduplicated successful search results even when the producer cites none. This repairs a model-input loss, not a missing transport channel. |
+| Producer interpretation versus retrieved evidence | **Necessary HealthBench adaptation:** retain exact receipt-bound `supported_claim`, `conditions_or_qualifiers`, document provenance and evidence spans; distinguish these interpretations from independently verified facts. Uncited results remain explicitly unendorsed. Duplicate documents do not erase a later producer's distinct qualifiers. Projection truncation/omissions are explicit; full raw receipts remain in trajectory. |
+| v3 applicability / Direct control | **Existing runtime reuse with explicit configuration:** only HealthBench + communication v3 receives the new prompt/projection. Non-HealthBench and historical v2 are unchanged. Direct is explicitly fixed to its original v2 communication profile; it does not receive the Graph treatment. |
+| Historical Direct reference | **Necessary evaluation compatibility adaptation:** extends the existing `evaluate_completion_benchmark_round.py::_collect_direct`/HotpotQA `direct_reused_from` path. Source config, population, actual generation/evaluator settings and saved receipts must match before API preflight. Original v2.32 condition IDs are preserved, not relabeled as v2.33. A missing/incompatible control fails instead of silently issuing 525 repeated Direct calls. |
+
+The raw Tool receipts were retained in v2.28/v2.32, but their existence did **not**
+guarantee model visibility: an empty `evidence_items` list could erase relevant
+results from downstream `rendered_messages`. This corrects the earlier broad
+statement that the compact projection did not discard information. v3 preserves
+bounded evidence visibility; it does not guarantee clinical correctness or that
+the model will use the evidence correctly.
+
+The 525 public tasks have informed development. New runs are explicitly
+post-development diagnostic replays, not untouched held-out generalization
+estimates. Rubrics/reference answers remain evaluator-only; no sample-specific
+answer, medical template, extra judge Agent, training or Skill update is added.

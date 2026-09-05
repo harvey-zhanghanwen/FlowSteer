@@ -8,7 +8,8 @@ task_schema_version: "flowsteer.agentgraph.task.v1"
 datasets:
   healthbench_professional:
     protocol_label: "healthbench_professional_public_test_reference_evaluator_v1"
-    preparation_catalog_path: "config/datasets_healthbench_professional_official_v1.yaml"
+    # Reuse the existing prepared population; its manifest records this source.
+    preparation_catalog_path: "${FLOWSTEER_HEALTHBENCH_PREPARATION_CATALOG:-/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v1/config/datasets_healthbench_professional_official_v1.yaml}"
     preparation_catalog_schema_version: "flowsteer.agentgraph.healthbench-professional.dataset.v1"
     manifest:
       path: "data/healthbench_professional_official_v1/manifest.json"

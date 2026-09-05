@@ -15,6 +15,7 @@ from scripts.prompts.prompt import FORMAT_PROMPT
 
 from .agent_runtime import (
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
     AgentRequest,
     AgentResponse,
@@ -397,6 +398,7 @@ _PRODUCER_CONTEXT_PROFILES = frozenset(
     {
         ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
         ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
+        ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
     }
 )
 
@@ -471,23 +473,10 @@ def _is_healthbench_search_receipt(receipt: Mapping[str, object]) -> bool:
     return receipt.get("tool_id") == _HEALTHBENCH_SEARCH_TOOL_ID
 
 
-def _healthbench_evidence_receipt_projection(
+def _healthbench_search_candidates(
     receipts: Sequence[Mapping[str, object]],
-    *,
-    artifact: str,
-) -> tuple[tuple[dict[str, object], ...], int | None]:
-    """Return compact receipt facts for evidence explicitly cited by Artifact.
-
-    Complete receipts remain immutable on ``AgentRequest`` and in persisted
-    execution records.  This projection is derived from successful search
-    receipts, contains no timing or unrelated result bodies, and never falls
-    back to replaying every search result when the Artifact is malformed.
-    """
-
-    references = _healthbench_structured_evidence_references(artifact)
-    if references is None:
-        return (), None
-
+) -> list[tuple[str, str, Mapping[str, object]]]:
+    """Reuse the v2 successful, public search-Observation admission boundary."""
     candidates: list[tuple[str, str, Mapping[str, object]]] = []
     for receipt in receipts:
         if not _is_healthbench_search_receipt(receipt):
@@ -525,6 +514,26 @@ def _healthbench_evidence_receipt_projection(
                         result_item,
                     )
                 )
+    return candidates
+
+
+def _healthbench_evidence_receipt_projection(
+    receipts: Sequence[Mapping[str, object]],
+    *,
+    artifact: str,
+) -> tuple[tuple[dict[str, object], ...], int | None]:
+    """Return compact receipt facts for evidence explicitly cited by Artifact.
+
+    Complete receipts remain immutable on ``AgentRequest`` and in persisted
+    execution records.  This projection is derived from successful search
+    receipts, contains no timing or unrelated result bodies, and never falls
+    back to replaying every search result when the Artifact is malformed.
+    """
+
+    references = _healthbench_structured_evidence_references(artifact)
+    if references is None:
+        return (), None
+    candidates = _healthbench_search_candidates(receipts)
 
     projected: list[dict[str, object]] = []
     seen_projection: set[str] = set()
@@ -678,6 +687,265 @@ def _compact_healthbench_input_provenance(
     return tuple(compact_items)
 
 
+# NECESSARY_ADAPTATION: SkillFlow GenericTaskEnvironment.step retains public
+# Tool Observations separately from the Agent's answer; BoundedAgent records
+# them without claiming their truth. FlowSteer's routed result/feedback path
+# is retained, but its text-only result cannot represent receipt provenance.
+# v3 fixes that projection gap without changing execution, roles or topology.
+_HEALTHBENCH_V3_UPSTREAM_CHARS = 12000
+_HEALTHBENCH_V3_PROMPT_CHARS = 24000
+_HEALTHBENCH_V3_TRUNCATED = "[projection truncated; full receipt retained in trajectory]"
+_HEALTHBENCH_V3_EXECUTION_SUPPLEMENT = (
+    " Retrieved excerpts are not automatically endorsed facts. Compare their "
+    "source, population, relation and date with the conversation and producer "
+    "summary; do not discard a sourced result merely because it conflicts with "
+    "model memory or appears newer. Missing evidence does not establish "
+    "nonexistence. Answer the relation actually asked, not a neighboring "
+    "question; do not invent patient facts. A requested format does not cancel "
+    "material risk or contradiction handling. Preserve supported conclusions "
+    "and explicitly distinguish unresolved conflicts from verified findings."
+)
+
+
+def _healthbench_v3_text(value: object, limit: int) -> str:
+    text = value if isinstance(value, str) else ""
+    if len(text) <= limit:
+        return text
+    # Preserve the ending as well: exceptions and temporal qualifiers often
+    # occur after a recommendation. Explicitly disclose any omitted middle.
+    available = max(0, limit - len(_HEALTHBENCH_V3_TRUNCATED))
+    head = (available + 1) // 2
+    tail = available - head
+    return text[:head] + _HEALTHBENCH_V3_TRUNCATED + (text[-tail:] if tail else "")
+
+
+def _healthbench_v3_artifact(artifact: str) -> object:
+    # Citation text is projected once, from matching receipts, below. Keep
+    # producer conclusions (including a mistaken rejection) visibly separate.
+    if _healthbench_structured_evidence_references(artifact) is not None:
+        value = json.loads(artifact)
+        uncertainties = list(dict.fromkeys(value["uncertainties"]))
+        visible_uncertainties = uncertainties if len(uncertainties) <= 4 else uncertainties[:2] + uncertainties[-2:]
+        partial = (
+            len(value["status"]) > 120 or len(value["summary"]) > 2400
+            or len(uncertainties) > 4
+            or any(len(item) > 300 for item in visible_uncertainties)
+        )
+        return {
+            "schema_version": value["schema_version"],
+            "status": _healthbench_v3_text(value["status"], 120),
+            "summary": _healthbench_v3_text(value["summary"], 2400),
+            "uncertainties": [
+                _healthbench_v3_text(item, 300)
+                for item in visible_uncertainties
+            ],
+            "projection_status": "partial" if partial else "complete",
+            "omitted_uncertainties_count": max(0, len(uncertainties) - 4),
+        }
+    return _healthbench_v3_text(artifact, 3600)
+
+
+def _healthbench_v3_interpretations(
+    citations: Sequence[Mapping[str, object]], match: Mapping[str, object], producer: str,
+) -> tuple[dict[str, object], ...]:
+    interpretations: list[dict[str, object]] = []
+    for citation in citations:
+        if any(citation.get(field) != match.get(field) for field in ("document_id", "source", "title", "date", "url")):
+            continue
+        if str(citation.get("evidence_span", "")).strip() != match["evidence_span"]:
+            continue
+        interpretation = {
+            "producer_agent_id": producer,
+            "claim_status": "producer-interpretation-not-independently-verified",
+            **{
+                field: _healthbench_v3_text(citation.get(field), limit)
+                for field, limit in (("supported_claim", 1000), ("conditions_or_qualifiers", 1600))
+            },
+        }
+        if (interpretation["supported_claim"] or interpretation["conditions_or_qualifiers"]) and interpretation not in interpretations:
+            interpretations.append(interpretation)
+    return tuple(interpretations)
+
+
+def _healthbench_v3_receipts(
+    item: UpstreamMessage,
+    *,
+    seen_sources: set[tuple[str, str]],
+    char_budget: int,
+) -> dict[str, object]:
+    """Bounded non-recursive projection, not a new retrieval or grading step."""
+
+    pending = [(item.source_agent_id, item.artifact, item.tool_receipts, item.input_artifact_provenance, 0)]
+    documents: dict[tuple[str, str], dict[str, object]] = {}
+    source_reference_interpretations: list[dict[str, object]] = []
+    visited: set[tuple[str, str]] = set()
+    references_total = matched_total = 0
+    examined = 0
+    while pending and examined < 16:
+        producer, artifact, receipts, nested, depth = pending.pop(0)
+        identity = (producer, artifact)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        examined += 1
+        matches, reference_count = _healthbench_evidence_receipt_projection(receipts, artifact=artifact)
+        producer_items = (
+            json.loads(artifact)["evidence_items"]
+            if reference_count is not None else []
+        )
+        references_total += reference_count or 0
+        matched_total += len(matches)
+        for tool_id, query, result in _healthbench_search_candidates(receipts):
+            document_id = result.get("document_id")
+            excerpt = result.get("excerpt")
+            if not isinstance(document_id, str) or not document_id.strip() or not isinstance(excerpt, str) or not excerpt.strip():
+                continue
+            key = (str(result.get("source") or ""), document_id)
+            if key in seen_sources:
+                # Do not replay the same source body, but retain a later
+                # producer's new interpretation/qualifier of that source.
+                for match in matches:
+                    if match["document_id"] != document_id or match["source"] != result.get("source"):
+                        continue
+                    for interpretation in _healthbench_v3_interpretations(producer_items, match, producer):
+                        reference = {
+                            **interpretation,
+                            "source_reference": {"document_id": document_id, "source": result.get("source")},
+                            "receipt_bound_evidence_span": _healthbench_v3_text(match["evidence_span"], 1200),
+                        }
+                        if reference not in source_reference_interpretations:
+                            source_reference_interpretations.append(reference)
+                continue
+            if key not in documents:
+                documents[key] = {
+                    "evidence_status": "retrieved-not-endorsed",
+                    "producer_agent_id": producer,
+                    "tool_id": tool_id,
+                    "query": _healthbench_v3_text(query, 320),
+                    **{
+                        field: _healthbench_v3_text(result.get(field), limit)
+                        for field, limit in (("document_id", 256), ("source", 180), ("title", 360), ("date", 80), ("url", 512))
+                    },
+                    "excerpts": [],
+                    "artifact_cited_spans": [],
+                    "producer_interpretations": [],
+                }
+            document = documents[key]
+            excerpts = document["excerpts"]
+            assert isinstance(excerpts, list)
+            bounded_excerpt = _healthbench_v3_text(" ".join(excerpt.split()), 1600)
+            if bounded_excerpt not in excerpts and len(excerpts) < 2:
+                excerpts.append(bounded_excerpt)
+            spans = document["artifact_cited_spans"]
+            assert isinstance(spans, list)
+            for match in matches:
+                if match["document_id"] == document_id and match["source"] == result.get("source"):
+                    span = _healthbench_v3_text(match["evidence_span"], 1200)
+                    if span not in spans and len(spans) < 2:
+                        spans.append(span)
+                    interpretations = document["producer_interpretations"]
+                    assert isinstance(interpretations, list)
+                    for interpretation in _healthbench_v3_interpretations(producer_items, match, producer):
+                        if span not in spans:
+                            document["producer_interpretations_truncated"] = True
+                            continue
+                        # Matching an excerpt establishes provenance, not the
+                        # truth of its producer's clinical interpretation.
+                        interpretation["receipt_bound_span_index"] = spans.index(span)
+                        if interpretation not in interpretations:
+                            if len(interpretations) < 6:
+                                interpretations.append(interpretation)
+                            else:
+                                document["producer_interpretations_truncated"] = True
+        if depth < 3:
+            for provenance in nested[:16]:
+                artifact_value = provenance.get("artifact", provenance.get("artifact_body", provenance.get("content", "")))
+                raw_receipts = provenance.get("tool_receipts", ())
+                raw_nested = provenance.get("input_artifact_provenance", ())
+                pending.append((
+                    str(provenance.get("source_agent_id", "unknown")),
+                    artifact_value if isinstance(artifact_value, str) else "",
+                    tuple(r for r in raw_receipts if isinstance(r, Mapping)) if isinstance(raw_receipts, (tuple, list)) else (),
+                    tuple(p for p in raw_nested if isinstance(p, Mapping)) if isinstance(raw_nested, (tuple, list)) else (),
+                    depth + 1,
+                ))
+
+    result: dict[str, object] = {
+        "tool_receipt_projection": "bounded-healthbench-retrieved-evidence-v3",
+        "artifact_reference_count": references_total,
+        "receipt_bound_reference_count": matched_total,
+        "evidence_receipts": [],
+        "projection_truncated": bool(pending),
+    }
+    if source_reference_interpretations:
+        visible_interpretations: list[dict[str, object]] = []
+        result["previously_projected_source_interpretations"] = visible_interpretations
+        for interpretation in source_reference_interpretations:
+            visible_interpretations.append(interpretation)
+            if len(json.dumps(result, ensure_ascii=False, separators=(",", ":"))) > char_budget:
+                visible_interpretations.pop()
+                result["projection_truncated"] = True
+    rows = result["evidence_receipts"]
+    assert isinstance(rows, list)
+    # Receipt-bound citations are preserved first; unendorsed results still
+    # remain available when the producer rejects or omits all citations.
+    ordered = sorted(documents.items(), key=lambda pair: not bool(pair[1]["artifact_cited_spans"]))
+    for key, document in ordered:
+        rows.append(document)
+        if len(rows) > 6 or len(json.dumps(result, ensure_ascii=False, separators=(",", ":"))) > char_budget:
+            rows.pop()
+            result["projection_truncated"] = True
+            continue
+        seen_sources.add(key)
+    return result
+
+
+def _format_healthbench_upstream_v3(
+    messages: Sequence[UpstreamMessage],
+    condition: CommunicationCondition,
+    *,
+    include_dependency: bool,
+    state: dict[str, Any],
+) -> str:
+    rendered: list[str] = []
+    for item in messages:
+        identity = (item.source_agent_id, item.target_agent_id, item.artifact_version, item.artifact)
+        if identity in state["envelopes"]:
+            continue
+        state["envelopes"].add(identity)
+        allowance = min(_HEALTHBENCH_V3_UPSTREAM_CHARS, state["remaining"] - 100)
+        if allowance < 512:
+            marker = _HEALTHBENCH_V3_TRUNCATED[:max(0, state["remaining"] - 2)]
+            if marker:
+                rendered.append(marker)
+                state["remaining"] -= len(marker) + 2
+            break
+        envelope: dict[str, object] = {
+            "source_agent": item.source_agent_id,
+            "target_agent": item.target_agent_id,
+            "artifact_version": item.artifact_version,
+            "source_execution_mode": item.source_execution_mode,
+            "source_model_id": item.source_model_id,
+        }
+        if condition is CommunicationCondition.UPSTREAM_MASKED:
+            envelope["artifact"] = MASKED_UPSTREAM_CONTENT
+        else:
+            envelope["source_contract_provenance"] = _healthbench_v3_text(item.source_contract, 700)
+            if include_dependency:
+                envelope["request_or_dependency"] = _healthbench_v3_text(item.request_or_dependency, 500)
+            envelope["producer_artifact"] = _healthbench_v3_artifact(item.artifact)
+            base_chars = len(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")))
+            if allowance - base_chars > 800:
+                envelope["retrieval_evidence"] = _healthbench_v3_receipts(
+                    item, seen_sources=state["sources"], char_budget=allowance - base_chars - 120,
+                )
+        text = "[Upstream artifact]\n" + json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+        text = _healthbench_v3_text(text, allowance)
+        state["remaining"] -= len(text) + 2
+        rendered.append(text)
+    return "\n\n".join(rendered) if rendered else "(none)"
+
+
 def _format_upstream(
     messages: Sequence[UpstreamMessage],
     condition: CommunicationCondition,
@@ -686,9 +954,22 @@ def _format_upstream(
     project_artifact_read_receipts: bool = False,
     project_healthbench_structured_evidence: bool = False,
     artifact_communication_profile: str = "legacy",
+    healthbench_projection_state: dict[str, Any] | None = None,
 ) -> str:
     if not messages:
         return "(none)"
+    if (
+        project_healthbench_structured_evidence
+        and artifact_communication_profile
+        == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3
+    ):
+        return _format_healthbench_upstream_v3(
+            messages, condition, include_dependency=include_dependency,
+            state=healthbench_projection_state if healthbench_projection_state is not None else {
+                "remaining": _HEALTHBENCH_V3_PROMPT_CHARS,
+                "sources": set(), "envelopes": set(),
+            },
+        )
     rendered = []
     seen_exact_envelopes: set[str] = set()
     for item in messages:
@@ -1221,6 +1502,12 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "(takes precedence over an Agent contract):\n"
             + _healthbench_execution_protocol(request)
         )
+        if request.artifact_communication_profile == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3:
+            system += _HEALTHBENCH_V3_EXECUTION_SUPPLEMENT
+    healthbench_projection_state: dict[str, Any] = {
+        "remaining": _HEALTHBENCH_V3_PROMPT_CHARS,
+        "sources": set(), "envelopes": set(),
+    }
     upstream_text = _format_upstream(
         request.upstream,
         request.communication_condition,
@@ -1232,11 +1519,15 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         project_healthbench_structured_evidence=(
             healthbench_messages is not None
             and request.artifact_communication_profile
-            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2
+            in {
+                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
+                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+            }
         ),
         artifact_communication_profile=(
             request.artifact_communication_profile
         ),
+        healthbench_projection_state=healthbench_projection_state,
     )
     if request.is_format_agent:
         # Directly reuse FlowSteer's Format Operator prompt and its clean
@@ -1337,11 +1628,15 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 project_healthbench_structured_evidence=(
                     healthbench_messages is not None
                     and request.artifact_communication_profile
-                    == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2
+                    in {
+                        ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
+                        ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+                    }
                 ),
                 artifact_communication_profile=(
                     request.artifact_communication_profile
                 ),
+                healthbench_projection_state=healthbench_projection_state,
             )
         else:
             phase = (

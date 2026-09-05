@@ -191,6 +191,7 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         "legacy",
         "producer_context_exact_dedup_v1",
         "producer_context_structured_evidence_v2",
+        "producer_context_structured_evidence_v3",
     }:
         raise ConfigurationError(
             "agent_graph.artifact_communication_profile is unsupported"

@@ -1513,3 +1513,49 @@ change was made during profile selection.
   the same configuration without `--canary-only`; the existing runner resumes
   compatible completed predictions and trajectories and fills the 525-task
   panel. Do not use the low8 canary as a substitute for this panel.
+
+## 2026-09-05: v2.33 evidence/context repair and isolated replay
+
+- Preserved the v2.32 source at `ef0a48f` and pushed the new isolated branch
+  `feature/healthbench-v2.33-evidence-context-20260905` before accepting edits.
+  Worktree: `/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v233`.
+- The user explicitly requested switching to the new version without finishing
+  the old evaluation. The task-owned v2.32 evaluator received SIGINT and exited;
+  its 385 evaluator-valid Graph records, pending evaluator records, failures and
+  original source remain in the old worktree. Its manifest is marked
+  `interrupted_for_v233`; this is not a full525 result. A pre-stop manifest copy
+  is retained in `runtime/switch_to_v233_20260905.json`. GPU5 SGLang on port8025
+  remains available; no external project service was touched.
+- Added immutable neutral Director v19 and communication v3. The treatments
+  target public-task relation/context alignment, unsupported nonexistence
+  conclusions, and loss of uncited retrieval evidence in model inputs. They
+  preserve role/model/topology choice, per-Agent ReAct mode, functional-subgraph
+  incremental execution and explicit FINISH. No additional model call is
+  required by the new projection or prompt.
+- Bounded evidence projection keeps successful source excerpts even when the
+  producer rejects or omits citations. Receipt-bound producer claims/qualifiers
+  remain distinct from raw unendorsed retrieved evidence. Exact duplicate
+  documents are not repeated; new interpretations of a repeated source survive.
+  Partial projections are explicitly marked rather than declared complete.
+- Registered v3 in the existing configuration/runtime factory, retaining the
+  existing structured-evidence completion validator for both v2 and v3.
+- The new full525 config retains the public task order, seed, model catalog v7,
+  thinking settings, generation budgets, concurrency4, task timeout900 and
+  official grader/aggregation. Direct is an explicitly frozen historical
+  control: 459 valid responses plus 66 strict-zero ReAct terminal failures.
+  Its raw/length-adjusted full525 scores are 13.968705% / 16.756929%.
+  No existing response is rewritten or regraded merely to rename the condition.
+- Initial no-API verification: Director v19 tests 5 passed; evidence-projection
+  v3 tests 16 passed; configuration/runtime/evidence-adapter integration tests
+  109 passed plus 59 subtests. Baseline-reference and remaining legacy-renderer
+  checks are recorded separately when completed. No new live score is claimed
+  by this implementation entry.
+- Training, backward, optimizer update, GRPO/LoRA, MACE, Bayesian updates and
+  Skill retrieval/evolution remain disabled. New results use the separate
+  `healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context`
+  artifact/report namespace; the old interrupted run is never mixed into it.
+- Final no-API checks: 94 legacy gateway/completion-runner tests passed (plus
+  four subtests), and 17 new Direct-reference tests passed. The fixed525
+  prepare-only run passed after the isolated worktree registry was pointed at
+  the original preparation catalog recorded in the reused data manifest. No
+  data, rubric, split or preparation manifest was regenerated or relabeled.
