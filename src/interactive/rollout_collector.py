@@ -3086,6 +3086,10 @@ def _request_record(call: AgentCallRecord) -> Mapping[str, Any]:
         "is_format_predecessor": request.is_format_predecessor,
         "semantic_protocol": request.semantic_protocol,
         "continuation_source_agent_id": request.continuation_source_agent_id,
+        "public_environment_state": (
+            dict(request.public_environment_state)
+            if request.public_environment_state is not None else None
+        ),
         "communication_condition": request.communication_condition.value,
         "upstream": [item.to_dict() for item in request.upstream],
         "own_draft": request.own_draft,

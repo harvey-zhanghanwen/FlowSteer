@@ -524,6 +524,7 @@ class AgentWorkflowEnv:
         self._progressive_output_metadata: dict[
             str, dict[str, object]
         ] = {}
+        self._last_public_environment_state: Optional[dict[str, object]] = None
         self._previous_revision_outputs: dict[str, str] = {}
         self._previous_revision_output_metadata: dict[
             str, dict[str, object]
@@ -791,6 +792,12 @@ class AgentWorkflowEnv:
             continuation = self._failure_continuations.get(actor_id, {})
             raw_state = continuation.get("environment_current_state")
         if not isinstance(raw_state, Mapping):
+            # A failed analysis invalidates dependent semantic artifacts, not
+            # an already observed native environment state. Keep this public
+            # input available for repair without reviving any Output artifact.
+            previous = self._last_public_environment_state
+            if previous is not None and previous.get("environment_actor_id") == actor_id:
+                return dict(previous)
             return None
         allowed_fields = (
             "environment_episode_id",
@@ -804,6 +811,8 @@ class AgentWorkflowEnv:
             "current_observation_clipped",
             "current_observation_original_chars",
             "admissible_action_count",
+            "model_visible_admissible_actions",
+            "model_visible_admissible_action_count",
             "public_progress",
             "turns_used",
             "remaining_action_budget",
@@ -826,10 +835,10 @@ class AgentWorkflowEnv:
                 "execution_semantics": "one_action_one_observation",
             }
         )
-        if str(raw_state.get("task_family", "")).casefold() != "webshop":
-            admissible_actions = raw_state.get("admissible_actions")
-            if isinstance(admissible_actions, (list, tuple)):
-                result["admissible_actions"] = list(admissible_actions)
+        admissible_actions = raw_state.get("admissible_actions")
+        if isinstance(admissible_actions, (list, tuple)):
+            result["admissible_actions"] = list(admissible_actions)
+        self._last_public_environment_state = dict(result)
         return result
 
     def _stateful_no_progress_receipt(self) -> Optional[dict[str, object]]:
@@ -4276,6 +4285,7 @@ class AgentWorkflowEnv:
         self._unavailable_model_ids.clear()
         self._model_availability_receipts.clear()
         self.runtime.reset_execution_state()
+        self._last_public_environment_state = None
         self._clear_progressive_execution()
         return self.snapshot()
 
@@ -4309,6 +4319,7 @@ class AgentWorkflowEnv:
         # A restored environment must therefore execute its current graph once
         # before it can establish a revision-local progressive result again.
         self.runtime.reset_execution_state()
+        self._last_public_environment_state = None
         self._clear_progressive_execution()
 
     def fork(self, snapshot: Optional[AgentWorkflowSnapshot] = None) -> "AgentWorkflowEnv":
@@ -4352,6 +4363,12 @@ class AgentWorkflowEnv:
         if not isinstance(action, AgentAction):
             return self._reject(None, "action must be AgentAction or JSON text")
 
+        # Capture SkillFlow's public episode input before Canvas invalidates
+        # any dirty artifacts. This does not change the task or its evaluator.
+        runtime_environment_state = (
+            self.public_environment_state()
+            if self.required_tool_id == "webshop.environment" else None
+        )
         self._turn_count += 1
         if self._is_repeated_rejected_action(action):
             return self._reject_after_count(
@@ -4438,6 +4455,7 @@ class AgentWorkflowEnv:
                     prior_outputs=self._progressive_outputs,
                     prior_output_metadata=self._progressive_output_metadata,
                     prior_failure_metadata=self._failure_continuations,
+                    public_environment_state=runtime_environment_state,
                     unavailable_model_ids=self._unavailable_model_ids,
                     dirty_agents=dirty_agents,
                     format_output_agent=self._uses_format_agent_protocol(),
@@ -4548,6 +4566,7 @@ class AgentWorkflowEnv:
                         prior_outputs=self._progressive_outputs,
                         prior_output_metadata=self._progressive_output_metadata,
                         prior_failure_metadata=self._failure_continuations,
+                        public_environment_state=runtime_environment_state,
                         unavailable_model_ids=self._unavailable_model_ids,
                         format_output_agent=self._uses_format_agent_protocol(),
                     )
@@ -4813,6 +4832,7 @@ class AgentWorkflowEnv:
                         prior_outputs=prior_outputs,
                         prior_output_metadata=prior_output_metadata,
                         prior_failure_metadata=prior_failure_metadata,
+                        public_environment_state=runtime_environment_state,
                         unavailable_model_ids=self._unavailable_model_ids,
                         dirty_agents=execution_dirty_agents,
                         format_output_agent=(

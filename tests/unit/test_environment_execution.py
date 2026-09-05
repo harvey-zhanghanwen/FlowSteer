@@ -1571,7 +1571,13 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         assert stalled_state is not None
         self.assertEqual(instruction, stalled_state["original_task_instruction"])
         self.assertEqual(workflow_problem, stalled_state["task_instruction"])
-        self.assertNotIn("admissible_actions", stalled_state)
+        self.assertEqual(
+            ["click[6.6ft]", "click[Buy Now]"],
+            stalled_state["admissible_actions"],
+        )
+        self.assertEqual(
+            ["click[Buy Now]"], stalled_state["model_visible_admissible_actions"]
+        )
         self.assertEqual(2, stalled_state["admissible_action_count"])
         progress = stalled_state["public_progress"]
         assert isinstance(progress, dict)

@@ -681,6 +681,14 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     else:
         common = (
             f"Task:\n{request.problem}\n\n"
+            + (
+                "Shared public environment state for this Canvas execution "
+                "(read-only; Agent messages remain routed through graph edges):\n"
+                + json.dumps(dict(request.public_environment_state), ensure_ascii=False)
+                + "\n\n"
+                if getattr(request, "public_environment_state", None) else ""
+            )
+            +
             "External upstream messages:\n"
             f"{upstream_text}"
         )

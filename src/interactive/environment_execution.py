@@ -1085,9 +1085,12 @@ def _webshop_current_product_evidence(
     evidence_observation = str(observation or "") if purchase_action_visible else ""
     current_asin = ""
     inspected_tabs: list[str] = []
+    inspected_tab_observations: dict[str, str] = {}
 
     if in_product_scope:
         for receipt in reversed(receipts):
+            if receipt.get("state_advanced") is not True:
+                continue
             raw_action = receipt.get("action")
             if not isinstance(raw_action, str):
                 continue
@@ -1114,7 +1117,14 @@ def _webshop_current_product_evidence(
                 flags=re.IGNORECASE,
             )
             if tab is not None and tab.group(1).casefold() not in inspected_tabs:
-                inspected_tabs.append(tab.group(1).casefold())
+                tab_name = tab.group(1).casefold()
+                inspected_tabs.append(tab_name)
+                # SkillFlow _build_react_prompt retains observed text, not
+                # just a marker that a page was visited. Bind the public
+                # result to this product and preserve it after < Prev>.
+                body = receipt.get("next_observation")
+                if isinstance(body, str):
+                    inspected_tab_observations[tab_name] = body
             if not evidence_observation:
                 for field in ("observation", "next_observation"):
                     candidate = receipt.get(field)
@@ -1137,6 +1147,7 @@ def _webshop_current_product_evidence(
         "visible_option_groups": groups,
         "selected_options": selected,
         "inspected_tabs": list(reversed(inspected_tabs)),
+        "inspected_tab_observations": inspected_tab_observations,
         "evidence_source": "current_public_observation_or_episode_receipts",
     }
 
@@ -1977,6 +1988,9 @@ def _public_transition_summary(
                         "inspected_tabs": product_evidence[
                             "inspected_tabs"
                         ],
+                        "inspected_tab_observations": product_evidence[
+                            "inspected_tab_observations"
+                        ],
                         "visible_option_groups": {
                             group: list(values) for group, values in groups.items()
                         },
@@ -2187,6 +2201,13 @@ def _public_state_feedback(
                     + ", ".join(str(value) for value in inspected_tabs)
                     + "."
                 )
+            observed_tabs = current_product.get("inspected_tab_observations")
+            if isinstance(observed_tabs, Mapping):
+                for tab_name, body in observed_tabs.items():
+                    lines.append(
+                        f"Retained public {tab_name} observation for current "
+                        f"candidate {asin}:\n{body}"
+                    )
             option_groups = current_product.get("visible_option_groups")
             if isinstance(option_groups, Mapping) and option_groups:
                 lines.append(
@@ -2355,14 +2376,11 @@ def _action_prompt(
         "episode. Emit only the Action; the Runtime returns its Observation "
         "to the Director before another Canvas decision.\n\n"
         + (
-            "For WebShop, preserve the entire original instruction: product "
-            "identity, attributes, compatibility, variant, quantity and price. "
-            "Before Buy Now, align each requirement with explicit same-product "
-            "evidence. An unmentioned or unverified requirement is not satisfied. "
-            "Use Description/Features or another admissible action when evidence "
-            "is missing; no fixed inspection sequence is required. Agent "
-            "contracts cannot relax the original scope. Remaining budget is a "
-            "planning constraint, not evidence that a product meets the goal.\n\n"
+            "For WebShop, preserve the original product, attribute, variant, "
+            "quantity and price requirements; contracts cannot relax them. "
+            "Use the retained same-product evidence and routed Agent messages "
+            "to resolve remaining uncertainty within the action budget. "
+            "Already observed evidence need not be fetched again.\n\n"
             if task_family.lower() == "webshop" else ""
         )
         + f"{format_instruction}"
@@ -2684,6 +2702,10 @@ class EnvironmentExecutionAdapter:
             request,
             request_id=f"{request.request_id}:environment:{turn}",
             problem=prompt,
+            # The action prompt above already renders the current native
+            # state. Avoid duplicating the Canvas-start snapshot here;
+            # directed upstream messages remain intact on this request.
+            public_environment_state=None,
             agent=replace(
                 request.agent,
                 # ReAct remains the outer execution mode; a provider turn
@@ -2711,10 +2733,14 @@ class EnvironmentExecutionAdapter:
             else AgentResponse(generated)
         )
         raw_action = response.text
+        # Capture the actual inner action-policy request, rather than only
+        # the outer Runtime request which predates the state/tool prompt.
+        from .openai_gateway import build_agent_messages
         state.model_calls.append(
             {
                 "turn": turn,
                 "request_id": model_request.request_id,
+                "rendered_messages": build_agent_messages(model_request),
                 "metadata": dict(response.metadata),
                 "public_state": public_state,
                 "observation_clipped": observation_clipped,

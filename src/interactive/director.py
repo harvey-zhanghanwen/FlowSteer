@@ -72,6 +72,18 @@ Use only action types, targets and parameters in the current admissible_action_t
 
 Each accepted Canvas edit is executed once. continue leaves the AgentGraph unchanged and executes exactly one Action--Observation transition in the current stateful environment. After every transition, inspect the original task, latest action result, current public episode state and remaining budget before choosing the next Canvas action. Preserve the current Agent and episode when public no-progress feedback requests repair or augmentation. ReAct is an execution mode, not an Agent role. Use finish only when finish_admissibility is admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
 
+STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V3 = (
+    STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2
+    + "\n\nAgents without tools can analyze the shared public environment state "
+    "and communicate through directed graph edges. Only the environment Tool "
+    "owner changes its state. Choose Agent contracts and relations as needed; "
+    "do not assume a fixed number or sequence of Agents."
+)
+
+STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V3 = (
+    "agentgraph.director.minimal-neutral-scalar-stepwise.v3"
+)
+
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
 STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION = (
@@ -632,6 +644,7 @@ def scalar_director_prompt_version(value: object) -> bool:
         SCALAR_DIRECTOR_PROMPT_VERSION,
         STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION,
         STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2,
+        STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V3,
     }
 
 
@@ -649,6 +662,9 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         ),
         STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2: (
             STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2
+        ),
+        STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V3: (
+            STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V3
         ),
         LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
@@ -717,6 +733,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
         STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT,
         STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V2,
+        STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
@@ -3761,6 +3778,7 @@ class AgentGraphOrchestrator:
             LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
             QA_DIRECTOR_PROMPT_VERSION,
             STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V2,
+            STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION_V3,
         }:
             return copied
         return self._compact_qa_historical_messages(copied)

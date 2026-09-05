@@ -188,6 +188,9 @@ class AgentRequest:
     action_history: Tuple[Mapping[str, object], ...] = ()
     prior_tool_receipts: Tuple[Mapping[str, object], ...] = ()
     continuation_source_agent_id: Optional[str] = None
+    # SkillFlow's public episode observation, shared independently of graph
+    # communication edges. Never an Agent artifact or evaluator target.
+    public_environment_state: Optional[Mapping[str, object]] = None
 
     def __post_init__(self) -> None:
         if type(self.is_output_agent) is not bool:
@@ -216,6 +219,14 @@ class AgentRequest:
         ):
             raise ValueError(
                 "AgentRequest.continuation_source_agent_id must be non-empty text"
+            )
+        if self.public_environment_state is not None:
+            if not isinstance(self.public_environment_state, Mapping):
+                raise TypeError("public_environment_state must be a mapping")
+            object.__setattr__(
+                self,
+                "public_environment_state",
+                MappingProxyType(dict(self.public_environment_state)),
             )
         object.__setattr__(
             self,
@@ -629,6 +640,7 @@ class AgentRuntime:
         communication_condition: Union[
             CommunicationCondition, str
         ] = CommunicationCondition.NORMAL,
+        public_environment_state: Optional[Mapping[str, object]] = None,
     ) -> AgentRuntimeResult:
         if not isinstance(problem, str) or not problem.strip():
             raise ValueError("problem must be a non-empty string")
@@ -712,6 +724,36 @@ class AgentRuntime:
         # only before adding missing IDs could otherwise reuse a stale cached
         # downstream artifact.
         dirty_seeds.update(agent_id for agent_id in nodes if agent_id not in outputs)
+        if (
+            public_environment_state is not None
+            and public_environment_state.get("environment_actor_id")
+            in execution_graph.dirty_closure(dirty_seeds)
+        ):
+            # FlowSteer's node cache is conditional on every input. In the
+            # stateful adapter, unchanged Canvas text does not imply unchanged
+            # input: upstream analysis must read the new public observation
+            # before the next environment action, not reuse an old suggestion.
+            state_identity = (
+                public_environment_state.get("environment_episode_id"),
+                public_environment_state.get("environment_revision"),
+                public_environment_state.get("turns_used"),
+            )
+            dirty_seeds.update(
+                agent_id
+                for agent_id, node in nodes.items()
+                if not node.allowed_tools
+                and (
+                    output_metadata.get(agent_id, {}).get(
+                        "input_environment_episode_id"
+                    ),
+                    output_metadata.get(agent_id, {}).get(
+                        "input_environment_revision"
+                    ),
+                    output_metadata.get(agent_id, {}).get(
+                        "input_environment_turns_used"
+                    ),
+                ) != state_identity
+            )
         dirty = execution_graph.dirty_closure(dirty_seeds)
         # FlowSteer's executor cache is valid only for an unchanged input
         # identity.  A dirty Agent and every dependent successor therefore
@@ -791,6 +833,7 @@ class AgentRuntime:
                     output_agent_id=execution_graph.output_agent_id,
                     format_output_agent=format_output_agent,
                     communication_condition=resolved_condition,
+                    public_environment_state=public_environment_state,
                 ),
                 False,
             )
@@ -1220,7 +1263,20 @@ class AgentRuntime:
         output_agent_id: Optional[str],
         format_output_agent: bool,
         communication_condition: CommunicationCondition,
+        public_environment_state: Optional[Mapping[str, object]] = None,
     ) -> Dict[str, str]:
+        # A dependent block can run after the single Tool owner. Refresh only
+        # fields already admitted by Canvas's public-state whitelist; do not
+        # copy an Agent's private artifact or native evaluator info to peers.
+        if public_environment_state is not None:
+            public_environment_state = dict(public_environment_state)
+            actor_id = public_environment_state.get("environment_actor_id")
+            actor_metadata = output_metadata.get(str(actor_id), {})
+            latest_state = actor_metadata.get("environment_current_state")
+            if isinstance(latest_state, Mapping):
+                for key in public_environment_state:
+                    if key in latest_state:
+                        public_environment_state[key] = latest_state[key]
         format_predecessor_ids = {
             source_id
             for relation in plan.relations
@@ -1250,6 +1306,7 @@ class AgentRuntime:
                 is_format_predecessor=agent_id in format_predecessor_ids,
                 communication_condition=communication_condition,
                 continuation_metadata=failure_metadata.get(agent_id),
+                public_environment_state=public_environment_state,
             )
             response = await self._invoke(
                 request,
@@ -1326,6 +1383,7 @@ class AgentRuntime:
                 ),
                 communication_condition=communication_condition,
                 continuation_metadata=failure_metadata.get(retriever_id),
+                public_environment_state=public_environment_state,
             )
             retriever_draft = await self._invoke(
                 retriever_draft_request,
@@ -1379,6 +1437,7 @@ class AgentRuntime:
                 ),
                 communication_condition=communication_condition,
                 continuation_metadata=failure_metadata.get(reasoner_id),
+                public_environment_state=public_environment_state,
             )
             reasoner_draft = await self._invoke(
                 reasoner_draft_request,
@@ -1422,6 +1481,7 @@ class AgentRuntime:
                 ),
                 communication_condition=communication_condition,
                 continuation_metadata=failure_metadata.get(retriever_id),
+                public_environment_state=public_environment_state,
             )
             retriever_revision = await self._invoke(
                 retriever_revision_request,
@@ -1465,6 +1525,7 @@ class AgentRuntime:
                 ),
                 communication_condition=communication_condition,
                 continuation_metadata=failure_metadata.get(reasoner_id),
+                public_environment_state=public_environment_state,
             )
             reasoner_revision = await self._invoke(
                 reasoner_revision_request,
@@ -1522,6 +1583,7 @@ class AgentRuntime:
                 ),
                 communication_condition=communication_condition,
                 continuation_metadata=failure_metadata.get(reasoner_id),
+                public_environment_state=public_environment_state,
             )
             reasoner_draft = await self._invoke(
                 reasoner_draft_request,
@@ -1575,6 +1637,7 @@ class AgentRuntime:
                 ),
                 communication_condition=communication_condition,
                 continuation_metadata=failure_metadata.get(verifier_id),
+                public_environment_state=public_environment_state,
             )
             verifier_initial = await self._invoke(
                 verifier_initial_request,
@@ -1618,6 +1681,7 @@ class AgentRuntime:
                 ),
                 communication_condition=communication_condition,
                 continuation_metadata=failure_metadata.get(reasoner_id),
+                public_environment_state=public_environment_state,
             )
             reasoner_revision = await self._invoke(
                 reasoner_revision_request,
@@ -1661,6 +1725,7 @@ class AgentRuntime:
                 ),
                 communication_condition=communication_condition,
                 continuation_metadata=failure_metadata.get(verifier_id),
+                public_environment_state=public_environment_state,
             )
             verifier_revision = await self._invoke(
                 verifier_revision_request,
@@ -1689,6 +1754,7 @@ class AgentRuntime:
             is_format_predecessor=left_id in format_predecessor_ids,
             communication_condition=communication_condition,
             continuation_metadata=failure_metadata.get(left_id),
+            public_environment_state=public_environment_state,
         )
         right_draft_request = self._request(
             agent=nodes[right_id],
@@ -1702,6 +1768,7 @@ class AgentRuntime:
             is_format_predecessor=right_id in format_predecessor_ids,
             communication_condition=communication_condition,
             continuation_metadata=failure_metadata.get(right_id),
+            public_environment_state=public_environment_state,
         )
         left_draft, right_draft = await _gather_pair(
             self._invoke(left_draft_request, calls, cancelled_failure_records),
@@ -1735,6 +1802,7 @@ class AgentRuntime:
             is_format_predecessor=left_id in format_predecessor_ids,
             communication_condition=communication_condition,
             continuation_metadata=failure_metadata.get(left_id),
+            public_environment_state=public_environment_state,
         )
         right_revision_request = self._request(
             agent=nodes[right_id],
@@ -1763,6 +1831,7 @@ class AgentRuntime:
             is_format_predecessor=right_id in format_predecessor_ids,
             communication_condition=communication_condition,
             continuation_metadata=failure_metadata.get(right_id),
+            public_environment_state=public_environment_state,
         )
         left_revision, right_revision = await _gather_pair(
             self._invoke(left_revision_request, calls, cancelled_failure_records),
@@ -1853,6 +1922,7 @@ class AgentRuntime:
         is_format_predecessor: bool,
         communication_condition: CommunicationCondition,
         continuation_metadata: Optional[Mapping[str, object]] = None,
+        public_environment_state: Optional[Mapping[str, object]] = None,
     ) -> AgentRequest:
         model = self.model_registry.require_model(agent.model_id)
         provider = self.model_registry.provider_for(agent.model_id)
@@ -1962,6 +2032,7 @@ class AgentRuntime:
             action_history=action_history,
             prior_tool_receipts=prior_tool_receipts,
             continuation_source_agent_id=continuation_source_agent_id,
+            public_environment_state=public_environment_state,
         )
 
     def _response_output_metadata(
@@ -1993,6 +2064,19 @@ class AgentRuntime:
             "allowed_tools": list(request.agent.allowed_tools),
         }
         metadata["raw_output"] = response.text
+        if request.public_environment_state is not None:
+            state = request.public_environment_state
+            metadata["input_environment_episode_id"] = state.get(
+                "environment_episode_id"
+            )
+            metadata["input_environment_revision"] = state.get(
+                "environment_revision"
+            )
+            metadata["input_environment_turns_used"] = state.get("turns_used")
+            if not request.agent.allowed_tools:
+                metadata["environment_revision"] = state.get(
+                    "environment_revision"
+                )
         inputs = list(request.upstream)
         if request.peer_draft is not None:
             inputs.append(request.peer_draft)
