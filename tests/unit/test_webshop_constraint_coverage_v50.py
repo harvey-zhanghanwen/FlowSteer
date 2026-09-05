@@ -210,11 +210,15 @@ class WebShopConstraintCoverageV50Tests(unittest.IsolatedAsyncioTestCase):
         )
         session = RAGENEnvironmentSession(adapter, "webshop", {}, "Buy a shirt", {})
         _, _, _, info = session.step("click[REGULAR]")
-        self.assertEqual({"group": "fit", "value": "Regular"}, info["public_option_assignment"])
+        self.assertEqual({}, info)
+        self.assertEqual(
+            {"group": "fit", "value": "Regular"},
+            session.public_option_assignment,
+        )
         receipt = {
             "state_advanced": True,
             "action": "click[REGULAR]",
-            "public_option_assignment": info["public_option_assignment"],
+            "public_option_assignment": session.public_option_assignment,
         }
         self.assertEqual(
             {"fit": "Regular"},
@@ -222,6 +226,57 @@ class WebShopConstraintCoverageV50Tests(unittest.IsolatedAsyncioTestCase):
                 (receipt,), {"fit": ("Regular",), "length": ("Regular",)}
             ),
         )
+
+    async def test_public_radio_metadata_never_changes_native_replay_info(self) -> None:
+        native = SimpleNamespace(text_to_clickable={
+            "regular": {"type": "radio", "name": "Fit", "value": "Regular"},
+            "description": {"type": "button"},
+        })
+        native_info = {"public_transition": "observed", "details": {"revision": 1}}
+        adapter = SimpleNamespace(
+            _env=SimpleNamespace(env=native),
+            available_actions={
+                "has_search_bar": False,
+                "clickables": ["Regular", "Description"],
+            },
+            reset=lambda *args, **kwargs: self.product_page,
+            step=lambda action: (self.product_page, 0, False, native_info),
+        )
+        session = RAGENEnvironmentSession(adapter, "webshop", {}, "Buy a shirt", {})
+        gateway = _ScriptedGateway([
+            _structured_action("click", {"target": "Regular"}),
+            _structured_action("click", {"target": "Description"}),
+        ])
+        environment = _resources(session, gateway, max_turns=4)
+        request = _request("Buy a shirt", run_id="radio-info-replay-boundary")
+
+        first = await environment.execution_adapter.execute(request)
+        self.assertEqual(
+            {"group": "fit", "value": "Regular"},
+            session.public_option_assignment,
+        )
+        self.assertEqual(
+            {"group": "fit", "value": "Regular"},
+            first.metadata["environment_receipts"][-1]["public_option_assignment"],
+        )
+
+        second = await environment.execution_adapter.execute(request)
+
+        self.assertIsNone(session.public_option_assignment)
+        self.assertIsNone(
+            second.metadata["environment_receipts"][-1].get("public_option_assignment")
+        )
+        expected_info = {"public_transition": "observed", "details": {"revision": 1}}
+        self.assertEqual(expected_info, native_info)
+        for response in (first, second):
+            with self.subTest(action=response.metadata["environment_receipts"][-1]["action"]):
+                self.assertEqual(
+                    expected_info, response.metadata["evaluator_environment_trace"][-1]["info"]
+                )
+                self.assertNotIn(
+                    "public_option_assignment",
+                    response.metadata["evaluator_environment_trace"][-1]["info"],
+                )
 
     def test_only_provably_empty_next_page_is_filtered(self) -> None:
         native_actions = (

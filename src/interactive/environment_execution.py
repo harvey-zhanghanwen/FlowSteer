@@ -113,6 +113,7 @@ class _EnvironmentTransition:
     reward: object
     terminal: bool
     info: Mapping[str, object]
+    public_option_assignment: Optional[Mapping[str, str]] = None
 
 
 @dataclass(slots=True)
@@ -331,6 +332,7 @@ class EnvironmentToolBackend:
             reward=reward,
             terminal=terminal,
             info=MappingProxyType(dict(info)),
+            public_option_assignment=getattr(episode.session, "public_option_assignment", None),
         )
         return ToolResult(
             {
@@ -361,6 +363,7 @@ class RAGENEnvironmentSession:
     question: str
     extra: Mapping[str, object]
     reset_seed: Optional[int] = None
+    public_option_assignment: Optional[Mapping[str, str]] = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.env_type, str) or not self.env_type.strip():
@@ -391,6 +394,7 @@ class RAGENEnvironmentSession:
         # Match task_evaluator's WebShop boundary: imports and the dependency
         # check may mutate global RNG, so seed immediately before SimServer is
         # constructed by RAGENAdapter.reset.
+        self.public_option_assignment = None
         if self.reset_seed is not None:
             random.seed(self.reset_seed)
         return str(
@@ -406,6 +410,7 @@ class RAGENEnvironmentSession:
         # Thin WebShop adaptation: the public radio element carries the group
         # which flattened observation text loses when display values repeat.
         assignment: Optional[dict[str, str]] = None
+        self.public_option_assignment = None
         if self.env_type.casefold() == "webshop":
             match = re.fullmatch(r"click\[(.*)\]", action, re.IGNORECASE)
             native = getattr(getattr(self.adapter, "_env", None), "env", None)
@@ -425,8 +430,9 @@ class RAGENEnvironmentSession:
             raise EnvironmentExecutionError("environment terminal flag must be boolean")
         if not isinstance(info, Mapping):
             raise EnvironmentExecutionError("environment info must be a mapping")
-        if assignment is not None:
-            info = {**info, "public_option_assignment": assignment}
+        # Public projection is not native evaluator info. Keep the strict
+        # replay payload byte-for-field equivalent to RAGENAdapter.step.
+        self.public_option_assignment = assignment
         return str(observation), reward, terminal, info
 
 
@@ -2945,8 +2951,8 @@ class EnvironmentExecutionAdapter:
                 "observation_status": observation_status,
                 "public_state": public_state,
                 **(
-                    {"public_option_assignment": dict(transition.info["public_option_assignment"])}
-                    if isinstance(transition.info.get("public_option_assignment"), Mapping)
+                    {"public_option_assignment": dict(transition.public_option_assignment)}
+                    if isinstance(transition.public_option_assignment, Mapping)
                     else {}
                 ),
             }

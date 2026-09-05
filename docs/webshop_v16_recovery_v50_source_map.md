@@ -157,7 +157,7 @@ prepared output must remain explicitly identified as incomplete.
   implemented as a new oracle: `task_satisfaction=unverified` is deliberate,
   and model reasoning must use public same-product evidence.
 
-Targeted verification on 2026-09-05: **46 tests passed, 17 subtests passed**
+Targeted verification on 2026-09-05: **47 tests passed, 19 subtests passed**
 across `test_webshop_constraint_coverage_v50.py`,
 `test_environment_execution.py`, and
 `test_webshop_stateful_action_policy_v15.py`. This includes genuine native
@@ -169,3 +169,23 @@ Evaluation serving is isolated on physical **GPU4 / port8016**, keeping
 v16's full 32768-token server context, 8192-token Executor registry limit,
 concurrency 1 and non-thinking model condition. Other services are untouched.
 No adapter is loaded or updated; LoRA server capability is not training.
+
+## Canary-discovered receipt serialization correction
+
+The two-task canary exposed one native evaluator replay mismatch: the initial
+implementation placed `public_option_assignment` inside native `info`, whose
+fields are compared exactly on replay. The correction stores it separately on
+the session/transition and public receipt. Native `info` is now unchanged. This
+does not change Agent/Director inputs or any sampled action; it corrects the
+evaluator transport boundary, not the evaluator or its success criterion.
+
+`scripts/replay_webshop_public_option_receipt.py` is an explicitly bounded
+artifact migration using the existing `_retry_terminal_evaluator` and
+EvidenceStore append protocol. It takes the complete frozen runtime trace,
+requires each moved field to match the independently saved public receipt,
+and replays **every** action through the unmodified native evaluator. Only the
+known project-added field is removed from native `info`; observations, actions,
+rewards and all original native fields remain unchanged and strictly checked.
+The original invalid event is retained. No generation or trajectory resampling
+occurs. The invalid evaluator prefix is not treated as a complete episode.
+Newly collected trajectories do not require this migration.
