@@ -208,7 +208,7 @@ Director round6 修改原 Agent contract，重申18oz、sugar-free与价格条�
 
 ## 7. 备份、资源与下一步边界
 
-- 架构提交 `782617d`，本报告和必要指标另做评测阶段提交；v16/v50分支和原始结果保留。
+- 架构提交 `782617d`，完整评测及诊断提交 `603d1cd`；v16/v50分支和原始结果保留。
 - 源码增量 bundle：
   `/ssd1/iclr/1/backups/flowsteer/webshop-v51-architecture-20260905.bundle`，
   基础完整包为 `webshop-v16-based-v50-complete-20260905.bundle`。
@@ -216,8 +216,10 @@ Director round6 修改原 Agent contract，重申18oz、sugar-free与价格条�
   `webshop-v51-evaluation-20260905.tar.gz` 完整运行档案；恢复增量需先有上述v50完整基础。
 - 大型 trajectory、所有实际输入输出、环境 receipts 保留于 artifacts 并归档，不直接塞入 Git。
   模型权重、商品库和外部环境依赖不重复打包。
-- GitHub 现有非交互认证此前不可用；远程 push 状态以本轮收尾实际命令为准，
-  未成功前不称“已备份到 GitHub”。无凭据写入本报告或提交内容。
+- GitHub 本轮实际执行 `git push origin HEAD`，因现有非交互认证不可用失败：
+  `could not read Username for 'https://github.com': terminal prompts disabled`。
+  **未成功远程备份**；需要恢复现有仓库写入认证后推送本分支。不新建其他仓库，
+  无凭据写入本报告或提交内容。源码和完整结果另有下述本地可恢复备份。
 - 本任务 GPU4/8016 SGLang 在完整评测完成后已终止，监听端口和PID均已消失；其他服务未动。
   所有本轮有界子任务已完成，不保留冗余监控。
 - 不自动训练、不进入其他数据集、不重采旧题、不因分数临时强制多 Agent。
