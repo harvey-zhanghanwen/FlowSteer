@@ -399,7 +399,7 @@ class WebShopStatefulActionPolicyV15Tests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(purchase["price_evidence_missing"])
                 self.assertIsNone(summary.get("current_product"))
 
-    async def test_normalized_nonzero_search_repeat_is_typed_rejection(self) -> None:
+    async def test_query_punctuation_is_preserved_for_native_search(self) -> None:
         first_search = _structured_action(
             "search", {"query": "Blue Bottle"}
         )
@@ -418,25 +418,16 @@ class WebShopStatefulActionPolicyV15Tests(unittest.IsolatedAsyncioTestCase):
         third = await environment.execution_adapter.execute(request)
 
         self.assertEqual(
-            ["search[Blue Bottle]", "click[Back to Search]"],
+            ["search[Blue Bottle]", "click[Back to Search]", "search[BLUE---bottle]"],
             session.actions,
         )
         self.assertEqual(1, first.metadata["environment_current_state"]["environment_revision"])
         self.assertEqual(2, second.metadata["environment_current_state"]["environment_revision"])
-        rejected = third.metadata["environment_receipts"][-1]
-        self.assertEqual("precondition_failed", rejected["observation_status"])
-        self.assertEqual(
-            "repeated_search_query",
-            rejected["precondition_failure_reason"],
-        )
-        self.assertFalse(rejected["state_advanced"])
-        self.assertEqual(2, third.metadata["environment_current_state"]["environment_revision"])
-        self.assertIn(
-            "repeated_search_query",
-            third.metadata["environment_current_state"]["public_progress"][
-                "no_progress"
-            ]["reasons"],
-        )
+        executed = third.metadata["environment_receipts"][-1]
+        self.assertNotEqual("precondition_failed", executed["observation_status"])
+        self.assertTrue(executed["state_advanced"])
+        self.assertEqual(3, third.metadata["environment_current_state"]["environment_revision"])
+        self.assertEqual("search[BLUE---bottle]", third.metadata["evaluator_environment_trace"][-1]["action"])
 
     def test_public_attribute_binding_covers_color_flavor_and_units(self) -> None:
         cases = (

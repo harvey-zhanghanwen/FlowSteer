@@ -1613,8 +1613,7 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Do not repeat an unchanged option", gateway.requests[-1].problem)
         self.assertIn("Apply one ReAct control cycle", gateway.requests[-1].problem)
         self.assertIn(
-            "Do not repeat a previously executed Action when its public "
-            "preconditions have not changed",
+            "Distinguish legal navigation recovery from an unchanged action cycle",
             gateway.requests[-1].problem,
         )
         self.assertIn(

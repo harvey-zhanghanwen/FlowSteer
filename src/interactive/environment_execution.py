@@ -403,6 +403,18 @@ class RAGENEnvironmentSession:
         )
 
     def step(self, action: str) -> tuple[str, object, bool, Mapping[str, object]]:
+        # Thin WebShop adaptation: the public radio element carries the group
+        # which flattened observation text loses when display values repeat.
+        assignment: Optional[dict[str, str]] = None
+        if self.env_type.casefold() == "webshop":
+            match = re.fullmatch(r"click\[(.*)\]", action, re.IGNORECASE)
+            native = getattr(getattr(self.adapter, "_env", None), "env", None)
+            clickables = getattr(native, "text_to_clickable", {})
+            target = clickables.get(match.group(1).lower()) if match and isinstance(clickables, Mapping) else None
+            if hasattr(target, "get") and target.get("type") == "radio":
+                group, value = target.get("name"), target.get("value")
+                if isinstance(group, str) and isinstance(value, str):
+                    assignment = {"group": group.lower(), "value": value}
         transition = self.adapter.step(action)  # type: ignore[attr-defined]
         if not isinstance(transition, tuple) or len(transition) != 4:
             raise EnvironmentExecutionError(
@@ -413,6 +425,8 @@ class RAGENEnvironmentSession:
             raise EnvironmentExecutionError("environment terminal flag must be boolean")
         if not isinstance(info, Mapping):
             raise EnvironmentExecutionError("environment info must be a mapping")
+        if assignment is not None:
+            info = {**info, "public_option_assignment": assignment}
         return str(observation), reward, terminal, info
 
 
@@ -1023,6 +1037,18 @@ def _webshop_clicked_option_assignments(
         if value_lower in _WEBSHOP_NAV_CLICKABLES:
             continue
         candidates = value_groups.get(_webshop_norm(value), ())
+        assignment = receipt.get("public_option_assignment")
+        if isinstance(assignment, Mapping):
+            bound = [
+                (group, canonical_value)
+                for group, canonical_value in candidates
+                if _webshop_norm(group) == _webshop_norm(str(assignment.get("group", "")))
+                and _webshop_norm(canonical_value) == _webshop_norm(str(assignment.get("value", "")))
+            ]
+            if len(bound) == 1:
+                group, canonical_value = bound[0]
+                selected.setdefault(group, canonical_value)
+                continue
         # When the same display value belongs to multiple option groups, the
         # flattened observation does not expose the HTML option name.  Retain
         # the native action instead of guessing an entity--attribute binding.
@@ -1232,6 +1258,11 @@ def _webshop_model_visible_actions(
     for group, values in groups.items():
         for value in values:
             option_value_groups.setdefault(_webshop_norm(value), set()).add(group)
+    page = re.search(r"\bPage\s+([0-9]+)\b", str(observation), re.IGNORECASE)
+    total = re.search(r"\bTotal\s+results\s*:\s*([0-9]+)\b", str(observation), re.IGNORECASE)
+    # Native WebShop PRODUCT_WINDOW=10. The template still renders Next at
+    # the final page; exclude only a provably empty page, not candidate choice.
+    last_page = bool(page and total and int(page.group(1)) * 10 >= int(total.group(1)))
     visible: list[str] = []
     for action in native_actions:
         match = re.fullmatch(r"click\[(.*)\]", action, flags=re.IGNORECASE)
@@ -1239,6 +1270,8 @@ def _webshop_model_visible_actions(
             continue
         if match is not None:
             normalized_target = _webshop_norm(match.group(1))
+            if normalized_target == "next" and last_page:
+                continue
             candidate_groups = option_value_groups.get(normalized_target, set())
             if len(candidate_groups) == 1:
                 candidate_group = next(iter(candidate_groups))
@@ -1568,6 +1601,13 @@ def _webshop_purchase_preconditions(
         "price_evidence_missing": price_evidence_missing,
         "price_exceeds_limit": price_exceeds_limit,
         "minimum_actions_to_purchase": minimum_actions_to_purchase,
+        # These deterministic checks are deliberately partial. Neither an
+        # absent option target nor a passing price check proves the complete
+        # natural-language task. Preserve the full semantic scope for Agents.
+        "validation_scope": "visible_option_bindings_and_price_only",
+        "task_requirement_coverage": "partial",
+        "task_satisfaction": "unverified",
+        "original_task_instruction": task_instruction,
         "source": "public_task_and_observation",
     }
 
@@ -1575,7 +1615,7 @@ def _webshop_purchase_preconditions(
 def _webshop_zero_result_queries(
     receipts: Sequence[Mapping[str, object]],
 ) -> tuple[str, ...]:
-    """Return normalized exact queries with an observed zero-result page."""
+    """Return native lower-case queries with an observed zero-result page."""
 
     queries: list[str] = []
     seen: set[str] = set()
@@ -1594,7 +1634,7 @@ def _webshop_zero_result_queries(
         )
         if match is None or total is None or int(total.group(1)) != 0:
             continue
-        query = _webshop_norm(match.group(1))
+        query = match.group(1).strip().lower()
         if query and query not in seen:
             seen.add(query)
             queries.append(query)
@@ -1604,7 +1644,7 @@ def _webshop_zero_result_queries(
 def _webshop_search_queries(
     receipts: Sequence[Mapping[str, object]],
 ) -> tuple[str, ...]:
-    """Return normalized queries already executed in this deterministic episode."""
+    """Retain query punctuation, matching WebShop's native lower-casing."""
 
     queries: list[str] = []
     seen: set[str] = set()
@@ -1617,7 +1657,7 @@ def _webshop_search_queries(
         match = re.fullmatch(r"search\[(.*)\]", action, flags=re.IGNORECASE)
         if match is None:
             continue
-        query = _webshop_norm(match.group(1))
+        query = match.group(1).strip().lower()
         if query and query not in seen:
             seen.add(query)
             queries.append(query)
@@ -1652,13 +1692,9 @@ def _webshop_action_precondition_failure(
 ) -> Optional[str]:
     """Validate one sampled action against public state-dependent constraints."""
 
-    search = re.fullmatch(r"search\[(.*)\]", action, flags=re.IGNORECASE)
-    if search is not None:
-        query = _webshop_norm(search.group(1))
-        if query in _webshop_zero_result_queries(receipts):
-            return "known_zero_result_query"
-        if query in _webshop_search_queries(receipts):
-            return "repeated_search_query"
+    # SkillFlow/WebShop execute every native legal search, including recovery
+    # after Back to Search. Repetition is observable feedback, not an invented
+    # invalid action which spends budget without returning actual results.
     if _webshop_repeats_unchanged_click(
         action=action,
         observation=observation,
@@ -1918,6 +1954,7 @@ def _public_transition_summary(
                 "opened_asins": opened_asins[-8:],
                 "recent_click_targets": click_targets[-8:],
                 "latest_search_outcome": latest_search_outcome,
+                "original_task_instruction": task_instruction,
                 "purchase_preconditions": purchase_preconditions,
                 "candidate_history": _webshop_candidate_history(receipts),
                 "current_product": (
@@ -2070,6 +2107,15 @@ def _public_state_feedback(
                 opened.append(asin.group(1).lower())
         if searches:
             lines.append("Recent search queries: " + " | ".join(searches[-3:]) + ".")
+            if len(searches) > len({query.lower() for query in searches}):
+                lines.append(
+                    "Search history contains repeated queries. Reusing a query "
+                    "after Back is legal and restores its result list, but "
+                    "uses another action. Compare the observed result set and "
+                    "visited candidates before repeating it. On a product or "
+                    "detail page, < Prev preserves the current navigation path; "
+                    "Back to Search resets the selected product and options."
+                )
         if opened:
             lines.append("Opened candidate ASINs: " + ", ".join(opened[-8:]) + ".")
         latest_search_outcome = progress.get("latest_search_outcome")
@@ -2082,7 +2128,7 @@ def _public_state_feedback(
         zero_result_queries = progress.get("zero_result_queries")
         if isinstance(zero_result_queries, (list, tuple)) and zero_result_queries:
             lines.append(
-                "Observed zero-result queries (do not repeat exactly): "
+                "Previously observed zero-result queries: "
                 + " | ".join(str(value) for value in zero_result_queries[-6:])
                 + "."
             )
@@ -2168,6 +2214,14 @@ def _public_state_feedback(
                 )
         purchase = progress.get("purchase_preconditions")
         if isinstance(purchase, Mapping):
+            lines.append(
+                "Purchase check scope: visible option bindings and price only "
+                "(partial). Complete task satisfaction remains unverified. "
+                "No extracted constraint is not evidence of no requirement. "
+                "Compare every requirement in the original instruction with "
+                "the same product's public evidence; do not substitute the "
+                "partial check or an unsupported Agent assertion for that check."
+            )
             minimum_actions = purchase.get("minimum_actions_to_purchase")
             if isinstance(minimum_actions, int):
                 lines.append(
@@ -2289,12 +2343,23 @@ def _action_prompt(
         "Apply one ReAct control cycle: condition the next Action on the "
         "original task, current Agent contract and preceding Observation. "
         "After each Observation, update the next Action from public state. "
-        "Do not repeat a previously executed Action when its public "
-        "preconditions have not changed. Treat a failed Tool call as public "
+        "Distinguish legal navigation recovery from an unchanged action cycle. "
+        "Treat a failed Tool call as public "
         "evidence, revise the next Action, and preserve the current Agent and "
         "episode. Emit only the Action; the Runtime returns its Observation "
         "to the Director before another Canvas decision.\n\n"
-        f"{format_instruction}"
+        + (
+            "For WebShop, preserve the entire original instruction: product "
+            "identity, attributes, compatibility, variant, quantity and price. "
+            "Before Buy Now, align each requirement with explicit same-product "
+            "evidence. An unmentioned or unverified requirement is not satisfied. "
+            "Use Description/Features or another admissible action when evidence "
+            "is missing; no fixed inspection sequence is required. Agent "
+            "contracts cannot relax the original scope. Remaining budget is a "
+            "planning constraint, not evidence that a product meets the goal.\n\n"
+            if task_family.lower() == "webshop" else ""
+        )
+        + f"{format_instruction}"
         + (
             ""
             if task_family.lower() == "webshop" and structured_actions
@@ -2879,6 +2944,11 @@ class EnvironmentExecutionAdapter:
                 "state_advanced": True,
                 "observation_status": observation_status,
                 "public_state": public_state,
+                **(
+                    {"public_option_assignment": dict(transition.info["public_option_assignment"])}
+                    if isinstance(transition.info.get("public_option_assignment"), Mapping)
+                    else {}
+                ),
             }
         )
         state.evaluator_trace.append(
