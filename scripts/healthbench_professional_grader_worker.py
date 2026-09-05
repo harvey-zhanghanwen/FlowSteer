@@ -169,6 +169,35 @@ def _provider_error(error: BaseException, *, call_index: int) -> dict[str, Any]:
     }
 
 
+def _retryable_provider_error(error: BaseException) -> bool:
+    """Keep SDK-style transient retries, excluding exhausted account quota."""
+
+    # The SDK exposes structured codes both on the exception and in its body;
+    # compatible gateways may retain the outer ``error`` envelope and a
+    # namespace such as ``local:insufficient_quota``. Do not infer quota from
+    # free-form message text, which may also describe transient rate limits.
+    codes = [getattr(error, "code", None), getattr(error, "type", None)]
+    body = getattr(error, "body", None)
+    if isinstance(body, Mapping):
+        codes.extend((body.get("code"), body.get("type")))
+        nested = body.get("error")
+        if isinstance(nested, Mapping):
+            codes.extend((nested.get("code"), nested.get("type")))
+    if any(
+        isinstance(code, str) and code.rsplit(":", 1)[-1] == "insufficient_quota"
+        for code in codes
+    ):
+        return False
+
+    status_code = getattr(error, "status_code", None)
+    if type(status_code) is int:
+        # These are the default HTTP retry classes in OpenAI's _should_retry.
+        return status_code in {408, 409, 429} or status_code >= 500
+    # Preserve the existing bounded retry for connection/timeout exceptions
+    # and providers that do not supply an HTTP status.
+    return True
+
+
 @dataclass(slots=True)
 class _BoundedResponsesSampler:
     """Official SamplerBase-compatible GPT-5.4 low Responses API adapter."""
@@ -211,9 +240,8 @@ class _BoundedResponsesSampler:
                 }
             )
 
-        # The official simple-evals ChatCompletionSampler retries provider
-        # exceptions with exponential backoff.  Preserve that source behavior
-        # but bound it and retain every physical attempt in the receipt.
+        # Bound transient provider retries and retain every physical attempt
+        # in the receipt. Permanent HTTP/account failures must fail promptly.
         for provider_attempt in range(1, self.max_provider_attempts + 1):
             with self.lock:
                 self.calls += 1
@@ -267,7 +295,10 @@ class _BoundedResponsesSampler:
                             "token_usage": _usage(None),
                         }
                     )
-                if provider_attempt >= self.max_provider_attempts:
+                if (
+                    provider_attempt >= self.max_provider_attempts
+                    or not _retryable_provider_error(error)
+                ):
                     raise
                 time.sleep(min(2 ** (provider_attempt - 1), 4))
         raise RuntimeError("HealthBench grader provider retry loop exhausted")

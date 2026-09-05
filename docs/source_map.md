@@ -839,3 +839,25 @@ GRPO, LoRA, MACE, Bayesian and Skill paths disabled. The official evaluator
 preflight currently fails with provider `403 insufficient_quota`; therefore no
 v2.32 model, Tool, Director or AgentGraph rollout has been started and no score
 is claimed.
+
+### 2026-09-05: HealthBench grader recovery and full525 replay
+
+- `scripts/healthbench_professional_grader_worker.py::_BoundedResponsesSampler`
+  continues to call the pinned simple-evals `HealthBenchEval.grade_sample`
+  through the existing private worker. The HTTP retry classification follows
+  the installed OpenAI SDK `BaseClient._should_retry`: retry transient
+  408/409/429/5xx failures within the existing bound, but do not retry permanent
+  client errors. Structured provider `insufficient_quota` errors stop without
+  repeated requests even when delivered as HTTP 429. This is a necessary
+  provider-transport adaptation, not a change to rubric grading, aggregation,
+  grader model, AgentGraph, or model prompts.
+- The v2.32 full525 config reuses v2.27's ordered public-test task panel, seed,
+  and `sampling_schedule_purpose` through the existing FlowSteer/SkillFlow
+  sampling path. The new condition and output directory remain separate.
+  Catalog v7 selects Executor protocol v5 for both Direct and AgentGraph, so
+  the new Direct comparator cannot reuse historical v2.27 predictions.
+- The standalone quota diagnostic reuses
+  `_attach_healthbench_reference_judge` and `_run_evaluator_preflight` with the
+  existing synthetic fixture, without creating a model backend. Its one-call
+  retry bound applies only to the diagnostic; the saved evaluation's transient
+  retry bound remains three.

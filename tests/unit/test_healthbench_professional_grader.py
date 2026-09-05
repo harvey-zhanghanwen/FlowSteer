@@ -7,6 +7,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 _MODULE_PATH = (
     Path(__file__).resolve().parents[2]
@@ -376,14 +377,126 @@ class BoundedResponsesSamplerTests(unittest.TestCase):
             max_calls=6,
             max_provider_attempts=3,
         )
-        response = sampler([{"role": "user", "content": "rubric"}])
+        with patch.object(_WORKER.time, "sleep") as sleep:
+            response = sampler([{"role": "user", "content": "rubric"}])
 
         self.assertIn("criteria_met", response.response_text)
+        sleep.assert_called_once_with(1)
         self.assertEqual(2, sampler.calls)
         self.assertEqual(1, len(sampler.provider_errors))
         self.assertEqual("provider_error", sampler.api_call_receipts[0]["status"])
         self.assertEqual("success", sampler.api_call_receipts[1]["status"])
         self.assertEqual(2, sampler.api_call_receipts[1]["provider_attempt"])
+
+    def _provider_sampler(self, error: Exception, *, recover: bool = True):
+        calls = 0
+
+        class Responses:
+            def create(self, **kwargs):
+                nonlocal calls
+                del kwargs
+                calls += 1
+                if calls == 1 or not recover:
+                    raise error
+                return SimpleNamespace(
+                    output_text='{"explanation":"recovered","criteria_met":true}',
+                    usage=None,
+                )
+
+        return _WORKER._BoundedResponsesSampler(
+            client=SimpleNamespace(responses=Responses()),
+            sampler_response_type=SimpleNamespace,
+            max_parse_attempts=2,
+            max_calls=6,
+            max_provider_attempts=3,
+        )
+
+    def test_permanent_http_errors_fail_once_with_receipt(self) -> None:
+        for status_code in (400, 401, 402, 403, 404, 422):
+            with self.subTest(status_code=status_code):
+                error = RuntimeError("permanent provider error")
+                error.status_code = status_code
+                sampler = self._provider_sampler(error)
+                with patch.object(_WORKER.time, "sleep") as sleep:
+                    with self.assertRaises(RuntimeError) as raised:
+                        sampler([{"role": "user", "content": "rubric"}])
+                self.assertIs(error, raised.exception)
+                sleep.assert_not_called()
+                self.assertEqual(1, sampler.calls)
+                self.assertEqual(1, len(sampler.provider_errors))
+                self.assertEqual(
+                    status_code, sampler.provider_errors[0]["status_code"]
+                )
+                self.assertEqual(1, len(sampler.api_call_receipts))
+                self.assertEqual(
+                    "provider_error", sampler.api_call_receipts[0]["status"]
+                )
+
+    def test_structured_insufficient_quota_is_not_transient_429(self) -> None:
+        cases = (
+            {"code": "insufficient_quota"},
+            {"type": "insufficient_quota"},
+            {"body": {"code": "insufficient_quota"}},
+            {"body": {"type": "insufficient_quota"}},
+            {"body": {"error": {"code": "local:insufficient_quota"}}},
+            {"body": {"error": {"type": "insufficient_quota"}}},
+        )
+        for attributes in cases:
+            with self.subTest(attributes=attributes):
+                error = RuntimeError("provider rejected request")
+                error.status_code = 429
+                for name, value in attributes.items():
+                    setattr(error, name, value)
+                sampler = self._provider_sampler(error)
+                with patch.object(_WORKER.time, "sleep") as sleep:
+                    with self.assertRaises(RuntimeError) as raised:
+                        sampler([{"role": "user", "content": "rubric"}])
+                self.assertIs(error, raised.exception)
+                sleep.assert_not_called()
+                self.assertEqual(1, sampler.calls)
+                self.assertEqual(1, len(sampler.provider_errors))
+                self.assertEqual(1, len(sampler.api_call_receipts))
+
+    def test_transient_http_and_transport_errors_still_retry(self) -> None:
+        errors = [ConnectionError("connection interrupted"), TimeoutError("timeout")]
+        for status_code in (408, 409, 429, 500, 502, 503, 504):
+            error = RuntimeError("temporary rate quota limit")
+            error.status_code = status_code
+            error.body = {"error": {"code": "rate_limit_exceeded"}}
+            errors.append(error)
+        for error in errors:
+            with self.subTest(
+                error_type=type(error).__name__,
+                status_code=getattr(error, "status_code", None),
+            ):
+                sampler = self._provider_sampler(error)
+                with patch.object(_WORKER.time, "sleep") as sleep:
+                    response = sampler([{"role": "user", "content": "rubric"}])
+                self.assertIn("criteria_met", response.response_text)
+                sleep.assert_called_once_with(1)
+                self.assertEqual(2, sampler.calls)
+                self.assertEqual(1, len(sampler.provider_errors))
+                self.assertEqual(
+                    ["provider_error", "success"],
+                    [receipt["status"] for receipt in sampler.api_call_receipts],
+                )
+
+    def test_transient_provider_retries_remain_bounded(self) -> None:
+        error = RuntimeError("temporarily unavailable")
+        error.status_code = 503
+        sampler = self._provider_sampler(error, recover=False)
+        with patch.object(_WORKER.time, "sleep") as sleep:
+            with self.assertRaises(RuntimeError) as raised:
+                sampler([{"role": "user", "content": "rubric"}])
+        self.assertIs(error, raised.exception)
+        self.assertEqual([((1,),), ((2,),)], sleep.call_args_list)
+        self.assertEqual(3, sampler.calls)
+        self.assertEqual(3, len(sampler.provider_errors))
+        self.assertEqual(3, len(sampler.api_call_receipts))
+        self.assertEqual(
+            [1, 2, 3],
+            [receipt["provider_attempt"] for receipt in sampler.api_call_receipts],
+        )
 
 
 if __name__ == "__main__":

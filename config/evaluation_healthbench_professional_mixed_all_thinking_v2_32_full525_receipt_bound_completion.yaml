@@ -1,7 +1,9 @@
 # HealthBench Professional full-525 formal replay candidate. It applies the
 # topology-neutral v2.32 architecture to the same official public-test panel,
-# reference evaluator, Direct condition, seed and generation settings used by
-# the v2.27 full-525 run. No medical role, Agent count, relation, Output identity,
+# reference evaluator, seed and generation budgets used by the v2.27 full-525
+# run. The v7 catalog applies Executor protocol v5 to Direct and AgentGraph;
+# Direct is therefore a new comparator and must not reuse v2.27 predictions.
+# No medical role, Agent count, relation, Output identity,
 # or topology is prescribed. Training, GRPO, LoRA, MACE, Bayesian updates and
 # Skill evolution remain disabled.
 schema_version: flowsteer.agentgraph.config.v1
@@ -13,7 +15,7 @@ experiment:
   training_enabled: false
   seed: 20260825
   condition_id: healthbench_professional_mixed_all_thinking_v2_32_full525_receipt_bound_completion
-  sampling_schedule_purpose: healthbench_professional_public_test_full525_v2_32
+  sampling_schedule_purpose: healthbench_professional_public_test_full525_v2_27
   catalog_order_namespace: healthbench_professional_mixed_all_thinking_v2_6_heldout20_baseline
   prompt_version: agentgraph.director.minimal-neutral.v18
   tool_version: skillflow.medrag+ncbi-pubmed-eutils-react.receipt-bound-completion.v4

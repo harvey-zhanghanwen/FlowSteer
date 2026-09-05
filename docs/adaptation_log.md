@@ -1479,3 +1479,37 @@ change was made during profile selection.
 - No training, backward, optimizer update, GRPO, LoRA, MACE, Bayesian update,
   Skill injection/evolution, fixed medical role inventory, or fixed topology
   was introduced.
+
+## 2026-09-05: v2.32 full525 retry preparation
+
+- The user requested recovery and the complete 525-task rerun. Reused the
+  existing v2.32 full525 profile and preserved the prepared 525 task records.
+- A standalone reference-grader preflight at 09:50 +08:00 made one synthetic
+  request to the configured VectorEngine `gpt-5.4-2026-03-05` endpoint and
+  returned `403 local:insufficient_quota`. Receipt:
+  `artifacts/healthbench_professional_mixed_all_thinking_v2_32_full525_receipt_bound_completion/evaluation/grader_connectivity_preflight_20260905.json`.
+  No Direct, Director, Agent, Tool or benchmark scoring call followed it.
+- Corrected the worker's retry handling for permanent provider errors and
+  explicit exhausted quota. Transient failures retain bounded retries.
+  Official rubric prompts, grading and aggregation are unchanged.
+  All 13 tests in `tests/unit/test_healthbench_professional_grader.py` passed,
+  including permanent errors, structured quota errors, transient recovery,
+  and exhausted transient retry budgets; these checks made no API calls.
+- Corrected the full525 sampling namespace to retain v2.27's per-task sampling
+  coordinates. The previous candidate changed this field while claiming to
+  retain the same generation settings. No v2.32 samples had been generated.
+  Read-only checks confirmed identical ordered 525 task IDs, data/evaluator/
+  Direct configuration, base seed and sampling namespace.
+- Clarified that the v7 catalog changes the Executor protocol for both arms:
+  v2.32 Direct must be evaluated under the new condition. Reusing v2.27 Direct
+  outputs as the new paired comparator is not valid.
+- GPU2 and port 8015 were free when checked. Server startup is deferred until
+  the official grader quota recovers. The prepared manifest is not a completed
+  evaluation and v2.32 scores remain N/A.
+- After provider quota recovery, use the existing SGLang startup script on
+  GPU2 with `--max-running-requests 8`, then run
+  `scripts/evaluate_completion_benchmark_round.py` with the v2.32 full525
+  configuration and `--canary-only`. On a passing Stable Zero result, invoke
+  the same configuration without `--canary-only`; the existing runner resumes
+  compatible completed predictions and trajectories and fills the 525-task
+  panel. Do not use the low8 canary as a substitute for this panel.
