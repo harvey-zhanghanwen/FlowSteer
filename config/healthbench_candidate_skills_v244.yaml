@@ -1,0 +1,67 @@
+# Optional Director prompt priors, not learned or ACTIVE Skills.
+# Directly reuses the existing v2.41 candidate schema and injection helper.
+schema_version: flowsteer.healthbench-candidate-skill-profile.v1
+profile_version: healthbench.orchestration-candidates.v2.44
+dataset_key: healthbench_professional
+status: candidate
+training_enabled: false
+skill_publication_enabled: false
+candidates:
+  - condition_id: delegate_source_matched_identification_v244
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: >-
+      A relevant entity or factual premise remains unresolved when planning
+      or revising an Agent contract.
+    action:
+      instruction: >-
+        Use ADD/MODIFY to assign evidence gathering. Ask the Agent to search
+        the original terms and establish the entity before explaining it.
+        Require original wording, evidence-backed identity and unresolved
+        alternatives in the deliverable. Match an allowed Tool to the need:
+        primary literature/registry for
+        named studies, product sources for drug claims, reference texts for
+        definitions. Do not add an unstated disease, phase, date or conclusion.
+        A related hit is not an entity match; an empty search is not proof of
+        absence. Keep the original scope in the contract.
+  - condition_id: repair_failed_execution_without_restart_v244
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: >-
+      Real feedback identifies a failed field or node, especially a failure
+      repeated after a targeted repair.
+    action:
+      instruction: >-
+        MODIFY the specific failed field or node using its actual error;
+        preserve valid artifacts. If a parser/Tool failure recurs after repair,
+        consider another admitted model or a smaller contract/completion_condition,
+        not another wording-only rerun. Retain required Tool capability and
+        valid relations; do not add consumers of a still-failing prerequisite.
+        Request one schema-valid action and the missing
+        result, not a new research report. Reuse successful retrieval receipts
+        instead of repeating their calls.
+  - condition_id: route_independent_evidence_check_before_output_v244
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: >-
+      Planning a final response while a proposed conclusion has uncertain
+      support or conflicts with delivered findings.
+    action:
+      instruction: >-
+        Use the live action domain: MODIFY a conflicting producer when
+        admitted; otherwise ask the permitted final consumer to evaluate,
+        not copy, upstream conclusions. Put support, contradiction and
+        uncertainty checks in its contract; do not prescribe agreement.
+        Where allowed, add an independent check and route its findings.
+        Keep source, population and measured outcome bound to each claim.
+        A forbidden evidence edge remains unresolved, not repaired by
+        rewording. FINISH only when the task is addressed and the action is legal.

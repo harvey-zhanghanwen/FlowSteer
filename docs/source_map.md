@@ -1,5 +1,21 @@
 # Dataset adaptation source map
 
+## HealthBench v2.44 — actionable candidate prompt priors only
+
+- Direct reuse: SkillFlow `src/skills/format.py::SkillEntry`,
+  `src/skills/workspace.py::SkillWorkspace.format_skills_for_prompt`,
+  `training/environment.py::_handle_skill_invoke` for conditional procedural
+  instructions; project `healthbench_candidate_skill_profile.py` and existing
+  collector injection/receipt path remain byte-for-byte unchanged.
+- Necessary profile adaptation: instructions target the Director's existing
+  ADD/MODIFY/relation decisions, not imaginary direct tool access. They cover
+  source-matched identification, serialization-specific recovery, and repairing
+  unsupported producer conclusions before adding consumers.
+- MD §§10–11: candidate, optional and unvalidated; no ACTIVE, posterior,
+  training, learned-effect claim or fixed topology. All v2.43 runtime and
+  evaluator conditions stay unchanged; see `healthbench_v244_skill_changes.md`.
+
+
 ## HealthBench v2.43 — declaration feedback and candidate refinement
 
 - `rollout_collector.py`: retain the existing SkillFlow reasoning/action phase

@@ -1,5 +1,20 @@
 # Dataset adaptation log
 
+## 2026-09-06 — HealthBench v2.44 candidate-only iteration
+
+The completed v2.43 dev5 collection has four valid FINISH trajectories and one
+900-second timeout; full-population metrics remain N/A. Actual feedback reaches
+the Director after the v2.43 fixes, but edits can still target medical prose
+instead of serialization errors, preserve unsupported conclusions, or add nodes
+behind a failing prerequisite. New candidate instructions target those observed
+action choices and existing Tool selection; no runtime/model/evaluator changes.
+
+Output-ingress restrictions are recorded separately from model non-adherence.
+This candidate does not remove those restrictions or fabricate a working edge.
+The five examples are already observed development material, not confirmatory
+Skill publication evidence. No new task score is implied by this entry.
+
+
 ## 2026-09-06 — HealthBench v2.43 candidate
 
 The frozen v2.42 run exposed an engineering defect independent of grader
