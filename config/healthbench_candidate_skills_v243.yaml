@@ -1,0 +1,66 @@
+# Predeclared, unvalidated orchestration conditions; no ACTIVE publication.
+# Same schema and rejectable prior wire as v2.42; no execution-core change.
+schema_version: flowsteer.healthbench-candidate-skill-profile.v1
+profile_version: healthbench.orchestration-candidates.v2.43
+dataset_key: healthbench_professional
+status: candidate
+training_enabled: false
+skill_publication_enabled: false
+candidates:
+  - condition_id: evidence_before_entity_commitment_v243
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: >-
+      Planning or revising a contract or query involving an unresolved name,
+      premise, or proposed conclusion.
+    action:
+      instruction: >-
+        Describe the work to perform, not a predetermined entity identity or
+        positive or negative conclusion. Preserve the user's real goal, scope,
+        and requested form; a requested conclusion does not validate its
+        premises. For an ambiguous proper name, search the original wording
+        before resolving its identity from evidence. No matching result does
+        not prove nonexistence. Explain supported conflicts with a premise
+        while still addressing the original goal.
+  - condition_id: reconcile_receipts_before_requery_v243
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: >-
+      A retrieved source conflicts with an upstream claim, or actual feedback
+      reports a Tool, artifact, dependency, or provider error.
+    action:
+      instruction: >-
+        Check the actual retrieved source before repeating synonymous queries.
+        When needed, read an already observed source ID to resolve the
+        conflict. Preserve verified artifacts and working relations. Repair
+        the reported field using the real receipt, with faithful quotations
+        and matching metadata; rewording a contract alone is not a repair.
+        Distinguish unavailable evidence from a failed Tool call. For provider
+        failure, choose a suitable model from the currently admitted domain.
+  - condition_id: ground_final_claims_in_observed_sources_v243
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: before_final_answer
+      required_tools: []
+    trigger: >-
+      A structurally complete graph is preparing a final response; available
+      text and admissible FINISH do not establish content correctness.
+    action:
+      instruction: >-
+        Check final claims against the original request, actual sources, and
+        delivered upstream findings. Keep each number bound to its measured
+        outcome, population, and denominator; do not substitute a broader
+        category. Preserve applicable conditions and
+        uncertainty; do not turn search limitations into study conclusions
+        or claim a database was searched without its receipt. Do not invent
+        details to complete missing evidence. For a specific remaining
+        conflict, freely choose whether to add an independent check or repair
+        the Output path. Finish when the task is addressed and FINISH is
+        admissible.

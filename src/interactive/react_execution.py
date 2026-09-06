@@ -354,6 +354,8 @@ class ToolReactExecutionAdapter:
         invalid_fields = (
             "observation_status",
             "public_error_code",
+            "error_message",
+            "finish_reason",
             "tool_id",
             "action_name",
             "argument_validation",
@@ -405,6 +407,8 @@ class ToolReactExecutionAdapter:
                 for key in (
                     "observation_status",
                     "public_error_code",
+                    "error_message",
+                    "finish_reason",
                     "tool_id",
                     "action_name",
                     "argument_validation",
@@ -800,10 +804,24 @@ class ToolReactExecutionAdapter:
             try:
                 action = _parse_structured_action(response.text)
             except (TypeError, ValueError) as exc:
+                # NECESSARY_ADAPTATION: SkillFlow BoundedAgent.execute_turn
+                # publishes the actual parser error as its invalid Observation.
+                # Preserve that diagnosis, not an assumed wrapper failure.
+                finish_reason = response.metadata.get("finish_reason")
+                length_terminated = finish_reason == "length" or (
+                    isinstance(finish_reason, Mapping)
+                    and finish_reason.get("type") == "length"
+                )
                 observation = MappingProxyType(
                     {
                         "observation_status": "parse_error",
                         "public_error_code": type(exc).__name__,
+                        "error_message": str(exc),
+                        **(
+                            {"finish_reason": finish_reason}
+                            if finish_reason is not None
+                            else {}
+                        ),
                         "expected_top_level_fields": [
                             "arguments",
                             "kind",
@@ -816,9 +834,18 @@ class ToolReactExecutionAdapter:
                             "argument_json_schema",
                         ],
                         "repair_instruction": (
-                            "Return exactly one StructuredAction JSON object and "
-                            "place the five expected fields directly at its top "
-                            "level; do not wrap them in action_envelope."
+                            "Correct the parser error reported in error_message. "
+                            "Return exactly one StructuredAction JSON object "
+                            "with the five expected top-level fields and values "
+                            "of the types required by the currently admissible "
+                            "action schema."
+                            + (
+                                " This generation ended with finish_reason=length; "
+                                "return a complete JSON object within the current "
+                                "token budget."
+                                if length_terminated
+                                else ""
+                            )
                         ),
                         # Persist the sampled public Action in the trajectory.
                         # ``_model_visible_observations`` sends only canonical

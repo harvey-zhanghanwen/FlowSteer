@@ -1,5 +1,32 @@
 # Dataset adaptation source map
 
+## HealthBench v2.43 — declaration feedback and candidate refinement
+
+- `rollout_collector.py`: retain the existing SkillFlow reasoning/action phase
+  receipts and FlowSteer rejected-Canvas-turn continuation. The project-specific
+  free-contract declaration validator runs before final relation generation;
+  its actual error must reach the next Director input, rather than parsing a
+  declaration as a complete edit and reporting an unrelated missing field.
+  Partial declarations remain non-executable; no relation is synthesized.
+- `react_execution.py`: reuse `StructuredAction.from_value`'s existing precise
+  parser exceptions and SkillFlow's invalid-Action Observation/continuation.
+  Retain the actual failure message for the next Agent turn, rather than
+  treating every malformed action as an envelope wrapper. No parser relaxation,
+  automatic JSON repair, new generation attempt or budget increase is added.
+- `agent_workflow_env.py`: the existing public ReAct error summary and step
+  Observation projection also preserve that error message, so the Director's
+  next input receives the same diagnosis as the failed Agent. Existing bounded
+  summaries are retained; sampled malformed JSON is not replayed as context.
+- `healthbench_candidate_skills_v243.yaml`: reuse the v2.41 candidate helper and
+  MD optional prompt-prior boundary. Three general procedures cover open
+  questions before evidence, receipt-based repair, and final source consistency.
+  No medical answer, fixed role or required topology is introduced.
+- Versioned v2.43 configs directly reuse v2.42's model pool, sampling, tools,
+  per-model token budget, 900-second task deadline and 360-second Agent limit.
+  No training or Skill publication. Because rejection feedback also changes,
+  comparisons are combined-condition observations, not a Skill-only effect.
+
+
 ## HealthBench v2.42 — per-model budgets and observed-source schema
 
 - `react_execution.py`: directly retains SkillFlow-style StructuredAction and

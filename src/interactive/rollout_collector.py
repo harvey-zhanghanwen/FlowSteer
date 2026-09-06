@@ -1896,10 +1896,11 @@ class SGLangReceiptDirectorClient:
                         selected_agent_profiles=selected_add_agent_profiles,
                     )
                 )
-            except ValueError:
-                # Match the existing malformed final-parameter boundary: keep
-                # the exact sampled text/token/log-prob receipt and let the
-                # Canvas publish its parse rejection on the next continuation.
+            except ValueError as exc:
+                # NECESSARY_ADAPTATION: SkillFlow BoundedAgent.execute_turn
+                # retains the phase's validation error in its observation.
+                # Keep the exact sample and original declaration error for
+                # FlowSteer's Canvas rejection/next-continuation boundary.
                 # No declaration is repaired into an AgentAction and no final
                 # ADD parameter request is issued.
                 metadata = dict(declaration_response.metadata)
@@ -1925,6 +1926,11 @@ class SGLangReceiptDirectorClient:
                         "parse_failure_phase": (
                             _ADD_DECLARATION_PARSE_FAILURE_PHASE
                         ),
+                        "phase_failure_error": {
+                            "phase": _ADD_DECLARATION_PARSE_FAILURE_PHASE,
+                            "error_type": type(exc).__name__,
+                            "message": str(exc),
+                        },
                         "hierarchical_phase_receipts": phase_receipts,
                         "request_count": len(phase_receipts),
                         "latency_ms": total_latency_ms,
@@ -3212,8 +3218,20 @@ def _validate_v3_hierarchical_action_receipt(
                     selected_agent_roles=selected_roles,
                     selected_agent_profiles=selected_profiles,
                 )
-            except ValueError:
-                pass
+            except ValueError as exc:
+                # Older receipts did not retain this field. When present,
+                # bind it to the actual sampled declaration/live-domain error.
+                if "phase_failure_error" in metadata and metadata[
+                    "phase_failure_error"
+                ] != {
+                    "phase": _ADD_DECLARATION_PARSE_FAILURE_PHASE,
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                }:
+                    raise ReceiptValidationError(
+                        "v3 declaration failure diagnosis differs from the "
+                        "sampled declaration validation error"
+                    ) from exc
             else:
                 raise ReceiptValidationError(
                     "v3 declaration parse-failure sample satisfies the strict "
@@ -4806,7 +4824,33 @@ class AgentGraphRolloutCollector:
                         "v3 hierarchical phase-failure sample decoded as a "
                         "Canvas action"
                     )
-            canvas = await env.step(response.text)
+            phase_failure_error = metadata.get("phase_failure_error")
+            if phase_failure_error is not None:
+                if (
+                    parse_failure_phase != _ADD_DECLARATION_PARSE_FAILURE_PHASE
+                    or not isinstance(phase_failure_error, Mapping)
+                ):
+                    raise ReceiptValidationError(
+                        "Director phase-failure diagnosis has no declaration "
+                        "failure binding"
+                    )
+                _validate_v3_hierarchical_action_receipt(
+                    None, metadata, schema_request
+                )
+                # DIRECT_REUSE: Env._reject is also the Env.step parse-error
+                # boundary. It counts one rejected turn, preserves the Graph,
+                # and publishes last_feedback/history in the next observation.
+                # A declaration is not a complete AgentAction: reparsing it as
+                # one would replace its actual error with 'missing relations'.
+                canvas = env._reject(
+                    None,
+                    "invalid action at "
+                    f"{phase_failure_error['phase']}: "
+                    f"{phase_failure_error['error_type']}: "
+                    f"{phase_failure_error['message']}",
+                )
+            else:
+                canvas = await env.step(response.text)
             if diagnostic_state is not None:
                 diagnostic_state.update(canvas=canvas, stage="turn_validation")
 
@@ -5211,6 +5255,10 @@ class AgentGraphRolloutCollector:
                 if metadata.get("parse_failure_phase") is not None:
                     action_decoding["parse_failure_phase"] = metadata.get(
                         "parse_failure_phase"
+                    )
+                if metadata.get("phase_failure_error") is not None:
+                    action_decoding["phase_failure_error"] = dict(
+                        metadata["phase_failure_error"]
                     )
                 if metadata.get("parameter_regeneration_attempted") is not None:
                     action_decoding["parameter_regeneration_attempted"] = (

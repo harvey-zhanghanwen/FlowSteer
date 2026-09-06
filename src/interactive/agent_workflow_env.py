@@ -5556,11 +5556,12 @@ class AgentWorkflowEnv:
                 value = observation.get(field_name)
                 if value is not None and isinstance(value, (str, bool, int, float)):
                     observation_receipt[field_name] = value
-            repair_instruction = observation.get("repair_instruction")
-            if isinstance(repair_instruction, str) and repair_instruction.strip():
-                observation_receipt["repair_instruction"] = (
-                    _artifact_head_tail_preview(repair_instruction, limit=320)
-                )
+            for field_name in ("error_message", "repair_instruction"):
+                value = observation.get(field_name)
+                if isinstance(value, str) and value.strip():
+                    observation_receipt[field_name] = (
+                        _artifact_head_tail_preview(value, limit=320)
+                    )
             raw_result = observation.get("result")
             if isinstance(raw_result, Mapping):
                 result_receipt: dict[str, object] = {}
@@ -12329,6 +12330,9 @@ class AgentWorkflowEnv:
             source = observation if isinstance(observation, Mapping) else entry
             status = source.get("observation_status")
             code = source.get("public_error_code")
+            error_message = source.get("error_message")
+            if not isinstance(error_message, str):
+                error_message = entry.get("error_message")
             repair_instruction = source.get("repair_instruction")
             if not isinstance(repair_instruction, str):
                 repair_instruction = entry.get("repair_instruction")
@@ -12343,6 +12347,12 @@ class AgentWorkflowEnv:
                 last_public_error = {"observation_status": status}
                 if isinstance(code, str) and code:
                     last_public_error["public_error_code"] = code
+                if isinstance(error_message, str) and error_message.strip():
+                    # Preserve the SkillFlow-style public parser diagnosis
+                    # alongside its repair instruction, never action_text.
+                    last_public_error["error_message"] = " ".join(
+                        error_message.split()
+                    )[:400]
                 if isinstance(repair_instruction, str) and repair_instruction.strip():
                     # SkillFlow makes this instruction part of the public
                     # Observation. Keep the generic schema repair, while still

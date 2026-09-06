@@ -1,5 +1,44 @@
 # Dataset adaptation log
 
+## 2026-09-06 — HealthBench v2.43 candidate
+
+The frozen v2.42 run exposed an engineering defect independent of grader
+answers: intermediate Agent declarations rejected for Output-closure dependency
+incompatibility were then parsed as full ADD actions, losing the actual error
+and reporting missing relations. Direct replay, rather than inference from the
+contract's number of node IDs, establishes the actual original exception.
+Preserve the original declaration error through the existing Canvas
+feedback continuation; do not generate edges or execute a rejected declaration.
+
+The optional candidate profile is refined to discourage answer-bearing contracts
+before evidence, to distinguish empty search results from proof of absence, and
+to compare conclusions with real Tool receipts and delivered artifacts. These
+are general orchestration procedures, not clinical recommendations or test
+answers. Development examples have already been inspected, so their scores are
+not unbiased held-out generalization results. Model weights remain unchanged.
+
+Source, testing, completion and score evidence are recorded separately. This
+entry does not imply that the candidate was evaluated or improved the score.
+
+The correction reuses `AgentWorkflowEnv._reject`: one rejected turn, no Graph
+mutation, original sampled text/token/log-prob receipts retained, actual error
+present in the next native Director prompt. Four new mock tests and three
+targeted existing regression instances passed, with no model/API requests.
+
+MDT's saved prefix separately showed 18 MiniMax requests consuming 640.63 seconds
+across three six-turn invocations. Twelve parsing errors received the same
+wrapper warning despite different existing parser exceptions. v2.43 also passes
+the real parser error through Agent Observation and continuation; it does not
+infer duplicate-key support, rewrite JSON, or increase retries/time limits.
+Nine new ReAct mock tests and two existing targeted regressions passed for
+specific parser errors, observed length termination and cross-revision
+continuation. Director-facing error projection is checked separately.
+One additional targeted mock test passed for trace -> public error summary ->
+Canvas feedback -> actual Director prompt, including existing 400/320-character
+summary bounds and retention of the original full trace. No broad tests or
+paid canaries were repeated.
+
+
 ## 2026-09-06 — HealthBench v2.42 candidate
 
 The v2.41 five-task runs were kept frozen. Their failures justify per-model
