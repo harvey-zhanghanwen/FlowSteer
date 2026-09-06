@@ -1,0 +1,121 @@
+{
+  "candidate_skill_evaluation": {
+    "enabled": true,
+    "mode": "candidate_prompt_prior",
+    "profile": {
+      "candidates": [
+        {
+          "action": {
+            "instruction": "Preserve the user's actual goal, requested relation, scope, and output form. Separate these requirements from unverified premises in a suggested plan or conclusion; a request to state something is not evidence that it is true. Bind findings to the actual entity and applicability. If reliable evidence conflicts with a premise, explain that conflict while still addressing the original goal. Do not replace ambiguity with an unsupported interpretation or change the subject."
+          },
+          "condition": {
+            "graph_stage": "*",
+            "required_tools": [],
+            "task_family": "healthbench_professional"
+          },
+          "condition_id": "preserve_goal_and_check_premises_v242",
+          "status": "candidate",
+          "trigger": "Planning or revising a contract, query, or dependency that interprets the supplied conversation or a proposed conclusion."
+        },
+        {
+          "action": {
+            "instruction": "Preserve valid artifacts and working relations. Use the specific reported error to repair the affected field, source binding, or dependency; changing contract wording alone is not a repair. Reuse actual receipts, keep quotations faithful, and read the source if missing information requires it. Do not repeat an unchanged failed request or search. For a provider failure, choose any suitable alternative in the currently admitted model domain while preserving the node's task and useful artifacts. Add a repair unit only if needed."
+          },
+          "condition": {
+            "graph_stage": "*",
+            "required_tools": [],
+            "task_family": "healthbench_professional"
+          },
+          "condition_id": "repair_specific_failure_from_receipts_v242",
+          "status": "candidate",
+          "trigger": "Actual Canvas feedback identifies a field, Tool, artifact, dependency, or provider failure."
+        },
+        {
+          "action": {
+            "instruction": "Compare the actual output with the original request and the findings delivered by upstream Agents. Preserve supported conclusions, relevant conditions, and uncertainty; resolve inconsistencies rather than merging them or dropping inconvenient details. Do not invent facts to fill an unknown. If a specific conflict remains, consider an independent check with freely chosen model, responsibility, and relations; do not add Agents merely to increase their number. Submit only after addressing the task and when FINISH is admissible."
+          },
+          "condition": {
+            "graph_stage": "before_final_answer",
+            "required_tools": [],
+            "task_family": "healthbench_professional"
+          },
+          "condition_id": "verify_output_against_actual_findings_v242",
+          "status": "candidate",
+          "trigger": "The graph is structurally complete and an output is being considered for submission; available text or an admissible FINISH does not establish that its content is correct."
+        }
+      ],
+      "dataset_key": "healthbench_professional",
+      "profile_version": "healthbench.orchestration-candidates.v2.42",
+      "schema_version": "flowsteer.healthbench-candidate-skill-profile.v1",
+      "skill_publication_enabled": false,
+      "status": "candidate",
+      "training_enabled": false
+    },
+    "prompt_priors": [
+      {
+        "action": {
+          "instruction": "Preserve the user's actual goal, requested relation, scope, and output form. Separate these requirements from unverified premises in a suggested plan or conclusion; a request to state something is not evidence that it is true. Bind findings to the actual entity and applicability. If reliable evidence conflicts with a premise, explain that conflict while still addressing the original goal. Do not replace ambiguity with an unsupported interpretation or change the subject."
+        },
+        "application_mode": "forced_probe_condition",
+        "condition": {
+          "graph_stage": "*",
+          "required_tools": [],
+          "task_family": "healthbench_professional"
+        },
+        "condition_id": "preserve_goal_and_check_premises_v242",
+        "content": "Predeclared unvalidated candidate condition, not an ACTIVE Skill. This is an optional, rejectable prompt prior. Applicable graph stage: *. Only when: Planning or revising a contract, query, or dependency that interprets the supplied conversation or a proposed conclusion. Otherwise ignore this suggestion. Suggested action: Preserve the user's actual goal, requested relation, scope, and output form. Separate these requirements from unverified premises in a suggested plan or conclusion; a request to state something is not evidence that it is true. Bind findings to the actual entity and applicability. If reliable evidence conflicts with a premise, explain that conflict while still addressing the original goal. Do not replace ambiguity with an unsupported interpretation or change the subject.",
+        "rejectable": true
+      },
+      {
+        "action": {
+          "instruction": "Preserve valid artifacts and working relations. Use the specific reported error to repair the affected field, source binding, or dependency; changing contract wording alone is not a repair. Reuse actual receipts, keep quotations faithful, and read the source if missing information requires it. Do not repeat an unchanged failed request or search. For a provider failure, choose any suitable alternative in the currently admitted model domain while preserving the node's task and useful artifacts. Add a repair unit only if needed."
+        },
+        "application_mode": "forced_probe_condition",
+        "condition": {
+          "graph_stage": "*",
+          "required_tools": [],
+          "task_family": "healthbench_professional"
+        },
+        "condition_id": "repair_specific_failure_from_receipts_v242",
+        "content": "Predeclared unvalidated candidate condition, not an ACTIVE Skill. This is an optional, rejectable prompt prior. Applicable graph stage: *. Only when: Actual Canvas feedback identifies a field, Tool, artifact, dependency, or provider failure. Otherwise ignore this suggestion. Suggested action: Preserve valid artifacts and working relations. Use the specific reported error to repair the affected field, source binding, or dependency; changing contract wording alone is not a repair. Reuse actual receipts, keep quotations faithful, and read the source if missing information requires it. Do not repeat an unchanged failed request or search. For a provider failure, choose any suitable alternative in the currently admitted model domain while preserving the node's task and useful artifacts. Add a repair unit only if needed.",
+        "rejectable": true
+      },
+      {
+        "action": {
+          "instruction": "Compare the actual output with the original request and the findings delivered by upstream Agents. Preserve supported conclusions, relevant conditions, and uncertainty; resolve inconsistencies rather than merging them or dropping inconvenient details. Do not invent facts to fill an unknown. If a specific conflict remains, consider an independent check with freely chosen model, responsibility, and relations; do not add Agents merely to increase their number. Submit only after addressing the task and when FINISH is admissible."
+        },
+        "application_mode": "forced_probe_condition",
+        "condition": {
+          "graph_stage": "before_final_answer",
+          "required_tools": [],
+          "task_family": "healthbench_professional"
+        },
+        "condition_id": "verify_output_against_actual_findings_v242",
+        "content": "Predeclared unvalidated candidate condition, not an ACTIVE Skill. This is an optional, rejectable prompt prior. Applicable graph stage: before_final_answer. Only when: The graph is structurally complete and an output is being considered for submission; available text or an admissible FINISH does not establish that its content is correct. Otherwise ignore this suggestion. Suggested action: Compare the actual output with the original request and the findings delivered by upstream Agents. Preserve supported conclusions, relevant conditions, and uncertainty; resolve inconsistencies rather than merging them or dropping inconvenient details. Do not invent facts to fill an unknown. If a specific conflict remains, consider an independent check with freely chosen model, responsibility, and relations; do not add Agents merely to increase their number. Submit only after addressing the task and when FINISH is admissible.",
+        "rejectable": true
+      }
+    ],
+    "publication_performed": false
+  },
+  "collection_arm": "agentgraph",
+  "collection_arm_completed": false,
+  "completed_at": "2026-09-06T14:07:11.805617+00:00",
+  "condition_id": "healthbench_professional_candidate_skill_v2_42_dev5",
+  "dataset_key": "healthbench_professional",
+  "manifest_path": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v242/artifacts/healthbench_professional_candidate_skill_v2_42_dev5/evaluation/run_manifest.json",
+  "metrics": {
+    "agentgraph": {
+      "completed": 4,
+      "completed_only_overall_score": 0.11666666666666667,
+      "completed_only_overall_score_length_adjusted": 0.08450306666666667,
+      "denominator": 5,
+      "evaluator_valid": 4,
+      "strict_overall_score": null,
+      "strict_overall_score_length_adjusted": null
+    }
+  },
+  "paired_comparison_available": false,
+  "sample_count": 5,
+  "schema_version": "flowsteer.completion_benchmark.collection_arm_report.v1",
+  "training_performed": false
+}
