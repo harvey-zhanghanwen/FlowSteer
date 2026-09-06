@@ -415,6 +415,13 @@ def _public_failure_metadata(exc: BaseException) -> Mapping[str, object]:
     """Copy only adapter-published Action--Observation failure receipts."""
 
     result: Dict[str, object] = {}
+    environment_current_state = getattr(
+        exc,
+        "environment_current_state",
+        None,
+    )
+    if isinstance(environment_current_state, Mapping):
+        result["environment_current_state"] = dict(environment_current_state)
     for field_name in (
         "react_trace",
         "tool_receipts",

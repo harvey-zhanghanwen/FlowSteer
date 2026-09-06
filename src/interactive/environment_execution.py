@@ -45,6 +45,7 @@ class EnvironmentExecutionError(RuntimeError):
         evaluator_environment_trace: Sequence[Mapping[str, object]] = (),
         tool_receipts: Sequence[Mapping[str, object]] = (),
         model_calls: Sequence[Mapping[str, object]] = (),
+        environment_current_state: Optional[Mapping[str, object]] = None,
         environment_revision: int = 0,
         environment_terminal: bool = False,
         cause_error_type: Optional[str] = None,
@@ -67,6 +68,11 @@ class EnvironmentExecutionError(RuntimeError):
         )
         self.tool_receipts = tuple(dict(item) for item in tool_receipts)
         self.model_calls = tuple(dict(item) for item in model_calls)
+        self.environment_current_state = (
+            None
+            if environment_current_state is None
+            else dict(environment_current_state)
+        )
         self.environment_revision = environment_revision
         self.environment_terminal = environment_terminal
         self.cause_error_type = cause_error_type
@@ -733,11 +739,66 @@ def _alfworld_action_object(action: object) -> str:
         r"^move\s+(.+?)\s+to\s+",
         r"^(?:clean|heat|cool)\s+(.+?)\s+with\s+",
         r"^use\s+(.+?)\s+",
+        r"^examine\s+(.+?)$",
     ):
         match = re.match(pattern, text, flags=re.IGNORECASE)
         if match:
             return match.group(1).strip()
     return ""
+
+
+def _alfworld_action_move_destination(action: object) -> str:
+    """Return the native ``move`` destination using SkillFlow's parser."""
+
+    match = re.match(
+        r"^move\s+(.+?)\s+to\s+(.+)$",
+        str(action or "").strip(),
+        flags=re.IGNORECASE,
+    )
+    return match.group(2).strip() if match else ""
+
+
+def _alfworld_action_verb(action: object) -> str:
+    text = str(action or "").strip()
+    return text.split(" ", 1)[0].casefold() if text else ""
+
+
+def _alfworld_held_objects(
+    admissible_actions: Sequence[str],
+    *,
+    target_class: object = None,
+) -> tuple[str, ...]:
+    """Infer held objects from public native actions as SkillFlow does."""
+
+    held: list[str] = []
+    seen: set[str] = set()
+    normalized_target = _alfworld_object_class(target_class)
+    for action in admissible_actions:
+        match = re.match(
+            r"^(?:move|clean|heat|cool)\s+(.+?)\s+(?:to|with)\s+",
+            action,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            object_id = match.group(1).strip()
+            key = object_id.casefold()
+            if key not in seen:
+                held.append(object_id)
+                seen.add(key)
+        if normalized_target:
+            examine = re.match(
+                r"^examine\s+(.+?)$", action, flags=re.IGNORECASE
+            )
+            if (
+                examine
+                and _alfworld_object_class(examine.group(1))
+                == normalized_target
+                and examine.group(1).strip().casefold() not in seen
+            ):
+                object_id = examine.group(1).strip()
+                held.append(object_id)
+                seen.add(object_id.casefold())
+    return tuple(held)
 
 
 def _alfworld_action_response_schema(
@@ -756,6 +817,492 @@ def _alfworld_action_response_schema(
         },
         "additionalProperties": False,
     }
+
+
+def _alfworld_collaborator_action_proposals(
+    request: AgentRequest,
+    admissible_actions: Sequence[str],
+) -> list[dict[str, object]]:
+    """Project exact routed action proposals against the public action domain.
+
+    FlowSteer routes predecessor artifacts as unverified work products.  A
+    collaborator may emit arbitrary analysis, so this adapter recognizes the
+    existing one-field JSON envelope and one explicitly labelled ``Action:``
+    or ``Command:`` line.  The latter is a necessary compatibility projection
+    for free-text Agent contracts; it does not introduce a role or workflow.
+    The proposal is never executed directly and never replaces ALFWorld's
+    native admissible-action authority; the receipt only makes cross-Agent
+    grounding observable to the Tool owner and the next Director turn.
+    """
+
+    action_set = {str(action) for action in admissible_actions}
+    proposals: list[dict[str, object]] = []
+    for message in request.upstream:
+        action: Optional[str] = None
+        parse_status = "unparsed"
+        try:
+            parsed = json.loads(message.content)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, Mapping):
+            keys = set(parsed)
+            if keys == {"action"}:
+                raw_action = parsed.get("action")
+            elif keys == {"command"}:
+                raw_action = parsed.get("command")
+            else:
+                raw_action = None
+            if isinstance(raw_action, str) and raw_action.strip():
+                action = raw_action.strip()
+                parse_status = "structured"
+        if action is None:
+            labelled = re.findall(
+                r"(?im)^\s*(?:next\s+)?(?:action|command)\s*:\s*(.+?)\s*$",
+                message.content,
+            )
+            labelled_actions = {
+                candidate.strip()
+                for candidate in labelled
+                if candidate.strip() in action_set
+            }
+            if len(labelled_actions) == 1:
+                action = next(iter(labelled_actions))
+                parse_status = "labelled_free_text"
+        if action is None:
+            # Keep the artifact count and parse result observable.  Arbitrary
+            # prose is intentionally not searched for action-like substrings:
+            # doing so could turn discussion of alternatives into a proposal.
+            proposals.append(
+                {
+                    "source_agent_id": message.source_agent_id,
+                    "artifact_id": message.artifact_id,
+                    "proposed_action": None,
+                    "admissible": None,
+                    "parse_status": parse_status,
+                }
+            )
+            continue
+        proposals.append(
+            {
+                "source_agent_id": message.source_agent_id,
+                "artifact_id": message.artifact_id,
+                "proposed_action": action,
+                "admissible": action in action_set,
+                "parse_status": parse_status,
+            }
+        )
+    return proposals
+
+
+def _alfworld_collaborator_action_alignment(
+    proposals: Sequence[Mapping[str, object]],
+    executed_action: Optional[str],
+) -> dict[str, object]:
+    """Bind the Tool action to current routed proposals without judging reward."""
+
+    admissible_proposals = {
+        str(item.get("proposed_action"))
+        for item in proposals
+        if item.get("admissible") is True
+        and isinstance(item.get("proposed_action"), str)
+    }
+    all_proposals = {
+        str(item.get("proposed_action"))
+        for item in proposals
+        if isinstance(item.get("proposed_action"), str)
+    }
+    parsed_proposals = tuple(
+        item
+        for item in proposals
+        if isinstance(item.get("proposed_action"), str)
+    )
+    if not parsed_proposals:
+        status = "no_structured_proposal"
+    elif not admissible_proposals:
+        status = "proposal_not_admissible"
+    elif len(admissible_proposals) > 1:
+        status = (
+            "matched_conflicting_proposals"
+            if executed_action in admissible_proposals
+            else "diverged_from_conflicting_proposals"
+        )
+    elif executed_action in admissible_proposals:
+        status = "matched"
+    else:
+        status = "diverged"
+    return {
+        "schema_version": "alfworld.collaborator-action-grounding.v1",
+        "status": status,
+        "proposed_actions": sorted(all_proposals),
+        "admissible_proposed_actions": sorted(admissible_proposals),
+        "executed_action": executed_action,
+        "upstream_artifact_count": len(proposals),
+        "parsed_proposal_count": len(parsed_proposals),
+        "proposal_parse_statuses": sorted(
+            {
+                str(item.get("parse_status"))
+                for item in proposals
+                if isinstance(item.get("parse_status"), str)
+            }
+        ),
+    }
+
+
+def _alfworld_policy_action_domain(
+    request: AgentRequest,
+    *,
+    observation: str,
+    environment_admissible_actions: Sequence[str],
+    receipts: Sequence[Mapping[str, object]],
+    profile: str,
+) -> dict[str, object]:
+    """Project a model-visible ALFWorld action domain from public invariants.
+
+    ``environment_admissible_actions`` is never changed and remains the source
+    of truth for the Tool and official evaluator replay.  The optional policy
+    domain is a necessary constrained-decoding adaptation of SkillFlow's
+    ``_build_alfworld_semantic_action_feedback``: actions that violate an
+    explicit task invariant are removed before generation instead of spending
+    a model/environment turn on a rejection.  No source-location prior,
+    simulator state, reward, terminal label, or evaluator field is consumed.
+    """
+
+    raw_actions = tuple(str(action) for action in environment_admissible_actions)
+    if profile == "none":
+        return {
+            "schema_version": "skillflow.alfworld.policy-action-domain.v1",
+            "profile": profile,
+            "environment_admissible_actions": list(raw_actions),
+            "policy_action_domain": list(raw_actions),
+            "blocked_actions": [],
+            "fail_open": False,
+            "goal_progress": {},
+        }
+    if profile not in {
+        "skillflow_public_invariants_v1",
+        "skillflow_public_invariants_v2",
+        "skillflow_public_invariants_v3",
+        "skillflow_public_invariants_v4",
+    }:
+        raise EnvironmentExecutionError(
+            f"unsupported ALFWorld policy action profile {profile!r}"
+        )
+
+    facts = _alfworld_task_facts(request.problem)
+    target_class = _alfworld_object_class(facts.get("target_class"))
+    destination_class = _alfworld_object_class(
+        facts.get("destination_class")
+    )
+    required_transform = str(facts.get("required_transform") or "").casefold()
+    count = int(facts.get("count", 1) or 1)
+    progress = _alfworld_public_goal_progress(facts, receipts)
+    placed_ids = {
+        str(object_id).casefold()
+        for object_id in progress.get("placed_target_instances", ())
+    }
+    transformed_ids = {
+        str(object_id).casefold()
+        for object_id in progress.get("transformed_target_instances", ())
+    }
+    held_objects = _alfworld_held_objects(
+        raw_actions, target_class=target_class
+    )
+    held_target = tuple(
+        object_id
+        for object_id in held_objects
+        if _alfworld_object_class(object_id) == target_class
+    )
+
+    preferred_destination = ""
+    if count > 1 and destination_class:
+        for item in receipts:
+            if item.get("state_advanced") is not True:
+                continue
+            action = item.get("action")
+            if (
+                _alfworld_action_verb(action) == "move"
+                and _alfworld_object_class(_alfworld_action_object(action))
+                == target_class
+                and _alfworld_object_class(
+                    _alfworld_action_move_destination(action)
+                )
+                == destination_class
+            ):
+                preferred_destination = _alfworld_action_move_destination(action)
+                break
+
+    lamp_use_available = any(
+        re.match(r"^use\s+desklamp\s+\d+$", action, flags=re.IGNORECASE)
+        for action in raw_actions
+    )
+    blocked: list[dict[str, str]] = []
+
+    def block(action: str, reason: str) -> None:
+        blocked.append({"action": action, "reason": reason})
+
+    # PROJECT_NECESSARY_ADAPTATION: v2 keeps the v1 public invariants intact
+    # and closes two action-budget leaks observed in frozen ALFWorld receipts.
+    # Neither rule uses simulator state, source-location priors, reward, or a
+    # reference plan.  The original environment action list remains untouched
+    # for Tool execution and official evaluator replay.
+    if profile in {
+        "skillflow_public_invariants_v2",
+        "skillflow_public_invariants_v3",
+        "skillflow_public_invariants_v4",
+    } and not held_target:
+        arrived_closed = re.search(
+            r"You arrive at (.+?)\.\s+The (.+?) is closed\.",
+            observation,
+            flags=re.IGNORECASE,
+        )
+        if (
+            arrived_closed is not None
+            and arrived_closed.group(1).strip().casefold()
+            == arrived_closed.group(2).strip().casefold()
+        ):
+            location = arrived_closed.group(1).strip()
+            open_action = next(
+                (
+                    action
+                    for action in raw_actions
+                    if action.casefold() == f"open {location}".casefold()
+                ),
+                None,
+            )
+            if open_action is not None:
+                for action in raw_actions:
+                    if action != open_action:
+                        block(action, "inspect_current_closed_receptacle")
+
+    for action in raw_actions:
+        verb = _alfworld_action_verb(action)
+        object_id = _alfworld_action_object(action)
+        object_class = _alfworld_object_class(object_id)
+        object_is_target = bool(
+            target_class and object_id and object_class == target_class
+        )
+
+        if (
+            target_class
+            and object_id
+            and not object_is_target
+            and verb in {"take", "clean", "cool", "heat"}
+        ):
+            block(action, "wrong_target_class")
+            continue
+        if (
+            count > 1
+            and object_is_target
+            and verb == "take"
+            and object_id.casefold() in placed_ids
+        ):
+            block(action, "count_task_take_back")
+            continue
+        if (
+            count > 1
+            and object_is_target
+            and verb == "move"
+            and preferred_destination
+            and _alfworld_action_move_destination(action).casefold()
+            != preferred_destination.casefold()
+        ):
+            block(action, "count_task_destination_instance")
+            continue
+        if facts.get("examine_with_desklamp") and held_target:
+            if lamp_use_available and not re.match(
+                r"^use\s+desklamp\s+\d+$", action, flags=re.IGNORECASE
+            ):
+                block(action, "desklamp_use_available")
+                continue
+            if object_is_target and verb in {"move", "clean", "cool", "heat"}:
+                block(action, "desklamp_preserve_held_target")
+                continue
+        if object_is_target and verb in {"clean", "cool", "heat"}:
+            if required_transform not in {"clean", "cool", "heat"}:
+                block(action, "unrequired_transform")
+                continue
+            if object_id.casefold() in transformed_ids:
+                block(action, "repeated_transform")
+                continue
+            if verb != required_transform:
+                block(action, "wrong_transform")
+                continue
+        if (
+            object_is_target
+            and verb == "move"
+            and required_transform in {"clean", "cool", "heat"}
+            and object_id.casefold() not in transformed_ids
+        ):
+            block(action, "placement_before_transform")
+
+    # Public negative evidence is applied only while searching with a free
+    # hand and only when an unvisited alternative exists.  v1/v2 protect the
+    # required destination and appliance class.  v3/v4 also filter those classes
+    # during target search when the public scene ledger explicitly says that
+    # the target is absent; once the target is held this search-only filter is
+    # disabled, so the required destination/appliance remains reachable.  This
+    # prevents a known-empty revisit without turning SkillFlow's optional
+    # source-priority table into a fixed policy.
+    if target_class and not held_target:
+        scene_memory = _alfworld_public_scene_memory(
+            receipts, target_class=target_class
+        )
+        evidence_by_location = {
+            str(item.get("location", "")).casefold(): item
+            for item in scene_memory
+            if str(item.get("location", "")).strip()
+        }
+        go_actions = [
+            action for action in raw_actions if _alfworld_action_verb(action) == "go"
+        ]
+        unvisited_go_exists = any(
+            action[6:].strip().casefold() not in evidence_by_location
+            for action in go_actions
+        )
+        appliance_class = {
+            "clean": "sinkbasin",
+            "cool": "fridge",
+            "heat": "microwave",
+        }.get(required_transform, "")
+        protected_classes = (
+            set()
+            if profile
+            in {
+                "skillflow_public_invariants_v3",
+                "skillflow_public_invariants_v4",
+            }
+            else {
+                value
+                for value in (destination_class, appliance_class)
+                if value
+            }
+        )
+        already_blocked = {item["action"] for item in blocked}
+        if unvisited_go_exists:
+            for action in go_actions:
+                location = action[6:].strip()
+                remembered = evidence_by_location.get(location.casefold())
+                if (
+                    action not in already_blocked
+                    and remembered is not None
+                    and remembered.get("target_evidence") == "absent"
+                    and _alfworld_object_class(location) not in protected_classes
+                ):
+                    block(action, "known_negative_target_evidence")
+
+            if (
+                profile
+                in {
+                    "skillflow_public_invariants_v2",
+                    "skillflow_public_invariants_v3",
+                    "skillflow_public_invariants_v4",
+                }
+                and count > 1
+                and placed_ids
+                and len(placed_ids) < count
+                and preferred_destination
+            ):
+                for action in go_actions:
+                    if (
+                        action not in {item["action"] for item in blocked}
+                        and action[6:].strip().casefold()
+                        == preferred_destination.casefold()
+                    ):
+                        block(action, "count_task_destination_revisit")
+
+            if profile == "skillflow_public_invariants_v4":
+                # ALFWorld's public arrival Observation already reports the
+                # visible contents of the current receptacle.  Re-examining a
+                # location whose scene-memory entry explicitly says the target
+                # is absent cannot add target evidence while unvisited
+                # alternatives remain.  This is the same public-evidence
+                # invariant as the ``go`` filter above, applied to the native
+                # ``examine`` action; it uses no source prior or hidden state.
+                for action in raw_actions:
+                    if _alfworld_action_verb(action) != "examine":
+                        continue
+                    location = _alfworld_action_object(action)
+                    remembered = evidence_by_location.get(
+                        location.casefold()
+                    )
+                    if (
+                        action not in {item["action"] for item in blocked}
+                        and remembered is not None
+                        and remembered.get("target_evidence") == "absent"
+                    ):
+                        block(action, "known_negative_target_evidence")
+
+        if profile in {
+            "skillflow_public_invariants_v2",
+            "skillflow_public_invariants_v3",
+            "skillflow_public_invariants_v4",
+        } and not held_objects:
+            for action in raw_actions:
+                if (
+                    _alfworld_action_verb(action) == "inventory"
+                    and action not in {item["action"] for item in blocked}
+                ):
+                    block(action, "empty_inventory_redundant")
+
+    blocked_actions = {item["action"] for item in blocked}
+    policy_actions = tuple(
+        action for action in raw_actions if action not in blocked_actions
+    )
+    fail_open = not policy_actions
+    if fail_open:
+        policy_actions = raw_actions
+    return {
+        "schema_version": (
+            "skillflow.alfworld.policy-action-domain.v4"
+            if profile == "skillflow_public_invariants_v4"
+            else (
+                "skillflow.alfworld.policy-action-domain.v3"
+                if profile == "skillflow_public_invariants_v3"
+                else (
+                    "skillflow.alfworld.policy-action-domain.v2"
+                    if profile == "skillflow_public_invariants_v2"
+                    else "skillflow.alfworld.policy-action-domain.v1"
+                )
+            )
+        ),
+        "profile": profile,
+        "environment_admissible_actions": list(raw_actions),
+        "policy_action_domain": list(policy_actions),
+        "blocked_actions": blocked,
+        "fail_open": fail_open,
+        "goal_progress": dict(progress),
+        "held_objects": list(held_objects),
+    }
+
+
+def _alfworld_policy_action_domain_feedback(
+    receipt: Mapping[str, object],
+) -> str:
+    """Render a compact public receipt without prescribing one next action."""
+
+    reason_counts: dict[str, int] = {}
+    for item in receipt.get("blocked_actions", ()):
+        if not isinstance(item, Mapping):
+            continue
+        reason = str(item.get("reason", "unknown"))
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    environment_actions = receipt.get("environment_admissible_actions", ())
+    policy_actions = receipt.get("policy_action_domain", ())
+    return (
+        "[MODEL-VISIBLE POLICY ACTION DOMAIN] "
+        f"profile={receipt.get('profile', 'none')}; "
+        f"environment_count={len(environment_actions)}; "
+        f"policy_count={len(policy_actions)}; "
+        f"fail_open={str(bool(receipt.get('fail_open'))).lower()}; "
+        "blocked_reason_counts="
+        + json.dumps(
+            reason_counts,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "."
+    )
 
 
 def _alfworld_observation_mentions_class(
@@ -1168,6 +1715,25 @@ def _alfworld_public_stall_diagnostic(
         alternating_actions = completed_actions[-2:]
 
     turns_since_progress = int(progress["turns_since_goal_progress"])
+    latest_alignment = (
+        receipts[-1].get("collaborator_action_alignment")
+        if receipts
+        else None
+    )
+    alignment_status = (
+        str(latest_alignment.get("status", ""))
+        if isinstance(latest_alignment, Mapping)
+        else ""
+    )
+    collaborator_grounding_failure = (
+        turns_since_progress >= 4
+        and alignment_status
+        in {
+            "proposal_not_admissible",
+            "diverged",
+            "diverged_from_conflicting_proposals",
+        }
+    )
     signals: list[str] = []
     if repeated_state_count:
         signals.append("repeated_public_state")
@@ -1175,6 +1741,8 @@ def _alfworld_public_stall_diagnostic(
         signals.append("alternating_action_loop")
     if turns_since_progress >= 4:
         signals.append("no_goal_predicate_progress")
+    if collaborator_grounding_failure:
+        signals.append("collaborator_action_grounding_failure")
 
     latest_advanced = bool(
         receipts and receipts[-1].get("state_advanced") is True
@@ -1188,7 +1756,9 @@ def _alfworld_public_stall_diagnostic(
     # Only an observed repeated public state or an A-B-A-B action loop blocks
     # another bare ``continue`` at the Canvas boundary.
     stalled = (
-        repeated_state_stall or bool(alternating_actions)
+        repeated_state_stall
+        or bool(alternating_actions)
+        or collaborator_grounding_failure
     ) and not environment_terminal
     return {
         "schema_version": "alfworld.public-stall.v1",
@@ -1197,6 +1767,11 @@ def _alfworld_public_stall_diagnostic(
         "repeated_state_count": repeated_state_count,
         "alternating_actions": alternating_actions,
         "turns_since_goal_progress": turns_since_progress,
+        "latest_collaborator_action_alignment": (
+            dict(latest_alignment)
+            if isinstance(latest_alignment, Mapping)
+            else None
+        ),
         "goal_predicates": progress,
     }
 
@@ -1424,18 +1999,14 @@ def _public_state_feedback(
                     action,
                     flags=re.IGNORECASE,
                 )
-                move_match = re.match(
-                    r"^move\s+.+?\s+to\s+(.+)$",
-                    action,
-                    flags=re.IGNORECASE,
-                )
+                move_destination = _alfworld_action_move_destination(action)
                 if (
                     go_match
                     and _alfworld_object_class(go_match.group(1))
                     == destination_class
                 ) or (
-                    move_match
-                    and _alfworld_object_class(move_match.group(1))
+                    move_destination
+                    and _alfworld_object_class(move_destination)
                     == destination_class
                 ):
                     destination_mentions.append(action)
@@ -1721,8 +2292,7 @@ def _public_action_observation_history(
         observation_result = (
             raw_result[:max_result_chars] + "..." if clipped else raw_result
         )
-        result.append(
-            {
+        entry: dict[str, object] = {
                 "turn": item.get("turn"),
                 "environment_revision_before": item.get(
                     "environment_revision_before"
@@ -1738,7 +2308,15 @@ def _public_action_observation_history(
                 "state_advanced": item.get("state_advanced"),
                 "environment_terminal": item.get("terminal"),
             }
-        )
+        if "collaborator_action_proposals" in item:
+            entry["collaborator_action_proposals"] = item.get(
+                "collaborator_action_proposals", []
+            )
+        if "collaborator_action_alignment" in item:
+            entry["collaborator_action_alignment"] = item.get(
+                "collaborator_action_alignment"
+            )
+        result.append(entry)
     return result
 
 
@@ -1766,6 +2344,10 @@ def _action_prompt(
     turn: int,
     max_observation_chars: int = 0,
     total_action_budget: Optional[int] = None,
+    environment_admissible_actions: Optional[Sequence[str]] = None,
+    policy_action_domain_receipt: Optional[Mapping[str, object]] = None,
+    collaborator_action_proposals: Sequence[Mapping[str, object]] = (),
+    compact_execution_feedback: bool = False,
 ) -> str:
     """Render the same SkillFlow ReAct prompt used by the Direct condition.
 
@@ -1835,11 +2417,70 @@ def _action_prompt(
         request,
         task_family=task_family,
         observation=observation,
-        admissible_actions=admissible_actions,
+        admissible_actions=(
+            admissible_actions
+            if environment_admissible_actions is None
+            else environment_admissible_actions
+        ),
         receipts=receipts,
         total_action_budget=total_action_budget,
         remaining_action_budget=remaining_action_budget,
     )
+    if policy_action_domain_receipt is not None:
+        public_state += "\n" + _alfworld_policy_action_domain_feedback(
+            policy_action_domain_receipt
+        )
+    if request.upstream and not compact_execution_feedback:
+        # FlowSteer routes predecessor artifacts through AgentRequest.upstream.
+        # The specialized SkillFlow environment prompt must preserve that
+        # communication channel instead of silently dropping free-text plans
+        # that do not match the optional one-action proposal schema.  These
+        # remain unverified work products; only the official admissible-action
+        # list can authorize the native environment Action.
+        public_state += (
+            "\n[ROUTED UPSTREAM AGENT ARTIFACTS] "
+            + json.dumps(
+                [
+                    {
+                        "source_agent_id": message.source_agent_id,
+                        "target_agent_id": message.target_agent_id,
+                        "message_type": message.message_type,
+                        "artifact_type": message.artifact_type,
+                        "artifact_id": message.artifact_id,
+                        "graph_revision": message.graph_revision,
+                        "environment_revision": message.environment_revision,
+                        "request_or_dependency": (
+                            message.request_or_dependency
+                        ),
+                        "artifact_body": message.content,
+                    }
+                    for message in request.upstream
+                ],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + ". These routed artifacts are unverified. Use relevant public "
+            "analysis when selecting exactly one current admissible action; "
+            "the admissible-action list remains authoritative."
+        )
+    # Compact feedback reuses OpenAICompatibleGateway.build_agent_messages:
+    # it renders request.upstream with full source/artifact/revision metadata.
+    # execute() replaces only problem/model/agent, so this canonical channel
+    # remains intact. Avoid repeating the same artifacts inside the Task.
+    if collaborator_action_proposals:
+        public_state += (
+            "\n[ROUTED COLLABORATOR ACTION GROUNDING] "
+            + json.dumps(
+                [dict(item) for item in collaborator_action_proposals],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + ". These are unverified routed work products. The current "
+            "policy action domain remains authoritative; preserve useful "
+            "intent, but do not execute a proposal marked inadmissible."
+        )
     prompt = _environment_prompt(
         dataset=task_family.lower(),
         task_description=instruction,
@@ -1875,6 +2516,9 @@ class EnvironmentExecutionAdapter:
         max_action_tokens: int = 512,
         max_observation_chars: int = 0,
         stepwise_director: bool = False,
+        compact_execution_feedback: bool = False,
+        alfworld_policy_action_profile: str = "none",
+        alfworld_complex_thinking_budget: Optional[int] = None,
     ) -> None:
         if not hasattr(gateway, "generate"):
             raise TypeError("gateway must implement generate")
@@ -1890,6 +2534,24 @@ class EnvironmentExecutionAdapter:
             raise ValueError("max_observation_chars must be a non-negative integer")
         if type(stepwise_director) is not bool:
             raise TypeError("stepwise_director must be bool")
+        if type(compact_execution_feedback) is not bool:
+            raise TypeError("compact_execution_feedback must be bool")
+        if alfworld_policy_action_profile not in {
+            "none",
+            "skillflow_public_invariants_v1",
+            "skillflow_public_invariants_v2",
+            "skillflow_public_invariants_v3",
+            "skillflow_public_invariants_v4",
+        }:
+            raise ValueError("unsupported alfworld_policy_action_profile")
+        if alfworld_complex_thinking_budget is not None and (
+            isinstance(alfworld_complex_thinking_budget, bool)
+            or not isinstance(alfworld_complex_thinking_budget, int)
+            or alfworld_complex_thinking_budget < 1
+        ):
+            raise ValueError(
+                "alfworld_complex_thinking_budget must be positive when supplied"
+            )
         if environment_backend.tool_id not in tool_registry.resource_ids:
             raise ValueError("environment backend tool is absent from ToolRegistry")
         capability = tool_registry.require_capability(environment_backend.tool_id)
@@ -1909,6 +2571,11 @@ class EnvironmentExecutionAdapter:
         self._max_action_tokens = max_action_tokens
         self._max_observation_chars = max_observation_chars
         self._stepwise_director = stepwise_director
+        self._compact_execution_feedback = compact_execution_feedback
+        self._alfworld_policy_action_profile = alfworld_policy_action_profile
+        self._alfworld_complex_thinking_budget = (
+            alfworld_complex_thinking_budget
+        )
         # ``asyncio.wait_for`` may insert a Task boundary between this adapter
         # and AgentRuntime.  Task cancellation intentionally normalizes the
         # raised ``CancelledError``, so retain the completed public prefix in
@@ -1954,9 +2621,6 @@ class EnvironmentExecutionAdapter:
         last = episode.receipts[-1] if episode.receipts else None
         turns_used = len(episode.receipts)
         remaining_action_budget = max(self._max_turns - turns_used, 0)
-        action_observation_history = _public_action_observation_history(
-            episode.receipts
-        )
         public_state = _public_state_feedback(
             request,
             task_family=episode.session.task_family,
@@ -1968,14 +2632,32 @@ class EnvironmentExecutionAdapter:
             environment_terminal=episode.terminal,
         )
         alfworld_state: dict[str, object] = {}
+        current_policy_action_domain = tuple(admissible_actions)
+        current_goal_progress: dict[str, object] = {}
+        task_facts: dict[str, object] = {}
         if episode.session.task_family.lower() == "alfworld":
             facts = _alfworld_task_facts(request.problem)
+            policy_receipt = _alfworld_policy_action_domain(
+                request,
+                observation=episode.observation,
+                environment_admissible_actions=admissible_actions,
+                receipts=episode.receipts,
+                profile=self._alfworld_policy_action_profile,
+            )
+            task_facts = dict(facts)
+            current_policy_action_domain = tuple(
+                str(action)
+                for action in policy_receipt.get("policy_action_domain", ())
+            )
+            current_goal_progress = dict(
+                policy_receipt.get("goal_progress", {})
+            )
             alfworld_state = {
                 # SkillFlow derives these fields only from the immutable public
                 # task instruction.  Publishing the same projection lets the
                 # Canvas and stateless collaborators reason about the requested
                 # object count/transform without simulator or evaluator state.
-                "task_facts": dict(facts),
+                "task_facts": task_facts,
                 "public_scene_memory": _alfworld_public_scene_memory(
                     episode.receipts,
                     target_class=facts.get("target_class"),
@@ -1987,7 +2669,104 @@ class EnvironmentExecutionAdapter:
                     receipts=episode.receipts,
                     environment_terminal=episode.terminal,
                 ),
+                "goal_progress": current_goal_progress,
+                "held_objects": list(
+                    policy_receipt.get("held_objects", ())
+                ),
+                "policy_action_domain": list(current_policy_action_domain),
+                "policy_action_domain_receipt": policy_receipt,
             }
+            if self._alfworld_policy_action_profile in {
+                "skillflow_public_invariants_v2",
+                "skillflow_public_invariants_v3",
+                "skillflow_public_invariants_v4",
+            }:
+                alfworld_state.update(
+                    {
+                        "collaborator_action_proposals": (
+                            []
+                            if last is None
+                            else list(
+                                last.get("collaborator_action_proposals", ())
+                            )
+                        ),
+                        "collaborator_action_alignment": (
+                            None
+                            if last is None
+                            else last.get("collaborator_action_alignment")
+                        ),
+                    }
+                )
+        action_observation_history = _public_action_observation_history(
+            episode.receipts
+        )
+        latest_action_observation: Optional[dict[str, object]] = None
+        if last is not None and action_observation_history:
+            # SkillFlow's embodied boundary returns the complete result of the
+            # just-executed Action together with the next public state.  Keep
+            # older history bounded, but make the latest transition
+            # self-contained for the next FlowSteer Director turn.  All fields
+            # below come only from the public task instruction, Action--
+            # Observation ledger and official admissible commands.
+            prior_policy_receipt = last.get("policy_action_domain_receipt")
+            prior_goal_progress = (
+                dict(prior_policy_receipt.get("goal_progress", {}))
+                if isinstance(prior_policy_receipt, Mapping)
+                else {}
+            )
+            goal_progress_state_fields = (
+                "acquired_target_instances",
+                "held_target_instances",
+                "transformed_target_instances",
+                "placed_target_instances",
+                "transformed_and_placed_target_instances",
+                "lamp_use_completed",
+            )
+            goal_progress_changed = any(
+                prior_goal_progress.get(field_name)
+                != current_goal_progress.get(field_name)
+                for field_name in goal_progress_state_fields
+            )
+            latest_action_observation = dict(action_observation_history[-1])
+            latest_action_observation.update(
+                {
+                    "task_instruction": str(request.problem)
+                    .split("\n\n", 1)[0]
+                    .strip(),
+                    "task_facts": task_facts,
+                    "observation": str(last.get("observation", "")),
+                    "next_observation": episode.observation,
+                    "observation_result": episode.observation,
+                    "observation_result_clipped": False,
+                    "observation_changed": (
+                        str(last.get("observation", ""))
+                        != episode.observation
+                    ),
+                    "admissible_actions_before": list(
+                        last.get("admissible_actions", ())
+                    ),
+                    "policy_action_domain_before": list(
+                        last.get("policy_action_domain", ())
+                    ),
+                    "next_admissible_actions": list(admissible_actions),
+                    "next_policy_action_domain": list(
+                        current_policy_action_domain
+                    ),
+                    "goal_progress_before": prior_goal_progress,
+                    "goal_progress_after": current_goal_progress,
+                    # The elapsed no-progress counters change after ordinary
+                    # navigation as well.  Compare only the public task-state
+                    # milestones so a legal Action is not mislabeled as goal
+                    # progress merely because environment revision advanced.
+                    "goal_progress_changed": goal_progress_changed,
+                    "goal_progress": current_goal_progress,
+                    "remaining_action_budget": remaining_action_budget,
+                    "remaining_action_budget_after": (
+                        remaining_action_budget
+                    ),
+                    "total_action_budget": self._max_turns,
+                }
+            )
         return {
             "environment_episode_id": episode.episode_id,
             "environment_id": episode.session.environment_id,
@@ -2003,11 +2782,7 @@ class EnvironmentExecutionAdapter:
             "current_observation": episode.observation,
             "admissible_actions": list(admissible_actions),
             "public_state": public_state,
-            "latest_action_observation": (
-                action_observation_history[-1]
-                if action_observation_history
-                else None
-            ),
+            "latest_action_observation": latest_action_observation,
             "action_observation_history": action_observation_history,
             "turns_used": turns_used,
             "remaining_action_budget": remaining_action_budget,
@@ -2050,15 +2825,66 @@ class EnvironmentExecutionAdapter:
                     raise EnvironmentExecutionError(
                         "environment exposed no admissible actions before terminal"
                     )
+                policy_receipt: dict[str, object] = {
+                    "schema_version": "environment.policy-action-domain.v1",
+                    "profile": "none",
+                    "environment_admissible_actions": list(admissible_actions),
+                    "policy_action_domain": list(admissible_actions),
+                    "blocked_actions": [],
+                    "fail_open": False,
+                    "goal_progress": {},
+                }
+                policy_actions = admissible_actions
+                collaborator_action_proposals: list[dict[str, object]] = []
+                collaborator_grounding_enabled = False
+                if session.task_family.lower() == "alfworld":
+                    policy_receipt = _alfworld_policy_action_domain(
+                        request,
+                        observation=observation,
+                        environment_admissible_actions=admissible_actions,
+                        receipts=receipts,
+                        profile=self._alfworld_policy_action_profile,
+                    )
+                    raw_policy_actions = policy_receipt.get(
+                        "policy_action_domain", ()
+                    )
+                    if not isinstance(raw_policy_actions, Sequence) or isinstance(
+                        raw_policy_actions, (str, bytes)
+                    ):
+                        raise EnvironmentExecutionError(
+                            "ALFWorld policy action domain is malformed"
+                        )
+                    policy_actions = tuple(str(action) for action in raw_policy_actions)
+                    if (
+                        self._alfworld_policy_action_profile
+                        in {
+                            "skillflow_public_invariants_v2",
+                            "skillflow_public_invariants_v3",
+                            "skillflow_public_invariants_v4",
+                        }
+                    ):
+                        collaborator_grounding_enabled = True
+                        collaborator_action_proposals = (
+                            _alfworld_collaborator_action_proposals(
+                                request,
+                                policy_actions,
+                            )
+                        )
                 prompt = _action_prompt(
                     request,
                     task_family=session.task_family,
                     observation=observation,
-                    admissible_actions=admissible_actions,
+                    admissible_actions=policy_actions,
                     receipts=receipts,
                     turn=turn,
                     max_observation_chars=self._max_observation_chars,
                     total_action_budget=self._max_turns,
+                    environment_admissible_actions=admissible_actions,
+                    policy_action_domain_receipt=policy_receipt,
+                    collaborator_action_proposals=(
+                        collaborator_action_proposals
+                    ),
+                    compact_execution_feedback=self._compact_execution_feedback,
                 )
                 remaining_action_budget = max(
                     self._max_turns - len(receipts), 0
@@ -2072,6 +2898,13 @@ class EnvironmentExecutionAdapter:
                     total_action_budget=self._max_turns,
                     remaining_action_budget=remaining_action_budget,
                 )
+                if session.task_family.lower() == "alfworld":
+                    public_state += (
+                        "\n"
+                        + _alfworld_policy_action_domain_feedback(
+                            policy_receipt
+                        )
+                    )
                 _, observation_clipped = _prompt_observation(
                     observation, self._max_observation_chars
                 )
@@ -2084,11 +2917,46 @@ class EnvironmentExecutionAdapter:
                     ),
                 }
                 if session.task_family.lower() == "alfworld":
+                    facts = _alfworld_task_facts(request.problem)
+                    complex_signals = [
+                        signal
+                        for signal, active in (
+                            ("count", int(facts.get("count", 1) or 1) > 1),
+                            (
+                                "transform",
+                                str(facts.get("required_transform") or "")
+                                in {"clean", "cool", "heat"},
+                            ),
+                            (
+                                "desklamp",
+                                bool(facts.get("examine_with_desklamp")),
+                            ),
+                        )
+                        if active
+                    ]
+                    selected_reasoning_budget: Optional[int] = None
+                    raw_base_budget = model_metadata.get(
+                        "chat_template_thinking_budget"
+                    )
+                    if isinstance(raw_base_budget, str) and raw_base_budget.isdigit():
+                        selected_reasoning_budget = int(raw_base_budget)
+                    if (
+                        complex_signals
+                        and self._alfworld_complex_thinking_budget is not None
+                        and selected_reasoning_budget is not None
+                    ):
+                        selected_reasoning_budget = max(
+                            selected_reasoning_budget,
+                            self._alfworld_complex_thinking_budget,
+                        )
+                        model_metadata["chat_template_thinking_budget"] = str(
+                            selected_reasoning_budget
+                        )
                     model_metadata.update(
                         {
                             "response_json_schema": json.dumps(
                                 _alfworld_action_response_schema(
-                                    admissible_actions
+                                    policy_actions
                                 ),
                                 ensure_ascii=False,
                                 sort_keys=True,
@@ -2096,6 +2964,13 @@ class EnvironmentExecutionAdapter:
                             ),
                             "response_json_schema_version": (
                                 "alfworld.native-action-enum.v1"
+                            ),
+                            "alfworld_reasoning_budget_policy": (
+                                "task-facts.simple512-complex768.v1"
+                            ),
+                            "alfworld_reasoning_budget_signals": json.dumps(
+                                complex_signals,
+                                separators=(",", ":"),
                             ),
                         }
                     )
@@ -2127,6 +3002,24 @@ class EnvironmentExecutionAdapter:
                         "request_id": model_request.request_id,
                         "metadata": dict(response.metadata),
                         "public_state": public_state,
+                        "environment_admissible_actions": list(
+                            admissible_actions
+                        ),
+                        "policy_action_domain": list(policy_actions),
+                        "policy_action_domain_receipt": dict(policy_receipt),
+                        **(
+                            {
+                                "collaborator_action_proposals": [
+                                    dict(item)
+                                    for item in collaborator_action_proposals
+                                ]
+                            }
+                            if collaborator_grounding_enabled
+                            else {}
+                        ),
+                        "selected_reasoning_budget": (
+                            model_metadata.get("chat_template_thinking_budget")
+                        ),
                         "remaining_action_budget": remaining_action_budget,
                         "total_action_budget": self._max_turns,
                         **(
@@ -2149,10 +3042,18 @@ class EnvironmentExecutionAdapter:
                 action = _parse_action(
                     raw_action,
                     task_family=session.task_family,
-                    admissible_actions=admissible_actions,
+                    admissible_actions=policy_actions,
                     webshop_has_search_bar=has_search_bar,
                 )
                 if action is None:
+                    collaborator_action_alignment = (
+                        _alfworld_collaborator_action_alignment(
+                            collaborator_action_proposals,
+                            None,
+                        )
+                        if collaborator_grounding_enabled
+                        else None
+                    )
                     receipts.append(
                         {
                             "receipt_type": "environment_transition",
@@ -2164,6 +3065,21 @@ class EnvironmentExecutionAdapter:
                             "environment_revision_after": revision,
                             "observation": observation,
                             "admissible_actions": list(admissible_actions),
+                            "policy_action_domain": list(policy_actions),
+                            "policy_action_domain_receipt": dict(policy_receipt),
+                            **(
+                                {
+                                    "collaborator_action_proposals": [
+                                        dict(item)
+                                        for item in collaborator_action_proposals
+                                    ],
+                                    "collaborator_action_alignment": (
+                                        collaborator_action_alignment
+                                    ),
+                                }
+                                if collaborator_grounding_enabled
+                                else {}
+                            ),
                             "raw_model_output": raw_action,
                             "action": None,
                             "next_observation": observation,
@@ -2196,6 +3112,14 @@ class EnvironmentExecutionAdapter:
                         break
                     continue
 
+                collaborator_action_alignment = (
+                    _alfworld_collaborator_action_alignment(
+                        collaborator_action_proposals,
+                        action,
+                    )
+                    if collaborator_grounding_enabled
+                    else None
+                )
                 previous_revision = revision
                 tool_request = (
                     ToolRequest("act", {"command": action})
@@ -2236,6 +3160,21 @@ class EnvironmentExecutionAdapter:
                         "environment_revision_after": revision,
                         "observation": observation,
                         "admissible_actions": list(admissible_actions),
+                        "policy_action_domain": list(policy_actions),
+                        "policy_action_domain_receipt": dict(policy_receipt),
+                        **(
+                            {
+                                "collaborator_action_proposals": [
+                                    dict(item)
+                                    for item in collaborator_action_proposals
+                                ],
+                                "collaborator_action_alignment": (
+                                    collaborator_action_alignment
+                                ),
+                            }
+                            if collaborator_grounding_enabled
+                            else {}
+                        ),
                         "raw_model_output": raw_action,
                         "action": action,
                         "next_observation": next_observation,
@@ -2315,6 +3254,10 @@ class EnvironmentExecutionAdapter:
             )
             exc.tool_receipts = tuple(dict(item) for item in tool_receipts)
             exc.model_calls = tuple(dict(item) for item in model_calls)
+            exc.environment_current_state = self._current_public_state(
+                episode,
+                request,
+            )
             exc.environment_revision = revision
             exc.environment_terminal = terminal
             exc.cause_error_type = type(exc).__name__
@@ -2329,6 +3272,9 @@ class EnvironmentExecutionAdapter:
                     ),
                     "tool_receipts": tuple(dict(item) for item in tool_receipts),
                     "model_calls": tuple(dict(item) for item in model_calls),
+                    "environment_current_state": dict(
+                        exc.environment_current_state
+                    ),
                     "environment_revision": revision,
                     "environment_terminal": terminal,
                     "cause_error_type": type(exc).__name__,
@@ -2349,6 +3295,10 @@ class EnvironmentExecutionAdapter:
                 evaluator_environment_trace=evaluator_trace,
                 tool_receipts=tool_receipts,
                 model_calls=model_calls,
+                environment_current_state=self._current_public_state(
+                    episode,
+                    request,
+                ),
                 environment_revision=revision,
                 environment_terminal=terminal,
                 cause_error_type=cause_error_type,
@@ -2380,6 +3330,9 @@ def build_environment_execution_resources(
     max_action_tokens: int = 512,
     max_observation_chars: int = 0,
     stepwise_director: bool = False,
+    compact_execution_feedback: bool = False,
+    alfworld_policy_action_profile: str = "none",
+    alfworld_complex_thinking_budget: Optional[int] = None,
     tool_version: str = "skillflow.ragen_adapter.v2",
     timeout_seconds: Optional[float] = None,
 ) -> EnvironmentExecutionResources:
@@ -2481,6 +3434,9 @@ def build_environment_execution_resources(
         max_action_tokens=max_action_tokens,
         max_observation_chars=max_observation_chars,
         stepwise_director=stepwise_director,
+        compact_execution_feedback=compact_execution_feedback,
+        alfworld_policy_action_profile=alfworld_policy_action_profile,
+        alfworld_complex_thinking_budget=alfworld_complex_thinking_budget,
     )
     return EnvironmentExecutionResources(tool_id, registry, adapter)
 

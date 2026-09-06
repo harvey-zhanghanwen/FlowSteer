@@ -832,12 +832,37 @@ class OpenAICompatibleGateway:
                     "model metadata chat_template_enable_thinking must be true or false"
                 )
             # SGLang's Qwen3.5 OpenAI surface accepts the Hugging Face chat
-            # template toggle under chat_template_kwargs.  This keeps Agent
-            # answers in message.content instead of an empty content field
-            # accompanied only by reasoning_content.
-            payload["chat_template_kwargs"] = {
-                "enable_thinking": normalized == "true"
+            # template toggle under chat_template_kwargs.  Its checked-in
+            # Qwen3.5 template does not consume thinking_budget; SGLang's
+            # request-level reasoning grammar receives that value through
+            # top-level custom_params instead.
+            thinking_enabled = normalized == "true"
+            chat_template_kwargs: Dict[str, Any] = {
+                "enable_thinking": thinking_enabled
             }
+            raw_thinking_budget = metadata.get("chat_template_thinking_budget")
+            if raw_thinking_budget is not None:
+                try:
+                    thinking_budget = int(raw_thinking_budget)
+                except (TypeError, ValueError) as exc:
+                    raise OpenAICompatibleGatewayError(
+                        "model metadata chat_template_thinking_budget must be "
+                        "a positive integer"
+                    ) from exc
+                if thinking_budget <= 0:
+                    raise OpenAICompatibleGatewayError(
+                        "model metadata chat_template_thinking_budget must be "
+                        "a positive integer"
+                    )
+                if not thinking_enabled:
+                    raise OpenAICompatibleGatewayError(
+                        "chat_template_thinking_budget requires "
+                        "chat_template_enable_thinking=true"
+                    )
+                payload["custom_params"] = {
+                    "thinking_budget": thinking_budget
+                }
+            payload["chat_template_kwargs"] = chat_template_kwargs
         response_schema_text = metadata.get("response_json_schema")
         if response_schema_text is not None:
             if not isinstance(response_schema_text, str) or not response_schema_text.strip():
@@ -887,6 +912,158 @@ class OpenAICompatibleGateway:
             "generation_seed",
             self.default_seed,
         )
+        url = endpoint.rstrip("/") + "/chat/completions"
+        chat_template_kwargs = payload.get("chat_template_kwargs")
+        thinking_enabled = (
+            isinstance(chat_template_kwargs, Mapping)
+            and chat_template_kwargs.get("enable_thinking") is True
+        )
+        if not thinking_enabled:
+            return await self._generate_payload(
+                request=request,
+                url=url,
+                api_key=api_key,
+                payload=payload,
+                scientific_generation_seed=scientific_generation_seed,
+                phase_request_id=request.request_id,
+            )
+
+        # DIRECT_REUSE: SkillFlow's RolloutEngine runs two separately bounded
+        # model phases for every step: REASONING first, then ACTION conditioned
+        # on the sampled reasoning.  Qwen3.5's checked-in chat template only
+        # consumes enable_thinking (not thinking_budget), so a single request
+        # can spend the entire completion on reasoning and leave content empty.
+        # Keep the same two-pass boundary here while preserving the existing
+        # AgentRequest, response schema, provider route, and action parser.
+        raw_reasoning_budget = request.model.metadata.get(
+            "chat_template_thinking_budget",
+            "512",
+        )
+        try:
+            reasoning_budget = int(raw_reasoning_budget)
+        except (TypeError, ValueError) as exc:
+            raise OpenAICompatibleGatewayError(
+                "model metadata chat_template_thinking_budget must be a positive integer"
+            ) from exc
+        if reasoning_budget <= 0:
+            raise OpenAICompatibleGatewayError(
+                "model metadata chat_template_thinking_budget must be a positive integer"
+            )
+
+        reasoning_payload = dict(payload)
+        reasoning_payload["messages"] = [
+            dict(message) for message in payload["messages"]
+        ]
+        reasoning_payload["max_tokens"] = reasoning_budget
+        reasoning_payload["chat_template_kwargs"] = {"enable_thinking": True}
+        reasoning_payload.pop("response_format", None)
+        reasoning_response = await self._generate_payload(
+            request=request,
+            url=url,
+            api_key=api_key,
+            payload=reasoning_payload,
+            scientific_generation_seed=scientific_generation_seed,
+            phase_request_id=f"{request.request_id}:reasoning",
+        )
+        sampled_reasoning = reasoning_response.metadata.get(
+            "reasoning_content"
+        )
+        if not isinstance(sampled_reasoning, str) or not sampled_reasoning.strip():
+            sampled_reasoning = reasoning_response.text
+        if not isinstance(sampled_reasoning, str) or not sampled_reasoning.strip():
+            raise OpenAICompatibleGatewayError(
+                "Qwen3.5 reasoning phase produced no model-visible text"
+            )
+        sampled_reasoning = sampled_reasoning.strip()
+
+        action_payload = dict(payload)
+        action_payload["messages"] = [
+            *[dict(message) for message in payload["messages"]],
+            {
+                "role": "assistant",
+                "content": f"Reasoning:\n{sampled_reasoning}",
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Use the reasoning above. Return only the response required "
+                    "by the preceding request, in its exact required format. "
+                    "Do not include reasoning."
+                ),
+            },
+        ]
+        action_payload["chat_template_kwargs"] = {"enable_thinking": False}
+        action_payload.pop("custom_params", None)
+        action_response = await self._generate_payload(
+            request=request,
+            url=url,
+            api_key=api_key,
+            payload=action_payload,
+            scientific_generation_seed=scientific_generation_seed,
+            phase_request_id=f"{request.request_id}:action",
+        )
+
+        reasoning_metadata = dict(reasoning_response.metadata)
+        action_metadata = dict(action_response.metadata)
+
+        def summed_int(field: str) -> Optional[int]:
+            values = tuple(
+                value
+                for value in (
+                    reasoning_metadata.get(field),
+                    action_metadata.get(field),
+                )
+                if isinstance(value, int) and not isinstance(value, bool)
+            )
+            return sum(values) if values else None
+
+        metadata = dict(action_metadata)
+        for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            combined = summed_int(field)
+            if combined is not None:
+                metadata[field] = combined
+        metadata.update(
+            {
+                "generation_phase_protocol": "reasoning_then_action",
+                "chat_template_enable_thinking": "true",
+                "chat_template_thinking_budget": str(reasoning_budget),
+                "reasoning_content": sampled_reasoning,
+                "reasoning_phase_receipt": reasoning_metadata,
+                "action_phase_receipt": action_metadata,
+                "model_calls": (
+                    {
+                        "phase": "reasoning",
+                        "request_id": f"{request.request_id}:reasoning",
+                        "metadata": reasoning_metadata,
+                    },
+                    {
+                        "phase": "action",
+                        "request_id": f"{request.request_id}:action",
+                        "metadata": action_metadata,
+                    },
+                ),
+                "latency_ms": float(
+                    reasoning_metadata.get("latency_ms", 0.0)
+                )
+                + float(action_metadata.get("latency_ms", 0.0)),
+                "attempt_count": int(
+                    reasoning_metadata.get("attempt_count", 0)
+                )
+                + int(action_metadata.get("attempt_count", 0)),
+            }
+        )
+        return AgentResponse(action_response.text, metadata)
+
+    async def _generate_payload(
+        self,
+        *,
+        request: AgentRequest,
+        url: str,
+        api_key: str,
+        payload: Mapping[str, Any],
+        scientific_generation_seed: Optional[int],
+        phase_request_id: str,
+    ) -> AgentResponse:
         requested_sampling = _requested_sampling(payload)
         if (
             scientific_generation_seed is not None
@@ -894,8 +1071,6 @@ class OpenAICompatibleGateway:
         ):
             requested_sampling["seed"] = scientific_generation_seed
             requested_sampling["backend_seed"] = payload.get("seed")
-        url = endpoint.rstrip("/") + "/chat/completions"
-
         last_error: BaseException | None = None
         started_at = time.monotonic()
         retry_receipts: list[dict[str, object]] = []
@@ -908,7 +1083,7 @@ class OpenAICompatibleGateway:
                 retry_receipts.append(
                     {
                         "attempt": attempt + 1,
-                        "request_id": request.request_id,
+                        "request_id": phase_request_id,
                         "provider_id": request.provider.provider_id,
                         "model_id": request.model.model_id,
                         "status": "completed",
@@ -922,6 +1097,22 @@ class OpenAICompatibleGateway:
                     }
                 )
                 metadata = dict(parsed.metadata)
+                payload_chat_template = payload.get("chat_template_kwargs")
+                if isinstance(payload_chat_template, Mapping) and isinstance(
+                    payload_chat_template.get("enable_thinking"),
+                    bool,
+                ):
+                    metadata["chat_template_enable_thinking"] = (
+                        "true"
+                        if payload_chat_template["enable_thinking"]
+                        else "false"
+                    )
+                    payload_custom_params = payload.get("custom_params")
+                    metadata["chat_template_thinking_budget"] = (
+                        payload_custom_params.get("thinking_budget")
+                        if isinstance(payload_custom_params, Mapping)
+                        else None
+                    )
                 metadata.update(
                     {
                         "latency_ms": max(
@@ -945,7 +1136,7 @@ class OpenAICompatibleGateway:
                 retry_receipts.append(
                     {
                         "attempt": attempt + 1,
-                        "request_id": request.request_id,
+                        "request_id": phase_request_id,
                         "provider_id": request.provider.provider_id,
                         "model_id": request.model.model_id,
                         "status": "retryable_failure" if will_retry else "failed",
@@ -968,7 +1159,7 @@ class OpenAICompatibleGateway:
                 retry_receipts.append(
                     {
                         "attempt": attempt + 1,
-                        "request_id": request.request_id,
+                        "request_id": phase_request_id,
                         "provider_id": request.provider.provider_id,
                         "model_id": request.model.model_id,
                         "status": "retryable_failure" if will_retry else "failed",
@@ -1044,7 +1235,18 @@ class OpenAICompatibleGateway:
             "completion_tokens": usage.get("completion_tokens"),
             "total_tokens": usage.get("total_tokens"),
             "provider_request_id": response.get("id"),
+            "chat_template_enable_thinking": request.model.metadata.get(
+                "chat_template_enable_thinking"
+            ),
+            "chat_template_thinking_budget": request.model.metadata.get(
+                "chat_template_thinking_budget"
+            ),
         }
+        reasoning_content = message.get("reasoning_content")
+        if isinstance(reasoning_content, str):
+            metadata["reasoning_content"] = reasoning_content
+        if usage.get("reasoning_tokens") is not None:
+            metadata["reasoning_tokens"] = usage.get("reasoning_tokens")
         return AgentResponse(text=message["content"], metadata=metadata)
 
 

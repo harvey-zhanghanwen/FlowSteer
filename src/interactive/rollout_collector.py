@@ -139,6 +139,10 @@ _ADD_ACTION_CONTINUATION = (
 _PARAMETER_REGENERATION_CONTINUATION = (
     "Return one complete JSON object that conforms to the current schema."
 )
+_THINKING_TO_ACTION_CONTINUATION = (
+    "Use the analysis above. Return exactly one JSON Canvas action admitted "
+    "by the current action domains, with no other text."
+)
 
 
 def _sglang_backend_sampling_seed(seed: int) -> int:
@@ -196,6 +200,25 @@ def _hierarchical_continuation_prompt(
         )
     )
     return encode_director_transcript(messages)
+
+
+def _reasoning_condition_text(sampled_text: str) -> str:
+    """Project one exact Qwen reasoning receipt into action-phase context."""
+
+    if not isinstance(sampled_text, str) or not sampled_text.strip():
+        raise ReceiptValidationError(
+            "Director reasoning phase produced no model-visible text"
+        )
+    condition = sampled_text.strip()
+    if condition.startswith("<think>"):
+        condition = condition[len("<think>") :].lstrip("\n")
+    if "</think>" in condition:
+        condition = condition.split("</think>", 1)[0].rstrip()
+    if not condition:
+        raise ReceiptValidationError(
+            "Director reasoning phase produced an empty reasoning segment"
+        )
+    return condition
 
 
 def _action_parameter_serialization_failed(text: str) -> bool:
@@ -420,9 +443,9 @@ class SGLangReceiptDirectorClient:
     """Qwen3.5 Director client using SGLang's exact native token receipt.
 
     ``tokenizer`` must be loaded from the same Qwen3.5 checkpoint as the SGLang
-    behavior server.  The client intentionally requires
-    ``apply_chat_template(..., enable_thinking=False)`` and never falls back to
-    an approximately reconstructed prompt.
+    behavior server.  The client applies the configured Qwen chat-template
+    thinking mode explicitly and never falls back to an approximately
+    reconstructed prompt.
     """
 
     def __init__(
@@ -440,8 +463,15 @@ class SGLangReceiptDirectorClient:
         top_k: int = 20,
         max_tokens: int = 768,
         max_context_tokens: Optional[int] = None,
+        context_safety_tokens: int = 0,
+        enable_thinking: bool = False,
+        thinking_budget: int = 512,
+        empty_reasoning_retries: int = 0,
         timeout_seconds: float = 180.0,
         max_retries: int = 2,
+        readiness_timeout_seconds: float = 0.0,
+        readiness_poll_interval_seconds: float = 3.0,
+        served_model_name: str = "supervisor_theta",
         action_json_schema: Optional[str] = None,
         action_json_schema_version: Optional[str] = None,
     ) -> None:
@@ -460,12 +490,53 @@ class SGLangReceiptDirectorClient:
             raise ValueError("top_k must be -1 or a positive integer")
         if max_tokens <= 0 or timeout_seconds <= 0 or max_retries < 0:
             raise ValueError("Director token, timeout, and retry limits are invalid")
+        for field_name, value, allow_zero in (
+            ("readiness_timeout_seconds", readiness_timeout_seconds, True),
+            (
+                "readiness_poll_interval_seconds",
+                readiness_poll_interval_seconds,
+                False,
+            ),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or (value < 0 if allow_zero else value <= 0)
+            ):
+                qualifier = "non-negative" if allow_zero else "positive"
+                raise ValueError(f"{field_name} must be finite and {qualifier}")
+        if not isinstance(served_model_name, str) or not served_model_name.strip():
+            raise ValueError("served_model_name must be non-empty")
+        if type(enable_thinking) is not bool:
+            raise ValueError("enable_thinking must be bool")
+        if (
+            isinstance(context_safety_tokens, bool)
+            or not isinstance(context_safety_tokens, int)
+            or context_safety_tokens < 0
+        ):
+            raise ValueError("context_safety_tokens must be non-negative")
+        if isinstance(thinking_budget, bool) or not isinstance(
+            thinking_budget, int
+        ) or thinking_budget <= 0:
+            raise ValueError("thinking_budget must be a positive integer")
+        if (
+            isinstance(empty_reasoning_retries, bool)
+            or not isinstance(empty_reasoning_retries, int)
+            or empty_reasoning_retries < 0
+        ):
+            raise ValueError("empty_reasoning_retries must be non-negative")
         if (
             max_context_tokens is not None
             and (
                 isinstance(max_context_tokens, bool)
                 or not isinstance(max_context_tokens, int)
-                or max_context_tokens <= max_tokens
+                or max_context_tokens
+                <= (
+                    max(max_tokens, thinking_budget)
+                    if enable_thinking
+                    else max_tokens
+                ) + context_safety_tokens
             )
         ):
             raise ValueError(
@@ -517,8 +588,17 @@ class SGLangReceiptDirectorClient:
         self.top_k = int(top_k)
         self.max_tokens = int(max_tokens)
         self.max_context_tokens = max_context_tokens
+        self.context_safety_tokens = context_safety_tokens
+        self.enable_thinking = enable_thinking
+        self.thinking_budget = thinking_budget
+        self.empty_reasoning_retries = empty_reasoning_retries
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
+        self.readiness_timeout_seconds = float(readiness_timeout_seconds)
+        self.readiness_poll_interval_seconds = float(
+            readiness_poll_interval_seconds
+        )
+        self.served_model_name = served_model_name.strip()
         self.action_json_schema = action_json_schema
         self.action_json_schema_version = action_json_schema_version
 
@@ -579,7 +659,12 @@ class SGLangReceiptDirectorClient:
                 self._expected_server_weight_version,
             )
 
-    def prompt_token_ids(self, prompt: str) -> Tuple[int, ...]:
+    def prompt_token_ids(
+        self,
+        prompt: str,
+        *,
+        enable_thinking_override: Optional[bool] = None,
+    ) -> Tuple[int, ...]:
         if not isinstance(prompt, str) or not prompt:
             raise ReceiptValidationError("Director prompt must be non-empty")
         transcript = decode_director_transcript(prompt)
@@ -591,16 +676,26 @@ class SGLangReceiptDirectorClient:
                 {"role": "user", "content": prompt},
             ]
         )
+        enable_thinking = (
+            self.enable_thinking
+            if enable_thinking_override is None
+            else enable_thinking_override
+        )
+        if type(enable_thinking) is not bool:
+            raise ReceiptValidationError(
+                "enable_thinking_override must be bool or None"
+            )
         try:
             encoded = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=True,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                enable_thinking=enable_thinking,
             )
         except TypeError as exc:
             raise ReceiptValidationError(
-                "Qwen3.5 tokenizer must support enable_thinking=False"
+                "Qwen3.5 tokenizer must support the configured "
+                "enable_thinking value"
             ) from exc
         return _token_ids(encoded, "prompt_token_ids")
 
@@ -615,19 +710,47 @@ class SGLangReceiptDirectorClient:
         action_schema_branch: Optional[str] = None,
         action_target_domains_json: Optional[str] = None,
         action_target_domain_version: Optional[str] = None,
+        enable_thinking_override: Optional[bool] = None,
+        include_action_schema: bool = True,
+        max_tokens_override: Optional[int] = None,
     ) -> Mapping[str, Any]:
         if seed is not None:
             _sglang_backend_sampling_seed(seed)
-        prompt_ids = self.prompt_token_ids(prompt)
+        if type(include_action_schema) is not bool:
+            raise ValueError("include_action_schema must be bool")
+        if max_tokens_override is not None and (
+            isinstance(max_tokens_override, bool)
+            or not isinstance(max_tokens_override, int)
+            or max_tokens_override <= 0
+        ):
+            raise ValueError("max_tokens_override must be positive or None")
+        request_max_tokens = (
+            self.max_tokens
+            if max_tokens_override is None
+            else max_tokens_override
+        )
+        request_enable_thinking = (
+            self.enable_thinking
+            if enable_thinking_override is None
+            else enable_thinking_override
+        )
+        prompt_ids = self.prompt_token_ids(
+            prompt,
+            enable_thinking_override=enable_thinking_override,
+        )
         if (
             self.max_context_tokens is not None
-            and len(prompt_ids) + self.max_tokens > self.max_context_tokens
+            and len(prompt_ids)
+            + request_max_tokens
+            + self.context_safety_tokens
+            > self.max_context_tokens
         ):
             raise ReceiptValidationError(
                 "Director prompt plus maximum completion exceeds "
                 f"max_context_tokens={self.max_context_tokens}: "
                 f"prompt_tokens={len(prompt_ids)}, "
-                f"max_new_tokens={self.max_tokens}"
+                f"max_new_tokens={request_max_tokens}, "
+                f"safety_tokens={self.context_safety_tokens}"
             )
         payload: dict[str, Any] = {
             "input_ids": list(prompt_ids),
@@ -635,7 +758,7 @@ class SGLangReceiptDirectorClient:
                 "temperature": self.temperature,
                 "top_p": self.top_p,
                 "top_k": self.top_k,
-                "max_new_tokens": self.max_tokens,
+                "max_new_tokens": request_max_tokens,
                 "skip_special_tokens": False,
                 "spaces_between_special_tokens": False,
                 "no_stop_trim": True,
@@ -654,19 +777,27 @@ class SGLangReceiptDirectorClient:
             payload["sampling_params"]["sampling_seed"] = (
                 _sglang_backend_sampling_seed(seed)
             )
-        (
-            resolved_action_schema,
-            _,
-            _,
-            _,
-            _,
-        ) = self._resolve_action_schema(
-            action_json_schema=action_json_schema,
-            action_json_schema_version=action_json_schema_version,
-            action_schema_branch=action_schema_branch,
-            action_target_domains_json=action_target_domains_json,
-            action_target_domain_version=action_target_domain_version,
-        )
+        if request_enable_thinking:
+            # SGLang's request-level reasoning grammar consumes this field;
+            # Qwen3.5's chat template itself only consumes enable_thinking.
+            payload["sampling_params"]["custom_params"] = {
+                "thinking_budget": self.thinking_budget
+            }
+        resolved_action_schema = None
+        if include_action_schema:
+            (
+                resolved_action_schema,
+                _,
+                _,
+                _,
+                _,
+            ) = self._resolve_action_schema(
+                action_json_schema=action_json_schema,
+                action_json_schema_version=action_json_schema_version,
+                action_schema_branch=action_schema_branch,
+                action_target_domains_json=action_target_domains_json,
+                action_target_domain_version=action_target_domain_version,
+            )
         if resolved_action_schema is not None:
             # NECESSARY_ADAPTATION: deployed SGLang 0.5.15 exposes
             # SamplingParams.json_schema.  Evaluation may use the schema that
@@ -699,6 +830,11 @@ class SGLangReceiptDirectorClient:
             action_schema_branch=action_schema_branch,
             action_target_domains_json=action_target_domains_json,
             action_target_domain_version=action_target_domain_version,
+            # This public helper describes the executable Canvas-action
+            # request.  Thinking-enabled clients first sample their separate
+            # unconstrained receipt inside propose(); JSON Schema is applied
+            # only to this non-thinking structured phase.
+            enable_thinking_override=False,
         )
 
     def _resolve_action_schema(
@@ -886,8 +1022,88 @@ class SGLangReceiptDirectorClient:
                 action_target_domains_json=action_target_domains_json,
                 action_target_domain_version=action_target_domain_version,
             )
+            proposal_prompt = prompt
+            thinking_phase_receipt: Mapping[str, Any] | None = None
+            thinking_phase_receipts: list[Mapping[str, Any]] = []
+            thinking_condition_text: str | None = None
+            if self.enable_thinking:
+                thinking_payload = self._request_payload(
+                    prompt,
+                    adapter_name,
+                    seed,
+                    enable_thinking_override=True,
+                    include_action_schema=False,
+                    max_tokens_override=self.thinking_budget,
+                )
+                for content_attempt in range(
+                    self.empty_reasoning_retries + 1
+                ):
+                    value, latency_ms, attempt_count, transport_retry_receipt = (
+                        await self._post_with_retries(thinking_payload)
+                    )
+                    thinking_response = self._parse_response(
+                        prompt,
+                        thinking_payload,
+                        value,
+                        policy_version=policy_version,
+                        adapter_name=adapter_name,
+                        expected_server_weight_version=(
+                            expected_server_weight_version
+                        ),
+                        action_json_schema_version=None,
+                        action_schema_branch=None,
+                        action_target_domains_json=None,
+                        action_target_domain_version=None,
+                        latency_ms=latency_ms,
+                        attempt_count=attempt_count,
+                        transport_retry_receipt=transport_retry_receipt,
+                        generation_seed=seed,
+                    )
+                    receipt = dict(
+                        self._hierarchical_phase_receipt(thinking_response)
+                    )
+                    receipt["chat_template_enable_thinking"] = True
+                    receipt["thinking_budget"] = self.thinking_budget
+                    receipt["content_attempt"] = content_attempt + 1
+                    try:
+                        thinking_condition_text = _reasoning_condition_text(
+                            thinking_response.text
+                        )
+                    except ReceiptValidationError:
+                        receipt["content_status"] = "empty_reasoning"
+                        thinking_phase_receipts.append(receipt)
+                        if content_attempt >= self.empty_reasoning_retries:
+                            raise
+                        continue
+                    receipt["content_status"] = "completed"
+                    thinking_phase_receipts.append(receipt)
+                    break
+                assert thinking_condition_text is not None
+                assert thinking_phase_receipts
+                thinking_phase_receipt = dict(thinking_phase_receipts[-1])
+                thinking_phase_receipt["content_attempt_receipts"] = [
+                    dict(item) for item in thinking_phase_receipts
+                ]
+                thinking_phase_receipt["content_retry_count"] = max(
+                    len(thinking_phase_receipts) - 1,
+                    0,
+                )
+                thinking_phase_receipt["latency_ms"] = sum(
+                    float(item.get("latency_ms", 0.0))
+                    for item in thinking_phase_receipts
+                )
+                thinking_phase_receipt["attempt_count"] = sum(
+                    int(item.get("attempt_count", 0))
+                    for item in thinking_phase_receipts
+                )
+                proposal_prompt = _hierarchical_continuation_prompt(
+                    prompt,
+                    committed_json=f"Reasoning:\n{thinking_condition_text}",
+                    instruction=_THINKING_TO_ACTION_CONTINUATION,
+                )
+
             payload = self._request_payload(
-                prompt,
+                proposal_prompt,
                 adapter_name,
                 seed,
                 action_json_schema=action_json_schema,
@@ -895,6 +1111,7 @@ class SGLangReceiptDirectorClient:
                 action_schema_branch=action_schema_branch,
                 action_target_domains_json=action_target_domains_json,
                 action_target_domain_version=action_target_domain_version,
+                enable_thinking_override=False,
             )
             if (
                 resolved_action_schema_version
@@ -907,8 +1124,8 @@ class SGLangReceiptDirectorClient:
                 actions = director_actions_from_admissible_schema_branch(
                     resolved_action_schema_branch
                 )
-                return await self._propose_hierarchical_action(
-                    prompt=prompt,
+                response = await self._propose_hierarchical_action(
+                    prompt=proposal_prompt,
                     seed=seed,
                     actions=actions,
                     selector_payload=payload,
@@ -925,10 +1142,53 @@ class SGLangReceiptDirectorClient:
                     action_target_domains_json=resolved_target_domains_json,
                     action_target_domain_version=resolved_target_domain_version,
                 )
+                if thinking_phase_receipt is not None:
+                    metadata = dict(response.metadata)
+                    structured_base_prompt = metadata.get(
+                        "base_prompt_text",
+                        metadata.get("prompt_text"),
+                    )
+                    metadata["thinking_phase_used"] = True
+                    metadata["thinking_phase_receipt"] = dict(
+                        thinking_phase_receipt
+                    )
+                    metadata["thinking_condition_text"] = (
+                        thinking_condition_text
+                    )
+                    metadata["thinking_request_count"] = len(
+                        thinking_phase_receipts
+                    )
+                    metadata["structured_chat_template_enable_thinking"] = False
+                    metadata["structured_base_prompt_text"] = (
+                        structured_base_prompt
+                    )
+                    metadata["structured_latency_ms"] = metadata.get(
+                        "latency_ms"
+                    )
+                    metadata["structured_attempt_count"] = metadata.get(
+                        "attempt_count"
+                    )
+                    metadata["latency_ms"] = float(
+                        metadata.get("latency_ms", 0.0)
+                    ) + float(thinking_phase_receipt.get("latency_ms", 0.0))
+                    metadata["attempt_count"] = int(
+                        metadata.get("attempt_count", 0)
+                    ) + int(thinking_phase_receipt.get("attempt_count", 0))
+                    metadata["base_prompt_text"] = prompt
+                    response = DirectorResponse(
+                        text=response.text,
+                        metadata=metadata,
+                    )
+                return response
 
-            value, latency_ms, attempt_count = await self._post_with_retries(payload)
-            return self._parse_response(
-                prompt,
+            (
+                value,
+                latency_ms,
+                attempt_count,
+                transport_retry_receipt,
+            ) = await self._post_with_retries(payload)
+            response = self._parse_response(
+                proposal_prompt,
                 payload,
                 value,
                 policy_version=policy_version,
@@ -944,41 +1204,261 @@ class SGLangReceiptDirectorClient:
                 action_target_domain_version=resolved_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
+                transport_retry_receipt=transport_retry_receipt,
                 generation_seed=seed,
             )
+            if thinking_phase_receipt is not None:
+                metadata = dict(response.metadata)
+                structured_base_prompt = metadata.get("prompt_text")
+                metadata["thinking_phase_used"] = True
+                metadata["thinking_phase_receipt"] = dict(
+                    thinking_phase_receipt
+                )
+                metadata["thinking_condition_text"] = thinking_condition_text
+                metadata["thinking_request_count"] = len(
+                    thinking_phase_receipts
+                )
+                metadata["structured_chat_template_enable_thinking"] = False
+                metadata["structured_base_prompt_text"] = (
+                    structured_base_prompt
+                )
+                metadata["structured_latency_ms"] = metadata.get("latency_ms")
+                metadata["structured_attempt_count"] = metadata.get(
+                    "attempt_count"
+                )
+                metadata["latency_ms"] = float(
+                    metadata.get("latency_ms", 0.0)
+                ) + float(thinking_phase_receipt.get("latency_ms", 0.0))
+                metadata["attempt_count"] = int(
+                    metadata.get("attempt_count", 0)
+                ) + int(thinking_phase_receipt.get("attempt_count", 0))
+                metadata["base_prompt_text"] = prompt
+                response = DirectorResponse(text=response.text, metadata=metadata)
+            return response
         finally:
             self.rollout_gate.release()
 
     async def _post_with_retries(
         self,
         payload: Mapping[str, Any],
-    ) -> tuple[Mapping[str, Any], float, int]:
-        """Submit one exact SGLang generation phase with transport retries."""
+    ) -> tuple[Mapping[str, Any], float, int, Mapping[str, Any]]:
+        """Submit one exact SGLang phase with bounded transport recovery.
+
+        SkillFlow disables the OpenAI client's hidden retries and applies its
+        retry policy to one immutable request.  Keep that boundary here: every
+        generation attempt receives the same ``payload``.  When explicitly
+        enabled, the SkillFlow Supervisor readiness probe is used once after
+        the fast retry group is exhausted; the current Director turn remains
+        open while the local service becomes ready again.
+        """
 
         last_error: BaseException | None = None
+        last_retryable = False
         started_at = time.monotonic()
-        for attempt in range(self.max_retries + 1):
-            try:
-                value = await asyncio.to_thread(self._post_json, payload)
-                return (
-                    value,
-                    max((time.monotonic() - started_at) * 1000.0, 0.0),
-                    attempt + 1,
+        request_attempts: list[dict[str, Any]] = []
+        readiness_receipt: dict[str, Any] = {
+            "enabled": self.readiness_timeout_seconds > 0,
+            "attempted": False,
+            "recovered": False,
+            "served_model_name": self.served_model_name,
+            "timeout_seconds": self.readiness_timeout_seconds,
+            "poll_interval_seconds": self.readiness_poll_interval_seconds,
+            "probe_count": 0,
+            "probes": [],
+        }
+
+        # One initial fast-retry group and, only after a successful readiness
+        # wait, one recovery group.  There is no unbounded recovery loop.
+        for recovery_group in range(2):
+            for attempt in range(self.max_retries + 1):
+                attempt_started_at = time.monotonic()
+                attempt_number = len(request_attempts) + 1
+                try:
+                    value = await asyncio.to_thread(self._post_json, payload)
+                    request_attempts.append(
+                        {
+                            "attempt": attempt_number,
+                            "recovery_group": recovery_group,
+                            "status": "completed",
+                            "error_type": None,
+                            "http_status": 200,
+                            "retryable": False,
+                            "backoff_seconds": 0.0,
+                            "latency_ms": max(
+                                (time.monotonic() - attempt_started_at) * 1000.0,
+                                0.0,
+                            ),
+                        }
+                    )
+                    transport_receipt = {
+                        "schema_version": (
+                            "flowsteer.sglang.transport-retry-readiness.v1"
+                        ),
+                        "request_attempts": request_attempts,
+                        "readiness": readiness_receipt,
+                    }
+                    return (
+                        value,
+                        max((time.monotonic() - started_at) * 1000.0, 0.0),
+                        len(request_attempts),
+                        transport_receipt,
+                    )
+                except HTTPError as exc:
+                    last_error = exc
+                    last_retryable = (
+                        exc.code in {408, 409, 425, 429} or exc.code >= 500
+                    )
+                    http_status: int | None = exc.code
+                except (URLError, TimeoutError, socket.timeout, OSError) as exc:
+                    # SkillFlow's urllib transports include OSError so a raw
+                    # ConnectionResetError is treated like URLError.
+                    last_error = exc
+                    last_retryable = True
+                    http_status = None
+
+                fast_retry = last_retryable and attempt < self.max_retries
+                readiness_retry = (
+                    last_retryable
+                    and recovery_group == 0
+                    and attempt == self.max_retries
+                    and self.readiness_timeout_seconds > 0
                 )
-            except HTTPError as exc:
-                last_error = exc
-                if not (exc.code in {408, 409, 425, 429} or exc.code >= 500):
+                backoff_seconds = min(2.0**attempt, 4.0) if fast_retry else 0.0
+                request_attempts.append(
+                    {
+                        "attempt": attempt_number,
+                        "recovery_group": recovery_group,
+                        "status": (
+                            "retryable_failure"
+                            if fast_retry or readiness_retry
+                            else "failed"
+                        ),
+                        "error_type": type(last_error).__name__,
+                        "http_status": http_status,
+                        "retryable": last_retryable,
+                        "backoff_seconds": backoff_seconds,
+                        "latency_ms": max(
+                            (time.monotonic() - attempt_started_at) * 1000.0,
+                            0.0,
+                        ),
+                    }
+                )
+                if not fast_retry:
                     break
-            except (URLError, TimeoutError, socket.timeout) as exc:
-                last_error = exc
-            if attempt < self.max_retries:
-                await asyncio.sleep(min(2.0**attempt, 4.0))
+                await asyncio.sleep(backoff_seconds)
+
+            if (
+                recovery_group == 0
+                and last_retryable
+                and self.readiness_timeout_seconds > 0
+            ):
+                readiness_receipt = dict(await self._wait_for_readiness())
+                if readiness_receipt["recovered"] is True:
+                    continue
+                request_attempts[-1]["status"] = "failed"
+            break
+
+        transport_receipt = {
+            "schema_version": "flowsteer.sglang.transport-retry-readiness.v1",
+            "request_attempts": request_attempts,
+            "readiness": readiness_receipt,
+        }
         detail = (
             f"HTTP {last_error.code}"
             if isinstance(last_error, HTTPError)
             else type(last_error).__name__
         )
-        raise DirectorError(f"SGLang Director request failed: {detail}") from last_error
+        error = DirectorError(f"SGLang Director request failed: {detail}")
+        error.transport_retry_receipt = transport_receipt
+        error.retryable = last_retryable
+        raise error from last_error
+
+    async def _wait_for_readiness(self) -> Mapping[str, Any]:
+        """Poll the local SGLang model endpoint using SkillFlow's cadence."""
+
+        started_at = time.monotonic()
+        deadline = started_at + self.readiness_timeout_seconds
+        probes: list[dict[str, Any]] = []
+        while True:
+            probe_started_at = time.monotonic()
+            probe: dict[str, Any] = {
+                "probe": len(probes) + 1,
+                "status": "not_ready",
+                "error_type": None,
+                "http_status": None,
+                "model_ids": [],
+            }
+            try:
+                model_ids = await asyncio.to_thread(self._probe_served_models)
+                probe["http_status"] = 200
+                probe["model_ids"] = list(model_ids)
+                if self.served_model_name in model_ids:
+                    probe["status"] = "ready"
+            except HTTPError as exc:
+                probe["error_type"] = type(exc).__name__
+                probe["http_status"] = exc.code
+            except (
+                URLError,
+                TimeoutError,
+                socket.timeout,
+                OSError,
+                ReceiptValidationError,
+            ) as exc:
+                probe["error_type"] = type(exc).__name__
+            probe["latency_ms"] = max(
+                (time.monotonic() - probe_started_at) * 1000.0,
+                0.0,
+            )
+            probes.append(probe)
+            if probe["status"] == "ready":
+                return {
+                    "enabled": True,
+                    "attempted": True,
+                    "recovered": True,
+                    "served_model_name": self.served_model_name,
+                    "timeout_seconds": self.readiness_timeout_seconds,
+                    "poll_interval_seconds": self.readiness_poll_interval_seconds,
+                    "probe_count": len(probes),
+                    "probes": probes,
+                    "latency_ms": max(
+                        (time.monotonic() - started_at) * 1000.0,
+                        0.0,
+                    ),
+                }
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {
+                    "enabled": True,
+                    "attempted": True,
+                    "recovered": False,
+                    "served_model_name": self.served_model_name,
+                    "timeout_seconds": self.readiness_timeout_seconds,
+                    "poll_interval_seconds": self.readiness_poll_interval_seconds,
+                    "probe_count": len(probes),
+                    "probes": probes,
+                    "latency_ms": max(
+                        (time.monotonic() - started_at) * 1000.0,
+                        0.0,
+                    ),
+                }
+            await asyncio.sleep(min(self.readiness_poll_interval_seconds, remaining))
+
+    def _probe_served_models(self) -> tuple[str, ...]:
+        request = Request(
+            self.base_url + "/v1/models",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            method="GET",
+        )
+        with urlopen(request, timeout=3.0) as response:
+            value = json.load(response)
+        if not isinstance(value, Mapping) or not isinstance(value.get("data"), list):
+            raise ReceiptValidationError("SGLang model-list response is malformed")
+        model_ids: list[str] = []
+        for item in value["data"]:
+            if not isinstance(item, Mapping) or not isinstance(item.get("id"), str):
+                raise ReceiptValidationError("SGLang model-list entry is malformed")
+            model_ids.append(str(item["id"]))
+        return tuple(model_ids)
 
     @staticmethod
     def _hierarchical_choice(
@@ -1066,6 +1546,9 @@ class SGLangReceiptDirectorClient:
             "attempt_count": metadata.get("attempt_count"),
             "generation_seed": metadata.get("generation_seed"),
             "backend_sampling_seed": metadata.get("backend_sampling_seed"),
+            "policy_version": metadata.get("policy_version"),
+            "adapter_name": metadata.get("adapter_name"),
+            "requested_lora_path": metadata.get("requested_lora_path"),
             "server_weight_version": metadata.get("server_weight_version"),
             "receipt_verified": metadata.get("receipt_verified"),
         }
@@ -1113,7 +1596,7 @@ class SGLangReceiptDirectorClient:
         if len(actions) == 1:
             selected_action = actions[0]
         else:
-            value, latency_ms, attempt_count = await self._post_with_retries(
+            value, latency_ms, attempt_count, transport_retry_receipt = await self._post_with_retries(
                 selector_payload
             )
             total_latency_ms += latency_ms
@@ -1131,6 +1614,7 @@ class SGLangReceiptDirectorClient:
                 action_target_domain_version=action_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
+                transport_retry_receipt=transport_retry_receipt,
                 generation_seed=seed,
             )
             selected_action = self._hierarchical_choice(
@@ -1178,14 +1662,19 @@ class SGLangReceiptDirectorClient:
                 )
             )
             role_selection_payload = dict(
-                self._request_payload(prompt, adapter_name, seed)
+                self._request_payload(
+                    prompt,
+                    adapter_name,
+                    seed,
+                    enable_thinking_override=False,
+                )
             )
             role_selection_sampling = dict(
                 role_selection_payload["sampling_params"]
             )
             role_selection_sampling["json_schema"] = role_selection_schema
             role_selection_payload["sampling_params"] = role_selection_sampling
-            value, latency_ms, attempt_count = await self._post_with_retries(
+            value, latency_ms, attempt_count, transport_retry_receipt = await self._post_with_retries(
                 role_selection_payload
             )
             total_latency_ms += latency_ms
@@ -1203,6 +1692,7 @@ class SGLangReceiptDirectorClient:
                 action_target_domain_version=action_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
+                transport_retry_receipt=transport_retry_receipt,
                 generation_seed=seed,
             )
             try:
@@ -1244,14 +1734,19 @@ class SGLangReceiptDirectorClient:
                     instruction=_PARAMETER_REGENERATION_CONTINUATION,
                 )
                 regeneration_payload = dict(
-                    self._request_payload(regeneration_prompt, adapter_name, seed)
+                    self._request_payload(
+                        regeneration_prompt,
+                        adapter_name,
+                        seed,
+                        enable_thinking_override=False,
+                    )
                 )
                 regeneration_sampling = dict(
                     regeneration_payload["sampling_params"]
                 )
                 regeneration_sampling["json_schema"] = role_selection_schema
                 regeneration_payload["sampling_params"] = regeneration_sampling
-                value, latency_ms, attempt_count = await self._post_with_retries(
+                value, latency_ms, attempt_count, transport_retry_receipt = await self._post_with_retries(
                     regeneration_payload
                 )
                 total_latency_ms += latency_ms
@@ -1271,6 +1766,7 @@ class SGLangReceiptDirectorClient:
                     action_target_domain_version=action_target_domain_version,
                     latency_ms=latency_ms,
                     attempt_count=attempt_count,
+                    transport_retry_receipt=transport_retry_receipt,
                     generation_seed=seed,
                 )
                 try:
@@ -1367,12 +1863,17 @@ class SGLangReceiptDirectorClient:
                 )
             )
             declaration_payload = dict(
-                self._request_payload(declaration_prompt, adapter_name, seed)
+                self._request_payload(
+                    declaration_prompt,
+                    adapter_name,
+                    seed,
+                    enable_thinking_override=False,
+                )
             )
             declaration_sampling = dict(declaration_payload["sampling_params"])
             declaration_sampling["json_schema"] = declaration_schema
             declaration_payload["sampling_params"] = declaration_sampling
-            value, latency_ms, attempt_count = await self._post_with_retries(
+            value, latency_ms, attempt_count, transport_retry_receipt = await self._post_with_retries(
                 declaration_payload
             )
             total_latency_ms += latency_ms
@@ -1390,6 +1891,7 @@ class SGLangReceiptDirectorClient:
                 action_target_domain_version=action_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
+                transport_retry_receipt=transport_retry_receipt,
                 generation_seed=seed,
             )
             phase_receipts["add_agent_declarations"] = (
@@ -1499,11 +2001,18 @@ class SGLangReceiptDirectorClient:
             field_schema = director_modify_agent_field_selector_json_schema_text(
                 admitted_modify_fields
             )
-            field_payload = dict(self._request_payload(prompt, adapter_name, seed))
+            field_payload = dict(
+                self._request_payload(
+                    prompt,
+                    adapter_name,
+                    seed,
+                    enable_thinking_override=False,
+                )
+            )
             field_sampling = dict(field_payload["sampling_params"])
             field_sampling["json_schema"] = field_schema
             field_payload["sampling_params"] = field_sampling
-            value, latency_ms, attempt_count = await self._post_with_retries(
+            value, latency_ms, attempt_count, transport_retry_receipt = await self._post_with_retries(
                 field_payload
             )
             total_latency_ms += latency_ms
@@ -1521,6 +2030,7 @@ class SGLangReceiptDirectorClient:
                 action_target_domain_version=action_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
+                transport_retry_receipt=transport_retry_receipt,
                 generation_seed=seed,
             )
             field_selector = json.loads(field_schema)
@@ -1552,12 +2062,17 @@ class SGLangReceiptDirectorClient:
                     selected_modify_agent_id = admitted_agent_ids[0]
                 else:
                     agent_payload = dict(
-                        self._request_payload(prompt, adapter_name, seed)
+                        self._request_payload(
+                            prompt,
+                            adapter_name,
+                            seed,
+                            enable_thinking_override=False,
+                        )
                     )
                     agent_sampling = dict(agent_payload["sampling_params"])
                     agent_sampling["json_schema"] = agent_schema
                     agent_payload["sampling_params"] = agent_sampling
-                    value, latency_ms, attempt_count = await self._post_with_retries(
+                    value, latency_ms, attempt_count, transport_retry_receipt = await self._post_with_retries(
                         agent_payload
                     )
                     total_latency_ms += latency_ms
@@ -1577,6 +2092,7 @@ class SGLangReceiptDirectorClient:
                         action_target_domain_version=action_target_domain_version,
                         latency_ms=latency_ms,
                         attempt_count=attempt_count,
+                        transport_retry_receipt=transport_retry_receipt,
                         generation_seed=seed,
                     )
                     selected_modify_agent_id = self._hierarchical_choice(
@@ -1600,11 +2116,18 @@ class SGLangReceiptDirectorClient:
                     action_target_domains
                 )
             )
-            candidate_payload = dict(self._request_payload(prompt, adapter_name, seed))
+            candidate_payload = dict(
+                self._request_payload(
+                    prompt,
+                    adapter_name,
+                    seed,
+                    enable_thinking_override=False,
+                )
+            )
             candidate_sampling = dict(candidate_payload["sampling_params"])
             candidate_sampling["json_schema"] = candidate_schema
             candidate_payload["sampling_params"] = candidate_sampling
-            value, latency_ms, attempt_count = await self._post_with_retries(
+            value, latency_ms, attempt_count, transport_retry_receipt = await self._post_with_retries(
                 candidate_payload
             )
             total_latency_ms += latency_ms
@@ -1622,6 +2145,7 @@ class SGLangReceiptDirectorClient:
                 action_target_domain_version=action_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
+                transport_retry_receipt=transport_retry_receipt,
                 generation_seed=seed,
             )
             candidate_selector = json.loads(candidate_schema)
@@ -1658,6 +2182,7 @@ class SGLangReceiptDirectorClient:
                         regeneration_prompt,
                         adapter_name,
                         seed,
+                        enable_thinking_override=False,
                     )
                 )
                 regeneration_sampling = dict(
@@ -1665,7 +2190,7 @@ class SGLangReceiptDirectorClient:
                 )
                 regeneration_sampling["json_schema"] = candidate_schema
                 regeneration_payload["sampling_params"] = regeneration_sampling
-                value, latency_ms, attempt_count = await self._post_with_retries(
+                value, latency_ms, attempt_count, transport_retry_receipt = await self._post_with_retries(
                     regeneration_payload
                 )
                 total_latency_ms += latency_ms
@@ -1685,6 +2210,7 @@ class SGLangReceiptDirectorClient:
                     action_target_domain_version=action_target_domain_version,
                     latency_ms=latency_ms,
                     attempt_count=attempt_count,
+                    transport_retry_receipt=transport_retry_receipt,
                     generation_seed=seed,
                 )
                 selected_relation_candidate = self._hierarchical_index_choice(
@@ -1712,12 +2238,17 @@ class SGLangReceiptDirectorClient:
             )
 
         parameter_payload = dict(
-            self._request_payload(parameter_prompt, adapter_name, seed)
+            self._request_payload(
+                parameter_prompt,
+                adapter_name,
+                seed,
+                enable_thinking_override=False,
+            )
         )
         parameter_sampling = dict(parameter_payload["sampling_params"])
         parameter_sampling["json_schema"] = parameter_schema
         parameter_payload["sampling_params"] = parameter_sampling
-        value, latency_ms, attempt_count = await self._post_with_retries(
+        value, latency_ms, attempt_count, transport_retry_receipt = await self._post_with_retries(
             parameter_payload
         )
         total_latency_ms += latency_ms
@@ -1735,6 +2266,7 @@ class SGLangReceiptDirectorClient:
             action_target_domain_version=action_target_domain_version,
             latency_ms=latency_ms,
             attempt_count=attempt_count,
+            transport_retry_receipt=transport_retry_receipt,
             generation_seed=seed,
         )
         parameter_regeneration_attempted = False
@@ -1755,14 +2287,19 @@ class SGLangReceiptDirectorClient:
                 instruction=_PARAMETER_REGENERATION_CONTINUATION,
             )
             regeneration_payload = dict(
-                self._request_payload(regeneration_prompt, adapter_name, seed)
+                self._request_payload(
+                    regeneration_prompt,
+                    adapter_name,
+                    seed,
+                    enable_thinking_override=False,
+                )
             )
             regeneration_sampling = dict(
                 regeneration_payload["sampling_params"]
             )
             regeneration_sampling["json_schema"] = parameter_schema
             regeneration_payload["sampling_params"] = regeneration_sampling
-            value, latency_ms, attempt_count = await self._post_with_retries(
+            value, latency_ms, attempt_count, transport_retry_receipt = await self._post_with_retries(
                 regeneration_payload
             )
             total_latency_ms += latency_ms
@@ -1782,6 +2319,7 @@ class SGLangReceiptDirectorClient:
                 action_target_domain_version=action_target_domain_version,
                 latency_ms=latency_ms,
                 attempt_count=attempt_count,
+                transport_retry_receipt=transport_retry_receipt,
                 generation_seed=seed,
             )
             try:
@@ -1916,6 +2454,7 @@ class SGLangReceiptDirectorClient:
         action_target_domain_version: Optional[str],
         latency_ms: float,
         attempt_count: int,
+        transport_retry_receipt: Mapping[str, Any],
         generation_seed: Optional[int] = None,
     ) -> DirectorResponse:
         text = value.get("text")
@@ -1980,6 +2519,7 @@ class SGLangReceiptDirectorClient:
                 "completion_tokens": len(output_ids),
                 "latency_ms": latency_ms,
                 "attempt_count": attempt_count,
+                "transport_retry_receipt": dict(transport_retry_receipt),
                 "generation_seed": (
                     generation_seed
                     if generation_seed is not None
@@ -3742,7 +4282,27 @@ class AgentGraphRolloutCollector:
                 "retrieved Skills are absent from the version-compatible ACTIVE library"
             )
         prompt = self.orchestrator.build_prompt(env, 0, current_skills)
-        for round_index in range(self.orchestrator.max_rounds):
+        for round_index in range(self.orchestrator.max_rounds + 1):
+            terminal_control_epilogue = round_index == self.orchestrator.max_rounds
+            if terminal_control_epilogue:
+                environment_state = env.public_environment_state()
+                environment_closed = bool(
+                    isinstance(environment_state, Mapping)
+                    and (
+                        environment_state.get("environment_terminal") is True
+                        or environment_state.get("environment_truncated") is True
+                    )
+                )
+                live_actions = env.model_admissible_action_types()
+                finish_admission = env.finish_admissibility()
+                if not (
+                    isinstance(env.runtime.dataset_id, str)
+                    and env.runtime.dataset_id.casefold() == "alfworld"
+                    and environment_closed
+                    and live_actions == ("finish",)
+                    and finish_admission.get("admissible") is True
+                ):
+                    break
             terminal_diagnosis = self.orchestrator.terminal_canvas_diagnosis(env)
             if terminal_diagnosis is not None:
                 natural_terminal_reason = str(
@@ -3826,9 +4386,311 @@ class AgentGraphRolloutCollector:
                         "Director target domains differ from the request"
                     )
             strategy_hint = metadata.get("action_decoding_strategy")
+            structured_canvas_prompt = prompt
+            if metadata.get("thinking_phase_used") is True:
+                thinking_receipt = metadata.get("thinking_phase_receipt")
+                if not isinstance(thinking_receipt, Mapping):
+                    raise ReceiptValidationError(
+                        "Director thinking phase has no exact receipt"
+                    )
+                thinking_request_count = metadata.get(
+                    "thinking_request_count"
+                )
+                thinking_attempts = thinking_receipt.get(
+                    "content_attempt_receipts"
+                )
+                thinking_retry_count = thinking_receipt.get(
+                    "content_retry_count"
+                )
+                max_thinking_requests = (
+                    self.orchestrator.client.empty_reasoning_retries + 1
+                )
+                if (
+                    type(thinking_request_count) is not int
+                    or type(thinking_retry_count) is not int
+                    or not isinstance(thinking_attempts, (list, tuple))
+                    or not 1
+                    <= thinking_request_count
+                    <= max_thinking_requests
+                    or len(thinking_attempts) != thinking_request_count
+                    or thinking_retry_count != thinking_request_count - 1
+                ):
+                    raise ReceiptValidationError(
+                        "Director thinking phase request count is invalid"
+                    )
+                for attempt_index, attempt in enumerate(
+                    thinking_attempts,
+                    start=1,
+                ):
+                    if not isinstance(attempt, Mapping):
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt receipt is invalid"
+                        )
+                    if (
+                        type(attempt.get("content_attempt")) is not int
+                        or attempt.get("content_attempt") != attempt_index
+                    ):
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt order is invalid"
+                        )
+                    if attempt.get("receipt_verified") is not True:
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt is not verified"
+                        )
+                    if attempt.get("chat_template_enable_thinking") is not True:
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt disabled thinking"
+                        )
+                    if attempt.get("thinking_budget") != (
+                        self.orchestrator.client.thinking_budget
+                    ):
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt changed its budget"
+                        )
+                    if attempt.get("prompt_text") != prompt:
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt changed its Canvas prompt"
+                        )
+                    if _optional_int(
+                        attempt.get("generation_seed")
+                    ) != generation_seed or _optional_int(
+                        attempt.get("backend_sampling_seed")
+                    ) != _sglang_backend_sampling_seed(generation_seed):
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt seed differs from the request"
+                        )
+                    if attempt.get("server_weight_version") != metadata.get(
+                        "server_weight_version"
+                    ):
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt used different weights"
+                        )
+                    if attempt.get("policy_version") != metadata.get(
+                        "policy_version"
+                    ) or attempt.get("adapter_name") != metadata.get(
+                        "adapter_name"
+                    ):
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt used a different policy route"
+                        )
+                    if attempt.get("requested_lora_path") != metadata.get(
+                        "requested_lora_path"
+                    ):
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt requested a different adapter"
+                        )
+                    if any(
+                        attempt.get(field_name) is not None
+                        for field_name in (
+                            "action_json_schema_version",
+                            "action_schema_branch",
+                            "action_target_domain_version",
+                            "action_target_domains_json",
+                        )
+                    ):
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt carried an action schema"
+                        )
+                    _token_ids(
+                        attempt.get("prompt_token_ids"),
+                        "thinking_phase.content_attempt.prompt_token_ids",
+                    )
+                    attempt_output_ids = _token_ids(
+                        attempt.get("output_token_ids"),
+                        "thinking_phase.content_attempt.output_token_ids",
+                    )
+                    attempt_log_probs = attempt.get("behavior_log_probs")
+                    if (
+                        not isinstance(attempt_log_probs, (list, tuple))
+                        or len(attempt_log_probs) != len(attempt_output_ids)
+                        or len(attempt_output_ids)
+                        > self.orchestrator.client.thinking_budget
+                    ):
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt log-prob receipt is incomplete"
+                        )
+                    if (
+                        not isinstance(attempt.get("request_id"), str)
+                        or not str(attempt["request_id"]).strip()
+                        or type(attempt.get("attempt_count")) is not int
+                        or attempt["attempt_count"] < 1
+                        or isinstance(attempt.get("latency_ms"), bool)
+                        or not isinstance(attempt.get("latency_ms"), (int, float))
+                        or attempt["latency_ms"] < 0
+                    ):
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt transport receipt is invalid"
+                        )
+                    attempt_text = attempt.get("text")
+                    if not isinstance(attempt_text, str):
+                        raise ReceiptValidationError(
+                            "Director thinking content attempt has no sampled text"
+                        )
+                    if attempt_index < thinking_request_count:
+                        if attempt.get("content_status") != "empty_reasoning":
+                            raise ReceiptValidationError(
+                                "Director thinking retry predecessor is not empty reasoning"
+                            )
+                        try:
+                            _reasoning_condition_text(attempt_text)
+                        except ReceiptValidationError:
+                            pass
+                        else:
+                            raise ReceiptValidationError(
+                                "Director retried a non-empty thinking response"
+                            )
+                    else:
+                        if attempt.get("content_status") != "completed":
+                            raise ReceiptValidationError(
+                                "Director final thinking content attempt is incomplete"
+                            )
+                        if _reasoning_condition_text(attempt_text) != metadata.get(
+                            "thinking_condition_text"
+                        ):
+                            raise ReceiptValidationError(
+                                "Director final thinking content differs from its condition"
+                            )
+                final_thinking_attempt = thinking_attempts[-1]
+                for field_name in (
+                    "text",
+                    "prompt_text",
+                    "prompt_token_ids",
+                    "output_token_ids",
+                    "behavior_log_probs",
+                    "request_id",
+                    "finish_reason",
+                    "generation_seed",
+                    "backend_sampling_seed",
+                    "policy_version",
+                    "adapter_name",
+                    "requested_lora_path",
+                    "server_weight_version",
+                    "receipt_verified",
+                    "chat_template_enable_thinking",
+                    "thinking_budget",
+                    "content_attempt",
+                    "content_status",
+                ):
+                    if thinking_receipt.get(field_name) != final_thinking_attempt.get(
+                        field_name
+                    ):
+                        raise ReceiptValidationError(
+                            "Director aggregate thinking receipt differs from its final attempt"
+                        )
+                if thinking_receipt.get("latency_ms") != sum(
+                    float(attempt["latency_ms"])
+                    for attempt in thinking_attempts
+                ) or thinking_receipt.get("attempt_count") != sum(
+                    int(attempt["attempt_count"])
+                    for attempt in thinking_attempts
+                ):
+                    raise ReceiptValidationError(
+                        "Director aggregate thinking receipt totals are invalid"
+                    )
+                if metadata.get(
+                    "structured_chat_template_enable_thinking"
+                ) is not False:
+                    raise ReceiptValidationError(
+                        "Director structured action phase must disable thinking"
+                    )
+                if thinking_receipt.get("receipt_verified") is not True:
+                    raise ReceiptValidationError(
+                        "Director thinking phase receipt is not verified"
+                    )
+                if thinking_receipt.get(
+                    "chat_template_enable_thinking"
+                ) is not True:
+                    raise ReceiptValidationError(
+                        "Director thinking phase did not enable the thinking template"
+                    )
+                if thinking_receipt.get("prompt_text") != prompt:
+                    raise ReceiptValidationError(
+                        "Director thinking phase is bound to a different Canvas prompt"
+                    )
+                if _optional_int(
+                    thinking_receipt.get("generation_seed")
+                ) != generation_seed or _optional_int(
+                    thinking_receipt.get("backend_sampling_seed")
+                ) != _sglang_backend_sampling_seed(generation_seed):
+                    raise ReceiptValidationError(
+                        "Director thinking phase seed receipt differs from the request"
+                    )
+                thinking_output_ids = _token_ids(
+                    thinking_receipt.get("output_token_ids"),
+                    "thinking_phase.output_token_ids",
+                )
+                thinking_log_probs = thinking_receipt.get(
+                    "behavior_log_probs"
+                )
+                if not isinstance(thinking_log_probs, (list, tuple)) or len(
+                    thinking_log_probs
+                ) != len(thinking_output_ids):
+                    raise ReceiptValidationError(
+                        "Director thinking phase log-prob receipt is incomplete"
+                    )
+                thinking_text = thinking_receipt.get("text")
+                if not isinstance(thinking_text, str) or not thinking_text.strip():
+                    raise ReceiptValidationError(
+                        "Director thinking phase has no model-visible reasoning"
+                    )
+                thinking_condition_text = metadata.get(
+                    "thinking_condition_text"
+                )
+                if (
+                    not isinstance(thinking_condition_text, str)
+                    or thinking_condition_text
+                    != _reasoning_condition_text(thinking_text)
+                ):
+                    raise ReceiptValidationError(
+                        "Director action phase is not conditioned on its sampled reasoning"
+                    )
+                if thinking_receipt.get("thinking_budget") != (
+                    self.orchestrator.client.thinking_budget
+                ) or len(thinking_output_ids) > (
+                    self.orchestrator.client.thinking_budget
+                ):
+                    raise ReceiptValidationError(
+                        "Director reasoning receipt exceeds its token budget"
+                    )
+                if thinking_receipt.get("server_weight_version") != metadata.get(
+                    "server_weight_version"
+                ):
+                    raise ReceiptValidationError(
+                        "Director thinking and structured phases used different weights"
+                    )
+                if thinking_receipt.get("policy_version") != metadata.get(
+                    "policy_version"
+                ) or thinking_receipt.get("adapter_name") != metadata.get(
+                    "adapter_name"
+                ):
+                    raise ReceiptValidationError(
+                        "Director thinking and structured phases used different policy routes"
+                    )
+                if thinking_receipt.get("requested_lora_path") != metadata.get(
+                    "requested_lora_path"
+                ):
+                    raise ReceiptValidationError(
+                        "Director thinking and structured phases requested different adapters"
+                    )
+                structured_canvas_prompt = _hierarchical_continuation_prompt(
+                    prompt,
+                    committed_json=f"Reasoning:\n{thinking_condition_text}",
+                    instruction=_THINKING_TO_ACTION_CONTINUATION,
+                )
+                if metadata.get("structured_base_prompt_text") != (
+                    structured_canvas_prompt
+                ):
+                    raise ReceiptValidationError(
+                        "Director structured phase is not conditioned on its thinking receipt"
+                    )
+            elif metadata.get("thinking_phase_used") is not None:
+                raise ReceiptValidationError(
+                    "Director thinking_phase_used flag must be true when present"
+                )
             receipt_base_prompt = (
                 metadata.get("base_prompt_text")
                 if strategy_hint is not None
+                or metadata.get("thinking_phase_used") is True
                 else metadata.get("prompt_text")
             )
             if receipt_base_prompt != prompt:
@@ -3876,7 +4738,7 @@ class AgentGraphRolloutCollector:
                 )
                 if not isinstance(root_phase, Mapping) or root_phase.get(
                     "prompt_text"
-                ) != prompt:
+                ) != structured_canvas_prompt:
                     raise ReceiptValidationError(
                         "hierarchical ADD receipt is not rooted in the Canvas prompt"
                     )
@@ -3889,12 +4751,13 @@ class AgentGraphRolloutCollector:
                 )
                 if (
                     not isinstance(failed_parameter_phase, Mapping)
-                    or failed_parameter_phase.get("prompt_text") != prompt
+                    or failed_parameter_phase.get("prompt_text")
+                    != structured_canvas_prompt
                 ):
                     raise ReceiptValidationError(
                         "parameter regeneration is not rooted in the Canvas prompt"
                     )
-            elif metadata.get("prompt_text") != prompt:
+            elif metadata.get("prompt_text") != structured_canvas_prompt:
                 raise ReceiptValidationError(
                     "Director final receipt is bound to a different prompt"
                 )
@@ -4018,6 +4881,26 @@ class AgentGraphRolloutCollector:
                             "hierarchical Director phase seed receipt differs "
                             "from the scientific/backend request pair"
                         )
+                    if phase_receipt.get(
+                        "server_weight_version"
+                    ) != metadata.get("server_weight_version"):
+                        raise ReceiptValidationError(
+                            "hierarchical Director phase used a different weight version"
+                        )
+                    if phase_receipt.get("policy_version") != metadata.get(
+                        "policy_version"
+                    ) or phase_receipt.get("adapter_name") != metadata.get(
+                        "adapter_name"
+                    ):
+                        raise ReceiptValidationError(
+                            "hierarchical Director phase used a different policy route"
+                        )
+                    if phase_receipt.get(
+                        "requested_lora_path"
+                    ) != metadata.get("requested_lora_path"):
+                        raise ReceiptValidationError(
+                            "hierarchical Director phase requested a different adapter"
+                        )
                     if live_v3_receipt:
                         if phase_receipt.get(
                             "action_json_schema_version"
@@ -4075,6 +4958,24 @@ class AgentGraphRolloutCollector:
             runtime_summary["director_backend_sampling_seed"] = (
                 metadata.get("backend_sampling_seed")
             )
+            if metadata.get("thinking_phase_used") is True:
+                thinking_phase_receipt = metadata.get(
+                    "thinking_phase_receipt"
+                )
+                if not isinstance(thinking_phase_receipt, Mapping):
+                    raise ReceiptValidationError(
+                        "Director thinking phase receipt was not persisted"
+                    )
+                runtime_summary["director_thinking"] = {
+                    "request_count": metadata.get("thinking_request_count"),
+                    "phase_receipt": dict(thinking_phase_receipt),
+                    "reasoning_condition_text": metadata.get(
+                        "thinking_condition_text"
+                    ),
+                    "structured_base_prompt_text": metadata.get(
+                        "structured_base_prompt_text"
+                    ),
+                }
             availability_receipt = env.model_availability_receipt()
             if availability_receipt["failure_receipts"]:
                 runtime_summary["model_availability"] = {
@@ -4190,6 +5091,13 @@ class AgentGraphRolloutCollector:
                         "profile_selection_regeneration_succeeded"
                     ] = metadata.get("profile_selection_regeneration_succeeded")
                 runtime_summary["director_action_decoding"] = action_decoding
+            if terminal_control_epilogue:
+                runtime_summary["terminal_control_epilogue"] = {
+                    "admitted": True,
+                    "max_extra_rounds": 1,
+                    "live_action_types": ["finish"],
+                    "submission_semantics": "explicit_finish",
+                }
             turn = TurnRecord(
                 turn_id=stable_id(
                     "turn",

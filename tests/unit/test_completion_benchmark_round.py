@@ -1325,6 +1325,65 @@ def test_alfworld_receipt_causal_taxonomy_separates_native_failure_classes():
     assert free_text_tool_profile["primary_failure_class"] == "tool_execution_profile"
 
 
+def test_alfworld_taxonomy_prioritizes_terminal_canvas_failure_receipt():
+    value = {
+        "task": {
+            "metadata": {
+                "skillflow": {
+                    "extra": {
+                        "task_directory": (
+                            "look_at_obj_in_light-CD-None-DeskLamp-302"
+                        )
+                    }
+                }
+            }
+        },
+        "evaluation": {
+            "valid": True,
+            "metrics": {"success": 0.0},
+            "details": {
+                "trace": [
+                    {
+                        "step": 0,
+                        "action": "take cd 1 from shelf 3",
+                        "info": {"action_is_valid": True, "score": 0},
+                    }
+                ]
+            },
+        },
+        "explicit_finish": False,
+        "terminal_failure": True,
+        "termination_reason": "canvas_action_domain_exhausted",
+        "turns": [
+            {
+                "round_index": 20,
+                "runtime_summary": {
+                    "terminal_canvas_diagnosis": {
+                        "public_error_code": "canvas_action_domain_exhausted",
+                        "finish_admissibility": {
+                            "admissible": False,
+                            "stage": "graph_validation",
+                            "reason": (
+                                "output_not_sink; cannot_reach_output"
+                            ),
+                            "issues": [
+                                {"code": "output_not_sink"},
+                                {"code": "cannot_reach_output"},
+                            ],
+                        },
+                    }
+                },
+            }
+        ],
+    }
+
+    taxonomy = _MODULE._alfworld_primary_failure_taxonomy(value)
+
+    assert taxonomy["primary_failure_class"] == "director_canvas_construction"
+    assert taxonomy["first_causal_step"] == 20
+    assert taxonomy["environment_turn_count"] == 1
+
+
 def test_alfworld_wrong_demo_prefers_first_typed_runtime_failure():
     diagnosis = _MODULE._alfworld_wrong_demo_diagnosis(
         {

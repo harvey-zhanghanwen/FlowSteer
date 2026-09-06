@@ -2572,6 +2572,77 @@ def _alfworld_primary_failure_taxonomy(
             "subsequent_error_propagation": "The native success evaluator could not produce a valid episode result.",
         }
 
+    if graph_value.get("terminal_failure") is True:
+        turns = graph_value.get("turns")
+        terminal_turn = None
+        terminal_diagnosis = None
+        if isinstance(turns, Sequence) and not isinstance(turns, (str, bytes)):
+            for turn in reversed(turns):
+                if not isinstance(turn, Mapping):
+                    continue
+                summary = turn.get("runtime_summary")
+                diagnosis = (
+                    summary.get("terminal_canvas_diagnosis")
+                    if isinstance(summary, Mapping)
+                    else None
+                )
+                if isinstance(diagnosis, Mapping):
+                    terminal_turn = turn
+                    terminal_diagnosis = diagnosis
+                    break
+        admission = (
+            terminal_diagnosis.get("finish_admissibility")
+            if isinstance(terminal_diagnosis, Mapping)
+            else None
+        )
+        stage = admission.get("stage") if isinstance(admission, Mapping) else None
+        issue_codes = [
+            str(issue.get("code"))
+            for issue in admission.get("issues", ())
+            if isinstance(issue, Mapping) and isinstance(issue.get("code"), str)
+        ] if isinstance(admission, Mapping) else []
+        canvas_construction = bool(
+            stage == "graph_validation"
+            or any(
+                code in {"cannot_reach_output", "output_not_sink"}
+                for code in issue_codes
+            )
+        )
+        failure_class = (
+            "director_canvas_construction"
+            if canvas_construction
+            else "terminal_control"
+        )
+        reason = (
+            str(admission.get("reason"))
+            if isinstance(admission, Mapping) and admission.get("reason")
+            else str(
+                graph_value.get("termination_reason")
+                or "missing_explicit_finish"
+            )
+        )
+        return {
+            "taxonomy_version": "alfworld.receipt_causal.v1",
+            "attribution_scope": "mutually_exclusive_primary_cause",
+            "primary_failure_class": failure_class,
+            "target_object_class": target_object_class,
+            "first_causal_step": (
+                terminal_turn.get("round_index")
+                if isinstance(terminal_turn, Mapping)
+                else None
+            ),
+            "first_causal_action": "finish",
+            "evidence": reason,
+            "subsequent_error_propagation": (
+                "The task-scoped environment ledger was preserved, but the "
+                "Canvas could not publish an explicit FINISH receipt."
+            ),
+            "environment_turn_count": len(trace),
+            "action_parse_error_turn_count": sum(
+                entry.get("parse_error") is True for entry in trace
+            ),
+        }
+
     if not trace:
         runtime_failure = _alfworld_first_runtime_failure(graph_value)
         runtime_layer = (
@@ -4351,6 +4422,26 @@ async def run_completion_benchmark_round(
             paths["manifest"],
             failure_path=paths["failures"],
         )
+        if dataset_key == "alfworld":
+            # SkillFlow's terminal reward belongs to the task-scoped native
+            # environment ledger, independently of whether FlowSteer's Canvas
+            # subsequently reached explicit FINISH.  A bounded orchestration
+            # failure can therefore still contain the authoritative terminal
+            # trace on its executor receipt.  Reuse the existing deterministic
+            # longest/latest ledger projection and official offline replay for
+            # newly collected trajectories as well as resumed checkpoints.
+            # This never converts explicit_finish or terminal_failure; those
+            # remain separate orchestration metrics.
+            trajectories = await _rescore_static_trajectory_checkpoint(
+                backend,
+                active,
+                trajectories,
+            )
+            hotpot_round._persist_ordered(
+                paths["trajectories"],
+                active,
+                trajectories,
+            )
         _atomic_jsonl(paths["failures"], failures)
 
     rows = _paired_rows(active, direct, trajectories, dataset_key)

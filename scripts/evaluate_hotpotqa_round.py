@@ -15,12 +15,15 @@ import asyncio
 from collections import Counter
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
+import errno
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 from typing import Any, Mapping, Optional, Sequence
+from urllib.error import URLError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +73,36 @@ DIRECT_CONTRACT = (
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _shared_runtime_transport_failure(exc: BaseException) -> bool:
+    """Return whether ``exc`` came from the shared model-service transport.
+
+    SkillFlow treats connection failures as Supervisor lifecycle failures, not
+    independent task failures.  Follow the explicit exception chain so an
+    ALFWorld/environment ``OSError`` is not mistaken for a model-service
+    outage merely because it shares the same base exception type.
+    """
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if current is not exc and isinstance(
+            current, (URLError, ConnectionError, socket.timeout)
+        ):
+            return True
+        if current is not exc and isinstance(current, OSError):
+            if current.errno in {
+                errno.ECONNABORTED,
+                errno.ECONNREFUSED,
+                errno.ECONNRESET,
+                errno.EPIPE,
+                errno.ETIMEDOUT,
+            }:
+                return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -436,6 +469,14 @@ def _reportable_terminal_failure_matches(
         and isinstance(details, Mapping)
         and details.get("formal_evaluator_called") is False
     )
+
+
+def _completed_terminal_failure_count(
+    values: Sequence[Mapping[str, Any]],
+) -> int:
+    """Count admitted trajectory terminal failures across benchmark adapters."""
+
+    return sum(value.get("terminal_failure") is True for value in values)
 
 
 def _trajectory_identity_matches(
@@ -884,14 +925,8 @@ async def _collect_graph(
     _persist_ordered(path, selected, by_task)
     manifest["agentgraph_progress"] = {
         "completed": len(by_task),
-        "reportable_terminal_failures": sum(
-            _reportable_terminal_failure_matches(
-                value,
-                task=selected_by_id[task_id],
-                condition_id=condition_id,
-                versions=versions[task_id].to_dict(),
-            )
-            for task_id, value in by_task.items()
+        "reportable_terminal_failures": _completed_terminal_failure_count(
+            tuple(by_task.values())
         ),
         "pending_evaluator_retries": len(pending_retry_task_ids),
         "failed_attempts": sum(
@@ -904,9 +939,12 @@ async def _collect_graph(
     task_timeout_seconds = (
         None if task_timeout_raw is None else float(task_timeout_raw)
     )
+    runtime_service_unavailable = asyncio.Event()
 
     async def run(task: TaskRecord) -> tuple[TaskRecord, str, Any]:
         async with semaphore:
+            if runtime_service_unavailable.is_set():
+                return task, "pending_shared_runtime_service", None
             mode = "terminal_evaluator_retry" if task.task_id in retry_sources else "collect"
             try:
                 if mode == "terminal_evaluator_retry":
@@ -935,6 +973,12 @@ async def _collect_graph(
                 )
                 return task, mode, result
             except BaseException as exc:
+                if _shared_runtime_transport_failure(exc):
+                    # SkillFlow pauses Supervisor admission when its shared
+                    # transport is unavailable.  Set this before releasing the
+                    # semaphore so queued tasks cannot turn one outage into a
+                    # benchmark-sized list of independent sample failures.
+                    runtime_service_unavailable.set()
                 return task, mode, exc
 
     jobs = [
@@ -944,7 +988,55 @@ async def _collect_graph(
     ]
     for completed in asyncio.as_completed(jobs):
         task, mode, result = await completed
+        if mode == "pending_shared_runtime_service":
+            continue
         if isinstance(result, BaseException):
+            if _shared_runtime_transport_failure(result):
+                for job in jobs:
+                    if not job.done():
+                        job.cancel()
+                await asyncio.gather(*jobs, return_exceptions=True)
+                pending_task_ids = [
+                    item.task_id
+                    for item in selected
+                    if item.task_id not in by_task and item.task_id != task.task_id
+                ]
+                failure = {
+                    "task_id": task.task_id,
+                    "condition": "agentgraph",
+                    "stage": "shared_runtime_service",
+                    "error": _safe_error(result),
+                    "recorded_at": _utc_now(),
+                    "pending_task_count": len(pending_task_ids),
+                    "pending_task_ids": pending_task_ids,
+                }
+                failures.append(failure)
+                manifest["status"] = "paused_runtime_service_failure"
+                manifest["agentgraph_progress"] = {
+                    "completed": len(by_task),
+                    "reportable_terminal_failures": (
+                        _completed_terminal_failure_count(
+                            tuple(by_task.values())
+                        )
+                    ),
+                    "pending_evaluator_retries": sum(
+                        item.task_id not in by_task
+                        and item.task_id in pending_retry_task_ids
+                        for item in selected
+                    ),
+                    "failed_attempts": sum(
+                        item.get("condition") == "agentgraph"
+                        for item in failures
+                    ),
+                    "runtime_service_failure": failure,
+                }
+                _write_json(manifest_path, manifest)
+                if failure_path is not None:
+                    _atomic_jsonl(failure_path, failures)
+                raise HotpotRoundError(
+                    "shared model-service transport unavailable; pending tasks "
+                    "were preserved without collection attempts"
+                ) from result
             failures.append(
                 {
                     "task_id": task.task_id,
@@ -999,14 +1091,8 @@ async def _collect_graph(
                 )
         manifest["agentgraph_progress"] = {
             "completed": len(by_task),
-            "reportable_terminal_failures": sum(
-                _reportable_terminal_failure_matches(
-                    value,
-                    task=selected_by_id[task_id],
-                    condition_id=condition_id,
-                    versions=versions[task_id].to_dict(),
-                )
-                for task_id, value in by_task.items()
+            "reportable_terminal_failures": _completed_terminal_failure_count(
+                tuple(by_task.values())
             ),
             "pending_evaluator_retries": sum(
                 task.task_id not in by_task

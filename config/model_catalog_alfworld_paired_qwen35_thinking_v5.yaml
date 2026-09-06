@@ -1,0 +1,31 @@
+# Paired ALFWorld Qwen3.5-9B thinking condition.  The same local model and
+# request-level chat template are used by Direct and every AgentGraph Agent.
+# The only behavioral change from v4 is a 1024-token reasoning-phase budget;
+# every action-phase budget remains unchanged.
+providers:
+  - provider_id: "local-director"
+    kind: "openai-compatible"
+    endpoint: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+    max_concurrency: 32
+
+models:
+  - model_id: "qwen3.5-9b-local"
+    provider_id: "local-director"
+    model_name: "supervisor_theta"
+    selection_weight: 1.0
+    cheap_weight: 1.0
+    fast_weight: 1.0
+    context_window: 8192
+    metadata:
+      family: "qwen"
+      profile: "provider=local-director;locality=local;instruction=chat;reasoning=qwen3.5-thinking;context=8192;capabilities=text,structured-action"
+      capability_canary: "pending_alfworld_thinking_v14"
+      text_capable: "true"
+      tool_capable: "true"
+      tool_capability_scope: "flowsteer-structured-action"
+      chat_template_enable_thinking: "true"
+      chat_template_thinking_budget: "1024"
+      sampling_backend: "sglang"
+      deployment_locality: "local"
+      supports_top_k: "true"
+      max_tokens: "4096"

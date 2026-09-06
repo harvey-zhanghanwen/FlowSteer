@@ -115,6 +115,17 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         raise ConfigurationError("the Qwen3.5-9B Flow-Director endpoint must be local")
     if director.get("execute_on_edit") is not True:
         raise ConfigurationError("the progressive Canvas requires execute_on_edit=true")
+    if type(director.get("enable_thinking", False)) is not bool:
+        raise ConfigurationError("director.enable_thinking must be boolean")
+    thinking_budget = director.get("thinking_budget", 512)
+    if (
+        isinstance(thinking_budget, bool)
+        or not isinstance(thinking_budget, int)
+        or thinking_budget <= 0
+    ):
+        raise ConfigurationError(
+            "director.thinking_budget must be a positive integer"
+        )
     history_window = director.get("history_window")
     if (
         isinstance(history_window, bool)
@@ -122,6 +133,21 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         or history_window < 1
     ):
         raise ConfigurationError("director.history_window must be a positive integer")
+    compact_execution_feedback = director.get("compact_execution_feedback", False)
+    if type(compact_execution_feedback) is not bool:
+        raise ConfigurationError("director.compact_execution_feedback must be bool")
+    if compact_execution_feedback:
+        environment_runtime = value.get("environment_runtime")
+        if (
+            not isinstance(environment_runtime, Mapping)
+            or environment_runtime.get("dataset_scope") != ["alfworld"]
+            or environment_runtime.get("stepwise_director") is not True
+            or environment_runtime.get("compact_execution_feedback") is not True
+        ):
+            raise ConfigurationError(
+                "compact Director feedback requires the matching stepwise "
+                "ALFWorld environment feedback profile"
+            )
 
     graph = value["agent_graph"]
     legacy_actions = [

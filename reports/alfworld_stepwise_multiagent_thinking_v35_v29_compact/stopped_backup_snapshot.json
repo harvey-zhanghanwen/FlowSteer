@@ -1,0 +1,111 @@
+{
+  "schema_version": "alfworld.backup.stopped-evaluation.v1",
+  "recorded_at": "2026-09-06T20:08:21+08:00",
+  "condition": "alfworld_stepwise_multiagent_thinking_v35_v29_compact",
+  "status": "stopped_by_user",
+  "planned_tasks": 140,
+  "completed": 14,
+  "success": 9,
+  "result_scope": "partial_run_not_a_full_benchmark_result",
+  "historical_manifest_status_note": "Original run_manifest.json was last written during collection; preserve it unchanged. Evaluation was stopped by the user after 14 saved tasks.",
+  "tasks": {
+    "alfworld:valid_seen:00000": {
+      "success": 1,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 9
+    },
+    "alfworld:valid_seen:00001": {
+      "success": 1,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 8
+    },
+    "alfworld:valid_seen:00002": {
+      "success": 1,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 4
+    },
+    "alfworld:valid_seen:00003": {
+      "success": 0,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 20
+    },
+    "alfworld:valid_seen:00004": {
+      "success": 0,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 20
+    },
+    "alfworld:valid_seen:00005": {
+      "success": 1,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 5
+    },
+    "alfworld:valid_seen:00006": {
+      "success": 1,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 4
+    },
+    "alfworld:valid_seen:00007": {
+      "success": 0,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 20
+    },
+    "alfworld:valid_seen:00008": {
+      "success": 0,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 20
+    },
+    "alfworld:valid_seen:00009": {
+      "success": 1,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 9
+    },
+    "alfworld:valid_seen:00010": {
+      "success": 1,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 14
+    },
+    "alfworld:valid_seen:00011": {
+      "success": 1,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 5
+    },
+    "alfworld:valid_seen:00012": {
+      "success": 1,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 7
+    },
+    "alfworld:valid_seen:00013": {
+      "success": 0,
+      "evaluator_valid": true,
+      "terminal_failure": false,
+      "explicit_finish": true,
+      "environment_actions": 20
+    }
+  }
+}

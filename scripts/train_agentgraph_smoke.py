@@ -1067,6 +1067,47 @@ def _environment_runtime_settings(
         raise ConfigurationError(
             "environment_runtime.stepwise_director must be bool"
         )
+    compact_execution_feedback = section.get("compact_execution_feedback", False)
+    if type(compact_execution_feedback) is not bool:
+        raise ConfigurationError(
+            "environment_runtime.compact_execution_feedback must be bool"
+        )
+    if compact_execution_feedback and source_key != "alfworld":
+        raise ConfigurationError(
+            "compact execution feedback applies only to ALFWorld"
+        )
+    alfworld_policy_action_profile = section.get(
+        "alfworld_policy_action_profile", "none"
+    )
+    if alfworld_policy_action_profile not in {
+        "none",
+        "skillflow_public_invariants_v1",
+        "skillflow_public_invariants_v2",
+        "skillflow_public_invariants_v3",
+        "skillflow_public_invariants_v4",
+    }:
+        raise ConfigurationError(
+            "environment_runtime.alfworld_policy_action_profile is unsupported"
+        )
+    if (
+        source_key != "alfworld"
+        and alfworld_policy_action_profile != "none"
+    ):
+        raise ConfigurationError(
+            "environment_runtime.alfworld_policy_action_profile applies only to ALFWorld"
+        )
+    alfworld_complex_thinking_budget = section.get(
+        "alfworld_complex_thinking_budget"
+    )
+    if alfworld_complex_thinking_budget is not None and (
+        isinstance(alfworld_complex_thinking_budget, bool)
+        or not isinstance(alfworld_complex_thinking_budget, int)
+        or alfworld_complex_thinking_budget < 1
+    ):
+        raise ConfigurationError(
+            "environment_runtime.alfworld_complex_thinking_budget must be a "
+            "positive integer when supplied"
+        )
     tool_version = section.get(
         "tool_version",
         experiment.get("tool_version", "skillflow.ragen_adapter.v2"),
@@ -1083,6 +1124,9 @@ def _environment_runtime_settings(
         "max_action_tokens": max_action_tokens,
         "max_observation_chars": max_observation_chars,
         "stepwise_director": stepwise_director,
+        "compact_execution_feedback": compact_execution_feedback,
+        "alfworld_policy_action_profile": alfworld_policy_action_profile,
+        "alfworld_complex_thinking_budget": alfworld_complex_thinking_budget,
         "tool_version": tool_version.strip(),
     }
 
@@ -2273,6 +2317,24 @@ class LiveSmokeBackend:
                 stepwise_director=bool(
                     environment_settings["stepwise_director"]
                 ),
+                compact_execution_feedback=bool(
+                    environment_settings["compact_execution_feedback"]
+                ),
+                alfworld_policy_action_profile=str(
+                    environment_settings["alfworld_policy_action_profile"]
+                ),
+                alfworld_complex_thinking_budget=(
+                    None
+                    if environment_settings[
+                        "alfworld_complex_thinking_budget"
+                    ]
+                    is None
+                    else int(
+                        environment_settings[
+                            "alfworld_complex_thinking_budget"
+                        ]
+                    )
+                ),
                 tool_version=str(environment_settings["tool_version"]),
                 timeout_seconds=float(
                     environment_settings["tool_timeout_seconds"]
@@ -2448,6 +2510,81 @@ class LiveSmokeBackend:
             raise ConfigurationError(
                 "director.action_decoding must be unconstrained or json_schema"
             )
+        enable_thinking = director.get("enable_thinking", False)
+        if type(enable_thinking) is not bool:
+            raise ConfigurationError("director.enable_thinking must be boolean")
+        thinking_budget = director.get("thinking_budget", 512)
+        if (
+            isinstance(thinking_budget, bool)
+            or not isinstance(thinking_budget, int)
+            or thinking_budget <= 0
+        ):
+            raise ConfigurationError(
+                "director.thinking_budget must be a positive integer"
+            )
+        empty_reasoning_retries = director.get(
+            "empty_reasoning_retries", 0
+        )
+        if (
+            isinstance(empty_reasoning_retries, bool)
+            or not isinstance(empty_reasoning_retries, int)
+            or empty_reasoning_retries < 0
+        ):
+            raise ConfigurationError(
+                "director.empty_reasoning_retries must be a non-negative integer"
+            )
+        readiness_timeout_seconds = director.get(
+            "readiness_timeout_seconds", 0.0
+        )
+        readiness_poll_interval_seconds = director.get(
+            "readiness_poll_interval_seconds", 3.0
+        )
+        for field_name, value, allow_zero in (
+            (
+                "readiness_timeout_seconds",
+                readiness_timeout_seconds,
+                True,
+            ),
+            (
+                "readiness_poll_interval_seconds",
+                readiness_poll_interval_seconds,
+                False,
+            ),
+        ):
+            is_number = isinstance(value, (int, float)) and not isinstance(
+                value, bool
+            )
+            valid_range = is_number and (
+                0.0 <= float(value) < float("inf")
+                if allow_zero
+                else 0.0 < float(value) < float("inf")
+            )
+            if not valid_range:
+                qualifier = "non-negative" if allow_zero else "positive"
+                raise ConfigurationError(
+                    f"director.{field_name} must be a finite {qualifier} number"
+                )
+        served_model_name = str(
+            director.get("served_model_name", "supervisor_theta")
+        ).strip()
+        if served_model_name != "supervisor_theta":
+            raise ConfigurationError(
+                "director.served_model_name must remain supervisor_theta"
+            )
+        context_safety_tokens = director.get("context_safety_tokens", 0)
+        if (
+            isinstance(context_safety_tokens, bool)
+            or not isinstance(context_safety_tokens, int)
+            or context_safety_tokens < 0
+        ):
+            raise ConfigurationError(
+                "director.context_safety_tokens must be a non-negative integer"
+            )
+        if enable_thinking and not evaluation_only:
+            raise ConfigurationError(
+                "two-phase Director thinking is evaluation-only until the "
+                "trainer defines the corresponding multi-phase loss"
+            )
         if action_decoding == "json_schema" and not evaluation_only:
             raise ConfigurationError(
                 "json_schema Director decoding is evaluation-only until the "
@@ -2536,6 +2673,15 @@ class LiveSmokeBackend:
                 if director.get("max_context_tokens") is not None
                 else None
             ),
+            context_safety_tokens=context_safety_tokens,
+            enable_thinking=enable_thinking,
+            thinking_budget=thinking_budget,
+            empty_reasoning_retries=empty_reasoning_retries,
+            readiness_timeout_seconds=float(readiness_timeout_seconds),
+            readiness_poll_interval_seconds=float(
+                readiness_poll_interval_seconds
+            ),
+            served_model_name=served_model_name,
             action_json_schema=(
                 director_sglang_sampling_json_schema_text(
                     tuple(str(value) for value in graph_config["actions"])
@@ -3336,6 +3482,9 @@ class LiveSmokeBackend:
                     f"{experiment['seed']}:{catalog_order_namespace}:{task.task_id}"
                 ),
                 history_window=int(director["history_window"]),
+                compact_execution_feedback=bool(
+                    director.get("compact_execution_feedback", False)
+                ),
                 sampling_base_seed=base_seed,
                 sampling_coordinate=sampling_coordinate,
                 tool_registry=task_tool_registry,

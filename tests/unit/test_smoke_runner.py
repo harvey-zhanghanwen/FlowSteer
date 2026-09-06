@@ -233,6 +233,43 @@ def test_live_backend_requires_and_wires_explicit_execution_timeout():
     assert backend.runtime.gateway.timeout_seconds == 37.0
 
 
+def test_live_backend_wires_director_readiness_recovery():
+    root = Path(__file__).resolve().parents[2]
+    config = yaml.safe_load(
+        (root / "config/evaluation_hotpotqa_unified_architecture_v1.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    config["execution_timeout"] = 37.0
+    config["director"]["readiness_timeout_seconds"] = 300.0
+    config["director"]["readiness_poll_interval_seconds"] = 3.0
+    config["director"]["served_model_name"] = "supervisor_theta"
+    fake_transformers = SimpleNamespace(
+        AutoTokenizer=SimpleNamespace(
+            from_pretrained=lambda *args, **kwargs: object()
+        )
+    )
+    with patch.dict(
+        os.environ,
+        {"VECTOR_ENGINE_API_KEY": "unit-test-placeholder"},
+        clear=False,
+    ), patch.dict(sys.modules, {"transformers": fake_transformers}), patch.object(
+        _MODULE,
+        "SGLangReceiptDirectorClient",
+        return_value=object(),
+    ) as constructor:
+        _MODULE.LiveSmokeBackend.from_config(
+            config,
+            root,
+            evaluation_only=True,
+        )
+
+    kwargs = constructor.call_args.kwargs
+    assert kwargs["readiness_timeout_seconds"] == 300.0
+    assert kwargs["readiness_poll_interval_seconds"] == 3.0
+    assert kwargs["served_model_name"] == "supervisor_theta"
+
+
 def test_interactive_workflow_problem_exposes_only_the_execution_contract():
     task = make_task("webshop", 0)
     config = {
@@ -1581,6 +1618,9 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
             max_action_tokens=256,
             max_observation_chars=0,
             stepwise_director=False,
+            compact_execution_feedback=False,
+            alfworld_policy_action_profile="none",
+            alfworld_complex_thinking_budget=None,
             tool_version="skillflow.ragen_adapter.v2",
             timeout_seconds=9.0,
         )
@@ -1711,6 +1751,24 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
         self.assertNotIn("Execution interface", workflow_problem(task, config))
         close()
 
+    def test_alfworld_runtime_accepts_public_invariants_v4_profile(self) -> None:
+        task = self._task("alfworld")
+        config = self._config(
+            source="alfworld",
+            runtime_budget=20,
+            evaluator_budget=20,
+        )
+        config["environment_runtime"]["alfworld_policy_action_profile"] = (
+            "skillflow_public_invariants_v4"
+        )
+
+        settings = environment_runtime_settings(config, task)
+
+        self.assertEqual(
+            "skillflow_public_invariants_v4",
+            settings["alfworld_policy_action_profile"],
+        )
+
     def test_condition_scope_and_budget_mismatches_are_rejected(self) -> None:
         task = self._task()
 
@@ -1734,6 +1792,36 @@ class EnvironmentRuntimeWiringTests(unittest.TestCase):
         budget_mismatch = self._config(runtime_budget=2, evaluator_budget=3)
         with self.assertRaisesRegex(ConfigurationError, "exactly match"):
             environment_runtime_settings(budget_mismatch, task)
+
+    def test_alfworld_v35_compact_feedback_runtime_wiring(self) -> None:
+        config = self._config(source="alfworld", runtime_budget=20, evaluator_budget=20)
+        config["environment_runtime"].update(
+            compact_execution_feedback=True,
+            alfworld_policy_action_profile="skillflow_public_invariants_v2",
+            stepwise_director=True,
+        )
+        backend = self._backend(config)
+        task = self._task("alfworld")
+        with patch.object(
+            _MODULE, "evaluator_locked_ragen_session_factory", return_value=lambda _: None
+        ):
+            runtime, _, close = backend._runtime_for_task(task)
+        try:
+            adapter = runtime.execution_adapters["react"]
+            self.assertTrue(adapter._compact_execution_feedback)
+            self.assertEqual("skillflow_public_invariants_v2", adapter._alfworld_policy_action_profile)
+        finally:
+            close()
+
+    def test_compact_feedback_rejects_non_boolean_and_other_dataset(self) -> None:
+        config = self._config(source="alfworld")
+        config["environment_runtime"]["compact_execution_feedback"] = "true"
+        with self.assertRaisesRegex(ConfigurationError, "must be bool"):
+            environment_runtime_settings(config, self._task("alfworld"))
+        config = self._config()
+        config["environment_runtime"]["compact_execution_feedback"] = True
+        with self.assertRaisesRegex(ConfigurationError, "only to ALFWorld"):
+            environment_runtime_settings(config, self._task())
 
     def test_terminal_or_budget_trace_is_passed_without_legacy_resampling(self) -> None:
         task = self._task()

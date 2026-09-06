@@ -53,6 +53,7 @@ from src.interactive.director import (
     SCALAR_DIRECTOR_SYSTEM_PROMPT,
     STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION,
     STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT,
+    STEPWISE_SUBGRAPH_DIRECTOR_PROMPT_VERSION_V2,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
@@ -1279,6 +1280,65 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             current_state["action_target_domains"],
         )
 
+    def test_stepwise_subgraph_compacts_stale_environment_state(self) -> None:
+        orchestrator = AgentGraphOrchestrator(
+            registry(),
+            ScriptedDirector([]),
+            history_window=4,
+            prompt_version=STEPWISE_SUBGRAPH_DIRECTOR_PROMPT_VERSION_V2,
+            semantic_protocol="none",
+        )
+        historical_payload = {
+            "current_graph": {"revision": 4, "stale": "x" * 4000},
+            "admissible_action_types": ["continue"],
+            "action_target_domains": {"continue": {}},
+            "canvas_feedback": "accepted continue at revision 4",
+            "environment_state": {
+                "environment_revision": 4,
+                "action_observation_history": [
+                    {"turn": 1, "observation_result": "y" * 4000}
+                ],
+            },
+        }
+        current_payload = {
+            "current_graph": {"revision": 5},
+            "admissible_action_types": ["finish"],
+            "environment_state": {
+                "environment_revision": 5,
+                "action_observation_history": [
+                    {"turn": 2, "observation_result": "current"}
+                ],
+            },
+        }
+        messages = [
+            {"role": "system", "content": orchestrator.system_prompt},
+            {"role": "user", "content": "immutable task and catalog"},
+            {"role": "assistant", "content": '{"action":"continue"}'},
+            {
+                "role": "user",
+                "content": orchestrator._observation_message(historical_payload),
+            },
+            {"role": "assistant", "content": '{"action":"finish"}'},
+            {
+                "role": "user",
+                "content": orchestrator._observation_message(current_payload),
+            },
+        ]
+
+        replay = orchestrator._compact_historical_messages(messages)
+
+        historical = observation_payload(replay[3])
+        current = observation_payload(replay[-1])
+        self.assertEqual(
+            historical_payload["canvas_feedback"],
+            historical["canvas_feedback"],
+        )
+        self.assertNotIn("environment_state", historical)
+        self.assertNotIn("current_graph", historical)
+        self.assertNotIn("admissible_action_types", historical)
+        self.assertNotIn("action_target_domains", historical)
+        self.assertEqual(current_payload, current)
+
     async def test_legacy_qa_v4_keeps_full_historical_observation(self) -> None:
         model_registry = registry()
         orchestrator = AgentGraphOrchestrator(
@@ -1541,6 +1601,38 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             result.valid_lineage_fallback_receipt["graph_snapshot_id"],
         )
         self.assertEqual(1, len(result.turns))
+
+    def test_model_admissible_empty_canvas_domain_is_natural_terminal(self) -> None:
+        model_registry = registry()
+
+        class EmptyDomainEnv(AgentWorkflowEnv):
+            def model_admissible_action_types(self):
+                return ()
+
+        env = EmptyDomainEnv(model_registry, gateway=FakeGateway())
+        env.reset("task")
+        diagnosis = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            max_rounds=3,
+            semantic_protocol="none",
+            sampling_action_profile=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            ),
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION
+            ),
+        ).terminal_canvas_diagnosis(env)
+
+        self.assertIsNotNone(diagnosis)
+        assert diagnosis is not None
+        self.assertEqual(
+            "canvas_action_domain_exhausted",
+            diagnosis["public_error_code"],
+        )
+        self.assertEqual(env.graph.revision, diagnosis["graph_revision"])
+        self.assertIn("finish_admissibility", diagnosis)
+        self.assertIn("recovery_state", diagnosis)
 
     async def test_verified_qa_empty_canvas_domain_is_natural_terminal(self) -> None:
         model_registry = registry()

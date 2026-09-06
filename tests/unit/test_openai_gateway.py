@@ -10,6 +10,7 @@ from urllib.error import HTTPError
 from src.interactive.agent_graph import AgentNode
 from src.interactive.agent_runtime import (
     AgentRequest,
+    AgentResponse,
     CommunicationCondition,
     ExecutionPhase,
     UpstreamMessage,
@@ -743,6 +744,121 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             payload["chat_template_kwargs"],
             {"enable_thinking": False},
+        )
+
+    def test_qwen_chat_template_thinking_budget_matches_skillflow(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={
+                    "chat_template_enable_thinking": "true",
+                    "chat_template_thinking_budget": "512",
+                },
+            ),
+        )
+
+        payload = OpenAICompatibleGateway().request_payload(item)
+
+        self.assertEqual(
+            payload["chat_template_kwargs"],
+            {"enable_thinking": True},
+        )
+        self.assertEqual(
+            payload["custom_params"],
+            {"thinking_budget": 512},
+        )
+
+    async def test_qwen_thinking_uses_skillflow_reasoning_then_action_phases(
+        self,
+    ) -> None:
+        item = request()
+        schema = {
+            "type": "object",
+            "required": ["action"],
+            "properties": {"action": {"const": "go to desk 1"}},
+            "additionalProperties": False,
+        }
+        item = replace(
+            item,
+            model=replace(
+                item.model,
+                metadata={
+                    **dict(item.model.metadata),
+                    "max_tokens": "128",
+                    "chat_template_enable_thinking": "true",
+                    "chat_template_thinking_budget": "512",
+                    "response_json_schema": json.dumps(schema),
+                },
+            ),
+        )
+        gateway = OpenAICompatibleGateway(max_retries=0)
+        gateway._generate_payload = AsyncMock(  # type: ignore[method-assign]
+            side_effect=(
+                AgentResponse(
+                    "",
+                    {
+                        "reasoning_content": "The desk is the next location.",
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                        "latency_ms": 1.0,
+                        "attempt_count": 1,
+                    },
+                ),
+                AgentResponse(
+                    '{"action":"go to desk 1"}',
+                    {
+                        "prompt_tokens": 20,
+                        "completion_tokens": 4,
+                        "total_tokens": 24,
+                        "latency_ms": 2.0,
+                        "attempt_count": 1,
+                    },
+                ),
+            )
+        )
+        response = await gateway.generate(item)
+        calls = gateway._generate_payload.await_args_list  # type: ignore[attr-defined]
+        payloads = [call.kwargs["payload"] for call in calls]
+
+        self.assertEqual(2, len(payloads))
+        self.assertEqual(512, payloads[0]["max_tokens"])
+        self.assertEqual(
+            {"enable_thinking": True},
+            payloads[0]["chat_template_kwargs"],
+        )
+        self.assertEqual(
+            {"thinking_budget": 512},
+            payloads[0]["custom_params"],
+        )
+        self.assertNotIn("response_format", payloads[0])
+        self.assertEqual(128, payloads[1]["max_tokens"])
+        self.assertEqual(
+            {"enable_thinking": False},
+            payloads[1]["chat_template_kwargs"],
+        )
+        self.assertNotIn("custom_params", payloads[1])
+        self.assertIn(
+            "Reasoning:\nThe desk is the next location.",
+            payloads[1]["messages"][-2]["content"],
+        )
+        self.assertIn("response_format", payloads[1])
+        self.assertEqual('{"action":"go to desk 1"}', response.text)
+        self.assertEqual("reasoning_then_action", response.metadata[
+            "generation_phase_protocol"
+        ])
+        self.assertEqual(30, response.metadata["prompt_tokens"])
+        self.assertEqual(9, response.metadata["completion_tokens"])
+        self.assertEqual(39, response.metadata["total_tokens"])
+        self.assertEqual(2, response.metadata["attempt_count"])
+        self.assertEqual(
+            ["reasoning", "action"],
+            [call["phase"] for call in response.metadata["model_calls"]],
         )
 
     def test_skillflow_response_schema_is_forwarded(self) -> None:

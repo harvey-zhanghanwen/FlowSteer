@@ -4,12 +4,13 @@ import asyncio
 import json
 import threading
 import time
+from urllib.error import URLError
 
 import pytest
 from jsonschema import Draft202012Validator
 
 from src.interactive.agent_action_parser import AgentActionParseError, AgentActionParser
-from src.interactive.agent_runtime import AgentResponse
+from src.interactive.agent_runtime import AgentResponse, AgentRuntime
 from src.interactive.agent_workflow_env import (
     AgentWorkflowEnv,
     AgentWorkflowEvidenceLineageSnapshot,
@@ -27,6 +28,7 @@ from src.interactive.director import (
     DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
     DIRECTOR_SYSTEM_PROMPT,
+    DirectorError,
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     director_actions_from_admissible_schema_branch,
     director_action_json_schema_text,
@@ -64,6 +66,7 @@ from src.interactive.rollout_collector import (
     _ADD_ACTION_CONTINUATION,
     _ADD_DECLARATION_CONTINUATION,
     _hierarchical_continuation_prompt,
+    _reasoning_condition_text,
     _validate_v3_hierarchical_action_receipt,
     select_balanced_tasks,
 )
@@ -130,6 +133,27 @@ class MismatchedTokenClient(ScriptedSGLangClient):
         value["output_ids"] = list(value["output_ids"])
         value["output_ids"][-1] += 1
         return value
+
+
+class TransportRecoverySGLangClient(ScriptedSGLangClient):
+    def __init__(self, actions, *, transport_failures=(), model_probes=(), **kwargs):
+        self.transport_failures = list(transport_failures)
+        self.model_probes = list(model_probes)
+        self.readiness_probe_calls = 0
+        super().__init__(actions, **kwargs)
+
+    def _post_json(self, payload):
+        if self.transport_failures:
+            self.payloads.append(payload)
+            raise self.transport_failures.pop(0)
+        return super()._post_json(payload)
+
+    def _probe_served_models(self):
+        self.readiness_probe_calls += 1
+        value = self.model_probes.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return tuple(value)
 
 
 class FakeGateway:
@@ -370,11 +394,202 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     assert len(response.metadata["output_token_ids"]) == len(
         response.metadata["behavior_log_probs"]
     )
-
     action = AgentActionParser().parse(text)
     consumed = client.executed_prefix_tokens(response, action)
     assert consumed == action.consumed_end
     assert consumed < len(response.metadata["output_token_ids"])
+
+
+def test_native_sglang_transport_retry_catches_connection_reset_and_records_receipt(
+    monkeypatch,
+):
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(
+        "src.interactive.rollout_collector.asyncio.sleep",
+        no_sleep,
+    )
+    text = '{"action":"finish"}'
+    client = TransportRecoverySGLangClient(
+        [text],
+        transport_failures=[ConnectionResetError("connection reset")],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        max_retries=1,
+    )
+
+    response = asyncio.run(client.propose("ordinary prompt", seed=23))
+
+    assert len(client.payloads) == 2
+    assert client.payloads[0] is client.payloads[1]
+    assert response.metadata["attempt_count"] == 2
+    receipt = response.metadata["transport_retry_receipt"]
+    assert receipt["schema_version"] == (
+        "flowsteer.sglang.transport-retry-readiness.v1"
+    )
+    assert [item["status"] for item in receipt["request_attempts"]] == [
+        "retryable_failure",
+        "completed",
+    ]
+    assert receipt["request_attempts"][0]["error_type"] == (
+        "ConnectionResetError"
+    )
+    assert receipt["request_attempts"][0]["backoff_seconds"] == 1.0
+    assert receipt["readiness"]["enabled"] is False
+    assert receipt["readiness"]["attempted"] is False
+    assert client.readiness_probe_calls == 0
+
+
+def test_native_sglang_readiness_wait_validates_model_and_reuses_payload():
+    text = '{"action":"finish"}'
+    client = TransportRecoverySGLangClient(
+        [text],
+        transport_failures=[URLError("server restarting")],
+        model_probes=[("another-model",), ("supervisor_theta",)],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        max_retries=0,
+        readiness_timeout_seconds=0.1,
+        readiness_poll_interval_seconds=0.001,
+    )
+
+    response = asyncio.run(client.propose("ordinary prompt", seed=23))
+
+    assert len(client.payloads) == 2
+    assert client.payloads[0] is client.payloads[1]
+    assert response.metadata["attempt_count"] == 2
+    receipt = response.metadata["transport_retry_receipt"]
+    assert [item["recovery_group"] for item in receipt["request_attempts"]] == [
+        0,
+        1,
+    ]
+    assert receipt["readiness"]["attempted"] is True
+    assert receipt["readiness"]["recovered"] is True
+    assert receipt["readiness"]["served_model_name"] == "supervisor_theta"
+    assert receipt["readiness"]["probe_count"] == 2
+    assert receipt["readiness"]["probes"][0]["status"] == "not_ready"
+    assert receipt["readiness"]["probes"][1]["status"] == "ready"
+    assert client.readiness_probe_calls == 2
+
+
+def test_native_sglang_readiness_recovery_is_disabled_by_default():
+    client = TransportRecoverySGLangClient(
+        ['{"action":"finish"}'],
+        transport_failures=[URLError("server unavailable")],
+        model_probes=[("supervisor_theta",)],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        max_retries=0,
+    )
+
+    with pytest.raises(DirectorError) as caught:
+        asyncio.run(client.propose("ordinary prompt", seed=23))
+
+    assert client.readiness_probe_calls == 0
+    receipt = caught.value.transport_retry_receipt
+    assert receipt["readiness"]["enabled"] is False
+    assert receipt["readiness"]["attempted"] is False
+    assert len(receipt["request_attempts"]) == 1
+    assert receipt["request_attempts"][0]["status"] == "failed"
+
+
+def test_native_sglang_receipt_uses_configured_thinking_template():
+    client = ScriptedSGLangClient(
+        [],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        enable_thinking=True,
+        action_json_schema=DIRECTOR_ACTION_JSON_SCHEMA_TEXT,
+        action_json_schema_version="agentgraph.canvas-action-json-schema.v1",
+    )
+
+    thinking_payload = client._request_payload(
+        "ordinary prompt",
+        None,
+        23,
+        enable_thinking_override=True,
+        include_action_schema=False,
+        max_tokens_override=512,
+    )
+    structured_payload = client._request_payload(
+        "ordinary prompt",
+        None,
+        23,
+        enable_thinking_override=False,
+    )
+
+    _, thinking_template_kwargs = client.tokenizer.chat_calls[0]
+    _, structured_template_kwargs = client.tokenizer.chat_calls[1]
+    assert thinking_template_kwargs == {
+        "tokenize": True,
+        "add_generation_prompt": True,
+        "enable_thinking": True,
+    }
+    assert structured_template_kwargs == {
+        "tokenize": True,
+        "add_generation_prompt": True,
+        "enable_thinking": False,
+    }
+    assert "json_schema" not in thinking_payload["sampling_params"]
+    assert thinking_payload["sampling_params"]["max_new_tokens"] == 512
+    assert thinking_payload["sampling_params"]["custom_params"] == {
+        "thinking_budget": 512
+    }
+    assert json.loads(structured_payload["sampling_params"]["json_schema"]) == (
+        DIRECTOR_ACTION_JSON_SCHEMA
+    )
+    assert client.enable_thinking is True
+    assert _reasoning_condition_text(
+        "<think>\ninspect public state\n</think>\nignored draft"
+    ) == "inspect public state"
+    assert _reasoning_condition_text(
+        "<think>\ntruncated but model-visible reasoning"
+    ) == "truncated but model-visible reasoning"
+
+
+def test_native_sglang_retries_empty_reasoning_with_identical_policy_condition():
+    client = ScriptedSGLangClient(
+        [
+            "<think>\n</think>",
+            "<think>\ninspect public state\n</think>",
+            '{"action":"finish"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        enable_thinking=True,
+        thinking_budget=512,
+        empty_reasoning_retries=1,
+        action_json_schema=DIRECTOR_ACTION_JSON_SCHEMA_TEXT,
+        action_json_schema_version="agentgraph.canvas-action-json-schema.v1",
+    )
+
+    response = asyncio.run(client.propose("ordinary prompt", seed=23))
+
+    assert len(client.payloads) == 3
+    assert client.payloads[0] == client.payloads[1]
+    assert response.metadata["thinking_request_count"] == 2
+    thinking_receipt = response.metadata["thinking_phase_receipt"]
+    assert thinking_receipt["content_retry_count"] == 1
+    assert [
+        item["content_status"]
+        for item in thinking_receipt["content_attempt_receipts"]
+    ] == ["empty_reasoning", "completed"]
+    assert response.metadata["thinking_condition_text"] == "inspect public state"
+
+
+def test_native_sglang_context_check_reserves_configured_safety_tokens():
+    client = ScriptedSGLangClient(
+        [],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        max_tokens=4,
+        max_context_tokens=8,
+        context_safety_tokens=2,
+    )
+
+    with pytest.raises(ReceiptValidationError, match="safety_tokens=2"):
+        client._request_payload("ordinary prompt", None, 23)
 
 
 def test_native_sglang_projects_uint64_seed_to_signed_backend_receipt():
@@ -2333,6 +2548,143 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
     assert len(evidence.trajectories) == 1
 
 
+def test_collector_accepts_exact_empty_reasoning_retry_receipt(tmp_path):
+    registry = _registry()
+    first_sample = (
+        '{"action":"add_agent","agent_id":"solver","model_id":"cheap-model",'
+        '"contract":"solve directly"}\n{"action":"finish"}'
+    )
+    second_sample = '{"action":"set_output","agent_id":"solver"} trailing'
+    client = ScriptedSGLangClient(
+        [
+            "<think>\n</think>",
+            "<think>\ninspect the first Canvas edit\n</think>",
+            first_sample,
+            "<think>\nselect the current Output artifact\n</think>",
+            second_sample,
+            "<think>\nsubmit the complete Canvas\n</think>",
+            '{"action":"finish"} trailing',
+        ],
+        policy_version=POLICY_VERSION,
+        adapter_name="theta_live",
+        expected_server_weight_version="default",
+        enable_thinking=True,
+        thinking_budget=512,
+        empty_reasoning_retries=1,
+    )
+    orchestrator = _orchestrator(registry, client, max_rounds=3)
+    environment = AgentWorkflowEnv(registry, gateway=UnifiedMetadataGateway())
+    evidence = EvidenceStore(tmp_path)
+    collector = AgentGraphRolloutCollector(
+        orchestrator,
+        environment,
+        _versions(),
+        evidence,
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime):
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 1.0,
+            "metrics": {"f1": 1.0},
+            "reason": "exact",
+            "details": {"gold": "final answer"},
+        }
+
+    trajectory = asyncio.run(
+        collector.collect(
+            _task(),
+            0,
+            evaluator,
+            workflow_problem=(
+                "What is the answer?\n\n"
+                "Execution interface: return one admissible action."
+            ),
+        )
+    )
+
+    assert trajectory.explicit_finish is True
+    assert len(trajectory.turns) == 3
+    first_thinking = trajectory.turns[0].runtime_summary[
+        "director_thinking"
+    ]
+    assert first_thinking["request_count"] == 2
+    first_receipt = first_thinking["phase_receipt"]
+    assert first_receipt["content_retry_count"] == 1
+    assert [
+        attempt["content_status"]
+        for attempt in first_receipt["content_attempt_receipts"]
+    ] == ["empty_reasoning", "completed"]
+    assert first_thinking["reasoning_condition_text"] == (
+        "inspect the first Canvas edit"
+    )
+    assert [
+        turn.runtime_summary["director_thinking"]["request_count"]
+        for turn in trajectory.turns
+    ] == [2, 1, 1]
+    assert all(turn.receipt_verified for turn in trajectory.turns)
+    persisted = list(evidence.trajectories.payloads())
+    assert len(persisted) == 1
+    assert persisted[0]["trajectory_id"] == trajectory.trajectory_id
+
+
+def test_collector_rejects_inconsistent_empty_reasoning_retry_receipt(tmp_path):
+    class TamperedRetryReceiptClient(ScriptedSGLangClient):
+        async def propose(self, prompt, **kwargs):
+            response = await super().propose(prompt, **kwargs)
+            metadata = dict(response.metadata)
+            if metadata.get("thinking_request_count") == 2:
+                thinking_receipt = dict(metadata["thinking_phase_receipt"])
+                thinking_receipt["content_retry_count"] = 0
+                metadata["thinking_phase_receipt"] = thinking_receipt
+            return type(response)(text=response.text, metadata=metadata)
+
+    registry = _registry()
+    client = TamperedRetryReceiptClient(
+        [
+            "<think>\n</think>",
+            "<think>\ninspect the first Canvas edit\n</think>",
+            (
+                '{"action":"add_agent","agent_id":"solver",'
+                '"model_id":"cheap-model","contract":"solve directly"}'
+            ),
+        ],
+        policy_version=POLICY_VERSION,
+        adapter_name="theta_live",
+        expected_server_weight_version="default",
+        enable_thinking=True,
+        thinking_budget=512,
+        empty_reasoning_retries=1,
+    )
+    collector = AgentGraphRolloutCollector(
+        _orchestrator(registry, client, max_rounds=1),
+        AgentWorkflowEnv(registry, gateway=UnifiedMetadataGateway()),
+        _versions(),
+        EvidenceStore(tmp_path),
+    )
+
+    with pytest.raises(
+        ReceiptValidationError,
+        match="thinking phase request count is invalid",
+    ):
+        asyncio.run(
+            collector.collect(
+                _task(),
+                0,
+                lambda *_args: {
+                    "evaluator_version": EVALUATOR_VERSION,
+                    "valid": True,
+                    "reward": 1.0,
+                },
+                workflow_problem=(
+                    "What is the answer?\n\n"
+                    "Execution interface: return one admissible action."
+                ),
+            )
+        )
+
+
 def test_collector_uses_state_conditioned_schema_on_every_progressive_turn():
     registry = _registry()
     client = ScriptedSGLangClient(
@@ -2389,6 +2741,197 @@ def test_collector_uses_state_conditioned_schema_on_every_progressive_turn():
     assert client.payloads[1]["sampling_params"]["json_schema"] == (
         director_state_conditioned_sampling_json_schema_text("finish")
     )
+
+
+def test_collector_allows_one_explicit_alfworld_terminal_control_round():
+    registry = _registry()
+
+    class InlineScriptedSGLangClient(ScriptedSGLangClient):
+        async def _post_with_retries(self, payload):
+            value = self._post_json(payload)
+            return (
+                value,
+                0.0,
+                1,
+                {
+                    "schema_version": (
+                        "flowsteer.sglang.transport-retry-readiness.v1"
+                    ),
+                    "request_attempts": (
+                        {
+                            "attempt": 1,
+                            "recovery_group": 0,
+                            "status": "completed",
+                            "error_type": None,
+                            "http_status": 200,
+                            "retryable": False,
+                            "backoff_seconds": 0.0,
+                            "latency_ms": 0.0,
+                        },
+                    ),
+                    "readiness": {
+                        "enabled": False,
+                        "attempted": False,
+                        "recovered": False,
+                        "served_model_name": self.served_model_name,
+                        "timeout_seconds": 0.0,
+                        "poll_interval_seconds": (
+                            self.readiness_poll_interval_seconds
+                        ),
+                        "probe_count": 0,
+                        "probes": (),
+                    },
+                },
+            )
+
+    class TerminalAdapter:
+        stepwise_director = True
+
+        def __init__(self):
+            self.requests = []
+
+        async def execute(self, request):
+            self.requests.append(request)
+            return AgentResponse(
+                "move apple 1 to fridge 1",
+                {
+                    "environment_terminal": True,
+                    "environment_truncated": False,
+                    "evaluator_environment_trace": (
+                        {
+                            "action": "move apple 1 to fridge 1",
+                            "done": True,
+                            "state_advanced": True,
+                        },
+                    ),
+                    "environment_current_state": {
+                        "environment_episode_id": "terminal-control-test",
+                        "environment_id": "alfworld",
+                        "task_family": "alfworld",
+                        "environment_revision": 1,
+                        "current_observation": (
+                            "You move the apple 1 to the fridge 1."
+                        ),
+                        "admissible_actions": [],
+                        "task_facts": {
+                            "target_class": "apple",
+                            "destination_class": "fridge",
+                            "required_transform": None,
+                            "count": 1,
+                            "examine_with_desklamp": False,
+                        },
+                        "remaining_action_budget": 19,
+                        "total_action_budget": 20,
+                        "environment_terminal": True,
+                        "environment_truncated": False,
+                        "action_observation_history": (
+                            {
+                                "turn": 1,
+                                "action": "move apple 1 to fridge 1",
+                                "observation_result": (
+                                    "You move the apple 1 to the fridge 1."
+                                ),
+                                "state_advanced": True,
+                                "environment_terminal": True,
+                            },
+                        ),
+                    },
+                },
+            )
+
+    class ALFWorldRuntime(AgentRuntime):
+        def registered_execution_profiles(self):
+            return (
+                ("reasoning", ()),
+                ("react", ("alfworld.environment",)),
+            )
+
+        def validate_execution_contracts(self, nodes):
+            return None
+
+    adapter = TerminalAdapter()
+    runtime = ALFWorldRuntime(
+        registry,
+        FakeGateway(),
+        execution_adapters={"react": adapter},
+        dataset_id="alfworld",
+    )
+    add_subgraph = (
+        '{"action":"add_subgraph","agents":['
+        '{"agent_id":"analysis","model_id":"cheap-model",'
+        '"contract":"Analyze the current public state.",'
+        '"execution_mode":"reasoning","allowed_tools":[]},'
+        '{"agent_id":"actor","model_id":"cheap-model",'
+        '"contract":"Execute one native action from routed analysis.",'
+        '"execution_mode":"react",'
+        '"allowed_tools":["alfworld.environment"]}'
+        '],"relations":['
+        '{"source_id":"analysis","target_id":"actor",'
+        '"source_to_target":true,"target_to_source":false}'
+        '],"output_agent_id":"actor"}'
+    )
+    client = InlineScriptedSGLangClient(
+        [add_subgraph, '{"action":"finish"}'],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    collector = AgentGraphRolloutCollector(
+        _orchestrator(registry, client, max_rounds=1),
+        AgentWorkflowEnv(
+            registry,
+            runtime=runtime,
+            execute_on_edit=True,
+            required_tool_id="alfworld.environment",
+            allowed_actions=(
+                "add_subgraph",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "continue",
+                "finish",
+            ),
+            max_agents=4,
+            max_agents_per_subgraph=3,
+            require_multi_agent_for_complex_tasks=True,
+            minimum_agents_for_complex_tasks=2,
+        ),
+        _versions(),
+    )
+
+    def evaluator(task, final_answer, final_graph, runtime_result):
+        assert final_answer == "move apple 1 to fridge 1"
+        assert runtime_result is not None
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "valid": True,
+            "reward": 1.0,
+            "metrics": {"success": 1.0},
+        }
+
+    trajectory = asyncio.run(
+        collector.collect(
+            _task(
+                task_id="alfworld:terminal-control",
+                source="ALFWorld",
+            ),
+            0,
+            evaluator,
+        )
+    )
+
+    assert trajectory.explicit_finish is True
+    assert trajectory.termination_reason == "finish"
+    assert len(trajectory.turns) == 2
+    assert len(adapter.requests) == 1
+    assert trajectory.turns[-1].runtime_summary[
+        "terminal_control_epilogue"
+    ] == {
+        "admitted": True,
+        "max_extra_rounds": 1,
+        "live_action_types": ["finish"],
+        "submission_semantics": "explicit_finish",
+    }
 
 
 def test_collector_records_model_admissible_schema_on_every_canvas_turn():

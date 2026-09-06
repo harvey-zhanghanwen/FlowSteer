@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
@@ -975,18 +975,44 @@ class AgentWorkflowEnv:
             ):
                 return False
             # FlowSteer SET_OUTPUT changes only the terminal artifact pointer;
-            # it does not dirty or re-execute an Agent. Preserve the original
-            # receipt revision and accept it after environment closure only
-            # when every accepted intervening Canvas mutation was SET_OUTPUT.
-            # Any Agent or relation edit still invalidates the provenance.
+            # it does not dirty or re-execute an Agent.  After a task-scoped
+            # environment closes, the stepwise WebShop boundary also permits
+            # structural reachability closure over already materialized
+            # artifacts.  Such a relation preserves the Tool owner's consumed
+            # collaborator receipt only when it is entirely outside the owner
+            # or is a pure outgoing edge from the owner.  Any edit of the
+            # owner's inbound dependency remains revision-incompatible unless
+            # Runtime re-executes the owner and records a fresh receipt.
             intervening = tuple(
                 entry
                 for entry in self._history
                 if entry.accepted and entry.revision > receipt_revision
             )
+
+            def preserves_closed_owner_receipt(
+                entry: AgentWorkflowHistoryEntry,
+            ) -> bool:
+                action = entry.action
+                if action is None:
+                    return False
+                if action.action_type is AgentActionType.SET_OUTPUT:
+                    return True
+                if action.action_type is not AgentActionType.SET_RELATION:
+                    return False
+                if action.source_id == owner_id:
+                    return (
+                        action.source_to_target is True
+                        and action.target_to_source is False
+                    )
+                if action.target_id == owner_id:
+                    return (
+                        action.source_to_target is False
+                        and action.target_to_source is True
+                    )
+                return True
+
             return bool(intervening) and all(
-                entry.action is not None
-                and entry.action.action_type is AgentActionType.SET_OUTPUT
+                preserves_closed_owner_receipt(entry)
                 for entry in intervening
             )
 
@@ -1040,9 +1066,28 @@ class AgentWorkflowEnv:
             return None
         actor_id = owners[0]
         metadata = self._progressive_output_metadata.get(actor_id)
-        if not isinstance(metadata, Mapping):
-            return None
-        raw_state = metadata.get("environment_current_state")
+        raw_state = (
+            metadata.get("environment_current_state")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        if not isinstance(raw_state, Mapping):
+            # A provider/runtime failure after one or more completed native
+            # actions must not erase the task-scoped public environment
+            # ledger. AgentRuntime carries the adapter's last public state on
+            # the typed failure record; preserve it for Director diagnosis and
+            # repair without treating the failed Agent output as reusable.
+            failure_record = self._latest_failure_record_by_agent.get(actor_id)
+            failure_metadata = (
+                failure_record.metadata
+                if failure_record is not None
+                else None
+            )
+            raw_state = (
+                failure_metadata.get("environment_current_state")
+                if isinstance(failure_metadata, Mapping)
+                else None
+            )
         if not isinstance(raw_state, Mapping):
             return None
         allowed_fields = (
@@ -1055,8 +1100,12 @@ class AgentWorkflowEnv:
             "observation_status",
             "current_observation",
             "admissible_actions",
+            "policy_action_domain",
+            "policy_action_domain_receipt",
             "public_state",
             "task_facts",
+            "goal_progress",
+            "held_objects",
             "latest_action_observation",
             "action_observation_history",
             "public_scene_memory",
@@ -1066,26 +1115,70 @@ class AgentWorkflowEnv:
             "environment_terminal",
             "environment_truncated",
             "stall_diagnostic",
+            "collaborator_action_proposals",
+            "collaborator_action_alignment",
         )
         result = {
             key: raw_state[key]
             for key in allowed_fields
             if key in raw_state
         }
+        public_transition_fields = (
+            "turn",
+            "environment_revision_before",
+            "environment_revision_after",
+            "raw_action",
+            "action",
+            "task_instruction",
+            "task_facts",
+            "observation",
+            "next_observation",
+            "observation_result",
+            "observation_result_clipped",
+            "observation_changed",
+            "observation_status",
+            "state_advanced",
+            "environment_terminal",
+            "admissible_actions_before",
+            "policy_action_domain_before",
+            "next_admissible_actions",
+            "next_policy_action_domain",
+            "goal_progress_before",
+            "goal_progress_after",
+            "goal_progress_changed",
+            "goal_progress",
+            "remaining_action_budget",
+            "remaining_action_budget_after",
+            "total_action_budget",
+            "collaborator_action_proposals",
+            "collaborator_action_alignment",
+        )
+        latest = raw_state.get("latest_action_observation")
+        if isinstance(latest, Mapping):
+            result["latest_action_observation"] = {
+                field: latest[field]
+                for field in public_transition_fields
+                if field in latest
+            }
+        policy_receipt = raw_state.get("policy_action_domain_receipt")
+        if isinstance(policy_receipt, Mapping):
+            public_policy_fields = (
+                "schema_version",
+                "profile",
+                "environment_admissible_actions",
+                "policy_action_domain",
+                "blocked_actions",
+                "fail_open",
+                "goal_progress",
+                "held_objects",
+            )
+            result["policy_action_domain_receipt"] = {
+                field: policy_receipt[field]
+                for field in public_policy_fields
+                if field in policy_receipt
+            }
         history = raw_state.get("action_observation_history")
         if isinstance(history, (list, tuple)):
-            public_transition_fields = (
-                "turn",
-                "environment_revision_before",
-                "environment_revision_after",
-                "raw_action",
-                "action",
-                "observation_result",
-                "observation_result_clipped",
-                "observation_status",
-                "state_advanced",
-                "environment_terminal",
-            )
             result["action_observation_history"] = [
                 {
                     field: item[field]
@@ -1265,6 +1358,53 @@ class AgentWorkflowEnv:
         ):
             return None
         return owners[0]
+
+    def _environment_collaborator_grounding_repair_agent_ids(
+        self,
+    ) -> Tuple[str, ...]:
+        """Return the measured Agent responsible for routed-action mismatch.
+
+        The environment adapter derives this receipt only from the current
+        public action domain, routed artifact, and executed native action.  An
+        inadmissible proposal identifies its source collaborator; divergence
+        from an admissible proposal identifies the Tool owner.  This is the
+        FlowSteer diagnose→repair boundary and does not prescribe any role,
+        topology, or environment action.
+        """
+
+        state = self.public_environment_state()
+        if not isinstance(state, Mapping):
+            return ()
+        diagnostic = state.get("stall_diagnostic")
+        signals = (
+            diagnostic.get("signals", ())
+            if isinstance(diagnostic, Mapping)
+            else ()
+        )
+        if (
+            not isinstance(signals, (list, tuple))
+            or "collaborator_action_grounding_failure" not in signals
+        ):
+            return ()
+        alignment = state.get("collaborator_action_alignment")
+        status = (
+            str(alignment.get("status", ""))
+            if isinstance(alignment, Mapping)
+            else ""
+        )
+        if status == "diverged":
+            return self._required_tool_actor_ids()
+        proposals = state.get("collaborator_action_proposals", ())
+        source_ids = {
+            str(item.get("source_agent_id"))
+            for item in proposals
+            if isinstance(item, Mapping)
+            and isinstance(item.get("source_agent_id"), str)
+            and self._graph.has_node(str(item.get("source_agent_id")))
+        } if isinstance(proposals, (list, tuple)) else set()
+        return tuple(
+            node.id for node in self._graph.nodes if node.id in source_ids
+        )
 
     def _required_tool_capability_repair_domains(
         self,
@@ -1493,6 +1633,23 @@ class AgentWorkflowEnv:
                 and self._model_admissible_output_agent_ids()
             ):
                 return (AgentActionType.SET_OUTPUT.value,)
+            terminal_reachability_candidates = (
+                self._terminal_reachability_relation_candidates()
+            )
+            if (
+                self._graph.output_agent_id is not None
+                and terminal_reachability_candidates
+                and AgentActionType.SET_RELATION.value
+                in self._allowed_action_type_set
+            ):
+                # WebShop's stepwise Director keeps the task-scoped episode
+                # immutable after its terminal receipt while allowing ordinary
+                # FlowSteer Canvas edits to close structural reachability.  Do
+                # the same for ALFWorld: the candidate domain below contains
+                # only relations that strictly reduce cannot_reach_output.
+                # EnvironmentExecutionAdapter observes the closed episode and
+                # therefore dispatches no further native environment action.
+                return (AgentActionType.SET_RELATION.value,)
             return ()
 
         capability_repairs = self._required_tool_capability_repair_domains()
@@ -1537,6 +1694,18 @@ class AgentWorkflowEnv:
                 in self._allowed_action_type_set
                 and environment_parse_repair_id
                 in self._model_admissible_modify_agent_ids()
+            ):
+                return (AgentActionType.MODIFY_AGENT.value,)
+            return ()
+
+        collaborator_grounding_repair_ids = (
+            self._environment_collaborator_grounding_repair_agent_ids()
+        )
+        if collaborator_grounding_repair_ids:
+            if (
+                AgentActionType.MODIFY_AGENT.value
+                in self._allowed_action_type_set
+                and self._model_admissible_modify_agent_ids()
             ):
                 return (AgentActionType.MODIFY_AGENT.value,)
             return ()
@@ -2694,6 +2863,7 @@ class AgentWorkflowEnv:
         if self._graph.output_agent_id in active_lineage:
             return ()
         admitted: list[str] = []
+        terminal_structural_candidates: list[str] = []
         for node in self._graph.nodes:
             if node.id == self._graph.output_agent_id:
                 continue
@@ -2713,16 +2883,32 @@ class AgentWorkflowEnv:
                 continue
             validation = candidate.validate(
                 self.model_registry,
-                # Once the environment is immutable, every advertised target
-                # must make explicit FINISH structurally reachable. This does
-                # not prescribe an Output role: the Director still selects
-                # among all prospectively terminal-valid AgentGraph sinks.
+                # Prefer a target that already makes explicit FINISH
+                # structurally reachable.  If none exists after the
+                # environment closes, the terminal-only fallback below reuses
+                # WebShop's partial Output boundary before strict reachability
+                # relation repair.
                 require_complete=(
                     environment_closed or environment_profile_domain
                 ),
             )
+            terminal_structural_candidate = False
             if not validation.valid:
-                continue
+                if not (environment_closed and environment_profile_domain):
+                    continue
+                # DIRECT_REUSE: WebShop admits a Director-selected Output on
+                # a partial Canvas with require_complete=False, then uses
+                # FlowSteer's native reachability relation edits before
+                # explicit FINISH.  Retain ALFWorld's stronger preference for
+                # an already complete target, but use that upstream boundary
+                # as a terminal-only fallback when no complete sink exists.
+                partial_validation = candidate.validate(
+                    self.model_registry,
+                    require_complete=False,
+                )
+                if not partial_validation.valid:
+                    continue
+                terminal_structural_candidate = True
             if self._semantic_edit_issue_for(candidate) is not None:
                 continue
             if (
@@ -2730,8 +2916,13 @@ class AgentWorkflowEnv:
                 and self._format_agent_issue_for(candidate) is not None
             ):
                 continue
-            admitted.append(node.id)
-        return tuple(admitted)
+            if terminal_structural_candidate:
+                terminal_structural_candidates.append(node.id)
+            else:
+                admitted.append(node.id)
+        if admitted:
+            return tuple(admitted)
+        return tuple(terminal_structural_candidates)
 
     def _model_admissible_modify_agent_ids(self) -> Tuple[str, ...]:
         """Exclude an already verified semantic lineage from repair targets."""
@@ -2749,6 +2940,11 @@ class AgentWorkflowEnv:
             # canonical profile delta remains.  Do not reopen free-text/no-op
             # MODIFY arms; the collector receives a bounded exhausted domain.
             return ()
+        collaborator_grounding_repairs = (
+            self._environment_collaborator_grounding_repair_agent_ids()
+        )
+        if collaborator_grounding_repairs:
+            return collaborator_grounding_repairs
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return node_ids
 
@@ -4901,7 +5097,10 @@ class AgentWorkflowEnv:
             )
         ):
             terminal_action_types = self.model_admissible_action_types()
-            if action.action_type.value not in terminal_action_types:
+            if (
+                action.action_type is not AgentActionType.FINISH
+                and action.action_type.value not in terminal_action_types
+            ):
                 return self._reject_after_count(
                     action,
                     "action rejected: action type is not currently admissible "
@@ -4909,6 +5108,11 @@ class AgentWorkflowEnv:
                     f"{list(terminal_action_types)!r}",
                     feedback_code="environment_terminal_action_unavailable",
                 )
+            # FlowSteer's model mask still exposes FINISH only when admitted.
+            # If a raw FINISH reaches the authoritative Canvas boundary, let
+            # the dedicated graph/artifact/environment terminal checks below
+            # diagnose it instead of replacing the causal failure with an
+            # empty-domain message.  This cannot publish an invalid artifact.
             if (
                 action.action_type is AgentActionType.SET_OUTPUT
                 and action.agent_id
@@ -5070,11 +5274,29 @@ class AgentWorkflowEnv:
                 ),
             )
         if action.action_type is AgentActionType.FINISH:
-            validation = self._graph.validate(self.model_registry, require_complete=True)
-            cached_execution = self._cached_progressive_execution()
+            terminal_projection = self._terminal_environment_owner_projection()
+            terminal_graph = (
+                self._graph
+                if terminal_projection is None
+                else terminal_projection[0]
+            )
+            validation = terminal_graph.validate(
+                self.model_registry,
+                require_complete=True,
+            )
+            cached_execution = (
+                self._cached_progressive_execution()
+                if terminal_projection is None
+                else terminal_projection[1]
+            )
             if (
                 not validation.valid
                 and not self._allows_unconsumed_auxiliary_terminal_reachability(
+                    validation,
+                    cached_execution,
+                )
+                and not self._allows_alfworld_terminal_auxiliary_reachability(
+                    terminal_graph,
                     validation,
                     cached_execution,
                 )
@@ -5084,7 +5306,7 @@ class AgentWorkflowEnv:
                     f"cannot finish: {self._format_issues(validation)}",
                     validation.issues,
                 )
-            format_issue = self.format_agent_issue()
+            format_issue = self._format_agent_issue_for(terminal_graph)
             if format_issue is not None:
                 return self._reject_after_count(
                     action,
@@ -5097,7 +5319,7 @@ class AgentWorkflowEnv:
                     "cannot finish: " + required_tool_issue,
                 )
             collaboration_issue = (
-                self._complex_environment_collaboration_issue_for(self._graph)
+                self._complex_environment_collaboration_issue_for(terminal_graph)
             )
             if collaboration_issue is not None:
                 return self._reject_after_count(
@@ -5201,6 +5423,13 @@ class AgentWorkflowEnv:
                     action,
                     "cannot finish: " + terminal_issue,
                 )
+            if terminal_projection is not None:
+                # Commit the prospective Output pointer only after every
+                # authoritative FINISH gate has passed.  A rejected FINISH
+                # therefore leaves the Canvas and terminal receipt untouched.
+                self._graph = terminal_graph
+                self._progressive_execution = execution
+                self._progressive_execution_revision = terminal_graph.revision
             self._finished = True
             self._unresolved_dirty_agents.clear()
             self._clear_failure_state()
@@ -5729,6 +5958,68 @@ class AgentWorkflowEnv:
             preview = " ".join(artifact.split())
             if len(preview) > 160:
                 preview = preview[:157] + "..."
+            raw_agent_provenance = execution.output_metadata.get(
+                agent_id,
+                {},
+            ).get("input_artifact_provenance", ())
+            input_artifact_provenance = []
+            if isinstance(raw_agent_provenance, (list, tuple)):
+                for item in raw_agent_provenance:
+                    if not isinstance(item, Mapping):
+                        continue
+                    raw_output = item.get(
+                        "raw_output",
+                        item.get(
+                            "artifact_body",
+                            item.get("artifact", item.get("content")),
+                        ),
+                    )
+                    if not isinstance(raw_output, str):
+                        continue
+                    raw_tool_receipts = item.get("tool_receipts", ())
+                    tool_receipts = (
+                        [
+                            receipt
+                            for receipt in raw_tool_receipts
+                            if isinstance(receipt, Mapping)
+                        ]
+                        if isinstance(raw_tool_receipts, (list, tuple))
+                        else []
+                    )
+                    input_artifact_provenance.append(
+                        {
+                            "source_agent_id": item.get("source_agent_id"),
+                            "target_agent_id": item.get("target_agent_id"),
+                            "message_type": item.get("message_type"),
+                            "artifact_type": item.get("artifact_type"),
+                            "artifact_id": item.get(
+                                "artifact_id",
+                                item.get("artifact_version"),
+                            ),
+                            "graph_revision": item.get("graph_revision"),
+                            "environment_revision": item.get(
+                                "environment_revision"
+                            ),
+                            "request_or_dependency": item.get(
+                                "request_or_dependency",
+                                item.get("dependency"),
+                            ),
+                            # FlowSteer returns the actual routed work product
+                            # to the Director.  Tool receipts remain summarized
+                            # here; environment state has its own public
+                            # projection and evaluator-only metadata is never
+                            # copied into Canvas feedback.
+                            "artifact_body": raw_output,
+                            "tool_receipt_count": len(tool_receipts),
+                            "tool_ids": sorted(
+                                {
+                                    str(receipt.get("tool_id"))
+                                    for receipt in tool_receipts
+                                    if receipt.get("tool_id") is not None
+                                }
+                            ),
+                        }
+                    )
             agent_artifacts.append(
                 {
                     "agent_id": agent_id,
@@ -5764,7 +6055,9 @@ class AgentWorkflowEnv:
                             "artifact_version"
                         ),
                     ),
+                    "artifact_body": artifact,
                     "artifact_preview": preview,
+                    "input_artifact_provenance": input_artifact_provenance,
                 }
             )
         result = json.dumps(
@@ -5873,6 +6166,124 @@ class AgentWorkflowEnv:
             and self._terminal_validation_error(execution.final_answer) is None
         )
 
+    def _allows_alfworld_terminal_auxiliary_reachability(
+        self,
+        graph: AgentGraph,
+        validation: GraphValidationResult,
+        execution: Optional[AgentRuntimeResult],
+    ) -> bool:
+        """Admit explicit FINISH over a current ALFWorld closure receipt.
+
+        FlowSteer's FINISH reuses the latest execution result and does not
+        require unrelated top-level helpers to be wired into the final Output.
+        Keep the shared complete-graph validator unchanged, and relax only its
+        ``cannot_reach_output`` issue after the unique environment Tool owner
+        has produced the authoritative, current-revision terminal transition
+        or measured fixed-budget truncation.  SkillFlow ends either boundary;
+        truncation remains unsuccessful.  No reward or evaluator field is read
+        at this Canvas boundary.
+        """
+
+        if (
+            self.required_tool_id is None
+            or not isinstance(self.runtime.dataset_id, str)
+            or self.runtime.dataset_id.casefold() != "alfworld"
+            or self._uses_semantic_lineage_protocol()
+            or execution is None
+            or execution.final_answer is None
+            or validation.valid
+            or not validation.issues
+            or execution.graph_revision != graph.revision
+        ):
+            return False
+        if any(issue.code != "cannot_reach_output" for issue in validation.issues):
+            return False
+        unreachable_ids = {
+            agent_id
+            for issue in validation.issues
+            for agent_id in issue.agent_ids
+        }
+        owners = self._required_tool_actor_ids_for_graph(graph)
+        if (
+            not unreachable_ids
+            or len(owners) != 1
+            or graph.output_agent_id != owners[0]
+            or owners[0] in unreachable_ids
+        ):
+            return False
+        for agent_id in unreachable_ids:
+            if (
+                not graph.has_node(agent_id)
+                or agent_id in self._failed_agent_ids
+                or agent_id in self._repair_exhausted_agent_ids
+                or not self._has_successful_artifact(agent_id)
+                or not isinstance(execution.outputs.get(agent_id), str)
+                or not str(execution.outputs[agent_id]).strip()
+                or not isinstance(execution.output_metadata.get(agent_id), Mapping)
+            ):
+                return False
+        owner_id = owners[0]
+        owner_artifact = execution.outputs.get(owner_id)
+        metadata = execution.output_metadata.get(owner_id)
+        if (
+            not isinstance(owner_artifact, str)
+            or not owner_artifact.strip()
+            or execution.final_answer != owner_artifact
+            or not isinstance(metadata, Mapping)
+        ):
+            return False
+        state = self.public_environment_state()
+        current_state = metadata.get("environment_current_state")
+        if not isinstance(state, Mapping) or not isinstance(
+            current_state,
+            Mapping,
+        ):
+            return False
+        terminal_closure = bool(
+            state.get("environment_terminal") is True
+            and state.get("environment_truncated") is False
+            and current_state.get("environment_terminal") is True
+            and current_state.get("environment_truncated") is False
+        )
+        truncated_closure = bool(
+            state.get("environment_terminal") is False
+            and state.get("environment_truncated") is True
+            and current_state.get("environment_terminal") is False
+            and current_state.get("environment_truncated") is True
+        )
+        if (
+            not (terminal_closure or truncated_closure)
+            or current_state.get("environment_revision")
+            != state.get("environment_revision")
+        ):
+            return False
+        transition = self._public_environment_transition_receipt(current_state)
+        if (
+            transition is None
+            or (
+                terminal_closure
+                and (
+                    transition.get("environment_terminal") is not True
+                    or transition.get("state_advanced") is not True
+                )
+            )
+            or (
+                truncated_closure
+                and transition.get("environment_terminal") is not False
+            )
+        ):
+            return False
+        return bool(
+            self._semantic_edit_issue_for(graph) is None
+            and self._required_tool_candidate_issue(graph) is None
+            and self._required_tool_auxiliary_profile_issue(graph) is None
+            and self._complex_environment_collaboration_issue_for(graph) is None
+            and self._environment_owner_has_collaborator_artifact()
+            and self._environment_terminal_issue(execution) is None
+            and self._semantic_protocol_issue(execution) is None
+            and self._terminal_validation_error(execution.final_answer) is None
+        )
+
     def finish_admissibility(self) -> dict[str, object]:
         """Return the revision-local explicit-FINISH admission state.
 
@@ -5883,13 +6294,28 @@ class AgentWorkflowEnv:
         Director submission.
         """
 
-        validation = self._graph.validate(
+        terminal_projection = self._terminal_environment_owner_projection()
+        terminal_graph = (
+            self._graph
+            if terminal_projection is None
+            else terminal_projection[0]
+        )
+        validation = terminal_graph.validate(
             self.model_registry,
             require_complete=True,
         )
-        execution = self._cached_progressive_execution()
+        execution = (
+            self._cached_progressive_execution()
+            if terminal_projection is None
+            else terminal_projection[1]
+        )
         auxiliary_reachability_only = (
             self._allows_unconsumed_auxiliary_terminal_reachability(
+                validation,
+                execution,
+            )
+            or self._allows_alfworld_terminal_auxiliary_reachability(
+                terminal_graph,
                 validation,
                 execution,
             )
@@ -5929,7 +6355,7 @@ class AgentWorkflowEnv:
                     # overwrite the structural repair target with a later
                     # semantic attribution.
             return result
-        format_issue = self.format_agent_issue()
+        format_issue = self._format_agent_issue_for(terminal_graph)
         if format_issue is not None:
             result = {
                 "admissible": False,
@@ -5953,7 +6379,7 @@ class AgentWorkflowEnv:
                 "reason": required_tool_issue,
             }
         collaboration_issue = self._complex_environment_collaboration_issue_for(
-            self._graph
+            terminal_graph
         )
         if collaboration_issue is not None:
             return {
@@ -6010,11 +6436,41 @@ class AgentWorkflowEnv:
                 "stage": "terminal_protocol",
                 "reason": terminal_issue,
             }
-        return {
+        result: dict[str, object] = {
             "admissible": True,
-            "graph_revision": self._graph.revision,
+            "graph_revision": terminal_graph.revision,
             "submission_semantics": "explicit_finish",
         }
+        if terminal_projection is not None:
+            result.update(
+                {
+                    "prospective_output_agent_id": terminal_projection[2],
+                    "terminal_output_source": terminal_projection[3],
+                }
+            )
+        if (
+            not validation.valid
+            and self._allows_alfworld_terminal_auxiliary_reachability(
+                terminal_graph,
+                validation,
+                execution,
+            )
+        ):
+            result.update(
+                {
+                    "accepted_validation_issue_codes": [
+                        "cannot_reach_output"
+                    ],
+                    "terminal_unreachable_agent_ids": sorted(
+                        {
+                            agent_id
+                            for issue in validation.issues
+                            for agent_id in issue.agent_ids
+                        }
+                    ),
+                }
+            )
+        return result
 
     def _semantic_repair_attribution(
         self,
@@ -6206,6 +6662,421 @@ class AgentWorkflowEnv:
         if self._progressive_execution.final_answer is None:
             return None
         return self._progressive_execution
+
+    def _terminal_environment_owner_projection(
+        self,
+    ) -> Optional[tuple[AgentGraph, AgentRuntimeResult, str, str]]:
+        """Project explicit FINISH over a measured ALFWorld closure receipt.
+
+        SkillFlow makes the environment ``done`` transition authoritative.
+        FlowSteer's explicit FINISH remains a Director action, but requiring a
+        separate post-closure SET_OUTPUT exposed a needless failure window.
+        Prefer the unique complete-valid downstream sink whose current artifact
+        is connected to the Tool owner's terminal artifact by materialized
+        versioned provenance.  If no such sink exists, retain the v25 Tool-owner
+        fallback, including when a pre-terminal Output pointer is structurally
+        invalid.  An already valid, current Output remains Director-selected.
+        The only complete-graph issue that may remain is an unrelated auxiliary
+        block that cannot reach the owner.  No Agent, model, or Tool is called
+        and no role or topology is prescribed.
+        """
+
+        if (
+            self.required_tool_id is None
+            or not isinstance(self.runtime.dataset_id, str)
+            or self.runtime.dataset_id.casefold() != "alfworld"
+            or self._uses_semantic_lineage_protocol()
+        ):
+            return None
+        state = self.public_environment_state()
+        if not isinstance(state, Mapping):
+            return None
+        terminal_closure = bool(
+            state.get("environment_terminal") is True
+            and state.get("environment_truncated") is False
+        )
+        truncated_closure = bool(
+            state.get("environment_terminal") is False
+            and state.get("environment_truncated") is True
+        )
+        if not (terminal_closure or truncated_closure):
+            return None
+        owners = self._required_tool_actor_ids()
+        if len(owners) != 1 or not self._environment_owner_has_collaborator_artifact():
+            return None
+        owner_id = owners[0]
+        execution = self._progressive_execution
+        if (
+            execution is None
+            or self._progressive_execution_revision != self._graph.revision
+            or execution.graph_revision != self._graph.revision
+        ):
+            return None
+        owner_artifact = execution.outputs.get(owner_id)
+        metadata = execution.output_metadata.get(owner_id)
+        if (
+            not isinstance(owner_artifact, str)
+            or not owner_artifact.strip()
+            or owner_id in self._failed_agent_ids
+            or owner_id in self._repair_exhausted_agent_ids
+            or owner_id in self._unresolved_dirty_agents
+            or not self._has_successful_artifact(owner_id)
+            or self._progressive_outputs.get(owner_id) != owner_artifact
+            or execution.agent_statuses.get(owner_id) not in (None, "SUCCESS")
+        ):
+            return None
+        if not isinstance(metadata, Mapping):
+            return None
+        if metadata.get("graph_revision") != execution.graph_revision:
+            return None
+        current_state = metadata.get("environment_current_state")
+        if not isinstance(current_state, Mapping):
+            return None
+        if (
+            current_state.get("environment_terminal")
+            is not state.get("environment_terminal")
+            or current_state.get("environment_truncated")
+            is not state.get("environment_truncated")
+            or current_state.get("environment_revision")
+            != state.get("environment_revision")
+        ):
+            return None
+        transition = self._public_environment_transition_receipt(current_state)
+        if (
+            transition is None
+            or (
+                terminal_closure
+                and (
+                    transition.get("environment_terminal") is not True
+                    or transition.get("state_advanced") is not True
+                )
+            )
+            or (
+                truncated_closure
+                and transition.get("environment_terminal") is not False
+            )
+        ):
+            return None
+
+        existing_output_id = self._graph.output_agent_id
+        if existing_output_id is not None:
+            existing_artifact = execution.outputs.get(existing_output_id)
+            existing_validation = self._graph.validate(
+                self.model_registry,
+                require_complete=True,
+            )
+            existing_reachability_valid = bool(
+                existing_validation.valid
+                or self._allows_alfworld_terminal_auxiliary_reachability(
+                    self._graph,
+                    existing_validation,
+                    execution,
+                )
+            )
+            existing_receipt_path_valid = bool(
+                existing_output_id == owner_id
+                or self._has_current_artifact_path(
+                    execution,
+                    source_id=owner_id,
+                    target_id=existing_output_id,
+                )
+            )
+            if (
+                existing_reachability_valid
+                and existing_receipt_path_valid
+                and self._execution_has_current_artifact(
+                    execution,
+                    existing_output_id,
+                )
+                and execution.output_agent_id == existing_output_id
+                and execution.final_answer == existing_artifact
+                and self._semantic_edit_issue_for(self._graph) is None
+                and self._required_tool_candidate_issue(self._graph) is None
+                and self._required_tool_auxiliary_profile_issue(self._graph)
+                is None
+                and self._complex_environment_collaboration_issue_for(
+                    self._graph
+                )
+                is None
+                and self._environment_terminal_issue(execution) is None
+                and self._semantic_protocol_issue(execution) is None
+                and isinstance(existing_artifact, str)
+                and self._terminal_validation_error(existing_artifact) is None
+            ):
+                # Preserve an already complete, receipt-grounded Director
+                # choice. Projection only repairs an existing Output that
+                # cannot consume the measured environment transition.
+                return None
+
+        verified_sink_projections: list[
+            tuple[AgentGraph, AgentRuntimeResult, str, str]
+        ] = []
+        for node in self._graph.nodes:
+            candidate_id = node.id
+            if candidate_id in {owner_id, existing_output_id}:
+                continue
+            candidate = self._graph.fork()
+            try:
+                candidate.set_output(candidate_id)
+            except GraphMutationError:
+                continue
+            if not candidate.validate(
+                self.model_registry,
+                require_complete=True,
+            ).valid:
+                # ``_model_admissible_output_agent_ids`` also exposes a
+                # terminal partial-Canvas fallback.  FINISH projection never
+                # consumes that fallback: a downstream Output must already be
+                # complete-valid.
+                continue
+            candidate_artifact = execution.outputs.get(candidate_id)
+            if (
+                not isinstance(candidate_artifact, str)
+                or not candidate_artifact.strip()
+                or not self._execution_has_current_artifact(
+                    execution,
+                    candidate_id,
+                )
+                or not self._has_current_artifact_path(
+                    execution,
+                    source_id=owner_id,
+                    target_id=candidate_id,
+                )
+                or self._semantic_edit_issue_for(candidate) is not None
+                or self._required_tool_candidate_issue(candidate) is not None
+                or self._required_tool_auxiliary_profile_issue(candidate)
+                is not None
+                or self._complex_environment_collaboration_issue_for(candidate)
+                is not None
+            ):
+                continue
+            verified_sink_projections.append(
+                (
+                    candidate,
+                    replace(
+                        execution,
+                        graph_revision=candidate.revision,
+                        output_agent_id=candidate_id,
+                        final_answer=candidate_artifact,
+                    ),
+                    candidate_id,
+                    "unique_complete_valid_sink_consumer",
+                )
+            )
+
+        if len(verified_sink_projections) == 1:
+            return verified_sink_projections[0]
+        if len(verified_sink_projections) > 1:
+            # A terminal receipt never authorizes an implicit semantic choice
+            # between multiple equally current sinks.  Keep SET_OUTPUT under
+            # explicit Director control in this ambiguous case.
+            return None
+
+        candidate = self._graph.fork()
+        try:
+            candidate.set_output(owner_id)
+        except GraphMutationError:
+            return None
+        projected_execution = replace(
+            execution,
+            graph_revision=candidate.revision,
+            output_agent_id=owner_id,
+            final_answer=owner_artifact,
+        )
+        validation = candidate.validate(self.model_registry, require_complete=True)
+        if (
+            not validation.valid
+            and not self._allows_alfworld_terminal_auxiliary_reachability(
+                candidate,
+                validation,
+                projected_execution,
+            )
+        ):
+            return None
+        if self._semantic_edit_issue_for(candidate) is not None:
+            return None
+        if self._required_tool_candidate_issue(candidate) is not None:
+            return None
+        if self._required_tool_auxiliary_profile_issue(candidate) is not None:
+            return None
+        if self._complex_environment_collaboration_issue_for(candidate) is not None:
+            return None
+
+        return (
+            candidate,
+            projected_execution,
+            owner_id,
+            "unique_environment_tool_owner_receipt",
+        )
+
+    def _execution_has_current_artifact(
+        self,
+        execution: AgentRuntimeResult,
+        agent_id: str,
+    ) -> bool:
+        """Return whether one Runtime artifact belongs to the live revision."""
+
+        artifact = execution.outputs.get(agent_id)
+        metadata = execution.output_metadata.get(agent_id)
+        progressive_metadata = self._progressive_output_metadata.get(agent_id)
+        if (
+            not isinstance(artifact, str)
+            or not artifact.strip()
+            or not isinstance(metadata, Mapping)
+            or not isinstance(progressive_metadata, Mapping)
+            or self._progressive_outputs.get(agent_id) != artifact
+            or agent_id in self._failed_agent_ids
+            or agent_id in self._repair_exhausted_agent_ids
+            or agent_id in self._unresolved_dirty_agents
+            or execution.agent_statuses.get(agent_id) not in (None, "SUCCESS")
+            or metadata.get("graph_revision") != execution.graph_revision
+        ):
+            return False
+        artifact_version = metadata.get("artifact_version")
+        return bool(
+            isinstance(artifact_version, str)
+            and artifact_version.strip()
+            and progressive_metadata.get("artifact_version")
+            == artifact_version
+        )
+
+    def _has_current_artifact_path(
+        self,
+        execution: AgentRuntimeResult,
+        *,
+        source_id: str,
+        target_id: str,
+    ) -> bool:
+        """Check a materialized versioned artifact path in the free AgentGraph.
+
+        Structural reachability alone is insufficient at the terminal boundary:
+        every traversed relation must have a current Runtime communication
+        receipt binding the exact producer artifact to the consumer.  The BFS
+        supports arbitrary admissible DAG topology and does not inspect roles,
+        contracts, rewards, or evaluator fields.
+        """
+
+        if source_id == target_id:
+            return False
+        verified_successors: dict[str, set[str]] = {}
+        for relation in self._graph.relations:
+            for producer_id, consumer_id in relation.directed_edges():
+                if (
+                    not self._execution_has_current_artifact(
+                        execution,
+                        producer_id,
+                    )
+                    or not self._execution_has_current_artifact(
+                        execution,
+                        consumer_id,
+                    )
+                    or self._artifact_version_binding_issue(
+                        execution.output_metadata,
+                        producer_id=producer_id,
+                        consumer_id=consumer_id,
+                        consumer_role="terminal output consumer",
+                    )
+                    is not None
+                    or not self._artifact_provenance_wire_matches(
+                        execution,
+                        producer_id=producer_id,
+                        consumer_id=consumer_id,
+                    )
+                ):
+                    continue
+                verified_successors.setdefault(producer_id, set()).add(
+                    consumer_id
+                )
+
+        frontier = [source_id]
+        visited = {source_id}
+        while frontier:
+            producer_id = frontier.pop(0)
+            for consumer_id in sorted(
+                verified_successors.get(producer_id, ())
+            ):
+                if consumer_id == target_id:
+                    return True
+                if consumer_id not in visited:
+                    visited.add(consumer_id)
+                    frontier.append(consumer_id)
+        return False
+
+    @staticmethod
+    def _artifact_provenance_wire_matches(
+        execution: AgentRuntimeResult,
+        *,
+        producer_id: str,
+        consumer_id: str,
+    ) -> bool:
+        """Validate one exact producer-to-consumer communication receipt."""
+
+        producer_artifact = execution.outputs.get(producer_id)
+        producer_metadata = execution.output_metadata.get(producer_id)
+        consumer_metadata = execution.output_metadata.get(consumer_id)
+        if (
+            not isinstance(producer_artifact, str)
+            or not producer_artifact.strip()
+            or not isinstance(producer_metadata, Mapping)
+            or not isinstance(consumer_metadata, Mapping)
+        ):
+            return False
+        producer_version = producer_metadata.get("artifact_version")
+        provenance = consumer_metadata.get("input_artifact_provenance")
+        if (
+            not isinstance(producer_version, str)
+            or not producer_version.strip()
+            or not isinstance(provenance, (list, tuple))
+        ):
+            return False
+        for item in provenance:
+            if not isinstance(item, Mapping):
+                continue
+            artifact_id = (
+                item.get("artifact_id")
+                if "artifact_id" in item
+                else item.get("artifact_version")
+            )
+            if "artifact_body" in item:
+                artifact_body = item.get("artifact_body")
+            elif "raw_output" in item:
+                artifact_body = item.get("raw_output")
+            elif "artifact" in item:
+                artifact_body = item.get("artifact")
+            else:
+                artifact_body = item.get("content")
+            if (
+                item.get("source_agent_id") == producer_id
+                and item.get("target_agent_id") == consumer_id
+                and item.get("graph_revision") == execution.graph_revision
+                and artifact_id == producer_version
+                and artifact_body == producer_artifact
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _public_environment_transition_receipt(
+        current_state: Mapping[str, object],
+    ) -> Optional[Mapping[str, object]]:
+        """Return the latest public Action--Observation transition.
+
+        ALFWorld publishes this receipt to the Director after every native
+        action.  Terminal Canvas admission must not consult the separate
+        evaluator replay, whose records may contain reward or hidden ``info``.
+        """
+
+        latest = current_state.get("latest_action_observation")
+        if not isinstance(latest, Mapping):
+            history = current_state.get("action_observation_history")
+            if (
+                not isinstance(history, (list, tuple))
+                or not history
+                or not isinstance(history[-1], Mapping)
+            ):
+                return None
+            latest = history[-1]
+        return latest
 
     def _capture_last_valid_evidence_lineage(
         self,
@@ -6783,6 +7654,68 @@ class AgentWorkflowEnv:
                 f"environment actor {actor_id!r} has no execution receipt for "
                 "the current Canvas revision"
             )
+        if (
+            isinstance(self.runtime.dataset_id, str)
+            and self.runtime.dataset_id.casefold() == "alfworld"
+        ):
+            public_state = self.public_environment_state()
+            current_state = metadata.get("environment_current_state")
+            if not isinstance(public_state, Mapping) or not isinstance(
+                current_state,
+                Mapping,
+            ):
+                return (
+                    f"environment actor {actor_id!r} has no current public "
+                    "Action--Observation state for the current Canvas revision"
+                )
+            if (
+                current_state.get("environment_revision")
+                != public_state.get("environment_revision")
+            ):
+                return (
+                    f"environment actor {actor_id!r} public environment "
+                    "revision does not match the current task-scoped episode"
+                )
+            transition = self._public_environment_transition_receipt(
+                current_state
+            )
+            terminal_transition = bool(
+                transition is not None
+                and transition.get("environment_terminal") is True
+                and transition.get("state_advanced") is True
+            )
+            if (
+                metadata.get("environment_terminal") is True
+                and metadata.get("environment_truncated") is False
+                and current_state.get("environment_terminal") is True
+                and current_state.get("environment_truncated") is False
+                and public_state.get("environment_terminal") is True
+                and public_state.get("environment_truncated") is False
+                and terminal_transition
+            ):
+                return None
+            adapter = self.runtime.execution_adapters.get("react")
+            if (
+                getattr(adapter, "stepwise_director", False) is True
+                and metadata.get("environment_terminal") is False
+                and metadata.get("environment_truncated") is True
+                and current_state.get("environment_terminal") is False
+                and current_state.get("environment_truncated") is True
+                and public_state.get("environment_terminal") is False
+                and public_state.get("environment_truncated") is True
+                and transition is not None
+                and transition.get("environment_terminal") is False
+            ):
+                # A public fixed-budget closure remains an unsuccessful
+                # episode.  It permits explicit Canvas FINISH but never
+                # becomes an environment success receipt.
+                return None
+            return (
+                f"environment actor {actor_id!r} has not produced a terminal "
+                "Action--Observation transition in public state or measured "
+                "public fixed-budget closure for the current Canvas revision"
+            )
+
         trace = metadata.get("evaluator_environment_trace")
         terminal_transition = (
             isinstance(trace, (list, tuple))

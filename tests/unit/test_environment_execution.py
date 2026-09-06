@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from src.interactive.agent_runtime import (
     AgentRuntime,
     CommunicationCondition,
     ExecutionPhase,
+    UpstreamMessage,
 )
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
 from src.interactive.director import (
@@ -24,7 +26,10 @@ from src.interactive.director import (
     director_system_prompt_for_version,
 )
 from src.interactive.environment_execution import (
+    _alfworld_policy_action_domain,
     _alfworld_public_goal_progress,
+    _alfworld_public_stall_diagnostic,
+    _public_state_feedback,
     build_environment_execution_resources,
     EnvironmentExecutionError,
     evaluator_locked_ragen_session_factory,
@@ -115,6 +120,8 @@ def resources(
     max_turns: int,
     max_observation_chars: int = 0,
     stepwise_director: bool = False,
+    alfworld_policy_action_profile: str = "none",
+    alfworld_complex_thinking_budget: int | None = None,
 ):
     return build_environment_execution_resources(
         gateway=gateway,
@@ -123,6 +130,8 @@ def resources(
         max_turns=max_turns,
         max_observation_chars=max_observation_chars,
         stepwise_director=stepwise_director,
+        alfworld_policy_action_profile=alfworld_policy_action_profile,
+        alfworld_complex_thinking_budget=alfworld_complex_thinking_budget,
     )
 
 
@@ -254,6 +263,598 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         receipts = response.metadata["environment_receipts"]
         self.assertEqual("look", receipts[0]["action"])
         self.assertEqual(json.dumps({"action": "look"}), receipts[0]["raw_model_output"])
+
+    async def test_alfworld_policy_domain_preserves_raw_evaluator_actions(
+        self,
+    ) -> None:
+        class TargetSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = (
+                    "take apple 1 from countertop 1",
+                    "take potato 1 from countertop 1",
+                )
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                self._available = ("finish",)
+                return "apple 1 is held", 0.0, False, {"won": False}
+
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Put an apple in sidetable.",
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        session = TargetSession()
+        gateway = SequenceGateway(
+            [json.dumps({"action": "take apple 1 from countertop 1"})]
+        )
+        runtime = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=1,
+            alfworld_policy_action_profile="skillflow_public_invariants_v1",
+        )
+
+        response = await runtime.execution_adapter.execute(request)
+
+        schema = json.loads(
+            gateway.requests[0].model.metadata["response_json_schema"]
+        )
+        self.assertEqual(
+            ["take apple 1 from countertop 1"],
+            schema["properties"]["action"]["enum"],
+        )
+        receipt = response.metadata["environment_receipts"][0]
+        self.assertEqual(
+            [
+                "take apple 1 from countertop 1",
+                "take potato 1 from countertop 1",
+            ],
+            receipt["admissible_actions"],
+        )
+        self.assertEqual(
+            ["take apple 1 from countertop 1"],
+            receipt["policy_action_domain"],
+        )
+        self.assertEqual(
+            receipt["admissible_actions"],
+            response.metadata["evaluator_environment_trace"][0]["legal_actions"],
+        )
+        self.assertNotIn("reward", str(receipt["policy_action_domain_receipt"]))
+        self.assertNotIn("won", str(receipt["policy_action_domain_receipt"]))
+
+    def test_alfworld_policy_domain_enforces_public_transform_order(self) -> None:
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Heat an egg and put it in sidetable.",
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        domain = _alfworld_policy_action_domain(
+            request,
+            observation="egg 1 is held",
+            environment_admissible_actions=(
+                "move egg 1 to sidetable 1",
+                "cool egg 1 with fridge 1",
+                "heat egg 1 with microwave 1",
+            ),
+            receipts=(),
+            profile="skillflow_public_invariants_v1",
+        )
+
+        self.assertEqual(
+            ["heat egg 1 with microwave 1"],
+            domain["policy_action_domain"],
+        )
+        self.assertEqual(
+            {"placement_before_transform", "wrong_transform"},
+            {
+                item["reason"]
+                for item in domain["blocked_actions"]
+            },
+        )
+
+    def test_alfworld_policy_domain_masks_known_empty_revisit_only_with_alternative(
+        self,
+    ) -> None:
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Put an apple in sidetable.",
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        receipts = (
+            {
+                "turn": 1,
+                "state_advanced": True,
+                "action": "go to cabinet 1",
+                "next_observation": (
+                    "You arrive at cabinet 1. In it, you see nothing."
+                ),
+            },
+        )
+        domain = _alfworld_policy_action_domain(
+            request,
+            observation="at cabinet 1",
+            environment_admissible_actions=(
+                "go to cabinet 1",
+                "go to cabinet 2",
+                "go to sidetable 1",
+            ),
+            receipts=receipts,
+            profile="skillflow_public_invariants_v1",
+        )
+
+        self.assertNotIn("go to cabinet 1", domain["policy_action_domain"])
+        self.assertIn("go to cabinet 2", domain["policy_action_domain"])
+        self.assertIn("go to sidetable 1", domain["policy_action_domain"])
+
+    def test_alfworld_v2_inspects_current_closed_receptacle_before_leaving(
+        self,
+    ) -> None:
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Put an apple in sidetable.",
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        actions = (
+            "open cabinet 4",
+            "go to cabinet 5",
+            "go to sidetable 1",
+            "inventory",
+        )
+
+        v1 = _alfworld_policy_action_domain(
+            request,
+            observation=(
+                "You arrive at cabinet 4. The cabinet 4 is closed."
+            ),
+            environment_admissible_actions=actions,
+            receipts=(),
+            profile="skillflow_public_invariants_v1",
+        )
+        v2 = _alfworld_policy_action_domain(
+            request,
+            observation=(
+                "You arrive at cabinet 4. The cabinet 4 is closed."
+            ),
+            environment_admissible_actions=actions,
+            receipts=(),
+            profile="skillflow_public_invariants_v2",
+        )
+
+        self.assertEqual(list(actions), v1["policy_action_domain"])
+        self.assertEqual(["open cabinet 4"], v2["policy_action_domain"])
+        self.assertEqual(
+            "skillflow.alfworld.policy-action-domain.v2",
+            v2["schema_version"],
+        )
+        self.assertIn(
+            "inspect_current_closed_receptacle",
+            {item["reason"] for item in v2["blocked_actions"]},
+        )
+
+    def test_alfworld_v2_count_search_preserves_placed_instance_without_revisit(
+        self,
+    ) -> None:
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Put two newspaper in drawer.",
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        receipts = (
+            {
+                "turn": 1,
+                "state_advanced": True,
+                "action": "take newspaper 2 from dresser 1",
+                "next_observation": "You pick up newspaper 2.",
+            },
+            {
+                "turn": 2,
+                "state_advanced": True,
+                "action": "move newspaper 2 to drawer 1",
+                "next_observation": "You move newspaper 2 to drawer 1.",
+            },
+        )
+        domain = _alfworld_policy_action_domain(
+            request,
+            observation="You are facing drawer 1.",
+            environment_admissible_actions=(
+                "go to drawer 1",
+                "go to dresser 2",
+                "inventory",
+            ),
+            receipts=receipts,
+            profile="skillflow_public_invariants_v2",
+        )
+
+        self.assertNotIn("go to drawer 1", domain["policy_action_domain"])
+        self.assertNotIn("inventory", domain["policy_action_domain"])
+        self.assertIn("go to dresser 2", domain["policy_action_domain"])
+        reasons = {item["reason"] for item in domain["blocked_actions"]}
+        self.assertIn("count_task_destination_revisit", reasons)
+        self.assertIn("empty_inventory_redundant", reasons)
+
+    async def test_alfworld_v2_records_routed_action_grounding_without_executing_it(
+        self,
+    ) -> None:
+        class ClosedSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = (
+                    "open cabinet 4",
+                    "go to cabinet 5",
+                )
+
+            def reset(self) -> str:
+                self.reset_count += 1
+                return "You arrive at cabinet 4. The cabinet 4 is closed."
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                self._available = ("go to cabinet 5",)
+                return "Cabinet 4 is open and empty.", 0.0, False, {"won": False}
+
+        base = make_request()
+        request = AgentRequest(
+            request_id=base.request_id,
+            run_id=base.run_id,
+            graph_revision=base.graph_revision,
+            problem="Put an apple in sidetable.",
+            agent=base.agent,
+            model=base.model,
+            provider=base.provider,
+            phase=base.phase,
+            communication_condition=base.communication_condition,
+            upstream=(
+                UpstreamMessage(
+                    "planner",
+                    "actor",
+                    json.dumps({"command": "go to cabinet 4"}),
+                    artifact_version="planner-current",
+                ),
+            ),
+        )
+        session = ClosedSession()
+        gateway = SequenceGateway(
+            [json.dumps({"action": "open cabinet 4"})]
+        )
+        runtime = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=1,
+            alfworld_policy_action_profile="skillflow_public_invariants_v2",
+        )
+
+        response = await runtime.execution_adapter.execute(request)
+
+        self.assertEqual(["open cabinet 4"], session.actions)
+        proposal = response.metadata["environment_receipts"][0][
+            "collaborator_action_proposals"
+        ][0]
+        self.assertFalse(proposal["admissible"])
+        alignment = response.metadata["environment_current_state"][
+            "collaborator_action_alignment"
+        ]
+        self.assertEqual("proposal_not_admissible", alignment["status"])
+        self.assertIn(
+            "ROUTED COLLABORATOR ACTION GROUNDING",
+            gateway.requests[0].problem,
+        )
+
+    async def test_alfworld_v3_grounds_labelled_free_text_action_proposal(
+        self,
+    ) -> None:
+        class ClosedSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = ("open drawer 3", "go to drawer 4")
+
+            def reset(self) -> str:
+                self.reset_count += 1
+                return "You arrive at drawer 3. The drawer 3 is closed."
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                self._available = ("go to drawer 4",)
+                return "Drawer 3 is open and empty.", 0.0, False, {"won": False}
+
+        base = make_request()
+        request = replace(
+            base,
+            problem="Put a cellphone on bed.",
+            upstream=(
+                UpstreamMessage(
+                    "analysis",
+                    "actor",
+                    "Search the current closed receptacle.\nAction: open drawer 3",
+                    artifact_version="analysis-current",
+                ),
+            ),
+        )
+        session = ClosedSession()
+        gateway = SequenceGateway([json.dumps({"action": "open drawer 3"})])
+        runtime = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=1,
+            alfworld_policy_action_profile="skillflow_public_invariants_v3",
+        )
+
+        response = await runtime.execution_adapter.execute(request)
+
+        proposal = response.metadata["environment_receipts"][0][
+            "collaborator_action_proposals"
+        ][0]
+        self.assertEqual("open drawer 3", proposal["proposed_action"])
+        self.assertEqual("labelled_free_text", proposal["parse_status"])
+        alignment = response.metadata["environment_current_state"][
+            "collaborator_action_alignment"
+        ]
+        self.assertEqual("matched", alignment["status"])
+        self.assertEqual(1, alignment["upstream_artifact_count"])
+        self.assertEqual(1, alignment["parsed_proposal_count"])
+
+    def test_alfworld_v3_filters_known_empty_destination_during_target_search(
+        self,
+    ) -> None:
+        base = make_request()
+        request = replace(base, problem="Put a cellphone on bed.")
+        receipts = (
+            {
+                "turn": 1,
+                "state_advanced": True,
+                "action": "go to bed 1",
+                "next_observation": (
+                    "You arrive at bed 1. On the bed 1, you see nothing."
+                ),
+            },
+        )
+        actions = ("go to bed 1", "go to drawer 2")
+
+        v2 = _alfworld_policy_action_domain(
+            request,
+            observation="You are at bed 1.",
+            environment_admissible_actions=actions,
+            receipts=receipts,
+            profile="skillflow_public_invariants_v2",
+        )
+        v3 = _alfworld_policy_action_domain(
+            request,
+            observation="You are at bed 1.",
+            environment_admissible_actions=actions,
+            receipts=receipts,
+            profile="skillflow_public_invariants_v3",
+        )
+
+        self.assertIn("go to bed 1", v2["policy_action_domain"])
+        self.assertNotIn("go to bed 1", v3["policy_action_domain"])
+        self.assertIn("go to drawer 2", v3["policy_action_domain"])
+        self.assertEqual(
+            "skillflow.alfworld.policy-action-domain.v3",
+            v3["schema_version"],
+        )
+        self.assertIn(
+            "known_negative_target_evidence",
+            {item["reason"] for item in v3["blocked_actions"]},
+        )
+
+    def test_alfworld_v3_restores_destination_after_target_is_held(self) -> None:
+        base = make_request()
+        request = replace(base, problem="Put a cellphone on bed.")
+        receipts = (
+            {
+                "turn": 1,
+                "state_advanced": True,
+                "action": "go to bed 1",
+                "next_observation": (
+                    "You arrive at bed 1. On the bed 1, you see nothing."
+                ),
+            },
+        )
+        domain = _alfworld_policy_action_domain(
+            request,
+            observation="You are at drawer 2 holding a cellphone 1.",
+            environment_admissible_actions=(
+                "go to bed 1",
+                "go to drawer 3",
+                "move cellphone 1 to drawer 2",
+            ),
+            receipts=receipts,
+            profile="skillflow_public_invariants_v3",
+        )
+
+        self.assertIn("go to bed 1", domain["policy_action_domain"])
+
+    def test_alfworld_v4_filters_known_empty_examine_during_target_search(
+        self,
+    ) -> None:
+        base = make_request()
+        request = replace(base, problem="Put a cellphone on bed.")
+        receipts = (
+            {
+                "turn": 1,
+                "state_advanced": True,
+                "action": "go to bed 1",
+                "next_observation": (
+                    "You arrive at bed 1. On the bed 1, you see nothing."
+                ),
+            },
+        )
+        actions = ("examine bed 1", "go to bed 1", "go to drawer 2")
+
+        v3 = _alfworld_policy_action_domain(
+            request,
+            observation="You are at bed 1.",
+            environment_admissible_actions=actions,
+            receipts=receipts,
+            profile="skillflow_public_invariants_v3",
+        )
+        v4 = _alfworld_policy_action_domain(
+            request,
+            observation="You are at bed 1.",
+            environment_admissible_actions=actions,
+            receipts=receipts,
+            profile="skillflow_public_invariants_v4",
+        )
+
+        self.assertIn("examine bed 1", v3["policy_action_domain"])
+        self.assertNotIn("examine bed 1", v4["policy_action_domain"])
+        self.assertNotIn("go to bed 1", v4["policy_action_domain"])
+        self.assertIn("go to drawer 2", v4["policy_action_domain"])
+        self.assertEqual(
+            "skillflow.alfworld.policy-action-domain.v4",
+            v4["schema_version"],
+        )
+
+    def test_alfworld_action_grounding_failure_enters_stall_repair_boundary(
+        self,
+    ) -> None:
+        request = make_request()
+        receipts = tuple(
+            {
+                "turn": index,
+                "state_advanced": True,
+                "action": f"go to cabinet {index}",
+                "observation": f"at cabinet {index - 1}",
+                "next_observation": f"at cabinet {index}",
+                "admissible_actions": [f"go to cabinet {index + 1}"],
+                **(
+                    {
+                        "collaborator_action_alignment": {
+                            "schema_version": (
+                                "alfworld.collaborator-action-grounding.v1"
+                            ),
+                            "status": "proposal_not_admissible",
+                            "proposed_actions": ["go to cabinet 1"],
+                            "admissible_proposed_actions": [],
+                            "executed_action": f"go to cabinet {index}",
+                        }
+                    }
+                    if index == 4
+                    else {}
+                ),
+            }
+            for index in range(1, 5)
+        )
+
+        diagnostic = _alfworld_public_stall_diagnostic(
+            request,
+            observation="at cabinet 4",
+            admissible_actions=("go to cabinet 5",),
+            receipts=receipts,
+        )
+
+        self.assertTrue(diagnostic["stalled"])
+        self.assertIn(
+            "collaborator_action_grounding_failure",
+            diagnostic["signals"],
+        )
+
+    async def test_alfworld_complex_task_uses_configured_reasoning_budget(
+        self,
+    ) -> None:
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Cool an apple and put it in sidetable.",
+            agent=request.agent,
+            model=ModelSpec(
+                "m",
+                "fake",
+                metadata={
+                    "chat_template_enable_thinking": "true",
+                    "chat_template_thinking_budget": "512",
+                },
+            ),
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+        session = FakeSession()
+        gateway = SequenceGateway([json.dumps({"action": "look"})])
+        runtime = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=1,
+            alfworld_complex_thinking_budget=768,
+        )
+
+        response = await runtime.execution_adapter.execute(request)
+
+        self.assertEqual(
+            "768",
+            gateway.requests[0].model.metadata[
+                "chat_template_thinking_budget"
+            ],
+        )
+        self.assertEqual(
+            "768", response.metadata["model_calls"][0]["selected_reasoning_budget"]
+        )
+
+    def test_alfworld_destination_feedback_uses_move_destination(self) -> None:
+        request = make_request()
+        request = AgentRequest(
+            request_id=request.request_id,
+            run_id=request.run_id,
+            graph_revision=request.graph_revision,
+            problem="Put an apple in sidetable.",
+            agent=request.agent,
+            model=request.model,
+            provider=request.provider,
+            phase=request.phase,
+            communication_condition=request.communication_condition,
+        )
+
+        public_state = _public_state_feedback(
+            request,
+            task_family="alfworld",
+            observation="apple 1 is held",
+            admissible_actions=("move apple 1 to sidetable 1",),
+            receipts=(),
+        )
+
+        self.assertIn(
+            "Current admissible strings mentioning the destination class: "
+            "move apple 1 to sidetable 1.",
+            public_state,
+        )
 
     async def test_provider_failure_retries_same_rollout_episode_and_budget(self) -> None:
         class RetryGateway(SequenceGateway):
@@ -1340,12 +1941,70 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             "room one",
             first_state["latest_action_observation"]["observation_result"],
         )
+        self.assertEqual(
+            "complete the alfworld task",
+            first_state["latest_action_observation"]["task_instruction"],
+        )
+        self.assertEqual(
+            "room zero",
+            first_state["latest_action_observation"]["observation"],
+        )
+        self.assertEqual(
+            "room one",
+            first_state["latest_action_observation"]["next_observation"],
+        )
+        self.assertEqual(
+            ["finish"],
+            first_state["latest_action_observation"][
+                "next_admissible_actions"
+            ],
+        )
+        self.assertEqual(
+            ["finish"],
+            first_state["latest_action_observation"][
+                "next_policy_action_domain"
+            ],
+        )
+        self.assertEqual(
+            ["look", "finish"],
+            first_state["latest_action_observation"][
+                "admissible_actions_before"
+            ],
+        )
+        self.assertTrue(
+            first_state["latest_action_observation"]["observation_changed"]
+        )
+        self.assertFalse(
+            first_state["latest_action_observation"][
+                "goal_progress_changed"
+            ]
+        )
+        self.assertEqual(
+            1,
+            first_state["latest_action_observation"][
+                "remaining_action_budget"
+            ],
+        )
+        self.assertFalse(
+            first_state["latest_action_observation"][
+                "observation_result_clipped"
+            ]
+        )
         self.assertEqual("finish", second_state["last_action"])
         self.assertEqual([], second_state["admissible_actions"])
         self.assertEqual(0, second_state["remaining_action_budget"])
         self.assertEqual(2, second_state["total_action_budget"])
         self.assertTrue(second_state["environment_terminal"])
         self.assertEqual(2, len(second_state["action_observation_history"]))
+        self.assertEqual(
+            [],
+            second_state["latest_action_observation"][
+                "next_admissible_actions"
+            ],
+        )
+        self.assertTrue(
+            second_state["latest_action_observation"]["environment_terminal"]
+        )
         self.assertEqual(
             ["look", "finish"],
             [
@@ -1387,6 +2046,137 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("search[", gateway.requests[0].problem)
         self.assertNotIn("click[", gateway.requests[0].problem)
+
+    async def test_alfworld_action_prompt_preserves_routed_agent_artifact(
+        self,
+    ) -> None:
+        session = FakeSession()
+        gateway = SequenceGateway(["look"])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=2,
+            stepwise_director=True,
+        )
+        request = replace(
+            make_request("alfworld", tool_id="alfworld.environment"),
+            upstream=(
+                UpstreamMessage(
+                    "analysis",
+                    "actor",
+                    '{"plan":["look","finish"],"basis":"public state"}',
+                    graph_revision=3,
+                    environment_revision=0,
+                    artifact_version="analysis:3",
+                ),
+            ),
+        )
+
+        await environment.execution_adapter.execute(request)
+
+        prompt = gateway.requests[0].problem
+        self.assertIn("[ROUTED UPSTREAM AGENT ARTIFACTS]", prompt)
+        self.assertIn('"source_agent_id":"analysis"', prompt)
+        self.assertIn('"artifact_id":"analysis:3"', prompt)
+        self.assertIn('\\"plan\\":[\\"look\\",\\"finish\\"]', prompt)
+        self.assertIn("admissible-action list remains authoritative", prompt)
+        self.assertNotIn("reward", prompt)
+        self.assertNotIn("won", prompt)
+
+    async def test_goal_progress_change_excludes_navigation_counter_only_change(
+        self,
+    ) -> None:
+        class ProgressSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__()
+                self._available = ("go to countertop 1",)
+
+            def step(self, action: str):  # type: ignore[no-untyped-def]
+                self.actions.append(action)
+                if action == "go to countertop 1":
+                    self._available = (
+                        "take apple 1 from countertop 1",
+                    )
+                    return (
+                        "You arrive at countertop 1. On the countertop 1, "
+                        "you see an apple 1.",
+                        0.0,
+                        False,
+                        {"won": False},
+                    )
+                self._available = (
+                    "move apple 1 to countertop 1",
+                )
+                return (
+                    "You pick up the apple 1 from the countertop 1.",
+                    0.0,
+                    False,
+                    {"won": False},
+                )
+
+        session = ProgressSession()
+        gateway = SequenceGateway(
+            ["go to countertop 1", "take apple 1 from countertop 1"]
+        )
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=3,
+            stepwise_director=True,
+            alfworld_policy_action_profile="skillflow_public_invariants_v2",
+        )
+        request = replace(
+            make_request("alfworld", tool_id="alfworld.environment"),
+            problem="put some apple on countertop.",
+        )
+
+        navigated = await environment.execution_adapter.execute(request)
+        acquired = await environment.execution_adapter.execute(request)
+
+        self.assertFalse(
+            navigated.metadata["environment_current_state"]
+            ["latest_action_observation"]["goal_progress_changed"]
+        )
+        acquired_transition = acquired.metadata["environment_current_state"][
+            "latest_action_observation"
+        ]
+        self.assertTrue(acquired_transition["goal_progress_changed"])
+        self.assertEqual(
+            ["apple 1"],
+            acquired_transition["goal_progress_after"]
+            ["acquired_target_instances"],
+        )
+
+    async def test_alfworld_failure_preserves_latest_public_environment_state(
+        self,
+    ) -> None:
+        session = FakeSession()
+        gateway = SequenceGateway(["look"])
+        environment = resources(
+            session=session,
+            gateway=gateway,
+            max_turns=2,
+            stepwise_director=True,
+        )
+        request = make_request(
+            "alfworld",
+            tool_id="alfworld.environment",
+        )
+        await environment.execution_adapter.execute(request)
+
+        with self.assertRaises(EnvironmentExecutionError) as captured:
+            await environment.execution_adapter.execute(request)
+
+        state = captured.exception.environment_current_state
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(1, state["environment_revision"])
+        self.assertEqual("look", state["last_action"])
+        self.assertEqual("room one", state["current_observation"])
+        self.assertEqual(["finish"], state["admissible_actions"])
+        self.assertEqual(1, state["remaining_action_budget"])
+        self.assertNotIn("reward", str(state))
+        self.assertNotIn("won", str(state))
 
     async def test_alfworld_canvas_continue_preserves_graph_revision(
         self,
@@ -1500,6 +2290,21 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
             "look",
             director_state["latest_action_observation"]["action"],
         )
+        self.assertEqual(
+            "room one",
+            director_state["latest_action_observation"]["next_observation"],
+        )
+        self.assertEqual(
+            ["finish"],
+            director_state["latest_action_observation"][
+                "next_admissible_actions"
+            ],
+        )
+        self.assertEqual(
+            ["finish"],
+            director_state["policy_action_domain"],
+        )
+        self.assertEqual({}, director_state["goal_progress"])
         self.assertIn("[PUBLIC OBSERVABLE STATE]", director_state["public_state"])
         self.assertNotIn("reward", str(director_state))
         self.assertNotIn("won", str(director_state))
@@ -1695,13 +2500,9 @@ class EnvironmentExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(added.accepted)
         self.assertEqual(
-            ("set_output",),
+            ("finish",),
             canvas.model_admissible_action_types(),
         )
-        selected = await canvas.step(
-            '{"action":"set_output","agent_id":"actor"}'
-        )
-        self.assertTrue(selected.accepted)
         state = canvas.public_environment_state()
         self.assertIsNotNone(state)
         assert state is not None

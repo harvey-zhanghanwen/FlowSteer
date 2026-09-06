@@ -20,6 +20,16 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 
 
+def test_progress_counter_includes_evaluator_valid_terminal_failures():
+    assert _MODULE._completed_terminal_failure_count(
+        (
+            {"terminal_failure": False, "evaluation": {"valid": True}},
+            {"terminal_failure": True, "evaluation": {"valid": True}},
+            {"terminal_failure": True, "evaluation": {"valid": False}},
+        )
+    ) == 2
+
+
 def test_round_config_is_fixed_heldout_and_training_disabled():
     config = load_yaml(_ROOT / "config" / "evaluation_hotpotqa_round_01.yaml")
     _MODULE.validate_hotpot_config(config)
@@ -252,6 +262,92 @@ def test_graph_task_timeout_is_an_operational_failure(tmp_path):
         for line in (tmp_path / "failures.jsonl")
         .read_text(encoding="utf-8")
         .splitlines()
+    ]
+    assert persisted == failures
+
+
+def test_graph_shared_runtime_failure_pauses_pending_tasks(tmp_path):
+    tasks = tuple(
+        _MODULE.TaskRecord(
+            task_id=f"hotpotqa:transport:{index}",
+            question="question",
+            ground_truth="answer",
+            split="validation",
+            metadata={"dataset_key": "hotpotqa"},
+        )
+        for index in range(3)
+    )
+
+    class EmptyTrajectoryStore:
+        def payloads(self):
+            return ()
+
+    class Backend:
+        model_catalog_version = "catalog-v1"
+        evidence_store = type("Evidence", (), {"trajectories": EmptyTrajectoryStore()})()
+
+        def __init__(self):
+            self.calls = []
+
+        async def collect(
+            self,
+            task,
+            rollout_index,
+            versions,
+            *,
+            expected_task_split="train",
+        ):
+            self.calls.append(task.task_id)
+            try:
+                raise _MODULE.URLError("connection refused")
+            except _MODULE.URLError as exc:
+                raise RuntimeError("shared SGLang request failed") from exc
+
+    backend = Backend()
+    failures = []
+    manifest = {}
+    failure_path = tmp_path / "failures.jsonl"
+    config = {
+        "experiment": {
+            "condition_id": "condition",
+            "prompt_version": "prompt-v1",
+            "tool_version": "tool-v1",
+        },
+        "director": {"behavior_policy_version": "policy-v1"},
+        "hotpotqa_evaluation": {"concurrency": 1, "split": "validation"},
+    }
+
+    try:
+        asyncio.run(
+            _MODULE._collect_graph(
+                backend,
+                tasks,
+                config,
+                tmp_path / "trajectories.jsonl",
+                failures,
+                manifest,
+                tmp_path / "manifest.json",
+                failure_path=failure_path,
+            )
+        )
+    except _MODULE.HotpotRoundError as exc:
+        assert "pending tasks were preserved" in str(exc)
+    else:  # pragma: no cover - fail-closed guard
+        raise AssertionError("shared transport failure did not pause collection")
+
+    assert backend.calls == [tasks[0].task_id]
+    assert len(failures) == 1
+    assert failures[0]["stage"] == "shared_runtime_service"
+    assert failures[0]["pending_task_count"] == 2
+    assert failures[0]["pending_task_ids"] == [
+        tasks[1].task_id,
+        tasks[2].task_id,
+    ]
+    assert manifest["status"] == "paused_runtime_service_failure"
+    assert manifest["agentgraph_progress"]["completed"] == 0
+    persisted = [
+        json.loads(line)
+        for line in failure_path.read_text(encoding="utf-8").splitlines()
     ]
     assert persisted == failures
 

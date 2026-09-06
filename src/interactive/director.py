@@ -85,6 +85,15 @@ When the live domain requires multiple Agents, use functional decomposition: giv
 
 Each accepted Canvas edit is executed once. continue leaves the AgentGraph unchanged and executes exactly one Action--Observation transition in the current stateful environment. Inspect the returned original task, action, public state and observation before choosing the next action. Use finish only when finish_admissibility is admissible. Do not assume a fixed workflow topology or an unlisted Skill."""
 
+# Interface-only prompt used for the orchestration-strategy ablation.  It keeps
+# the action/schema boundary and native stateful-environment semantics while
+# removing graph-construction and task-solving heuristics.
+STEPWISE_SUBGRAPH_INTERFACE_ONLY_SYSTEM_PROMPT = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
+
+Use only action types, targets and parameters in the current admissible_action_types and action_target_domains, model_id values in model_catalog, and exact tool_id values in tool_catalog. add_subgraph adds one to three Agents with free-text contracts and optional relations as one transaction. A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange. ReAct is an execution mode, not an Agent role.
+
+Each accepted Canvas edit is executed once. continue leaves the AgentGraph unchanged and executes exactly one Action--Observation transition in the current stateful environment. Only an Agent whose execution profile owns the stateful Tool may submit a native environment action. Use finish only when finish_admissibility is admissible."""
+
 DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral.v10"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
 STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION = (
@@ -95,6 +104,9 @@ STEPWISE_SUBGRAPH_DIRECTOR_PROMPT_VERSION = (
 )
 STEPWISE_SUBGRAPH_DIRECTOR_PROMPT_VERSION_V2 = (
     "agentgraph.director.minimal-neutral-add-subgraph-stepwise.v2"
+)
+STEPWISE_SUBGRAPH_INTERFACE_ONLY_PROMPT_VERSION = (
+    "agentgraph.director.interface-only-add-subgraph-stepwise.v1"
 )
 LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1 = (
     "agentgraph.director.minimal-neutral-scalar.v1"
@@ -238,6 +250,156 @@ def _director_neutral_feedback_projection(feedback: str) -> str:
             separators=(",", ":"),
         )
     return feedback
+
+
+def _director_compact_execution_feedback_projection(
+    feedback: str, *, historical: bool = False
+) -> str:
+    """Keep each current artifact once and route duplicate bodies by identity.
+
+    Thin adaptation of FlowSteer's same-named Director projection: the ALFWorld
+    envelope also carries per-Agent artifacts and input provenance. Runtime
+    artifacts and the original Canvas/trajectory receipt remain lossless.
+    """
+
+    marker = "execution_result="
+    marker_index = feedback.find(marker)
+    if marker_index < 0:
+        return feedback
+    payload_index = marker_index + len(marker)
+    try:
+        result = json.loads(feedback[payload_index:])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return feedback
+    if not isinstance(result, dict):
+        return feedback
+    artifacts = result.get("agent_artifacts")
+    if not isinstance(artifacts, list):
+        return feedback
+    canonical: dict[str, str] = {}
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        artifact_id = artifact.get("artifact_id")
+        body = artifact.get("artifact_body")
+        if isinstance(artifact_id, str) and isinstance(body, str):
+            canonical[artifact_id] = body
+
+    def reference_duplicate(item: object, field: str) -> None:
+        if not isinstance(item, dict):
+            return
+        artifact_id = item.get("artifact_id")
+        source = canonical.get(artifact_id) if isinstance(artifact_id, str) else None
+        if source is not None and item.get(field) == source:
+            item.pop(field)
+            item[f"{field}_ref"] = {"artifact_id": artifact_id}
+
+    inbox = result.get("output_inbox", ())
+    if isinstance(inbox, list):
+        for item in inbox:
+            reference_duplicate(item, "raw_output")
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        provenance = artifact.get("input_artifact_provenance", ())
+        if isinstance(provenance, list):
+            for item in provenance:
+                reference_duplicate(item, "artifact_body")
+        body = artifact.get("artifact_body")
+        if historical and isinstance(body, str):
+            # FlowSteer's _artifact_head_tail_preview preserves both ends for
+            # old observations; the latest Agent artifact is never shortened.
+            compact = " ".join(body.split())
+            if len(compact) > 320:
+                marker = " ...[truncated]... "
+                available = 320 - len(marker)
+                head = available // 2
+                compact = compact[:head] + marker + compact[-(available - head):]
+            artifact.pop("artifact_body")
+            artifact["artifact_preview"] = compact
+            artifact["artifact_character_count"] = len(body)
+    if historical:
+        # A historical preview is explicitly not a complete work product. Its
+        # provenance continues to name the same version without a dangling
+        # reference to a full body removed from this old model observation.
+        def preview_reference(item: object, field: str) -> None:
+            if isinstance(item, dict) and f"{field}_ref" in item:
+                item[f"{field}_preview_ref"] = item.pop(f"{field}_ref")
+        if isinstance(inbox, list):
+            for item in inbox:
+                preview_reference(item, "raw_output")
+        for artifact in artifacts:
+            if isinstance(artifact, dict):
+                provenance = artifact.get("input_artifact_provenance", ())
+                if isinstance(provenance, list):
+                    for item in provenance:
+                        preview_reference(item, "artifact_body")
+    return feedback[:payload_index] + json.dumps(
+        result, ensure_ascii=False, separators=(",", ":")
+    )
+
+
+def _director_compact_environment_state_projection(
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reference equal public fields without dropping a native action or result.
+
+    SkillFlow's public Action--Observation boundary and v29's latest transition
+    are retained. Only the redundant aliases added by the richer ALFWorld
+    feedback envelope are removed; unequal before/after values remain exact.
+    """
+
+    projected = dict(state)
+    raw_latest = state.get("latest_action_observation")
+    if not isinstance(raw_latest, Mapping):
+        return projected
+    latest = dict(raw_latest)
+    projected["latest_action_observation"] = latest
+
+    def reference_equal(
+        item: dict[str, Any], key: str, value: Any, reference: str
+    ) -> None:
+        if key in item and item[key] == value:
+            item.pop(key)
+            item[f"{key}_ref"] = reference
+
+    if "current_observation" in projected:
+        for key in ("observation_result", "next_observation"):
+            reference_equal(
+                latest, key, projected["current_observation"], "current_observation",
+            )
+    for source_key, target_keys in (
+        ("admissible_actions", ("next_admissible_actions",)),
+        ("policy_action_domain", ("next_policy_action_domain",)),
+        ("goal_progress", ("goal_progress", "goal_progress_after")),
+        ("task_facts", ("task_facts",)),
+    ):
+        if source_key in projected:
+            for target_key in target_keys:
+                reference_equal(
+                    latest, target_key, projected[source_key], source_key,
+                )
+    policy_receipt = state.get("policy_action_domain_receipt")
+    if isinstance(policy_receipt, Mapping):
+        policy = dict(policy_receipt)
+        projected["policy_action_domain_receipt"] = policy
+        for key in ("policy_action_domain", "goal_progress", "held_objects"):
+            if key in projected:
+                reference_equal(policy, key, projected[key], key)
+    history = state.get("action_observation_history")
+    if isinstance(history, (list, tuple)) and history:
+        last = history[-1]
+        if (
+            isinstance(last, Mapping)
+            and last.get("environment_revision_after")
+            == raw_latest.get("environment_revision_after")
+            and last.get("action") == raw_latest.get("action")
+        ):
+            projected["action_observation_history"] = [
+                *history[:-1],
+                {"action_observation_ref": "latest_action_observation"},
+            ]
+    return projected
 
 # This is an explicitly selected HotpotQA policy.  The neutral v10 prompt above
 # remains the default for every other dataset and for existing callers.
@@ -562,6 +724,7 @@ def scalar_director_prompt_version(value: object) -> bool:
         STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION,
         STEPWISE_SUBGRAPH_DIRECTOR_PROMPT_VERSION,
         STEPWISE_SUBGRAPH_DIRECTOR_PROMPT_VERSION_V2,
+        STEPWISE_SUBGRAPH_INTERFACE_ONLY_PROMPT_VERSION,
     }
 
 
@@ -582,6 +745,9 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         ),
         STEPWISE_SUBGRAPH_DIRECTOR_PROMPT_VERSION_V2: (
             STEPWISE_SUBGRAPH_DIRECTOR_SYSTEM_PROMPT_V2
+        ),
+        STEPWISE_SUBGRAPH_INTERFACE_ONLY_PROMPT_VERSION: (
+            STEPWISE_SUBGRAPH_INTERFACE_ONLY_SYSTEM_PROMPT
         ),
         LEGACY_SCALAR_DIRECTOR_PROMPT_VERSION_V1: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         LEGACY_DIRECTOR_PROMPT_VERSION_V9: LEGACY_DIRECTOR_SYSTEM_PROMPT_V9,
@@ -651,6 +817,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT,
         STEPWISE_SUBGRAPH_DIRECTOR_SYSTEM_PROMPT,
         STEPWISE_SUBGRAPH_DIRECTOR_SYSTEM_PROMPT_V2,
+        STEPWISE_SUBGRAPH_INTERFACE_ONLY_SYSTEM_PROMPT,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
         HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14,
@@ -3951,6 +4118,7 @@ class AgentGraphOrchestrator:
         prompt_version: str = DIRECTOR_PROMPT_VERSION,
         semantic_protocol: str = "none",
         recovery_policy: str = "default",
+        compact_execution_feedback: bool = False,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
@@ -3975,6 +4143,9 @@ class AgentGraphOrchestrator:
         # group must see the same catalog presentation in its exact prompt.
         self.catalog_order_seed = seed if catalog_order_seed is None else catalog_order_seed
         self.history_window = history_window
+        if type(compact_execution_feedback) is not bool:
+            raise ValueError("compact_execution_feedback must be a boolean")
+        self.compact_execution_feedback = compact_execution_feedback
         self.tool_registry = tool_registry
         if not isinstance(prompt_version, str) or not prompt_version.strip():
             raise ValueError("Director prompt_version must be non-empty text")
@@ -4106,16 +4277,20 @@ class AgentGraphOrchestrator:
         self,
         env: AgentWorkflowEnv,
     ) -> Optional[Mapping[str, Any]]:
-        """Return the typed natural terminal for an exhausted verified-QA Canvas.
+        """Return the typed natural terminal for an exhausted live Canvas.
 
         FlowSteer's bounded Canvas stops when no legal edit remains; it does not
         ask the policy to sample outside the live action domain.  Preserve that
-        boundary for verified QA without synthesizing a FINISH action or a
-        policy turn.  The projection contains only public environment state and
-        is computed before evaluation.
+        boundary for verified QA and generic model-admissible sampling without
+        synthesizing a FINISH action or a policy turn.  The projection contains
+        only public state and is computed before evaluation.
         """
 
-        if not verified_qa_semantic_protocol(self.semantic_protocol):
+        if (
+            not verified_qa_semantic_protocol(self.semantic_protocol)
+            and self.sampling_action_profile
+            != DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+        ):
             return None
         if env.model_admissible_action_types():
             return None
@@ -4364,7 +4539,20 @@ class AgentGraphOrchestrator:
             # original instruction together with the latest action,
             # observation and state. Evaluator reward, hidden goals and
             # simulator info are absent from this projection by construction.
-            payload["environment_state"] = environment_state
+            compact_alfworld = (
+                self.compact_execution_feedback
+                and environment_state.get("task_family") == "alfworld"
+            )
+            payload["environment_state"] = (
+                _director_compact_environment_state_projection(environment_state)
+                if compact_alfworld else environment_state
+            )
+            if compact_alfworld:
+                payload["canvas_feedback"] = (
+                    _director_compact_execution_feedback_projection(
+                        payload["canvas_feedback"]
+                    )
+                )
         if partial_validation.issues:
             payload["structural_issues"] = [
                 {
@@ -4498,9 +4686,48 @@ class AgentGraphOrchestrator:
         """Apply the versioned compact-history policy to prior observations."""
 
         copied = [dict(message) for message in messages]
+        if self.compact_execution_feedback and copied:
+            try:
+                latest_payload = json.loads(
+                    copied[-1]["content"].partition("\n\n")[2]
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                latest_payload = {}
+            latest_state = (
+                latest_payload.get("environment_state", {})
+                if isinstance(latest_payload, Mapping) else {}
+            )
+            if (
+                isinstance(latest_state, Mapping)
+                and latest_state.get("task_family") == "alfworld"
+            ):
+                copied = self._compact_qa_historical_messages(copied)
+                for index in range(2, len(copied) - 1):
+                    if copied[index]["role"] != "user":
+                        continue
+                    heading, separator, raw = copied[index]["content"].partition("\n\n")
+                    if not separator or heading != _HISTORICAL_CANVAS_OBSERVATION_HEADING:
+                        continue
+                    historical_payload = json.loads(raw)
+                    feedback = historical_payload.get("canvas_feedback")
+                    if isinstance(feedback, str):
+                        historical_payload["canvas_feedback"] = (
+                            _director_compact_execution_feedback_projection(
+                                feedback, historical=True
+                            )
+                        )
+                    copied[index]["content"] = heading + "\n\n" + json.dumps(
+                        historical_payload, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                return copied
         if self.prompt_version not in {
             LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
             QA_DIRECTOR_PROMPT_VERSION,
+            STEPWISE_SCALAR_DIRECTOR_PROMPT_VERSION,
+            STEPWISE_SUBGRAPH_DIRECTOR_PROMPT_VERSION,
+            STEPWISE_SUBGRAPH_DIRECTOR_PROMPT_VERSION_V2,
+            STEPWISE_SUBGRAPH_INTERFACE_ONLY_PROMPT_VERSION,
         }:
             return copied
         return self._compact_qa_historical_messages(copied)
@@ -4728,8 +4955,10 @@ __all__ = [
     "STEPWISE_SCALAR_DIRECTOR_SYSTEM_PROMPT",
     "STEPWISE_SUBGRAPH_DIRECTOR_PROMPT_VERSION",
     "STEPWISE_SUBGRAPH_DIRECTOR_PROMPT_VERSION_V2",
+    "STEPWISE_SUBGRAPH_INTERFACE_ONLY_PROMPT_VERSION",
     "STEPWISE_SUBGRAPH_DIRECTOR_SYSTEM_PROMPT",
     "STEPWISE_SUBGRAPH_DIRECTOR_SYSTEM_PROMPT_V2",
+    "STEPWISE_SUBGRAPH_INTERFACE_ONLY_SYSTEM_PROMPT",
     "HOTPOTQA_DIRECTOR_PROMPT_VERSION",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V14",
     "HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V15",
