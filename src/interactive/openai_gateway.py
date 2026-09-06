@@ -504,7 +504,11 @@ def _healthbench_medrag_evidence(
             "excerpt": chunk.get("text"),
             **{
                 key: chunk[key]
-                for key in ("score", "matched_terms", "rank")
+                for key in (
+                    "score", "matched_terms", "rank", "source_id",
+                    "content_type", "version", "offset", "total_characters",
+                    "truncated", "next_offset",
+                )
                 if key in chunk
             },
         }

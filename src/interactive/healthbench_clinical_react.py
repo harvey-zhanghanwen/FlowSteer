@@ -15,7 +15,11 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 from .agent_runtime import AgentRequest
-from .healthbench_evidence_adapter import HealthBenchAuthoritativeReactExecutionAdapter
+from .healthbench_evidence_adapter import (
+    HealthBenchAuthoritativeReactExecutionAdapter,
+    _evidence_preserves_query_anchors,
+    _query_preserves_task_surface,
+)
 from .openai_gateway import (
     _healthbench_medrag_evidence,
     _healthbench_search_candidates,
@@ -58,18 +62,35 @@ class HealthBenchClinicalReactExecutionAdapter(
         )
         if dispatched >= self._max_tool_calls:
             return frozenset(), True
-        successful_searches = sum(
-            observation.get("observation_status") == "success"
-            and isinstance(observation.get("executed_action"), Mapping)
-            and observation["executed_action"].get("resource_id") in _SEARCH_TOOLS
-            and observation["executed_action"].get("name") == "search"
-            and isinstance(observation.get("result"), Mapping)
-            and bool(
-                observation["result"].get("evidence")
-                or observation["result"].get("ranked_chunks")
-            )
-            for observation in observations
-        )
+        successful_searches = 0
+        for observation in observations:
+            action = observation.get("executed_action")
+            result = observation.get("result")
+            if not (
+                observation.get("observation_status") == "success"
+                and isinstance(action, Mapping)
+                and action.get("resource_id") in _SEARCH_TOOLS
+                and action.get("name") == "search"
+                and isinstance(result, Mapping)
+                and bool(result.get("evidence") or result.get("ranked_chunks"))
+            ):
+                continue
+            relevant_observation = observation
+            if action.get("resource_id") == "healthbench-medrag.search" and "ranked_chunks" in result:
+                relevant_observation = {
+                    **observation,
+                    "result": {**result, "evidence": list(_healthbench_medrag_evidence(result))},
+                }
+            # Direct reuse of the authoritative adapter's opted-in public
+            # anchor check. A non-empty but unrelated hit must not consume
+            # one of the relevant-search slots merely because a new Tool
+            # subclass widened the action domain. All dispatches still spend
+            # the original total Tool budget, and completion stays optional.
+            if self._require_relevant_evidence and not _evidence_preserves_query_anchors(
+                request, relevant_observation,
+            ):
+                continue
+            successful_searches += 1
         admitted = frozenset(
             (tool_id, action_name)
             for tool_id in request.agent.allowed_tools
@@ -173,6 +194,18 @@ class HealthBenchClinicalReactExecutionAdapter(
         )
         if inherited is not None:
             return inherited
+        # The parent's check is scoped to authoritative.search. Reuse only
+        # its existing lexical task-anchor boundary for the optional local
+        # MedRAG search; do not add a medical vocabulary, rewrite entities,
+        # tighten local query length, or merge duplicate requests across
+        # distinct sources. Drug names/source IDs/calculations are unaffected.
+        if (
+            self._require_task_query_anchor
+            and action.resource_id == "healthbench-medrag.search"
+            and action.name == "search"
+            and not _query_preserves_task_surface(request.problem, action.arguments.get("query"))
+        ):
+            return "query_does_not_preserve_public_task_anchor"
         # All optional capabilities are read-only or pure calculation. Unlike
         # an edit/test environment, another tool cannot change their input
         # state. Reuse prior observations instead of redispatching an exact

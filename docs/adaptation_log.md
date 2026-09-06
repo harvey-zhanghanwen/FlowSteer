@@ -1715,3 +1715,22 @@ registry order is additionally recorded. This is an engineering correction,
 not a model/Tool/search-space change. Separate arm reports do not invent the
 other arm or full-population scores for incomplete evaluations. Tests and
 resource/output boundaries are documented in the parallel run report.
+
+## 2026-09-06 — v2.37：停止 v2.35，来源分类检索与五题问题回归
+
+- 用户要求停止旧评测，只优化现有 demo 并评测 5 题。旧 Direct/Graph PID
+  6910/6912 均经 SIGINT 退出；保留 Direct 280 条有效结果、Graph 19 条有效
+  结果及全部失败记录，不把中断状态记为完成。停止 receipt 随本版报告保存。
+- 从 v2.36 独立 worktree 建立 v2.37；合入已验证的 v2.35 并行采集入口，
+  文档冲突保留两边来源。旧版本/worktree/artifacts 不覆盖。
+- 修复非空无关检索消耗有效搜索额度、长词轻微拼写导致 scope 误拒、500
+  字符片段缺真实截断信息、查询 echo 被用于 contract literal grounding。
+  不写临床结论、固定角色或样本答案；统一编排和官方 evaluator 不改。
+- 运行前固定五个已观察低分 ID（WATERFALL、ASTRONAUT、共病管理、IBD/HIV、
+  MDT），stage=development。旧版五题均分 raw 25.3561%、length-adjusted
+  20.9078%；来自原始 receipt，不能外推 525 题，也不能说是 untouched test。
+- 新版仅 `--collection-arm agentgraph`，沿用 GPU6/8026 的本地 Director 和
+  已验证异构模型池、thinking、seed、每题预算、并发 4，不重复 canary/Direct。
+  外部工具新增 v2.36 本地索引，所以旧版对照是端到端版本比较，不是单项消融。
+- 无训练、GRPO、backward、optimizer、LoRA、MACE、Bayesian 或 Skill evolution。
+  实测分数仅在本版五题完成后写入结果报告；不自动扩展到全量。

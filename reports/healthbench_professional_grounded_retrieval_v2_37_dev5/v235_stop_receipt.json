@@ -1,0 +1,37 @@
+{
+  "stopped_at_check": "2026-09-06T08:26:04.682952+00:00",
+  "reason": "User requested stop v2.35, combine v2.36 and repair into v2.37, evaluate only five cases.",
+  "pids": [
+    6910,
+    6912
+  ],
+  "both_processes_exited": true,
+  "signals_sent": "SIGINT only",
+  "artifacts_preserved": true,
+  "gpu_services_retained_for_bounded_regression": {
+    "direct": 8025,
+    "agentgraph": 8026
+  },
+  "new_full_run_authorized": false,
+  "agentgraph": {
+    "manifest": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v235-parallel/artifacts/healthbench_professional_optional_clinical_tools_v2_35_graph_gpu6/evaluation/run_manifest.json",
+    "last_progress": {
+      "completed": 19,
+      "failed_attempts": 7,
+      "pending_evaluator_retries": 0,
+      "reportable_terminal_failures": 0
+    }
+  },
+  "direct": {
+    "manifest": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v235/artifacts/healthbench_professional_optional_clinical_tools_v2_35/evaluation/run_manifest.json",
+    "last_progress": {
+      "completed": 280,
+      "failed_attempts": 18,
+      "frozen_react_terminal_failures": 16,
+      "newly_collected_records": 280,
+      "pending_evaluator_retries": 2,
+      "reused_from": null,
+      "reused_records": 0
+    }
+  }
+}

@@ -189,6 +189,83 @@ class HealthBenchClinicalReactTests(unittest.TestCase):
         seen.append(observation(READ, "pubmed:fixture-1"))
         self.assertEqual((frozenset(), True), adapter._state_conditioned_action_domain(request(), seen))
 
+    def test_unrelated_nonempty_searches_do_not_consume_relevant_search_slots(self):
+        adapter = self.adapter(require_relevant_evidence=True)
+        node_request = replace(request(), problem="Explain the synthetic TRIAL-ZETA study.")
+        seen = [
+            observation(SEARCH, "TRIAL-ZETA study findings"),
+            observation(SEARCH, "TRIAL-ZETA study design"),
+        ]
+        admitted, completion = adapter._state_conditioned_action_domain(node_request, seen)
+        self.assertIn((SEARCH, "search"), admitted)
+        self.assertIn((LOCAL, "search"), admitted)
+        self.assertIn((READ, "read_source"), admitted)
+        self.assertTrue(completion)
+        # A relevance check must never replenish the original dispatch budget.
+        seen.append(observation(SEARCH, "TRIAL-ZETA study population"))
+        self.assertEqual((frozenset(), True), adapter._state_conditioned_action_domain(node_request, seen))
+
+    def test_medrag_ranked_chunks_use_the_same_complete_entity_relevance_check(self):
+        adapter = self.adapter(require_relevant_evidence=True)
+        node_request = replace(request(), problem="Explain the synthetic TRIAL-ZETA study.")
+        raw = self.registry._backend(LOCAL).invoke(ToolRequest("search", {"query": "TRIAL-ZETA study"})).value
+        local = {**observation(LOCAL, "TRIAL-ZETA study"), "result": raw}
+        unrelated = observation(SEARCH, "TRIAL-ZETA design")
+        admitted, completion = adapter._state_conditioned_action_domain(node_request, [local, unrelated])
+        self.assertIn((SEARCH, "search"), admitted)
+        self.assertIn((LOCAL, "search"), admitted)
+        self.assertTrue(completion)
+        # Same raw schema, now with a genuine complete surface in both sources.
+        local["result"]["ranked_chunks"][0]["title"] = "Synthetic TRIAL-ZETA publication"
+        unrelated["result"]["evidence"][0]["title"] = "Synthetic TRIAL-ZETA study design"
+        admitted, completion = adapter._state_conditioned_action_domain(node_request, [local, unrelated])
+        self.assertNotIn((SEARCH, "search"), admitted)
+        self.assertNotIn((LOCAL, "search"), admitted)
+        self.assertIn((READ, "read_source"), admitted)
+        self.assertTrue(completion)
+
+    def test_relevance_setting_false_preserves_historical_nonempty_count(self):
+        adapter = self.adapter(require_relevant_evidence=False)
+        node_request = replace(request(), problem="Explain synthetic TRIAL-ZETA.")
+        admitted, completion = adapter._state_conditioned_action_domain(node_request, [
+            observation(SEARCH, "TRIAL-ZETA results"), observation(LOCAL, "TRIAL-ZETA design"),
+        ])
+        self.assertNotIn((SEARCH, "search"), admitted)
+        self.assertNotIn((LOCAL, "search"), admitted)
+        self.assertTrue(completion)
+
+    def test_medrag_search_reuses_opted_in_public_task_anchor_without_rewriting(self):
+        adapter = self.adapter(require_task_query_anchor=True)
+        node_request = replace(request(LOCAL), problem="Compare synthetic TRIAL-ZETA results and applicability.")
+        drift = StructuredAction.from_value(action(LOCAL, "unrelated enzyme metabolism"))
+        grounded = StructuredAction.from_value(action(LOCAL, "TRIAL-ZETA applicability"))
+        self.assertEqual("query_does_not_preserve_public_task_anchor", adapter._tool_action_error(
+            request=node_request, action=drift, observations=[]))
+        self.assertIsNone(adapter._tool_action_error(request=node_request, action=grounded, observations=[]))
+        self.assertEqual("TRIAL-ZETA applicability", grounded.arguments["query"])
+        # A different source is a legitimate retry, not a repeated local call.
+        self.assertIsNone(adapter._tool_action_error(
+            request=node_request, action=grounded,
+            observations=[observation(SEARCH, "TRIAL-ZETA applicability")]))
+        self.assertEqual("duplicate_tool_request", adapter._tool_action_error(
+            request=node_request, action=grounded,
+            observations=[observation(LOCAL, "TRIAL-ZETA applicability")]))
+
+    def test_medrag_anchor_guard_is_opt_in_and_does_not_constrain_other_tool_arguments(self):
+        node_request = replace(request(), problem="Compare synthetic TRIAL-ZETA results.")
+        adapter = self.adapter(require_task_query_anchor=False)
+        self.assertIsNone(adapter._tool_action_error(
+            request=node_request, action=StructuredAction.from_value(action(LOCAL, "unrelated enzyme metabolism")),
+            observations=[]))
+        adapter = self.adapter(require_task_query_anchor=True)
+        for sampled in (action(READ, "pubmed:fixture-1"), action(DRUG, "synthetic label"), action(CALC, "2 + 3")):
+            with self.subTest(tool=sampled["resource_id"]):
+                self.assertIsNone(adapter._tool_action_error(
+                    request=node_request, action=StructuredAction.from_value(sampled), observations=[]))
+        chinese = replace(request(LOCAL), problem='[{"role":"user","content":"合成中文问题"}]')
+        self.assertIsNone(adapter._tool_action_error(
+            request=chinese, action=StructuredAction.from_value(action(LOCAL, "synthetic translated query")), observations=[]))
+
     def test_failed_dispatches_share_budget_but_invalid_attempts_do_not(self):
         adapter = self.adapter(max_tool_calls=2)
         invalid = {"observation_status": "schema_invalid", "executed_action": action(READ, "missing")}

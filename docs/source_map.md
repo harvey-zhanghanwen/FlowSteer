@@ -966,3 +966,22 @@ HealthBench infrastructure and not evidence of a score improvement.
   records registry order. No Tool capability is added or removed.
 - FlowSteer/MD free AgentGraph, Canvas, per-node ReAct and all v2.35 sources
   remain unchanged. This does not include v2.36 databases or training.
+
+## 2026-09-06 — HealthBench v2.37 五题开发回归
+
+基于 v2.36 `fc655cc`，移植 v2.35 并行入口/Direct 工具顺序修复 `defb7ea`。
+用户 MD 第 3 节自由 AgentGraph、第 4.1 节 edit→feedback、第 15.1 节轨迹
+保持不变。本轮不训练、不更新 Skill，不以节点数或拓扑复杂度作为奖励。
+
+| 修改边界 | 来源与必要适配 |
+| --- | --- |
+| 来源分类数据库 | **直接复用 v2.36**：`healthbench_knowledge_tools/store` → SkillFlow `benchmarks/retrieval.py::DocumentPassage/build_retrieval_index/RetrievalIndex`。对话、真实文献和药品标签分开；不是 benchmark 答案库。 |
+| ReAct 有效搜索预算 | **复用原父类逻辑**：`healthbench_evidence_adapter._evidence_preserves_query_anchors` → `HealthBenchClinicalReactExecutionAdapter._state_conditioned_action_domain`。原多工具子类漏掉 `require_relevant_evidence`，现先用已有 MedRAG 投影统一 schema 再计数。仍最多 3 次实际调用、6 个回合；不强制检索或多 Agent。该检查只是词面相关性，不是医学正确性验证。 |
+| 查询拼写边界 | **必要任务适配**：既有 `_query_preserves_task_surface` 精确匹配失败后允许纯字母长词的一次字符编辑；不改 SkillFlow `environment.py::_search_external_corpus` 的分词、BM25 或查询文本。短缩写、数字/代码不能模糊替换；没有真实样本映射表。 |
+| 搜索片段完整性 | **复用既有 read-source schema**：`FrozenMedRAGBM25Corpus.search` 仍返回原 BM25 前三项/500 字符，但附真实长度、分页和 `source_id`；authoritative adapter、Gateway 透传，既有 V3/V4 与 FTS5 store 接收。不把残句当全文，也不强制每条来源再读一次。 |
+| Canvas contract 的公开证据 | **薄适配 FlowSteer admission**：`AgentWorkflowEnv._public_contract_scope_grounding_texts` 对 HealthBench 检索 receipt 复用 `_healthbench_search_candidates`，只从来源标题/正文获取 literal；不再把 result 中回显的 query、目录、文档编号当证明。不是语义裁判，也没有新角色或 FINISH 门槛。 |
+| 五题评测 | **直接复用原 runner/evaluator**：`selection=task_ids`、`stage=development`、`--collection-arm agentgraph`，官方 HealthBench rubric grading/聚合不变。旧五题结果仅离线比较；未新增 Direct 调用。 |
+
+Director 仍为本地 Qwen3.5-9B、minimal-neutral.v20；模型池及 thinking、
+唯一 Output、有限双向通信、Canvas 功能单元执行边界均不改。MD/两篇论文
+没有提供这几条 HealthBench 修复的现成实现，故只在已有 task adapter 边界适配。

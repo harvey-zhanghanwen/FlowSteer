@@ -416,6 +416,16 @@ class HealthBenchAuthoritativeSearchToolBackend:
                     str(term)
                     for term in cast(list[object], chunk["matched_terms"])
                 ],
+                # Reuse the source-read pagination contract for search
+                # snippets; do not present an incomplete clause as full text.
+                **{
+                    key: chunk[key]
+                    for key in (
+                        "source_id", "version", "content_type", "offset",
+                        "total_characters", "truncated", "next_offset",
+                    )
+                    if key in chunk
+                },
             }
             for chunk in local_chunks
         ]
@@ -538,10 +548,11 @@ def _query_preserves_task_surface(problem: object, query: object) -> bool:
 
     FlowSteer's QA Tool adapter already rejects query scope loss before a read.
     HealthBench queries are free text rather than entity/relation tuples, so
-    this thin adapter checks only lexical overlap with the model-visible
-    conversation. It never expands an abbreviation, chooses a diagnosis, or
-    consults a rubric/reference answer. Non-English tasks without comparable
-    ASCII anchors remain admitted.
+    this thin adapter checks lexical overlap with the model-visible
+    conversation, allowing a narrowly bounded long-word spelling correction.
+    It never expands an abbreviation, chooses a diagnosis, or consults a
+    rubric/reference answer. Non-English tasks without comparable ASCII
+    anchors remain admitted.
     """
 
     problem_tokens = {
@@ -556,7 +567,45 @@ def _query_preserves_task_surface(problem: object, query: object) -> bool:
         for token in _normalized_query_tokens(query)
         if token not in _GENERIC_TASK_QUERY_TERMS
     }
-    return bool(problem_tokens & query_tokens)
+    if problem_tokens & query_tokens:
+        return True
+
+    # NECESSARY_PROJECT_ADAPTATION: SkillFlow's lower-case lexical retrieval
+    # has no task-surface admission rule. Our exact-only guard can reject a
+    # corrected spelling before retrieval. Keep its original exact path and
+    # permit only one character edit in a long ordinary word, not acronym or
+    # numeric/code substitution. This neither rewrites the query nor changes
+    # the upstream BM25 tokenization, scores, or returned evidence.
+    from difflib import SequenceMatcher
+
+    def ordinary_long_words(value: object, tokens: set[str]) -> set[str]:
+        if not isinstance(value, str):
+            return set()
+        return {
+            word.casefold()
+            for word in re.findall(
+                r"(?<![A-Za-z0-9_-])[A-Za-z]{6,}(?![A-Za-z0-9_-])",
+                value,
+            )
+            if not word.isupper() and word.casefold() in tokens
+        }
+
+    for source in ordinary_long_words(problem, problem_tokens):
+        for candidate in ordinary_long_words(query, query_tokens):
+            if abs(len(source) - len(candidate)) > 1:
+                continue
+            comparison = SequenceMatcher(None, source, candidate, autojunk=False)
+            if comparison.ratio() < 0.90:
+                continue
+            edits = sum(
+                max(source_end - source_start, target_end - target_start)
+                for operation, source_start, source_end, target_start, target_end
+                in comparison.get_opcodes()
+                if operation != "equal"
+            )
+            if edits == 1:
+                return True
+    return False
 
 
 def _queries_are_near_duplicates(left: object, right: object) -> bool:
@@ -1450,6 +1499,13 @@ def _evidence_schema() -> dict[str, object]:
             "url": {"type": ["string", "null"]},
             "excerpt": {"type": "string"},
             "rank": {"type": "integer", "minimum": 1},
+            "source_id": {"type": "string"},
+            "version": {"type": "string"},
+            "content_type": {"type": "string"},
+            "offset": {"type": "integer", "minimum": 0},
+            "total_characters": {"type": "integer", "minimum": 0},
+            "truncated": {"type": "boolean"},
+            "next_offset": {"type": ["integer", "null"], "minimum": 0},
             # SkillFlow BM25 fields are present only on frozen-textbook
             # evidence.  PubMed evidence therefore keeps them optional under
             # the shared evidence schema.

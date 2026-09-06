@@ -8052,7 +8052,27 @@ class AgentWorkflowEnv:
                     and result.get("completed") is True
                 ):
                     observed = result.get("value")
-                    if observed is not None:
+                    if (
+                        self.runtime.dataset_id == "healthbench_professional"
+                        and value["tool_id"] in {
+                            "healthbench-authoritative.search",
+                            "healthbench-medrag.search",
+                            "healthbench-source.read",
+                            "healthbench-drug.lookup",
+                            "healthbench-knowledge.search",
+                        }
+                    ):
+                        # NECESSARY_TASK_ADAPTATION: these successful public
+                        # Observations echo the proposed query beside their
+                        # evidence. Reuse the existing receipt projection, not
+                        # the echoed query/index metadata, to ground literals.
+                        # A transport success or empty search is not evidence.
+                        from .openai_gateway import _healthbench_search_candidates
+
+                        for _, _, evidence in _healthbench_search_candidates([value]):
+                            for field in ("title", "excerpt"):
+                                collect_strings(evidence.get(field))
+                    elif observed is not None:
                         collect_strings(observed)
                     return
                 visited.add(identity)

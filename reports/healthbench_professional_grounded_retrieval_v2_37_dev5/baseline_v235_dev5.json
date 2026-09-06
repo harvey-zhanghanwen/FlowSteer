@@ -1,0 +1,76 @@
+{
+  "scope": "development_regression_selected_from_observed_v235_failures_not_heldout",
+  "selection_frozen_before_v237_generation": true,
+  "old_condition": "healthbench_professional_optional_clinical_tools_v2_35_graph_gpu6",
+  "old_code_commit": "defb7ea",
+  "source_trajectories": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v235-parallel/artifacts/healthbench_professional_optional_clinical_tools_v2_35_graph_gpu6/evaluation/agentgraph_trajectories.jsonl",
+  "sample_count": 5,
+  "cases": [
+    {
+      "task_id": "healthbench-professional:f056cdb489e3636b0b51afb8fd6b3a8a",
+      "evaluation": {
+        "overall_score": 0.0,
+        "overall_score_length_adjusted": 0.0011171999999999998,
+        "rubric_count": 2.0
+      },
+      "valid": true,
+      "termination_reason": "finish",
+      "explicit_finish": true,
+      "final_answer_characters": 1962
+    },
+    {
+      "task_id": "healthbench-professional:ed8b3ca0a4dabfd0827c17a08513a181",
+      "evaluation": {
+        "overall_score": 0.36363636363636365,
+        "overall_score_length_adjusted": 0.37757196363636364,
+        "rubric_count": 3.0
+      },
+      "valid": true,
+      "termination_reason": "finish",
+      "explicit_finish": true,
+      "final_answer_characters": 1526
+    },
+    {
+      "task_id": "healthbench-professional:4f08ae480b16ef825cf098eca6530e68",
+      "evaluation": {
+        "overall_score": 0.4375,
+        "overall_score_length_adjusted": 0.4351774,
+        "rubric_count": 2.0
+      },
+      "valid": true,
+      "termination_reason": "finish",
+      "explicit_finish": true,
+      "final_answer_characters": 2079
+    },
+    {
+      "task_id": "healthbench-professional:dadbebd3dce1b5928cac5a44dde095d3",
+      "evaluation": {
+        "overall_score": 0.4666666666666667,
+        "overall_score_length_adjusted": 0.4139818666666667,
+        "rubric_count": 2.0
+      },
+      "valid": true,
+      "termination_reason": "finish",
+      "explicit_finish": true,
+      "final_answer_characters": 3792
+    },
+    {
+      "task_id": "healthbench-professional:37101607e2947481e85e8fe3597a1acf",
+      "evaluation": {
+        "overall_score": 0.0,
+        "overall_score_length_adjusted": -0.18245640000000002,
+        "rubric_count": 4.0
+      },
+      "valid": true,
+      "termination_reason": "finish",
+      "explicit_finish": true,
+      "final_answer_characters": 8206
+    }
+  ],
+  "old_mean_scores": {
+    "overall_score": 0.25356060606060604,
+    "overall_score_length_adjusted": 0.20907840606060607
+  },
+  "v237_direct_not_run": true,
+  "new_vs_old_tool_conditions_differ": true
+}
