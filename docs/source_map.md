@@ -904,3 +904,24 @@ directory. It includes cases where evidence **was already received by the
 downstream model but was not used correctly**. Increased feedback visibility
 does not prove semantic or clinical correctness. Scores on these public tasks
 are post-development re-evaluation, not untouched held-out generalization.
+
+## HealthBench Professional v2.35 optional clinical tools (2026-09-06)
+
+| Local module | Source and adaptation classification |
+| --- | --- |
+| `healthbench_clinical_tools.build/open_healthbench_clinical_tool_registry` | **Direct reuse:** existing `build_healthbench_authoritative_tool_registry`, `build_healthbench_medrag_tool_registry`, and `OpenHealthBenchAuthoritativeToolRegistry` resource lifetime. Frozen BM25 remains SkillFlow `training/environment.py` external-corpus search (tokenization, ranking and excerpt protocol unchanged). No benchmark-derived memory. |
+| Calculator registration | **Direct reuse:** `computation_tools.create_aime_computation_registry` and its action-bound backend, ported from SkillFlow `training/tools.py::execute_tool/_calculator`. **Necessary adaptation:** HealthBench dataset scope and tool ID only. No new clinical formula, training reward or arbitrary code runtime. |
+| `HealthBenchSourceReadToolBackend` | **Necessary task adapter:** existing corpus has search snippets but no document-ID read API. Reuses the frozen corpus content/identity and `PubMedEUtilitiesClient` transport/date parser, reading the actual source at bounded, explicitly paginated offsets. PubMed abstracts are labeled as abstracts, not full articles. |
+| `DailyMedClient` / `HealthBenchDrugLookupToolBackend` | **Necessary external-tool adapter:** NLM DailyMed official `services/v2/spls.json` schema (`setid`, `spl_version`, `title`, `published_date`) and `/spls/{SETID}.xml` HL7 SPL sections, `versionNumber` and `effectiveTime`. References: https://dailymed.nlm.nih.gov/dailymed/webservices-help/v2/spls_api.cfm and https://dailymed.nlm.nih.gov/dailymed/webservices-help/v2/spls_setid_api.cfm. Real label text, not metadata-only evidence or an interaction diagnosis. |
+| `HealthBenchClinicalReactExecutionAdapter` | **Direct reuse:** generic `ToolReactExecutionAdapter.execute`, derived from SkillFlow bounded Action–Observation/continuation/receipt semantics, and existing HealthBench completion/evidence binding. **Necessary adaptation:** old action domain hard-coded one search resource. A thin subclass admits only each node's declared optional tools, with the existing shared call/turn budget and no mandatory medical role or initial search. |
+| `AgentRuntime._validate_execution_profile_allowlist/registered_execution_profiles` | **Necessary interface adaptation:** the existing executor accepts multiple tools, but its Director-facing profile enumeration exposed only singletons. Explicitly configured bundles of individually registered, available, dataset-scoped tools are now admitted. Default and historical singleton profiles are unchanged; no tool power set or graph template is introduced. |
+| `openai_gateway` evidence projection | **Necessary task adaptation of existing V3/V4 projection:** accept MedRAG `ranked_chunks`, source-read and label evidence, retaining source/version/page provenance. New read/label dedup keys distinguish pages and document versions so an earlier search excerpt cannot erase new content. Existing authoritative-search-only V2.33/V2.34 input projection is unchanged. |
+| Factory / evaluator condition validation | **Thin opt-in wiring:** `train_agentgraph_smoke._healthbench_tool_runtime_settings/_runtime_for_task` uses `toolset=optional_clinical_v1`; `evaluate_completion_benchmark_round.validate_completion_benchmark_config` checks matched Direct tool availability and explicit Graph profiles. Official grader, task adapter, Canvas step/FINISH, rubric isolation and terminal rules are reused. |
+| Capability probe / sequential evaluation | **Operational reuse:** deployed Gateway, registered SkillFlow calculator, existing receipt writer and exact-resume completion runner; bounded two-call probes, no model fallback, and existing handoff script with a new target config. No new training/evolution algorithm. |
+
+The model/tool capability change is versioned independently. DeepSeek V4 Flash
+and MiniMax-M3 passed real calculator Action–Observation–Complete canaries;
+Qwen3.5 Flash repeated an already dispatched action and is not promoted to ReAct.
+Changing tools makes old Direct receipts a different condition: v2.35 must collect
+its own matched Direct. Tool availability is a project extension, not native
+HealthBench infrastructure and not evidence of a score improvement.

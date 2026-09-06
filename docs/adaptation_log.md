@@ -1611,3 +1611,43 @@ change was made during profile selection.
   backup remote on the independent v2.34 branch. The handoff script, its tests,
   explicit host configuration and recovery notes are a separate operational
   commit; runtime readiness is recorded only after its push succeeds.
+
+## 2026-09-06 — v2.35 optional clinical tools and full reevaluation request
+
+- User requested optional search/source-read/medical retrieval/drug/calculation
+  per Agent, then a complete score rerun. Independent branch:
+  `feature/healthbench-v2.35-optional-clinical-tools-20260906`, based on v2.34
+  `412886c`; v2.33 running source/model/sample conditions remain untouched.
+- Reused SkillFlow-backed MedRAG and calculator, existing ToolRegistry and
+  bounded ReAct loop, and FlowSteer Canvas/trajectory boundaries. Only source-ID
+  reading, official DailyMed SPL parsing and required multi-tool registration/
+  receipt projection adapters are new. Exact mapping is in `source_map.md`.
+- Every compatible model can use optional ReAct tools; no fixed medical role,
+  chain, mandatory retrieval, minimum Agent count, training or Skill evolution.
+  Rubrics/reference responses stay evaluator-only. Tool results are external
+  evidence, not a simulated patient or actual examination/prescription.
+- Explicit budgets remain 6 turns and 3 tool calls per invocation, including
+  continuation. Source pages preserve version/offset/truncation. Different
+  pages are not lost under document-level duplicate suppression.
+- Final non-overlapping local checks: 15 backend tests (+8 subtests), 66
+  ReAct/projection regressions, 90 wiring/runner/V4/handoff tests passed.
+  A test's expected exception class was corrected; implementation correctly
+  rejected a mismatched Direct tool condition. No model calls in these tests.
+- Real capability probes made 6 completion requests total, two per existing
+  remote model, with thinking configured and no retry/fallback. DeepSeek and
+  MiniMax passed; Qwen Flash successfully called calculator but repeated the
+  same action instead of completion and remains reasoning-only. Initial probe
+  setup failed before model calls because the authoritative superclass expects
+  the search registration; the corrected probe reuses the complete registry
+  while admitting only calculator, without loading/querying medical data.
+- One real DailyMed search plus one SPL read succeeded, with body and version.
+  This is an API connectivity check, not a patient-answer evaluation.
+- Fixed public525 prepare-only succeeded. Because tool conditions changed,
+  old Direct outputs are not reused: the unchanged completion runner collects
+  matched-tool Direct followed by AgentGraph, using exact resume for already
+  admitted rows. No v2.35 HealthBench score exists at preparation time.
+- Per user's latest full-rerun request, the not-yet-started v2.34 evaluation is
+  superseded by v2.35; only its waiting coordinator was stopped, not the live
+  v2.33 process or SGLang service. New handoff config reuses the tested coordinator
+  and launches after old completion and verified/pushed readiness. The public
+  test collection has informed development and is reported as reevaluation.

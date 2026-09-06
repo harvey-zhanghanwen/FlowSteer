@@ -449,6 +449,20 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                 and bounded.get("direct_allowed_tools")
                 == [expected_healthbench_tool]
             )
+            optional_clinical = bool(
+                isinstance(tool_runtime, Mapping)
+                and tool_runtime.get("toolset") == "optional_clinical_v1"
+            )
+            if optional_clinical:
+                # Necessary adaptation of the existing paired-tool check:
+                # every Direct/Graph arm sees the same optional registry.
+                checks["healthbench.direct_allowed_tools"] = (
+                    bounded.get("direct_allowed_tools") == [
+                        "healthbench-authoritative.search", "healthbench-medrag.search",
+                        "healthbench-source.read", "healthbench-drug.lookup",
+                        "healthbench-computation.calculator",
+                    ]
+                )
             checks["healthbench_tool_runtime.enabled"] = bool(
                 isinstance(tool_runtime, Mapping)
                 and tool_runtime.get("enabled") is True
@@ -489,6 +503,17 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                 checks[
                     "healthbench_tool_runtime.execution_profile_allowlist"
                 ] = raw_execution_profile_allowlist == admitted_profiles
+                if optional_clinical:
+                    optional_profiles = [
+                        {"execution_mode": "reasoning", "allowed_tools": []},
+                        *({"execution_mode": "react", "allowed_tools": [tool_id]}
+                          for tool_id in bounded.get("direct_allowed_tools", ())),
+                        direct_profile,
+                    ]
+                    checks["healthbench_tool_runtime.execution_profile_allowlist"] = (
+                        protocol_equivalent_to_direct is False
+                        and raw_execution_profile_allowlist == optional_profiles
+                    )
         else:
             checks["healthbench_tool_runtime.disabled"] = not isinstance(
                 tool_runtime, Mapping

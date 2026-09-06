@@ -1,0 +1,265 @@
+{
+  "created_at": "2026-09-06T04:02:28.375059+00:00",
+  "protocol": "optional-clinical-tools.react.calculator.v1",
+  "max_total_model_calls": 6,
+  "probes": [
+    {
+      "model_id": "qwen3.5-flash",
+      "provider_id": "vectorengine-healthbench-mixed-thinking-v1",
+      "model_name": "qwen3.5-flash",
+      "thinking_requested": "true",
+      "status": "failed",
+      "error": {
+        "category": "client_error",
+        "error_type": "ReactExecutionError",
+        "http_status": null,
+        "message": "react agent 'tool_canary' exhausted 2 turns without a valid completion"
+      },
+      "react_trace": [
+        {
+          "action_text": "{\n  \"arguments\": {\n    \"expression\": \"17 * 19 + 23\"\n  },\n  \"kind\": \"tool\",\n  \"name\": \"calculator\",\n  \"resource_id\": \"healthbench-computation.calculator\",\n  \"skill_id\": null\n}",
+          "observation": {
+            "completed": true,
+            "executed_action": {
+              "arguments": {
+                "expression": "17 * 19 + 23"
+              },
+              "kind": "tool",
+              "name": "calculator",
+              "resource_id": "healthbench-computation.calculator",
+              "skill_id": null
+            },
+            "observation_status": "success",
+            "result": {
+              "action": "calculator",
+              "observation": "[RESULT] 17 * 19 + 23 = 346",
+              "ok": true
+            },
+            "tool_id": "healthbench-computation.calculator",
+            "tool_version": "skillflow.training-tools.v1"
+          },
+          "structured_action": {
+            "arguments": {
+              "expression": "17 * 19 + 23"
+            },
+            "kind": "tool",
+            "name": "calculator",
+            "resource_id": "healthbench-computation.calculator",
+            "skill_id": null
+          },
+          "turn": 1
+        },
+        {
+          "action_text": "{\"arguments\":{\"expression\":\"17 * 19 + 23\"},\"kind\":\"tool\",\"name\":\"calculator\",\"resource_id\":\"healthbench-computation.calculator\",\"skill_id\":null}",
+          "executed_action": {
+            "arguments": {
+              "expression": "17 * 19 + 23"
+            },
+            "kind": "tool",
+            "name": "calculator",
+            "resource_id": "healthbench-computation.calculator",
+            "skill_id": null
+          },
+          "observation_status": "schema_invalid",
+          "public_error_code": "duplicate_tool_request",
+          "structured_action": {
+            "arguments": {
+              "expression": "17 * 19 + 23"
+            },
+            "kind": "tool",
+            "name": "calculator",
+            "resource_id": "healthbench-computation.calculator",
+            "skill_id": null
+          },
+          "turn": 2
+        }
+      ],
+      "tool_receipts": [
+        {
+          "ended_at_monotonic": 8191180.934443375,
+          "error_type": null,
+          "latency_ms": 0.4569590091705322,
+          "request": {
+            "action": "calculator",
+            "arguments": {
+              "expression": "17 * 19 + 23"
+            }
+          },
+          "result": {
+            "completed": true,
+            "value": {
+              "action": "calculator",
+              "observation": "[RESULT] 17 * 19 + 23 = 346",
+              "ok": true
+            }
+          },
+          "started_at_monotonic": 8191180.933986416,
+          "tool_id": "healthbench-computation.calculator",
+          "tool_version": "skillflow.training-tools.v1"
+        }
+      ]
+    },
+    {
+      "model_id": "deepseek-v4-flash",
+      "provider_id": "vectorengine-healthbench-mixed-thinking-v1",
+      "model_name": "deepseek-v4-flash",
+      "thinking_requested": "true",
+      "status": "passed",
+      "final_output": "346",
+      "react_trace": [
+        {
+          "action_text": "{\"arguments\":{\"expression\":\"17 * 19 + 23\"},\"kind\":\"tool\",\"name\":\"calculator\",\"resource_id\":\"healthbench-computation.calculator\",\"skill_id\":null}",
+          "observation": {
+            "completed": true,
+            "executed_action": {
+              "arguments": {
+                "expression": "17 * 19 + 23"
+              },
+              "kind": "tool",
+              "name": "calculator",
+              "resource_id": "healthbench-computation.calculator",
+              "skill_id": null
+            },
+            "observation_status": "success",
+            "result": {
+              "action": "calculator",
+              "observation": "[RESULT] 17 * 19 + 23 = 346",
+              "ok": true
+            },
+            "tool_id": "healthbench-computation.calculator",
+            "tool_version": "skillflow.training-tools.v1"
+          },
+          "structured_action": {
+            "arguments": {
+              "expression": "17 * 19 + 23"
+            },
+            "kind": "tool",
+            "name": "calculator",
+            "resource_id": "healthbench-computation.calculator",
+            "skill_id": null
+          },
+          "turn": 1
+        },
+        {
+          "action_text": "{\"arguments\":{\"value\":\"346\"},\"kind\":\"complete\",\"name\":\"complete\",\"resource_id\":null,\"skill_id\":null}",
+          "observation_status": "completed",
+          "structured_action": {
+            "arguments": {
+              "value": "346"
+            },
+            "kind": "complete",
+            "name": "complete",
+            "resource_id": null,
+            "skill_id": null
+          },
+          "turn": 2
+        }
+      ],
+      "tool_receipts": [
+        {
+          "ended_at_monotonic": 8191193.737235527,
+          "error_type": null,
+          "latency_ms": 0.4214802756905556,
+          "request": {
+            "action": "calculator",
+            "arguments": {
+              "expression": "17 * 19 + 23"
+            }
+          },
+          "result": {
+            "completed": true,
+            "value": {
+              "action": "calculator",
+              "observation": "[RESULT] 17 * 19 + 23 = 346",
+              "ok": true
+            }
+          },
+          "started_at_monotonic": 8191193.736814046,
+          "tool_id": "healthbench-computation.calculator",
+          "tool_version": "skillflow.training-tools.v1"
+        }
+      ]
+    },
+    {
+      "model_id": "MiniMax-M3",
+      "provider_id": "vectorengine-healthbench-mixed-thinking-v1",
+      "model_name": "MiniMax-M3",
+      "thinking_requested": "true",
+      "status": "passed",
+      "final_output": "17 * 19 + 23 = 346",
+      "react_trace": [
+        {
+          "action_text": "{\"arguments\":{\"expression\":\"17 * 19 + 23\"},\"kind\":\"tool\",\"name\":\"calculator\",\"resource_id\":\"healthbench-computation.calculator\",\"skill_id\":null}",
+          "observation": {
+            "completed": true,
+            "executed_action": {
+              "arguments": {
+                "expression": "17 * 19 + 23"
+              },
+              "kind": "tool",
+              "name": "calculator",
+              "resource_id": "healthbench-computation.calculator",
+              "skill_id": null
+            },
+            "observation_status": "success",
+            "result": {
+              "action": "calculator",
+              "observation": "[RESULT] 17 * 19 + 23 = 346",
+              "ok": true
+            },
+            "tool_id": "healthbench-computation.calculator",
+            "tool_version": "skillflow.training-tools.v1"
+          },
+          "structured_action": {
+            "arguments": {
+              "expression": "17 * 19 + 23"
+            },
+            "kind": "tool",
+            "name": "calculator",
+            "resource_id": "healthbench-computation.calculator",
+            "skill_id": null
+          },
+          "turn": 1
+        },
+        {
+          "action_text": "{\"arguments\":{\"value\":\"17 * 19 + 23 = 346\"},\"kind\":\"complete\",\"name\":\"complete\",\"resource_id\":null,\"skill_id\":null}",
+          "observation_status": "completed",
+          "structured_action": {
+            "arguments": {
+              "value": "17 * 19 + 23 = 346"
+            },
+            "kind": "complete",
+            "name": "complete",
+            "resource_id": null,
+            "skill_id": null
+          },
+          "turn": 2
+        }
+      ],
+      "tool_receipts": [
+        {
+          "ended_at_monotonic": 8191215.348204053,
+          "error_type": null,
+          "latency_ms": 0.5970057100057602,
+          "request": {
+            "action": "calculator",
+            "arguments": {
+              "expression": "17 * 19 + 23"
+            }
+          },
+          "result": {
+            "completed": true,
+            "value": {
+              "action": "calculator",
+              "observation": "[RESULT] 17 * 19 + 23 = 346",
+              "ok": true
+            }
+          },
+          "started_at_monotonic": 8191215.347607047,
+          "tool_id": "healthbench-computation.calculator",
+          "tool_version": "skillflow.training-tools.v1"
+        }
+      ]
+    }
+  ]
+}

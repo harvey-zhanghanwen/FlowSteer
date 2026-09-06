@@ -472,13 +472,55 @@ def _healthbench_structured_evidence_references(
 
 
 def _is_healthbench_search_receipt(receipt: Mapping[str, object]) -> bool:
-    return receipt.get("tool_id") == _HEALTHBENCH_SEARCH_TOOL_ID
+    # NECESSARY_PROJECT_ADAPTATION: these are optional project retrieval
+    # capabilities, not native HealthBench tools. Existing authoritative-only
+    # receipts retain their exact projection; calculation is not literature.
+    return receipt.get("tool_id") in {
+        _HEALTHBENCH_SEARCH_TOOL_ID,
+        "healthbench-medrag.search",
+        "healthbench-source.read",
+        "healthbench-drug.lookup",
+    }
+
+
+def _healthbench_medrag_evidence(
+    value: Mapping[str, object],
+) -> tuple[Mapping[str, object], ...]:
+    """Reuse authoritative search's projection of unchanged SkillFlow BM25."""
+
+    chunks = value.get("ranked_chunks")
+    identity = value.get("frozen_corpus")
+    if not isinstance(chunks, list) or not isinstance(identity, Mapping):
+        return ()
+    return tuple(
+        {
+            "source_type": "frozen_medical_textbook",
+            "source": identity.get("source"),
+            "document_id": chunk.get("document_id"),
+            "title": chunk.get("title"),
+            "date": None,
+            "url": None,
+            "excerpt": chunk.get("text"),
+            **{
+                key: chunk[key]
+                for key in ("score", "matched_terms", "rank")
+                if key in chunk
+            },
+        }
+        for chunk in chunks
+        if isinstance(chunk, Mapping)
+    )
 
 
 def _healthbench_search_candidates(
     receipts: Sequence[Mapping[str, object]],
 ) -> list[tuple[str, str, Mapping[str, object]]]:
-    """Reuse the v2 successful, public search-Observation admission boundary."""
+    """Reuse the successful public retrieval-Observation admission boundary.
+
+    MedRAG's historical ranked_chunks schema is normalized without changing
+    its backend or receipt. Source reads and label lookups use the same
+    provenance-bearing evidence schema as authoritative search.
+    """
     candidates: list[tuple[str, str, Mapping[str, object]]] = []
     for receipt in receipts:
         if not _is_healthbench_search_receipt(receipt):
@@ -487,25 +529,39 @@ def _healthbench_search_candidates(
             continue
         request = receipt.get("request")
         result = receipt.get("result")
-        if not isinstance(request, Mapping) or request.get("action") != "search":
+        expected_action = {
+            _HEALTHBENCH_SEARCH_TOOL_ID: "search",
+            "healthbench-medrag.search": "search",
+            "healthbench-source.read": "read_source",
+            "healthbench-drug.lookup": "drug_lookup",
+        }.get(str(receipt.get("tool_id")))
+        if not isinstance(request, Mapping) or request.get("action") != expected_action:
             continue
         if not isinstance(result, Mapping) or result.get("completed") is not True:
             continue
         value = result.get("value", result)
-        if not isinstance(value, Mapping) or value.get("operation") != "search":
+        if not isinstance(value, Mapping) or value.get("operation") != expected_action:
             continue
         query = value.get("query")
         if not isinstance(query, str) or not query.strip():
             arguments = request.get("arguments")
             query = (
-                arguments.get("query")
+                arguments.get(
+                    {"read_source": "source_id", "drug_lookup": "drug_name"}.get(
+                        str(expected_action), "query"
+                    )
+                )
                 if isinstance(arguments, Mapping)
                 else None
             )
         if not isinstance(query, str) or not query.strip():
             continue
-        evidence = value.get("evidence")
-        if not isinstance(evidence, list):
+        evidence = (
+            _healthbench_medrag_evidence(value)
+            if receipt.get("tool_id") == "healthbench-medrag.search"
+            else value.get("evidence")
+        )
+        if not isinstance(evidence, (list, tuple)):
             continue
         for result_item in evidence:
             if isinstance(result_item, Mapping):
@@ -803,10 +859,25 @@ def _healthbench_v3_receipts(
             if not isinstance(document_id, str) or not document_id.strip() or not isinstance(excerpt, str) or not excerpt.strip():
                 continue
             key = (str(result.get("source") or ""), document_id)
+            result_matches = matches
+            if tool_id in {"healthbench-source.read", "healthbench-drug.lookup"}:
+                # Reading a document page is not a repeat of the earlier
+                # search snippet. Distinguish new retrieval pages/versions
+                # while still deduplicating the same page across producers.
+                # Historical authoritative-search keys remain unchanged.
+                key = (key[0], json.dumps([
+                    document_id, tool_id, result.get("version"),
+                    result.get("content_type"), result.get("offset"),
+                ], ensure_ascii=False, separators=(",", ":")))
+                result_matches = [
+                    match for match in matches
+                    if " ".join(str(match["evidence_span"]).split())
+                    in " ".join(excerpt.split())
+                ]
             if key in seen_sources:
                 # Do not replay the same source body, but retain a later
                 # producer's new interpretation/qualifier of that source.
-                for match in matches:
+                for match in result_matches:
                     if match["document_id"] != document_id or match["source"] != result.get("source"):
                         continue
                     for interpretation in _healthbench_v3_interpretations(producer_items, match, producer):
@@ -833,6 +904,21 @@ def _healthbench_v3_receipts(
                     "producer_interpretations": [],
                 }
             document = documents[key]
+            # Source-read pagination and SPL version identify what the
+            # producer actually saw. Keep them beside, not as, clinical
+            # claims; full Tool receipts remain unchanged in the trajectory.
+            source_retrieval = {
+                field: result[field]
+                for field in (
+                    "source_id", "content_type", "version", "truncated",
+                    "offset", "next_offset", "total_characters", "published_date",
+                )
+                if field in result
+            }
+            if source_retrieval:
+                retrievals = document.setdefault("source_retrieval", [])
+                if source_retrieval not in retrievals:
+                    retrievals.append(source_retrieval)
             excerpts = document["excerpts"]
             assert isinstance(excerpts, list)
             bounded_excerpt = _healthbench_v3_text(" ".join(excerpt.split()), 1600)
@@ -840,7 +926,7 @@ def _healthbench_v3_receipts(
                 excerpts.append(bounded_excerpt)
             spans = document["artifact_cited_spans"]
             assert isinstance(spans, list)
-            for match in matches:
+            for match in result_matches:
                 if match["document_id"] == document_id and match["source"] == result.get("source"):
                     span = _healthbench_v3_text(match["evidence_span"], 1200)
                     if span not in spans and len(spans) < 2:

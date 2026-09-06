@@ -77,6 +77,12 @@ from src.interactive.healthbench_evidence_adapter import (
     PubMedEUtilitiesClient,
     open_healthbench_authoritative_tool_registry,
 )
+from src.interactive.healthbench_clinical_tools import (
+    open_healthbench_clinical_tool_registry,
+)
+from src.interactive.healthbench_clinical_react import (
+    HealthBenchClinicalReactExecutionAdapter,
+)
 from src.interactive.hotpot_training_schedule import (
     FrozenHotpotTrainingSchedule,
     HotpotTrainingCursorState,
@@ -1000,6 +1006,19 @@ def _healthbench_tool_runtime_settings(
             enforce_state_conditioned_completion_admission
         ),
     }
+    toolset = section.get("toolset", "default")
+    if toolset not in {"default", "optional_clinical_v1"}:
+        raise ConfigurationError("healthbench_tool_runtime.toolset is unsupported")
+    if toolset == "optional_clinical_v1" and (
+        runtime_mode != HEALTHBENCH_AUTHORITATIVE_TOOL_RUNTIME_MODE
+        or section.get("require_initial_search") is not False
+        or section.get("require_refinement_on_insufficient_evidence", False)
+    ):
+        raise ConfigurationError(
+            "optional_clinical_v1 requires authoritative mode without mandatory "
+            "initial search or search refinement; each Agent chooses its tools"
+        )
+    settings["toolset"] = toolset
     raw_profile_allowlist = section.get("execution_profile_allowlist")
     if raw_profile_allowlist is not None:
         if (
@@ -2516,7 +2535,12 @@ class LiveSmokeBackend:
                         web["retry_backoff_seconds"]
                     ),
                 )
-                opened = open_healthbench_authoritative_tool_registry(
+                open_registry = (
+                    open_healthbench_clinical_tool_registry
+                    if healthbench_settings["toolset"] == "optional_clinical_v1"
+                    else open_healthbench_authoritative_tool_registry
+                )
+                opened = open_registry(
                     **common_open_arguments,
                     pubmed_client=pubmed_client,
                     max_query_content_tokens=int(
@@ -2545,7 +2569,12 @@ class LiveSmokeBackend:
                     ),
                 }
                 if authoritative:
-                    adapter = HealthBenchAuthoritativeReactExecutionAdapter(
+                    adapter_class = (
+                        HealthBenchClinicalReactExecutionAdapter
+                        if healthbench_settings["toolset"] == "optional_clinical_v1"
+                        else HealthBenchAuthoritativeReactExecutionAdapter
+                    )
+                    adapter = adapter_class(
                         **adapter_arguments,
                         require_structured_evidence_artifact=(
                             self.runtime.artifact_communication_profile
