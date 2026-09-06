@@ -465,6 +465,9 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                          if tool_runtime.get("toolset") == "source_separated_clinical_v1" else [])
                     + (["healthbench-literature.search", "healthbench-trials.search"]
                        if tool_runtime.get("external_medical_sources_enabled") is True else [])
+                    + (["healthbench-bookshelf.search", "healthbench-pdq.search",
+                        "healthbench-ahrq.search", "healthbench-terminology.search"]
+                       if tool_runtime.get("clinical_reference_sources_enabled") is True else [])
                 )
             checks["healthbench_tool_runtime.enabled"] = bool(
                 isinstance(tool_runtime, Mapping)
@@ -515,7 +518,12 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                     ]
                     checks["healthbench_tool_runtime.execution_profile_allowlist"] = (
                         protocol_equivalent_to_direct is False
-                        and raw_execution_profile_allowlist == optional_profiles
+                        # Reuse the existing paired full-toolset profile
+                        # as an alternative to source-specific profiles.
+                        # Both preserve the exact Direct tool condition.
+                        and raw_execution_profile_allowlist in (
+                            optional_profiles, admitted_profiles,
+                        )
                     )
         else:
             checks["healthbench_tool_runtime.disabled"] = not isinstance(

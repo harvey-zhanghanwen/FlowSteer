@@ -1311,6 +1311,10 @@ class AgentRuntime:
         prior_output_metadata: Optional[
             Mapping[str, Mapping[str, object]]
         ] = None,
+        historical_outputs: Optional[Mapping[str, str]] = None,
+        historical_output_metadata: Optional[
+            Mapping[str, Mapping[str, object]]
+        ] = None,
         prior_failure_metadata: Optional[
             Mapping[str, Mapping[str, object]]
         ] = None,
@@ -1405,6 +1409,17 @@ class AgentRuntime:
         # downstream artifact.
         dirty_seeds.update(agent_id for agent_id in nodes if agent_id not in outputs)
         dirty = execution_graph.dirty_closure(dirty_seeds)
+        # Canvas already keeps invalidated successful artifacts separately from
+        # its current-output cache.  Reuse that explicit, task-local boundary:
+        # old answers remain invalid, but a reciprocal phase may re-examine its
+        # own source-bound observations.  Never put them in ReAct continuation.
+        historical_evidence = self._historical_evidence(
+            nodes,
+            plan,
+            {**dict(historical_outputs or {}), **outputs},
+            {**dict(historical_output_metadata or {}), **output_metadata},
+            dirty,
+        )
         # FlowSteer's executor cache is valid only for an unchanged input
         # identity.  A dirty Agent and every dependent successor therefore
         # lose their prior artifact before execution starts; otherwise a
@@ -1471,6 +1486,7 @@ class AgentRuntime:
             cache_key: Optional[str] = None
             cache_eligible = (
                 execution_cache is not None
+                and not any(agent_id in historical_evidence for agent_id in component)
                 and self._component_cache_eligible(
                     component,
                     nodes,
@@ -1523,6 +1539,7 @@ class AgentRuntime:
                 output_metadata,
                 cancelled_failure_records,
                 failure_metadata,
+                historical_evidence,
                 output_agent_id=execution_graph.output_agent_id,
                 format_output_agent=format_output_agent,
                 communication_condition=resolved_condition,
@@ -1956,6 +1973,7 @@ class AgentRuntime:
         output_metadata: Dict[str, Mapping[str, object]],
         cancelled_failure_records: List[AgentFailureRecord],
         failure_metadata: Mapping[str, Mapping[str, object]],
+        historical_evidence: Mapping[str, UpstreamMessage],
         *,
         output_agent_id: Optional[str],
         format_output_agent: bool,
@@ -2021,6 +2039,13 @@ class AgentRuntime:
             graph_revision=graph_revision,
             output_metadata=output_metadata,
         )
+        # These are immutable observations from the same Agent's earlier
+        # execution, not the peer's current draft or a resumed control trace.
+        # The peer can receive them only through the existing draft barrier.
+        if left_id in historical_evidence:
+            left_upstream = (*left_upstream, historical_evidence[left_id])
+        if right_id in historical_evidence:
+            right_upstream = (*right_upstream, historical_evidence[right_id])
         semantic_roles = {
             agent_id: (nodes[agent_id].role_family or "").casefold()
             for agent_id in component
@@ -2630,6 +2655,106 @@ class AgentRuntime:
         )
         return {left_id: left_revision.text, right_id: right_revision.text}
 
+    def _historical_evidence(
+        self,
+        nodes: Mapping[str, AgentNode],
+        plan: _ExecutionPlan,
+        outputs: Mapping[str, str],
+        output_metadata: Mapping[str, Mapping[str, object]],
+        dirty: Collection[str],
+    ) -> Dict[str, UpstreamMessage]:
+        """Retain source material, never current answers or executable history.
+
+        MD section 3 keeps reciprocal execution finite; SkillFlow's
+        BoundedAgent.execute_turn binds its control state to one invocation.
+        The necessary adaptation is therefore an existing public envelope,
+        not replay of an earlier completed Action--Observation sequence.
+        Nested provenance retains its recorded path only while that path is
+        still legal in the current graph. Deleted/unconnected producers are
+        not revived by a historical artifact.
+        """
+
+        edges = {
+            edge for relation in plan.relations for edge in relation.directed_edges()
+        }
+
+        def retained_provenance(
+            source_id: str, artifact: str, metadata: Mapping[str, object],
+        ) -> Optional[Dict[str, object]]:
+            receipts = [
+                dict(item) for item in _tool_receipts_from_metadata(metadata)
+                if item.get("error_type") is None
+                and isinstance(item.get("result"), Mapping)
+            ]
+            has_direct_receipts = bool(receipts)
+            nested = []
+            for provenance in _input_artifact_provenance_from_metadata(metadata):
+                producer = provenance.get("source_agent_id")
+                if (
+                    not isinstance(producer, str)
+                    or producer not in nodes
+                    or (producer != source_id and (producer, source_id) not in edges)
+                ):
+                    continue
+                body = provenance.get("artifact", provenance.get("content", ""))
+                if not isinstance(body, str):
+                    continue
+                retained = retained_provenance(producer, body, provenance)
+                if retained is not None and producer == source_id:
+                    # Repeated edits must not push the same Agent's sources
+                    # beyond the existing bounded provenance projection.
+                    # Fold only local history, never flatten a graph edge.
+                    for receipt in retained["tool_receipts"]:
+                        if receipt not in receipts:
+                            receipts.append(receipt)
+                    for item in retained["input_artifact_provenance"]:
+                        if item not in nested:
+                            nested.append(item)
+                elif retained is not None and retained not in nested:
+                    nested.append(retained)
+            if not receipts and not nested:
+                return None
+            return {
+                "source_agent_id": source_id,
+                "target_agent_id": metadata.get("target_agent_id", source_id),
+                "artifact": artifact if has_direct_receipts else "Historical source observations only.",
+                "artifact_version": metadata.get("artifact_version"),
+                "graph_revision": metadata.get("graph_revision"),
+                "source_model_id": metadata.get("source_model_id"),
+                "source_contract": metadata.get("source_contract"),
+                "message_type": "historical_evidence",
+                "tool_receipts": receipts,
+                "input_artifact_provenance": nested,
+            }
+
+        result = {}
+        for agent_id in sorted(dirty):
+            if agent_id not in nodes or len(plan.component_for[agent_id]) != 2:
+                continue
+            artifact = outputs.get(agent_id)
+            metadata = output_metadata.get(agent_id)
+            if not isinstance(artifact, str) or not artifact.strip() or not isinstance(metadata, Mapping):
+                continue
+            provenance = retained_provenance(agent_id, artifact, metadata)
+            if provenance is None:
+                continue
+            version = metadata.get("artifact_version")
+            revision = metadata.get("graph_revision")
+            result[agent_id] = UpstreamMessage(
+                agent_id,
+                agent_id,
+                "Historical evidence for revalidation only. The prior answer was "
+                "invalidated by a graph edit; verify the original source observations "
+                "against the current task and contract before using any claim.",
+                message_type="historical_evidence",
+                graph_revision=(revision if type(revision) is int and revision >= 0 else None),
+                artifact_version=(version if isinstance(version, str) and version.strip() else None),
+                request_or_dependency="Revalidate historical sources; this is not a current answer or an execution continuation.",
+                tool_receipts=tuple(provenance["tool_receipts"]),
+                input_artifact_provenance=(provenance,),
+            )
+        return result
+
     def _upstream(
         self,
         target_agent_id: str,
@@ -2746,6 +2871,7 @@ class AgentRuntime:
                 *((peer_draft,) if peer_draft is not None else ()),
             )
             if message.artifact_version is not None
+            and message.message_type != "historical_evidence"
         }
         raw_continuation_input_versions = continuation.get(
             "input_artifact_versions"
@@ -2847,6 +2973,12 @@ class AgentRuntime:
 
         metadata = dict(response.metadata)
         metadata["artifact_version"] = request.request_id
+        metadata["graph_revision"] = request.graph_revision
+        metadata["execution_phase"] = request.phase.value
+        metadata.update(_producer_context(
+            request.agent, response.metadata,
+            artifact_communication_profile=self.artifact_communication_profile,
+        ))
         # FlowSteer's SET_OUTPUT edit is pointer-only. Persist the invocation
         # role so Canvas can distinguish a user-facing Artifact produced under
         # the Output protocol from an intermediate Artifact before promoting an
@@ -2873,7 +3005,7 @@ class AgentRuntime:
         input_artifact_provenance: list[dict[str, object]] = []
         distinct_inputs: list[UpstreamMessage] = []
         for message in inputs:
-            if message.artifact_version is not None:
+            if message.artifact_version is not None and message.message_type != "historical_evidence":
                 previous = input_artifact_versions.get(message.source_agent_id)
                 if (
                     previous is not None
@@ -2935,6 +3067,7 @@ class AgentRuntime:
                         message.source_agent_id: message.artifact_version
                         for message in inputs
                         if message.artifact_version is not None
+                        and message.message_type != "historical_evidence"
                     },
                     "input_artifact_provenance": [
                         message.to_dict() for message in inputs

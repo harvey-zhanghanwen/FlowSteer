@@ -4960,12 +4960,23 @@ class AgentWorkflowEnv:
             execution = cached_execution
             execution_reused = execution is not None
             if execution is None:
+                current_agent_ids = {node.id for node in self._graph.nodes}
                 try:
                     execution = await self.runtime.execute(
                         self._graph,
                         self._problem,
                         prior_outputs=self._progressive_outputs,
                         prior_output_metadata=self._progressive_output_metadata,
+                        historical_outputs={
+                            agent_id: artifact
+                            for agent_id, artifact in self._previous_revision_outputs.items()
+                            if agent_id in current_agent_ids
+                        },
+                        historical_output_metadata={
+                            agent_id: metadata
+                            for agent_id, metadata in self._previous_revision_output_metadata.items()
+                            if agent_id in current_agent_ids
+                        },
                         prior_failure_metadata=self._failure_continuations,
                         unavailable_model_ids=self._unavailable_model_ids,
                         execution_cache=(
@@ -5259,6 +5270,22 @@ class AgentWorkflowEnv:
                         require_complete=False,
                         prior_outputs=prior_outputs,
                         prior_output_metadata=prior_output_metadata,
+                        historical_outputs={
+                            agent_id: artifact
+                            for agent_id, artifact in self._previous_revision_outputs.items()
+                            if agent_id in (
+                                execution_scope_set if isolated_execution_scope
+                                else current_agent_ids
+                            )
+                        },
+                        historical_output_metadata={
+                            agent_id: metadata
+                            for agent_id, metadata in self._previous_revision_output_metadata.items()
+                            if agent_id in (
+                                execution_scope_set if isolated_execution_scope
+                                else current_agent_ids
+                            )
+                        },
                         prior_failure_metadata=prior_failure_metadata,
                         unavailable_model_ids=self._unavailable_model_ids,
                         dirty_agents=execution_dirty_agents,
@@ -12608,10 +12635,26 @@ class AgentWorkflowEnv:
             raise AgentWorkflowStateError("environment has no active problem")
         validation = self._graph.validate(self.model_registry, require_complete=True)
         validation.raise_if_invalid()
+        current_agent_ids = {node.id for node in self._graph.nodes}
         return await self.runtime.execute(
             self._graph,
             self._problem,
             run_id=run_id,
+            historical_outputs={
+                agent_id: artifact
+                for agent_id, artifact in {
+                    **self._previous_revision_outputs, **self._progressive_outputs,
+                }.items()
+                if agent_id in current_agent_ids
+            },
+            historical_output_metadata={
+                agent_id: metadata
+                for agent_id, metadata in {
+                    **self._previous_revision_output_metadata,
+                    **self._progressive_output_metadata,
+                }.items()
+                if agent_id in current_agent_ids
+            },
             prior_failure_metadata=self._failure_continuations,
             unavailable_model_ids=self._unavailable_model_ids,
             execution_cache=(

@@ -1778,3 +1778,36 @@ context overflow HTTP400，1 题 900 秒 TimeoutError；五题 strict 指标 N/A
 没有修改冻结的 runtime。没有 Agent 实际调用全文阅读工具，不将接口可用
 描述成已经利用全文。完整对照、错误分类和调用口径见
 `reports/healthbench_professional_external_medical_sources_v2_38/evaluation_report_zh.md`。
+
+## 2026-09-06 — v2.39 高质量来源与可选分类检索
+
+- 从已保存 v2.38 的 `3b42012` 建立
+  `feature/healthbench-v2.39-guidelines-sources-20260906`；旧配置和五题结果不改名、不覆盖。
+- 用户要求接入已列出的高质量来源。本版接入 NCBI Bookshelf、其 PDQ/AHRQ
+  指定集合和 MeSH；来源客户端由互不重叠的子任务实现，主线单点接 registry、
+  schema、gateway、FTS5、配置与测试。NIH/HHS 两次真实 GET 403，明确未接入。
+- 沿用 SkillFlow 的 search/read、Tool receipt、请求级 FTS5 和现有 ReAct；
+  Bookshelf 只按需读取许可 XML，搜索元数据不冒充正文；MeSH 标为词表定义，
+  不当成临床疗效证据。不检索 benchmark 原题、rubric 或参考回答。
+- 分类工具仍由 Director/Agent 选择，不根据题目关键词硬路由或设置固定医疗
+  角色。新分类检索 profile 同时允许阅读和查询已有证据，保留全工具集合选项，
+  不强制全部检索，不增加调用预算。Direct 与 Graph 准备配置为同一工具条件。
+- 对“分类检索是否提高评分”的结论：没有隔离该因素的配对消融。v2.35→v2.38
+  同五题 raw 增加 10 个百分点且全部来自 WATERFALL，其他四题 raw 不变；
+  不把长度项收益或接口接通描述成稳定临床质量提升。
+- 当前只做定向离线验证和 prepare-only；本版没有新的模型/官方评分，未修改
+  SINGLE→reciprocal DRAFT 证据丢失及标题式 FINISH 的既有 runtime 问题，
+  不将这些问题标为已修复。没有训练、GRPO、LoRA 或全量评测。
+
+随后用户更新本轮要求：取消分类检索执行配置，修复已知 demo 问题再重跑原
+五题。新配置只保留 reasoning 与全工具 ReAct，不再按来源限制 Agent。
+知识来源的出处/集合/药品标签与原对话的区别仍保存，不删除 provenance。
+同五题评分已获授权，但只在修复完成及定向测试后启动，旧指标不作为新指标。
+
+修复已完成：Output 公开任务要求正文却仅返回标题时，在原 ReAct 循环内
+返回可修复的 completion 错误；SINGLE→reciprocal 的历史资料从 Canvas
+已有 previous-revision 存储显式传 Runtime，旧输出保持失效，旧 evidence
+供重核，不污染 control continuation。真实 env 交接、同阶段预算、并发、
+合法短答及原 Runtime 定向回归已通过。测试中修正了两个不成立的假设：
+调度首个请求不一定是节点 a；节点 b 先前已合法接收的 a 来源应继续保留，
+只有 a 的本轮新草稿需要等待阶段屏障。这是测试断言修正，不是放宽通信边界。

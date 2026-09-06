@@ -15,6 +15,7 @@ IDs, rubrics, reference responses, ground truth, or evaluator state.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 import json
@@ -30,7 +31,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
-from .agent_runtime import AgentRequest
+from .agent_runtime import AgentRequest, GatewayResponse
+from .healthbench_professional_adapter import parse_model_visible_conversation
 from .healthbench_tool_adapter import (
     HEALTHBENCH_PROFESSIONAL_DATASET_SCOPE,
     FrozenMedRAGBM25Corpus,
@@ -80,6 +82,9 @@ _HEALTHBENCH_COMPLETION_QUALITY_PROFILES = frozenset(
         HEALTHBENCH_COMPLETION_QUALITY_PROFILE_V1,
         HEALTHBENCH_COMPLETION_QUALITY_PROFILE_V2,
     }
+)
+_COMPLETION_REQUEST: ContextVar[AgentRequest | None] = ContextVar(
+    "healthbench_completion_request", default=None
 )
 
 _PUBMED_RATE_LOCK = Lock()
@@ -809,6 +814,21 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
                 "HealthBench authoritative Tool capability"
             )
 
+    async def execute(self, request: AgentRequest) -> GatewayResponse:
+        """Scope public task context to the existing completion-validation hook.
+
+        The shared SkillFlow-compatible hook does not accept a request. Keep
+        the request coroutine-local, not mutable adapter state: independent
+        nodes may execute concurrently through the same adapter. Parsing,
+        recovery, turn budgets and terminal admission remain in the base loop.
+        """
+
+        token = _COMPLETION_REQUEST.set(request)
+        try:
+            return await super().execute(request)
+        finally:
+            _COMPLETION_REQUEST.reset(token)
+
     def _completion_arguments_schema(
         self,
         request: AgentRequest,
@@ -964,6 +984,12 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
                 "contract for downstream AgentGraph communication."
             )
         )
+        if self._require_complete_natural_language_artifact and request.is_output_agent:
+            description += (
+                " When the user requests an explanation, plan or document, "
+                "include its substantive body, not only a title or contents "
+                "outline. A genuinely complete short answer remains valid."
+            )
         return {
             "type": "object",
             "required": ["value"],
@@ -1009,6 +1035,7 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
             incomplete_error = self._obviously_incomplete_completion_error(
                 artifact,
                 completion_quality_profile=self._completion_quality_profile,
+                request=_COMPLETION_REQUEST.get(),
             )
             if incomplete_error is not None:
                 return incomplete_error
@@ -1054,6 +1081,7 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
         completion_quality_profile: str = (
             HEALTHBENCH_COMPLETION_QUALITY_PROFILE_V1
         ),
+        request: AgentRequest | None = None,
     ) -> str | None:
         """Reject a heading/label without rewriting or scoring its content."""
 
@@ -1066,6 +1094,26 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
         # below and must not be mistaken for Markdown or a short text label.
         if normalized.startswith("{") or normalized.startswith("["):
             return None
+        task = ""
+        if request is not None and request.is_output_agent:
+            try:
+                task = parse_model_visible_conversation(request.problem)[-1]["content"]
+            except ValueError:
+                task = request.problem
+            # Fragment-shaped outputs are legitimate for explicitly requested
+            # titles, outlines, lists or short factual values. Never infer a
+            # long-answer requirement from the Director's contract instead of
+            # the actual public user request.
+            if HealthBenchAuthoritativeReactExecutionAdapter._task_allows_fragment_completion(task):
+                return None
+            # Numeric results and direct yes/no answers are not empty labels;
+            # no arbitrary minimum character or word count is an answer test.
+            if re.fullmatch(
+                r"(?:yes|no|unknown|unclear|none|\d+(?:[.,]\d+)?\s*(?:%|[A-Za-zµμ/]+)?)\.?",
+                normalized,
+                flags=re.IGNORECASE,
+            ):
+                return None
         if "\n" not in normalized and re.fullmatch(
             r"#{1,6}\s+[^\n]+",
             normalized,
@@ -1089,9 +1137,104 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
             incomplete_suffixes
         ):
             return "completion_artifact_is_heading_only"
-        if len(lexical_tokens) <= 3 and has_sentence_boundary is None:
+        # Retain the historical fallback when no Output task is available.
+        # With the public task in hand, word count alone cannot distinguish
+        # a label from a correct short answer (e.g. a name or an imperative).
+        if not task and len(lexical_tokens) <= 3 and has_sentence_boundary is None:
             return "completion_artifact_is_label_only"
+        if task:
+            return HealthBenchAuthoritativeReactExecutionAdapter._task_body_completion_error(
+                normalized, task
+            )
         return None
+
+    @staticmethod
+    def _task_allows_fragment_completion(task: str) -> bool:
+        """Recognize requested output forms, not clinical answers or roles."""
+
+        return re.search(
+            r"\b(?:title|heading|headings|outline|table of contents)\s+only\b|"
+            r"\b(?:only|just)\s+(?:a\s+|the\s+)?(?:title|heading|outline|name|number|value|list)\b|"
+            r"\b(?:write|give|suggest|create|provide|generate)\s+(?:(?:me|a|an|the|short|brief)\s+)*"
+            r"(?:title|heading|outline|table of contents)\b|"
+            r"\b(?:list|name|enumerate)\s+(?:the|all|some|a|\d+)\b|"
+            r"\b(?:one[- ]word|single[- ]word|yes[- /]or[- /]no|yes/no|number only)\b|"
+            r"(?:只(?:要|需|给|写|列出)|仅(?:需|给|写|列出)).{0,12}(?:标题|提纲|目录|名称|数字)|"
+            r"(?:拟|写|给出|生成)(?:一个)?(?:标题|提纲|目录)",
+            task,
+            flags=re.IGNORECASE,
+        ) is not None
+
+    @staticmethod
+    def _task_body_completion_error(artifact: str, task: str) -> str | None:
+        """Reject all-heading scaffolds when the public task asks for a body.
+
+        NECESSARY_PROJECT_ADAPTATION: upstream BoundedAgent calls environment
+        validate_completion and returns a non-terminal schema_invalid
+        Observation on rejection. This is a narrow HealthBench surface-form
+        validator at that same boundary, not a medical correctness judge.
+        It does not require named roles, tools, sections or a minimum length.
+        """
+
+        if re.search(
+            r"\b(?:explain|describe|discuss|compare|summari[sz]e|write|draft|prepare|"
+            r"recommend|manage|management)\b|\bhow\s+(?:to|do|does|should|would|can)\b|"
+            r"(?:解释|说明|讨论|比较|总结|撰写|制定|如何|怎样)",
+            task,
+            flags=re.IGNORECASE,
+        ) is None:
+            return None
+        small_words = {
+            "a", "an", "the", "and", "or", "but", "for", "nor", "of", "on", "in",
+            "to", "at", "by", "from", "with", "as", "vs", "versus", "without",
+        }
+        # A finite predicate or imperative can make even a very short line a
+        # completed answer. Title case alone must not reject "No Evidence Was
+        # Found" or "Seek Urgent Care" just because they use capitals.
+        predicate = re.compile(
+            r"\b(?:is|are|was|were|has|have|had|should|must|may|might|can|could|"
+            r"cannot|will|would|recommend(?:s|ed)?|avoid|seek|refer|start|stop|"
+            r"continue|consider|monitor|use|give|take|call|consult|assess|treat|"
+            r"shows?|indicates?|supports?|suggests?|requires?)\b",
+            flags=re.IGNORECASE,
+        )
+        for line in artifact.splitlines():
+            stripped = line.strip()
+            if not stripped or re.fullmatch(r"[-=_*]{3,}", stripped):
+                continue
+            if re.fullmatch(r"#{1,6}\s+.+", stripped):
+                continue
+            stripped = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", stripped)
+            stripped = stripped.strip("*_ ")
+            if predicate.search(stripped):
+                return None
+            if stripped.endswith((":", "：")):
+                continue
+            words = re.findall(r"[A-Za-z]+(?:['’][A-Za-z]+)*", stripped)
+            content_words = [word for word in words if word.casefold() not in small_words]
+            if not content_words or not all(word[0].isupper() for word in content_words):
+                return None
+            # Mixed-language text is not safely classified by English casing.
+            if re.search(r"[^\x00-\x7f]", re.sub(r"[–—‘’“”]", "", stripped)):
+                return None
+        return "completion_artifact_requires_substantive_body"
+
+    @staticmethod
+    def _model_visible_observations(
+        observations: list[Mapping[str, object]],
+    ) -> list[dict[str, object]]:
+        visible = ToolReactExecutionAdapter._model_visible_observations(observations)
+        for observation in visible:
+            if observation.get("public_error_code") == "completion_artifact_requires_substantive_body":
+                observation["repair_instruction"] = (
+                    "The submitted artifact contains only a title, headings or "
+                    "contents outline, but the user requested an explanation, "
+                    "plan or document. Complete the requested body in your next "
+                    "completion, using available evidence and explicit limits "
+                    "where needed. A concise substantive answer is valid; no "
+                    "minimum length, extra Agent or Tool call is required."
+                )
+        return visible
 
     @staticmethod
     def _post_tool_keyword_fragment_error(artifact: str) -> str | None:
@@ -1514,6 +1657,14 @@ def _evidence_schema() -> dict[str, object]:
             "publication_types": {"type": "array", "items": {"type": "string"}},
             "is_open_access": {"type": "boolean"},
             "is_preprint": {"type": "boolean"},
+            # Bookshelf search metadata is not chapter text; source/version
+            # distinctions survive source.read and downstream projections.
+            "matched_title": {"type": "string"},
+            "book_title": {"type": ["string", "null"]},
+            "full_text_availability": {"type": "string"},
+            "text_scope": {"type": "string"},
+            "collection": {"type": "string"},
+            "repository_datestamp": {"type": ["string", "null"]},
             # SkillFlow BM25 fields are present only on frozen-textbook
             # evidence.  PubMed evidence therefore keeps them optional under
             # the shared evidence schema.

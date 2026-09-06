@@ -30,6 +30,8 @@ _SOURCE_DATABASE = {
     "NCBI PubMed": "medical_references",
     "Europe PMC": "medical_references",
     "ClinicalTrials.gov": "medical_references",
+    "NCBI Bookshelf": "medical_references",
+    "NLM MeSH": "medical_references",
     "NLM DailyMed": "drug_labels",
 }
 _PUBLIC_EVIDENCE_FIELDS = frozenset({
@@ -38,6 +40,8 @@ _PUBLIC_EVIDENCE_FIELDS = frozenset({
     "next_offset", "published_date", "total_characters",
     "pmid", "pmcid", "doi", "full_text_source_id", "publication_types",
     "is_open_access", "is_preprint",
+    "matched_title", "book_title", "full_text_availability", "text_scope",
+    "collection", "repository_datestamp",
 })
 
 

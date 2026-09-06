@@ -45,6 +45,10 @@ HEALTHBENCH_DRUG_LOOKUP_TOOL_ID = "healthbench-drug.lookup"
 HEALTHBENCH_CALCULATOR_TOOL_ID = "healthbench-computation.calculator"
 HEALTHBENCH_LITERATURE_SEARCH_TOOL_ID = "healthbench-literature.search"
 HEALTHBENCH_TRIAL_SEARCH_TOOL_ID = "healthbench-trials.search"
+HEALTHBENCH_BOOKSHELF_SEARCH_TOOL_ID = "healthbench-bookshelf.search"
+HEALTHBENCH_PDQ_SEARCH_TOOL_ID = "healthbench-pdq.search"
+HEALTHBENCH_AHRQ_SEARCH_TOOL_ID = "healthbench-ahrq.search"
+HEALTHBENCH_TERMINOLOGY_SEARCH_TOOL_ID = "healthbench-terminology.search"
 HEALTHBENCH_CLINICAL_TOOL_VERSION = "healthbench-clinical-tools-v1"
 DAILYMED_BASE_URL = "https://dailymed.nlm.nih.gov/dailymed/services/v2"
 SOURCE_PAGE_CHARACTERS = 16_000
@@ -199,6 +203,8 @@ class HealthBenchSourceReadToolBackend:
     drug_client: DailyMedClient
     literature_client: object | None = None
     trial_client: object | None = None
+    bookshelf_client: object | None = None
+    terminology_client: object | None = None
 
     def _read_pubmed(self, pmid: str) -> dict[str, object]:
         if not pmid.isdigit():
@@ -263,6 +269,10 @@ class HealthBenchSourceReadToolBackend:
             return self.literature_client.read(source_id)
         if self.trial_client is not None and source_id.startswith("clinicaltrials:"):
             return self.trial_client.read(source_id)
+        if self.bookshelf_client is not None and source_id.startswith("bookshelf:"):
+            return self.bookshelf_client.read(source_id)
+        if self.terminology_client is not None and source_id.startswith("mesh:"):
+            return self.terminology_client.read(source_id)
         raise LookupError("source_id is not a known MedRAG document, PMID, or DailyMed SETID")
 
     def invoke(self, request: ToolRequest) -> ToolResult:
@@ -349,6 +359,11 @@ def build_healthbench_clinical_tool_registry(
     external_medical_sources_enabled: bool = False,
     literature_client: object | None = None,
     trial_client: object | None = None,
+    clinical_reference_sources_enabled: bool = False,
+    bookshelf_client: object | None = None,
+    pdq_client: object | None = None,
+    ahrq_client: object | None = None,
+    terminology_client: object | None = None,
 ) -> ToolRegistry:
     """Compose existing registrations plus optional source/label/calculator."""
     pubmed = pubmed_client or PubMedEUtilitiesClient()
@@ -361,6 +376,16 @@ def build_healthbench_clinical_tool_registry(
         trial_client = trial_client or ClinicalTrialsClient()
     else:
         literature_client = trial_client = None
+    if clinical_reference_sources_enabled:
+        # Necessary transport adapters; reuse the same registry/receipt loop.
+        from .healthbench_bookshelf import BookshelfClient
+        from .healthbench_mesh import MeSHClient
+        bookshelf_client = bookshelf_client or BookshelfClient()
+        pdq_client = pdq_client or BookshelfClient(collection="pdq")
+        ahrq_client = ahrq_client or BookshelfClient(collection="ahrq")
+        terminology_client = terminology_client or MeSHClient()
+    else:
+        bookshelf_client = pdq_client = ahrq_client = terminology_client = None
     registries = (
         build_healthbench_authoritative_tool_registry(corpus, pubmed_client=pubmed, timeout_seconds=timeout_seconds, max_query_content_tokens=max_query_content_tokens),
         build_healthbench_medrag_tool_registry(corpus, timeout_seconds=timeout_seconds),
@@ -387,8 +412,15 @@ def build_healthbench_clinical_tool_registry(
             "open-access article XML, and clinicaltrials:NCT######## for a registered "
             "study and any posted results. Use IDs returned by search."
         )
+    if clinical_reference_sources_enabled:
+        inputs["read_source"]["properties"]["source_id"]["description"] += (
+            " Also accepts bookshelf:NBK identifiers for available public-domain/open-access "
+            "Bookshelf documents, and mesh:D identifiers for terminology definitions. "
+            "A catalogue hit is not a clinical recommendation; terminology is not evidence of efficacy."
+        )
     for tool_id, action, backend in (
-        (HEALTHBENCH_SOURCE_READ_TOOL_ID, "read_source", HealthBenchSourceReadToolBackend(corpus, pubmed, drugs, literature_client, trial_client)),
+        (HEALTHBENCH_SOURCE_READ_TOOL_ID, "read_source", HealthBenchSourceReadToolBackend(
+            corpus, pubmed, drugs, literature_client, trial_client, bookshelf_client, terminology_client)),
         (HEALTHBENCH_DRUG_LOOKUP_TOOL_ID, "drug_lookup", HealthBenchDrugLookupToolBackend(drugs)),
     ):
         registrations.append(ToolRegistration(tool_id, backend, ToolCapability(
@@ -406,8 +438,9 @@ def build_healthbench_clinical_tool_registry(
         output_schema=calculator.output_schema, side_effect=calculator.side_effect,
         timeout_seconds=calculator.timeout_seconds, version=calculator.version,
     )))
+    source_registrations = []
     if external_medical_sources_enabled:
-        for tool_id, client, description in (
+        source_registrations.extend((
             (HEALTHBENCH_LITERATURE_SEARCH_TOOL_ID, literature_client,
              "Search Europe PMC literature abstracts using the original named entity and requested relation. "
              "Preprints are excluded. An abstract is not a full paper; read available OA full text by full_text_source_id. "
@@ -416,22 +449,41 @@ def build_healthbench_clinical_tool_registry(
              "Search ClinicalTrials.gov for registered study names, interventions, populations and outcomes. "
              "Registration describes a protocol, not proof of efficacy; distinguish posted results from planned outcomes. "
              "Use short clinical terms, not the full conversation or benchmark/reference-answer content."),
-        ):
-            arguments = {
-                "type": "object", "additionalProperties": False,
-                "required": ["query"], "properties": {
-                    "query": {"type": "string", "minLength": 1, "maxLength": 160,
-                              "description": description},
-                },
-            }
-            output_schema = _clinical_output_schema()
-            output_schema["properties"]["operation"] = {"const": "search"}
-            registrations.append(ToolRegistration(tool_id, HealthBenchExternalSearchToolBackend(client), ToolCapability(
-                tool_id=tool_id, dataset_scope=HEALTHBENCH_PROFESSIONAL_DATASET_SCOPE,
-                action_schemas={"search": arguments}, input_schema=arguments,
-                output_schema=output_schema, side_effect="none",
-                timeout_seconds=timeout_seconds, version="healthbench-external-medical-sources-v1",
-            )))
+        ))
+    if clinical_reference_sources_enabled:
+        source_registrations.extend((
+            (HEALTHBENCH_BOOKSHELF_SEARCH_TOOL_ID, bookshelf_client,
+             "Search NCBI Bookshelf medical books, guidelines and reviews. Results are catalogue metadata; "
+             "read the returned source_id for available public-domain/OA text before citing its clinical content."),
+            (HEALTHBENCH_PDQ_SEARCH_TOOL_ID, pdq_client,
+             "Search the NCI PDQ collection in Bookshelf. Read the source and check the intended audience "
+             "and update date. PDQ evidence summaries are not clinical practice guidelines."),
+            (HEALTHBENCH_AHRQ_SEARCH_TOOL_ID, ahrq_client,
+             "Search AHRQ EPC Systematic Reviews (formerly Comparative Effectiveness Reviews) "
+             "in Bookshelf, not all AHRQ publications. "
+             "Read matching evidence reviews for population, outcomes, harms and limitations."),
+            (HEALTHBENCH_TERMINOLOGY_SEARCH_TOOL_ID, terminology_client,
+             "Look up MeSH descriptor labels to clarify medical terminology. Read definitions using source_id. "
+             "Label matching is not clinical evidence or an exhaustive synonym/trial-acronym lookup."),
+        ))
+    for tool_id, client, description in source_registrations:
+        arguments = {
+            "type": "object", "additionalProperties": False,
+            "required": ["query"], "properties": {
+                "query": {"type": "string", "minLength": 1, "maxLength": 160,
+                          "description": description},
+            },
+        }
+        output_schema = _clinical_output_schema()
+        output_schema["properties"]["operation"] = {"const": "search"}
+        if tool_id in {HEALTHBENCH_BOOKSHELF_SEARCH_TOOL_ID, HEALTHBENCH_PDQ_SEARCH_TOOL_ID, HEALTHBENCH_AHRQ_SEARCH_TOOL_ID}:
+            output_schema["properties"]["search_collection"] = {"enum": ["bookshelf", "pdq", "ahrq"]}
+        registrations.append(ToolRegistration(tool_id, HealthBenchExternalSearchToolBackend(client), ToolCapability(
+            tool_id=tool_id, dataset_scope=HEALTHBENCH_PROFESSIONAL_DATASET_SCOPE,
+            action_schemas={"search": arguments}, input_schema=arguments,
+            output_schema=output_schema, side_effect="none",
+            timeout_seconds=timeout_seconds, version="healthbench-external-medical-sources-v1",
+        )))
     return ToolRegistry(tuple(registrations))
 
 
@@ -448,13 +500,21 @@ def open_healthbench_clinical_tool_registry(
     external_medical_sources_enabled: bool = False,
     literature_client: object | None = None,
     trial_client: object | None = None,
+    clinical_reference_sources_enabled: bool = False,
+    bookshelf_client: object | None = None,
+    pdq_client: object | None = None,
+    ahrq_client: object | None = None,
+    terminology_client: object | None = None,
 ) -> OpenHealthBenchAuthoritativeToolRegistry:
     """Reuse the existing owned corpus lifetime without another resource type."""
     corpus = FrozenMedRAGBM25Corpus.open(corpus_root, source_identity=source_identity, expected_source_revision=expected_source_revision, expected_rows=expected_rows)
     try:
         registry = build_healthbench_clinical_tool_registry(corpus, pubmed_client=pubmed_client, timeout_seconds=timeout_seconds, max_query_content_tokens=max_query_content_tokens, drug_client=drug_client,
             external_medical_sources_enabled=external_medical_sources_enabled,
-            literature_client=literature_client, trial_client=trial_client)
+            literature_client=literature_client, trial_client=trial_client,
+            clinical_reference_sources_enabled=clinical_reference_sources_enabled,
+            bookshelf_client=bookshelf_client, pdq_client=pdq_client,
+            ahrq_client=ahrq_client, terminology_client=terminology_client)
     except BaseException:
         corpus.close()
         raise

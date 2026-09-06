@@ -30,6 +30,8 @@ from .tool_runtime import StructuredAction
 _SEARCH_TOOLS = frozenset({
     "healthbench-authoritative.search", "healthbench-medrag.search",
     "healthbench-literature.search", "healthbench-trials.search",
+    "healthbench-bookshelf.search", "healthbench-pdq.search",
+    "healthbench-ahrq.search", "healthbench-terminology.search",
 })
 
 
@@ -45,6 +47,22 @@ class HealthBenchClinicalReactExecutionAdapter(
             if kwargs.get(flag, False):
                 raise ValueError(f"optional clinical tools require {flag}=False")
         super().__init__(**kwargs)
+
+    def _contract(self, request, observations):
+        value = super()._contract(request, observations)
+        if "healthbench-bookshelf.search" in request.agent.allowed_tools:
+            # Necessary task adaptation on the existing ReAct contract, not a
+            # role or a question-specific answer/routing rule. Older profiles
+            # retain their original text.
+            value += (
+                "\nInterpret named studies and ambiguous terms using the original conversation "
+                "and source context, without changing the requested subject or relation. "
+                "An empty search is specific to that query/source, not proof that no study or evidence exists. "
+                "Read metadata-only hits before attributing clinical findings; another available source "
+                "may resolve uncertainty within the shared budget. Do not assume the contract's "
+                "proposed conclusion is established by the sources."
+            )
+        return value
 
     def _state_conditioned_action_domain(
         self,

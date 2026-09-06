@@ -1031,6 +1031,14 @@ def _healthbench_tool_runtime_settings(
             "external_medical_sources_enabled must be bool and requires source_separated_clinical_v1"
         )
     settings["external_medical_sources_enabled"] = external_sources
+    clinical_references = section.get("clinical_reference_sources_enabled", False)
+    if type(clinical_references) is not bool or (
+        clinical_references and toolset != "source_separated_clinical_v1"
+    ):
+        raise ConfigurationError(
+            "clinical_reference_sources_enabled must be bool and requires source_separated_clinical_v1"
+        )
+    settings["clinical_reference_sources_enabled"] = clinical_references
     if toolset == "source_separated_clinical_v1":
         for key in ("knowledge_root", "skillflow_source"):
             value = section.get(key)
@@ -2565,6 +2573,8 @@ class LiveSmokeBackend:
                     pubmed_client=pubmed_client,
                     **({"external_medical_sources_enabled": True}
                        if healthbench_settings["external_medical_sources_enabled"] else {}),
+                    **({"clinical_reference_sources_enabled": True}
+                       if healthbench_settings["clinical_reference_sources_enabled"] else {}),
                     max_query_content_tokens=int(
                         healthbench_settings["max_query_content_tokens"]
                     ),

@@ -483,6 +483,8 @@ def _is_healthbench_search_receipt(receipt: Mapping[str, object]) -> bool:
         "healthbench-knowledge.search",
         "healthbench-literature.search",
         "healthbench-trials.search",
+        "healthbench-bookshelf.search", "healthbench-pdq.search",
+        "healthbench-ahrq.search", "healthbench-terminology.search",
     }
 
 
@@ -544,6 +546,10 @@ def _healthbench_search_candidates(
             "healthbench-knowledge.search": "search",
             "healthbench-literature.search": "search",
             "healthbench-trials.search": "search",
+            "healthbench-bookshelf.search": "search",
+            "healthbench-pdq.search": "search",
+            "healthbench-ahrq.search": "search",
+            "healthbench-terminology.search": "search",
         }.get(str(receipt.get("tool_id")))
         if not isinstance(request, Mapping) or request.get("action") != expected_action:
             continue
@@ -871,7 +877,9 @@ def _healthbench_v3_receipts(
             key = (str(result.get("source") or ""), document_id)
             result_matches = matches
             if tool_id in {"healthbench-source.read", "healthbench-drug.lookup", "healthbench-knowledge.search",
-                           "healthbench-literature.search", "healthbench-trials.search"}:
+                           "healthbench-literature.search", "healthbench-trials.search",
+                           "healthbench-bookshelf.search", "healthbench-pdq.search",
+                           "healthbench-ahrq.search", "healthbench-terminology.search"}:
                 # Reading a document page is not a repeat of the earlier
                 # search snippet. Distinguish new retrieval pages/versions
                 # while still deduplicating the same page across producers.
@@ -925,6 +933,8 @@ def _healthbench_v3_receipts(
                     "offset", "next_offset", "total_characters", "published_date",
                     "pmid", "pmcid", "doi", "full_text_source_id",
                     "publication_types", "is_open_access", "is_preprint",
+                    "matched_title", "book_title", "full_text_availability",
+                    "text_scope", "collection", "repository_datestamp",
                 )
                 if field in result
             }

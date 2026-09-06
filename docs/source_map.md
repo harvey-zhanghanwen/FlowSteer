@@ -1016,3 +1016,44 @@ SkillFlow 原有动态预算实现。
 
 两篇上游论文没有提供这两个数据库的特定协议实现；本版只扩展 Tool Adapter
 和必要配置，不把 API 客户端称作上游现成功能。没有训练、Skill 或后验更新。
+
+## 2026-09-06 — v2.39：Bookshelf / PDQ / AHRQ / MeSH
+
+| 模块 | 来源、复用及必要适配 |
+| --- | --- |
+| `healthbench_bookshelf.py::BookshelfClient` | **必要 API 适配**：复用现有 PubMed 的 `_required_query/_node_text/_wait_for_pubmed_request_slot` 及 DailyMed/Europe PMC 的注入式 urllib 生命周期。官方 [Bookshelf search](https://www.ncbi.nlm.nih.gov/books/NBK45615/) 决定 ESearch books → ESummary accessionid；Entrez UID 不直接等于 NBK。官方 [Books-OAI](https://www.ncbi.nlm.nih.gov/books/about/oai/) 决定 GetRecord/nbk_ftext 与串行请求边界。metadata 不是正文，不能读取的来源报告 unavailable，不用网页片段伪装全文。 |
+| PDQ / AHRQ 分类检索 | **同一客户端的官方集合参数**，不是三个独立全文库。[PDQ NBK82221](https://www.ncbi.nlm.nih.gov/books/NBK82221/) 使用 `pdqcis[book]`；[AHRQ NBK42934](https://www.ncbi.nlm.nih.gov/books/NBK42934/) 使用 `collection_hscompeffcollect[filter]`，不代表全部 AHRQ EPC 来源。两者均保留 `source=NCBI Bookshelf` 和可核验 NBK/集合，跨工具发现同一文献不当作独立证据。 |
+| `healthbench_mesh.py::MeSHClient` | **必要 API 适配**：[官方 Swagger](https://id.nlm.nih.gov/mesh/swagger/ui) 的 descriptor-label contains 查询，及 [URI/JSON-LD 协议](https://hhs.github.io/meshrdf/sparql-and-uri-requests) 的 descriptor/preferred concept 读取。直接复用 `_required_query/_source_receipt`；定义不是治疗效果，术语 ID 不是已经取得同义词标签。 |
+| Tool / ReAct / 证据通信 | **直接复用** `healthbench_clinical_tools` 注册、`_source_page`、`HealthBenchClinicalReactExecutionAdapter` 的动作与预算、`_healthbench_search_candidates/_healthbench_v3_receipts` 的真实来源投影。必要增量仅为四个工具 ID、source.read 分发、Bookshelf 元数据和显式配置开关。 |
+| 请求级证据索引 | **直接复用 SkillFlow** `/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/skillev/benchmarks/retrieval.py::DocumentPassage/build_retrieval_index/RetrievalIndex.search/read`；现有 `HealthBenchKnowledgeStore` 增加来源映射。没有新建持久化医学总库；空正文的 Bookshelf metadata 不作为医学正文入库。 |
+| 工具能力配置 | **必要项目适配**：用户随后要求取消来源分类，故沿用 v2.35 `execution_profile_allowlist`，新配置仅保留无工具 reasoning 和一套全 12 项工具 ReAct；不再提供单一来源/分类执行 profile。现有 evaluator 配置验证接受这一既有 full-toolset 形式，仍严格匹配 Direct 工具集合。不是指定医疗职责或强制工作流，不改变角色、模型生成配置和每节点预算。 |
+| 未改变部分 | MD §3 的自由 Agent、有限双向通信和唯一 Output；FlowSteer `workflow_env.py::step` 的 edit→execute→feedback/history；SkillFlow Qwen3.5/SGLang 接口；原 HealthBench 官方 evaluator。没有新增训练、Skill evolution、MACE 或后验逻辑。 |
+
+**尚未接入：NIH/HHS HIV Clinical Guidelines。** 官方目录和真实章节在当前
+urllib 运行环境分别返回 HTTP 403。网页阅读工具可展示页面不等于仓库客户端
+可用；未注册猜测性接口或占位客户端。NICE 仍需官方 API 申请/许可，不在本次
+可用目录中。新来源的搜索集合、正文可用性与来源日期通过 receipt 保留。
+
+用户随后追加“优化并逐项修复 demo 后重跑同五题”：主线增加仅对新工具
+条件生效的简短 ReAct 说明，强调原对话消歧、未命中不等于研究不存在、
+metadata 不等于临床发现、contract 预设不等于来源结论；不改 Director
+提示词，不使用具体题名/答案。正文完整性与跨阶段证据修复单独记录其来源。
+
+### v2.39：错误 demo 的必要修复
+
+- `healthbench_evidence_adapter`：参考真实 SkillFlow
+  `src/skillev/runtime/bounded_agent.py::_validate_completion` 的非终局
+  `schema_invalid` observation；直接复用项目 `react_execution.py` 的原
+  completion-validation/恢复循环。新增的 HealthBench 正文外形检查是必要
+  task adaptation，不是上游现成医学判断。用既有 ContextVar 模式向无 request
+  参数的 hook 提供协程隔离的公开任务；明确要求正文时拒绝纯标题，保留短答、
+  显式标题/提纲请求和中间 artifact，不新增模型 judge 或最小字数。
+- `agent_workflow_env` → `agent_runtime`：复用 Canvas 已有
+  `_previous_revision_outputs/_metadata`、UpstreamMessage/input provenance、
+  MD §3.3 的有限双向 DRAFT/REVISION。旧答案继续失效，但旧来源通过当前图内
+  原节点历史输入显式移交；不使用新的持久化服务或跨任务缓存。
+  历史来源不进入 SkillFlow bounded-agent 控制 trace/当前 continuation
+  输入版本，不重置工具预算。对方的新 DRAFT 仍只能在 REVISION 阶段读取；
+  自身此前合法收到的来源可继续保留，不误当成提前读取对方新草稿。
+- 定向测试使用真实 Canvas step→Runtime、build_agent_messages 和本地
+  合成 Tool receipt；没有用 benchmark 答案编码规则，没有改官方 evaluator。
