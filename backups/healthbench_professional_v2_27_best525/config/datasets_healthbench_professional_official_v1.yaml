@@ -1,0 +1,25 @@
+# Official public HealthBench Professional evaluation population.  The 525
+# conversations are model-visible; rubrics, physician responses, slice labels,
+# and the release canary are materialized only in evaluator private cases.
+
+schema_version: "flowsteer.agentgraph.healthbench-professional.dataset.v1"
+task_schema_version: "flowsteer.agentgraph.task.v1"
+aligned_dir: "data/healthbench_professional_official_v1"
+
+sources:
+  dataset_id: "openai/healthbench-professional"
+  source_split: "test"
+  expected_count: 525
+  source_path: "${FLOWSTEER_HEALTHBENCH_PROFESSIONAL_PATH:-/ssd1/iclr/2/datasets/healthbench_professional/healthbench_professional_eval.jsonl}"
+
+split_policy:
+  mode: "official_public_evaluation_only"
+  test_count: 525
+  training_enabled: false
+  validation_enabled: false
+
+evaluator_boundary:
+  route: "healthbench-professional/rubric-grader"
+  public_file: "test.jsonl"
+  private_file: "private_cases.jsonl"
+  join_key: "task_id"

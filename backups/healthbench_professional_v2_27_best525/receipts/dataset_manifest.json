@@ -1,0 +1,41 @@
+{
+  "catalog": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v1/config/datasets_healthbench_professional_official_v1.yaml",
+  "counts_by_split": {
+    "test": 525,
+    "train": 0,
+    "validation": 0
+  },
+  "created_at": "2026-08-25T08:46:49.989328+00:00",
+  "dataset_id": "openai/healthbench-professional",
+  "evaluation_only": true,
+  "evaluator_join": {
+    "key": "task_id",
+    "private_file": "private_cases.jsonl",
+    "public_file": "test.jsonl"
+  },
+  "evaluator_only_fields": [
+    "rubric_items",
+    "physician_response",
+    "evaluator_metadata"
+  ],
+  "files": {
+    "evaluator_private_cases": "private_cases.jsonl",
+    "test": "test.jsonl",
+    "train": "train.jsonl",
+    "validation": "validation.jsonl"
+  },
+  "model_visible_fields": [
+    "task_id",
+    "question",
+    "conversation",
+    "evaluator_route",
+    "evaluator_source_id"
+  ],
+  "private_case_schema_version": "flowsteer.healthbench-professional.evaluator-case.v1",
+  "private_grader_public_input_copy": "prompt",
+  "schema_version": "flowsteer.agentgraph.healthbench-professional.dataset.v1",
+  "source_count": 525,
+  "source_split": "test",
+  "task_schema_version": "flowsteer.agentgraph.task.v1",
+  "training_enabled": false
+}

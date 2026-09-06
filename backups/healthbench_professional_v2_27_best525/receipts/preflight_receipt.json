@@ -1,0 +1,53 @@
+{
+  "adapter_name": null,
+  "checkpoint_path": null,
+  "evaluator_preflight": {
+    "evaluator_version": "openai-simple-evals-healthbench-professional-652c89d@1",
+    "fixture": "synthetic_non_benchmark",
+    "grader_api_calls": 1,
+    "grader_latency_ms": 5719.659867696464,
+    "grader_model": "gpt-5.4-2026-03-05",
+    "grader_reasoning_effort": "low",
+    "passed": true,
+    "provider_error_count": 0
+  },
+  "healthbench_judge_model": "gpt-5.4-2026-03-05",
+  "healthbench_judge_receipt": {
+    "catalog_path": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v1/config/model_catalog_healthbench_professional_grader_v1.yaml",
+    "configured_model_id": "healthbench-professional-reference-grader",
+    "length_adjustment_center": 2000.0,
+    "length_adjustment_penalty_per_500_chars": 0.0147,
+    "mode": "openai_simple_evals_healthbench_professional_reference",
+    "official_private_evaluator": "unavailable",
+    "paper_comparable": true,
+    "private_cases_path": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v1/data/healthbench_professional_official_v1/private_cases.jsonl",
+    "provider_model": "gpt-5.4-2026-03-05",
+    "reasoning_effort": "low",
+    "reference_grader": true,
+    "simple_evals_source_revision": "652c89d",
+    "simple_evals_source_root": "/ssd1/iclr/1/.tmp/openai-simple-evals-healthbench-professional"
+  },
+  "loaded_now": false,
+  "mode": "base_model",
+  "policy_published": false,
+  "sglang_server_runtime": {
+    "attention_backend": "fa3",
+    "context_length": 32768,
+    "cuda_graph_backend_decode": null,
+    "enable_deterministic_inference": false,
+    "max_running_requests": 8,
+    "max_running_requests_source": "explicit_server_argument",
+    "max_total_num_tokens": 717868,
+    "recorded_at": "2026-09-03T09:30:19.723364+00:00",
+    "request_attempts": {
+      "server_info": 1
+    },
+    "sampling_backend": "flashinfer",
+    "schema_version": "flowsteer.sglang.server-runtime-receipt.v1",
+    "weight_version": "default"
+  },
+  "status": "base_model_ready",
+  "success": true,
+  "swebench_harness_receipt": null,
+  "training_performed": false
+}

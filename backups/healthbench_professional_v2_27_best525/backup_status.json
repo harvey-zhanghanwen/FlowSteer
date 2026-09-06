@@ -1,0 +1,92 @@
+{
+  "schema_version": "flowsteer.healthbench.backup-recovery-status.v1",
+  "dataset": "HealthBench Professional",
+  "condition_id": "healthbench_professional_mixed_all_thinking_v2_27_full525_bestbase_provenance_scope_quality",
+  "backup_status": "SOURCE_SNAPSHOT_INCOMPLETE",
+  "source_snapshot_complete": false,
+  "exact_reproduction_ready": false,
+  "scores_are_historical_observations_not_evaluated_on_this_backup_commit": true,
+  "selected_scope": "completed public-test AgentGraph evaluation, fixed 525 denominator, reference evaluator; excludes Direct, partial runs and development subsets",
+  "sample_count": 525,
+  "evaluator_valid": 525,
+  "explicit_finish": 525,
+  "terminal_failure": 0,
+  "official_primary_metric": "overall_score_length_adjusted",
+  "overall_score_length_adjusted": 0.2665977635743483,
+  "overall_score": 0.2818790435743483,
+  "evaluator": "OpenAI simple-evals HealthBench Professional reference",
+  "evaluator_source_revision": "652c89d",
+  "run_completed_at": "2026-09-03T09:51:35.143755+00:00",
+  "recorded_git_baseline": "f680d137cf2187045682c439bf5a7a032cb1d1da",
+  "recorded_git_branch": "feature/healthbench-medrag-paired-v1-20260830",
+  "first_commit_retaining_v227_config": "a4bf83217002cd653ac0eea7c9b0ce34f9df35c5",
+  "baseline_source_location": "repository tree inherited unchanged from recorded_git_baseline",
+  "retained_config_source_worktree": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v1",
+  "archived_files": [
+    {
+      "source": "config/evaluation_healthbench_professional_mixed_all_thinking_v2_27_full525_bestbase_provenance_scope_quality.yaml",
+      "archived": "config/evaluation_healthbench_professional_mixed_all_thinking_v2_27_full525_bestbase_provenance_scope_quality.yaml"
+    },
+    {
+      "source": "config/datasets_healthbench_professional_official_v1.yaml",
+      "archived": "config/datasets_healthbench_professional_official_v1.yaml"
+    },
+    {
+      "source": "config/datasets_runtime_healthbench_professional_official_v1.yaml",
+      "archived": "config/datasets_runtime_healthbench_professional_official_v1.yaml"
+    },
+    {
+      "source": "config/model_catalog_healthbench_professional_mixed_authoritative_thinking_v2.yaml",
+      "archived": "config/model_catalog_healthbench_professional_mixed_authoritative_thinking_v2.yaml"
+    },
+    {
+      "source": "config/model_catalog_healthbench_professional_grader_v1.yaml",
+      "archived": "config/model_catalog_healthbench_professional_grader_v1.yaml"
+    },
+    {
+      "source": "reports/healthbench_professional_mixed_all_thinking_v2_27_full525_bestbase_provenance_scope_quality/evaluation_report.json",
+      "archived": "reports/evaluation_report.json"
+    },
+    {
+      "source": "reports/healthbench_professional_mixed_all_thinking_v2_27_full525_bestbase_provenance_scope_quality/evaluation_report.md",
+      "archived": "reports/evaluation_report.md"
+    },
+    {
+      "source": "artifacts/healthbench_professional_mixed_all_thinking_v2_27_full525_bestbase_provenance_scope_quality/evaluation/run_manifest.json",
+      "archived": "receipts/run_manifest.json"
+    },
+    {
+      "source": "artifacts/healthbench_professional_mixed_all_thinking_v2_27_full525_bestbase_provenance_scope_quality/evaluation/preflight_receipt.json",
+      "archived": "receipts/preflight_receipt.json"
+    },
+    {
+      "source": "data/healthbench_professional_official_v1/manifest.json",
+      "archived": "receipts/dataset_manifest.json"
+    }
+  ],
+  "branch": "backup/healthbench-v227-best525-evidence-20260906",
+  "destination": {
+    "remote_name": "backup",
+    "url": "https://github.com/harvey-zhanghanwen/FlowSteer.git",
+    "push_status": "not_attested_in_commit; consult actual push result"
+  },
+  "blockers": [
+    "Run manifest records Git HEAD only, not the uncommitted worktree delta or a complete resolved-config/source snapshot.",
+    "Recorded baseline does not implement all v2.27 features including Director minimal-neutral.v17 and public_text_quality_v1.",
+    "Next available source snapshot a4bf832 also includes v2.28-v2.32 changes; it is not substituted for the evaluated source."
+  ],
+  "external_resources_excluded": [
+    "model/tokenizer weights",
+    "MedRAG textbook database",
+    "raw conversations and rubric cases",
+    "large trajectories and progress logs",
+    "environment credentials"
+  ],
+  "operations": {
+    "training": false,
+    "evaluation": false,
+    "model_calls": 0,
+    "force_push": false,
+    "main_branch_update": false
+  }
+}
