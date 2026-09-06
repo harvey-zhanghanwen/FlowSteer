@@ -1411,8 +1411,8 @@ class AgentRuntime:
         dirty = execution_graph.dirty_closure(dirty_seeds)
         # Canvas already keeps invalidated successful artifacts separately from
         # its current-output cache.  Reuse that explicit, task-local boundary:
-        # old answers remain invalid, but a reciprocal phase may re-examine its
-        # own source-bound observations.  Never put them in ReAct continuation.
+        # old answers remain invalid, but any re-executed Agent may re-examine
+        # its own source-bound observations. Never put them in ReAct continuation.
         historical_evidence = self._historical_evidence(
             nodes,
             plan,
@@ -1989,17 +1989,20 @@ class AgentRuntime:
         }
         if len(component) == 1:
             agent_id = component[0]
+            upstream = self._upstream(
+                agent_id,
+                plan,
+                outputs,
+                nodes=nodes,
+                graph_revision=graph_revision,
+                output_metadata=output_metadata,
+            )
+            if agent_id in historical_evidence:
+                upstream = (*upstream, historical_evidence[agent_id])
             request = self._request(
                 agent=nodes[agent_id],
                 phase=ExecutionPhase.SINGLE,
-                upstream=self._upstream(
-                    agent_id,
-                    plan,
-                    outputs,
-                    nodes=nodes,
-                    graph_revision=graph_revision,
-                    output_metadata=output_metadata,
-                ),
+                upstream=upstream,
                 problem=problem,
                 run_id=run_id,
                 graph_revision=graph_revision,
@@ -2731,16 +2734,23 @@ class AgentRuntime:
 
         result = {}
         for agent_id in sorted(dirty):
-            if agent_id not in nodes or len(plan.component_for[agent_id]) != 2:
+            if agent_id not in nodes:
                 continue
             artifact = outputs.get(agent_id)
             metadata = output_metadata.get(agent_id)
             if not isinstance(artifact, str) or not artifact.strip() or not isinstance(metadata, Mapping):
                 continue
+            version = metadata.get("artifact_version")
+            if len(plan.component_for[agent_id]) == 1 and (
+                not isinstance(version, str) or not version.strip()
+            ):
+                # Extend the historical handoff to singletons only for a
+                # recorded successful Artifact version. Do not promote an
+                # unversioned caller-supplied text to a prior execution receipt.
+                continue
             provenance = retained_provenance(agent_id, artifact, metadata)
             if provenance is None:
                 continue
-            version = metadata.get("artifact_version")
             revision = metadata.get("graph_revision")
             result[agent_id] = UpstreamMessage(
                 agent_id,
@@ -2972,6 +2982,38 @@ class AgentRuntime:
                 else None
             )
         )
+        if (
+            agent.execution_mode == "reasoning"
+            and not (format_output_agent and agent.id == output_agent_id)
+            and continuation_source_agent_id in {None, agent.id}
+        ):
+            # SkillFlow environment.step keeps public Tool Observations in the
+            # next policy input. A same-node ReAct -> reasoning repair no longer
+            # passes through the ReAct adapter's observation renderer, so route
+            # those observations through the existing reference-only envelope.
+            # Keep failed Actions/completions out, and leave the original
+            # continuation fields untouched for bounded ReAct accounting.
+            retained_receipts = tuple(
+                receipt for receipt in prior_tool_receipts
+                if receipt.get("error_type") is None
+                and isinstance(receipt.get("result"), Mapping)
+                and receipt["result"].get("completed") is not False
+            )
+            if retained_receipts:
+                upstream = (*upstream, UpstreamMessage(
+                    agent.id,
+                    agent.id,
+                    "Public Tool observations retained from this Agent's "
+                    "failed execution. Revalidate these sources against the "
+                    "current task and contract; no prior completion is evidence.",
+                    message_type="historical_evidence",
+                    request_or_dependency=(
+                        "Reference-only source observations, not a current "
+                        "answer or a new upstream dependency."
+                    ),
+                    source_execution_mode="react",
+                    tool_receipts=retained_receipts,
+                ))
         return AgentRequest(
             request_id=request_id,
             run_id=run_id,

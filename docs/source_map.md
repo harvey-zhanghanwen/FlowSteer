@@ -1193,3 +1193,22 @@ Director仍为minimal-neutral.v20，提示词没有修改。原5个开发task、
 generation、seed、并发4、900秒时限、20轮上限及官方grader均保持原值；
 没有重新解释试验名或向模型提供评分目标。Europe PMC官方协议确认默认
 relevance排序，未发现确定排序bug，因此未改其客户端。
+## 2026-09-07 — v2.46：ReAct、职责建议与证据交接
+
+| 模块 | 实际来源及本轮适配 |
+| --- | --- |
+| `agent_runtime._execute_block/_historical_evidence/_request`、`openai_gateway._format_healthbench_upstream_v3` | 复用当前 `UpstreamMessage` 和有界历史证据投影；FlowSteer `InteractiveWorkflowEnv.step` 的执行/反馈、SkillFlow `training/environment.py::step` 的 Action–Observation、MD §3 的有限通信是来源。必要适配：单节点也接收真实的自身历史 evidence；同节点、同阶段 continuation 的成功公开 Tool receipt 可移交，不回收旧答案或故障 completion，不改 ReAct continuation 的次数预算。历史 envelope 明确标注类型，不能冒充新的实时依赖。 |
+| `agent_workflow_env` | 复用 `_record_failure_state`、模型可用域、Canvas MODIFY/admission、fork/reset；参考 SkillFlow/SkillEval `BoundedAgent.execute_turn` 的 typed invalid-action Observation。必要适配：opt-in `allow_untried_react_model_repair`，至少两次真实 parse/schema 错误且原修复耗尽时，开放一次未实际尝试且兼容 ReAct 的 `model_id` 单字段修改。保留 contract、关系、来源和预算；明确终局 Tool plan 不恢复，raw MODIFY 不能绕过次数限制。 |
+| 既有 scope guard | 必要词面修复：citations/references/source identifiers 等输出修饰不作为临床实体；保留任务缩写且首字母一致的展开仅能作为检索假设，不能作为确认的实体或答案。没有医学别名/样本答案表，没有改医学检索客户端。 |
+| `train_agentgraph_smoke`、`config_loader` | 原推理工厂的布尔配置薄接线，旧配置默认 false；没有调用训练部分。 |
+| `evaluate_completion_benchmark_round.validate_completion_benchmark_config` | prepare-only发现原可选医学工具检查强制存在reasoning入口。必要配置兼容修复：接受原完整ReAct profile的单元素allowlist；仍逐项匹配Direct工具集，仍标记非协议等价，不改变评分或预算。 |
+| `healthbench_candidate_skills_v246.yaml` 与 v2.46 evaluation configs | 直接复用现有 candidate profile/helper/receipt，表达参考 SkillFlow `SkillEntry` 的 trigger/plan/pitfall/constraint。用户要求的职责优化只提供可拒绝的实体识别、证据核对、交接/综合建议；不新增固定 role 或 topology。执行配置复用现有 allowlist，仅选 ReAct；无需新 Tool 调用时仍允许 complete。候选不等于 MD §§10–11 的 ACTIVE Skill。 |
+
+本轮未改变 Qwen3.5-9B Director、minimal-neutral.v20、官方 rubric evaluator、
+模型目录、训练权重与 Tool 预算。新固定五题和全量门槛见
+`docs/healthbench_v246_iteration_protocol.md`；新完整525配置只作准备，未运行。
+定向验证：scope/recovery 32项新增和21项既有回归通过；evidence handoff
+14项测试及4个参数子例通过；配置4项与实际推理工厂接线2项通过。未重复
+全套测试或调用模型，不能以单测通过代替真实完成率和官方评分。
+runner真实配置入口另有37项定向测试通过：两份ReAct-only、旧allowlist兼容，
+以及缺少工具/错误execution mode/错误协议声明的拒绝边界。

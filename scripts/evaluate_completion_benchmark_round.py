@@ -539,9 +539,12 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                         protocol_equivalent_to_direct is False
                         # Reuse the existing paired full-toolset profile
                         # as an alternative to source-specific profiles.
-                        # Both preserve the exact Direct tool condition.
+                        # A ReAct-only Graph may use that same full profile
+                        # without exposing tool-free reasoning. Keep the
+                        # non-equivalent declaration: a mixed-model Graph
+                        # is not a causal paired Direct comparison.
                         and raw_execution_profile_allowlist in (
-                            optional_profiles, admitted_profiles,
+                            optional_profiles, admitted_profiles, [direct_profile],
                         )
                     )
         else:

@@ -1070,6 +1070,11 @@ def _format_healthbench_upstream_v3(
             "source_execution_mode": item.source_execution_mode,
             "source_model_id": item.source_model_id,
         }
+        if item.message_type == "historical_evidence":
+            # The same bounded projection serves singleton repairs and
+            # reciprocal revisions. Label retained observations as reference
+            # input, not as an additional live dependency/current answer.
+            envelope["message_type"] = item.message_type
         if condition is CommunicationCondition.UPSTREAM_MASKED:
             envelope["artifact"] = MASKED_UPSTREAM_CONTENT
         else:

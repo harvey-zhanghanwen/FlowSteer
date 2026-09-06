@@ -3957,6 +3957,9 @@ class LiveSmokeBackend:
                 allow_same_provider_transient_repair=graph_config.get(
                     "allow_same_provider_transient_repair", False
                 ),
+                allow_untried_react_model_repair=graph_config.get(
+                    "allow_untried_react_model_repair", False
+                ),
                 finish_only_when_admissible=bool(
                     graph_config.get("finish_only_when_admissible", False)
                 ),

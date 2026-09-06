@@ -1,0 +1,60 @@
+# Optional orchestration candidates: no learned/ACTIVE status or medical answers.
+schema_version: flowsteer.healthbench-candidate-skill-profile.v1
+profile_version: healthbench.orchestration-candidates.v2.46
+dataset_key: healthbench_professional
+status: candidate
+training_enabled: false
+skill_publication_enabled: false
+candidates:
+  - condition_id: identify_before_assigning_explanation_v246
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: >-
+      A named entity or factual premise is unresolved when assigning work.
+    action:
+      instruction: >-
+        Consider a short identification contract before assigning explanation:
+        search the original expression, match the source's entity and context,
+        and report the match or unresolved alternatives with source IDs.
+        Related literature or a no-hit result does not establish identity.
+        Do not add a guessed expansion, population or conclusion to downstream
+        contracts. Choose responsibilities, models and relations freely; an
+        independent check is optional when evidence conflicts, not a fixed role.
+  - condition_id: repair_protocol_preserving_react_v246
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: >-
+      Real feedback reports repeated parsing, evidence-binding or Tool-action errors.
+    action:
+      instruction: >-
+        Keep ReAct and its Tool capability. Fix the reported field or source
+        binding; copy identifiers and excerpts from actual observations, not
+        memory. At a legal repair opportunity consider another admitted model
+        for the same node, retaining successful receipts. Do not replace a
+        failed evidence collection with tool-free reasoning, expand medical
+        prose to repair JSON, or add consumers blocked by that failed node.
+        Change only the admitted field per action and respect the shared budget.
+  - condition_id: evidence_handoff_and_responsibility_check_v246
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: >-
+      Routing artifacts, assigning complementary responsibilities or preparing an Output.
+    action:
+      instruction: >-
+        State the result each contract must deliver and which actual upstream
+        artifact it needs. Keep observed evidence, source IDs, interpretation
+        and uncertainty distinct. A promise to search is not a finding. Choose
+        an optional evidence-checking or synthesis responsibility for a real
+        gap, not another agreeing summary. Keep every node in ReAct: it may
+        complete from sufficient received evidence without another Tool call.
+        Do not turn an unsupported premise into a recommendation. FINISH only
+        with a complete response to the original task and a legal Output.

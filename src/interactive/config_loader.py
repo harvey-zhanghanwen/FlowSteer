@@ -177,6 +177,7 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         "reuse_unchanged_agent_inputs",
         "require_output_protocol_artifact_for_set_output",
         "require_reciprocal_terminal_artifact_lineage",
+        "allow_untried_react_model_repair",
     ):
         option_value = graph.get(option_name)
         if option_value is not None and type(option_value) is not bool:

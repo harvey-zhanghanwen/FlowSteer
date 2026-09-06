@@ -1982,3 +1982,34 @@ length和长feedback积累等失败；WATERFALL首搜反馈实际触发且找到
 离线报告仅修正“没有终局轨迹等于没有任何中间证据”的过度断言，指向本轮
 non-scoreable partial文件；不改变指标、运行源码、FINISH或官方评估。
 报告生成不发出模型/Tool/grader请求，没有重新跑失败题或扩大到525题。
+## 2026-09-07 — v2.46 固定新五题的 ReAct 工程迭代
+
+从 v2.45 最终报告提交 `b8ffb2eba5508ee700475eb1763e044836adcba3` 建立
+`feature/healthbench-v2.46-react-evidence-disambiguation-20260907`。
+用户澄清是另外5道 HealthBench 题，并允许通过候选 Skill 调整职责。按官方
+文件顺序仅看 ID，排除上一轮五题，选定 ordinal 0–4；后续修复不更换样本。
+公开全集有历史评测，故不声称这五题是从未接触的独立测试集。
+
+首次prepare-only在模型调用前发现配置不兼容：runner的医学工具allowlist
+检查仅接受带reasoning的组合。沿既有检查增加完整ReAct-only形式；不删除
+工具匹配检查、不声称与Direct等价。此失败没有调用模型或grader。
+修复后prepare-only已通过，实际选择固定5题；尚未开始生成或评分。
+runner真实入口37项定向测试通过，旧配置兼容且不放宽工具条件；新增测试
+没有额外模型调用。各实现子任务均已结束，主线单点冻结并运行。
+
+旧 demo 中的确定问题：单节点修改后历史 evidence 未入请求；ReAct 切到
+reasoning 时公开检索记录丢失；scope guard 把普通引用要求当临床实体；
+已反复发生协议错误的节点在既有恢复耗尽时不能尝试一个未用兼容模型。
+本次沿既有接口作最小修复并通过定向测试，来源逐项写入 source_map。
+新条件只允许 ReAct execution mode，避免通过关闭工具模式跳过错误；
+保留跨版本薄适配的证据交接能力，不强制每个节点重复查库。
+
+候选 Skill 的职责建议仍可拒绝：先识别未确定实体，保留真实证据和不确定性，
+明确当前节点产物与实际依赖；按缺口核对或综合。没有预设医疗角色或强制
+Reasoner→Verifier→Formatter，没有 sample/rubric/答案写入提示词。
+
+已通过32项新增scope/recovery、21项既有scope回归、14项evidence测试及
+4个参数子例、4项配置和2项工厂接线测试。本记录写入时尚未运行v2.46模型
+或grader，尚无新分数；无训练、权重更新、ACTIVE发布或自动Skill evolution。
+完整525只有在同一固定五题5/5 FINISH且evaluator-valid、length-adjusted
+均分严格超过60%后，先备份接受版本再启动；不能将缺失计零或回收中间答案。

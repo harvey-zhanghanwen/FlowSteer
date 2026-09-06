@@ -430,6 +430,7 @@ class AgentWorkflowEnv:
         require_output_protocol_artifact_for_set_output: bool = False,
         require_reciprocal_terminal_artifact_lineage: bool = False,
         allow_same_provider_transient_repair: bool = False,
+        allow_untried_react_model_repair: bool = False,
     ) -> None:
         if runtime is None and gateway is None:
             raise AgentWorkflowStateError("gateway or runtime is required")
@@ -473,6 +474,7 @@ class AgentWorkflowEnv:
             ),
             ("reuse_unchanged_agent_inputs", reuse_unchanged_agent_inputs),
             ("allow_same_provider_transient_repair", allow_same_provider_transient_repair),
+            ("allow_untried_react_model_repair", allow_untried_react_model_repair),
             (
                 "require_output_protocol_artifact_for_set_output",
                 require_output_protocol_artifact_for_set_output,
@@ -593,6 +595,7 @@ class AgentWorkflowEnv:
         )
         self.reuse_unchanged_agent_inputs = reuse_unchanged_agent_inputs
         self.allow_same_provider_transient_repair = allow_same_provider_transient_repair
+        self.allow_untried_react_model_repair = allow_untried_react_model_repair
         self.require_output_protocol_artifact_for_set_output = (
             require_output_protocol_artifact_for_set_output
         )
@@ -635,6 +638,8 @@ class AgentWorkflowEnv:
         self._repair_exhausted_agent_ids: set[str] = set()
         self._latest_failure_record_by_agent: dict[str, AgentFailureRecord] = {}
         self._pending_repair_receipt_count_by_agent: dict[str, int] = {}
+        self._react_attempted_model_ids: dict[str, set[str]] = {}
+        self._untried_react_model_repair_used: set[str] = set()
         # Frozen catalog membership remains unchanged during a trajectory.
         # Permanent provider/model failures add only a trajectory-scoped
         # availability overlay used by Runtime scheduling and Canvas admission.
@@ -2517,6 +2522,8 @@ class AgentWorkflowEnv:
             return node_ids
 
         def has_non_noop_repair(agent_id: str) -> bool:
+            if self._untried_react_repair_model_ids(agent_id):
+                return True
             if self._provider_repair_required(agent_id):
                 return bool(self._provider_repair_model_ids(agent_id))
             if agent_id not in self._react_exhausted_agent_ids:
@@ -2787,6 +2794,21 @@ class AgentWorkflowEnv:
         constraints after this common boundary.
         """
 
+        if (
+            self.allow_untried_react_model_repair
+            and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
+            and not self._uses_semantic_lineage_protocol()
+            and action.action_type is AgentActionType.MODIFY_AGENT
+            and action.agent_id in self._repair_exhausted_agent_ids
+            and self._graph.has_node(action.agent_id)
+            and self._graph.get_node(action.agent_id).execution_mode.value == "react"
+            and not self._untried_react_repair_model_ids(action.agent_id)
+        ):
+            return (
+                "repair-exhausted ReAct Agent has no remaining untried model "
+                "repair in the live action domain; MODIFY cannot reset its "
+                "protocol repair allowance or Tool continuation"
+            )
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
         if not mandatory_repair_ids:
             return None
@@ -3105,6 +3127,10 @@ class AgentWorkflowEnv:
             self._failed_agent_ids - self._diagnosed_unusable_agent_ids
             - self._repair_exhausted_agent_ids
         ).intersection(node_ids)
+        repairable_failed.update(
+            node_id for node_id in node_ids
+            if self._untried_react_repair_model_ids(node_id)
+        )
         if repairable_failed:
             return tuple(
                 node_id for node_id in node_ids if node_id in repairable_failed
@@ -3912,6 +3938,59 @@ class AgentWorkflowEnv:
             }
         )
 
+    def _untried_react_repair_model_ids(self, agent_id: str) -> Tuple[str, ...]:
+        """One catalog-backed model repair after measured protocol stagnation.
+
+        Reuse FlowSteer's MODIFY/feedback boundary and SkillFlow's typed
+        invalid-action Observation plus public continuation. No Tool budget
+        is reset: a full Tool allowance can still permit complete, whereas
+        an explicitly terminal continuation cannot be resumed.
+        """
+        if (
+            not self.allow_untried_react_model_repair
+            or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+            or self._uses_semantic_lineage_protocol()
+            or agent_id not in self._repair_exhausted_agent_ids
+            or agent_id in self._diagnosed_unusable_agent_ids
+            or agent_id in self._untried_react_model_repair_used
+            or not self._graph.has_node(agent_id)
+        ):
+            return ()
+        node = self._graph.get_node(agent_id)
+        record = self._latest_failure_record_by_agent.get(agent_id)
+        if (
+            node.execution_mode.value != "react"
+            or record is None
+            or self._execution_failure_diagnosis(record)[0]
+            not in _BOUNDED_REACT_FAILURE_CATEGORIES
+            or self._tool_continuation_exhausted(record.metadata)
+        ):
+            return ()
+        summary = self._react_public_error_summary(record)
+        counts = summary.get("observation_status_counts", {})
+        if not isinstance(counts, Mapping) or sum(
+            counts[status] for status in ("parse_error", "schema_invalid")
+            if type(counts.get(status)) is int and counts[status] > 0
+        ) < 2:
+            return ()
+        attempted = self._react_attempted_model_ids.get(agent_id, set())
+        return tuple(
+            model_id for model_id in self._available_model_ids()
+            if model_id != node.model_id and model_id not in attempted
+            and self.runtime.model_supports_execution_profile(
+                model_id, node.execution_mode.value, node.allowed_tools,
+            )
+        )
+
+    def _record_react_execution_models(self, execution: AgentRuntimeResult) -> None:
+        if not self.allow_untried_react_model_repair:
+            return
+        for call in execution.calls:
+            if call.request.agent.execution_mode.value == "react":
+                self._react_attempted_model_ids.setdefault(
+                    call.request.agent.id, set(),
+                ).add(call.request.model.model_id)
+
     def _provider_repair_model_ids(self, agent_id: str) -> Tuple[str, ...]:
         """Return the typed provider-failure model repair domain.
 
@@ -4487,6 +4566,9 @@ class AgentWorkflowEnv:
                 agent_id: list(
                     model_id
                     for model_id in (
+                        self._untried_react_repair_model_ids(agent_id)
+                        if self._untried_react_repair_model_ids(agent_id)
+                        else
                         self._provider_repair_model_ids(agent_id)
                         if agent_id in provider_failure_agent_ids
                         else tuple(
@@ -4540,6 +4622,7 @@ class AgentWorkflowEnv:
                     for field in (
                         ["model_id"]
                         if agent_id in provider_failure_agent_ids
+                        or self._untried_react_repair_model_ids(agent_id)
                         else list(
                             per_agent_recovery_field_values[agent_id]
                         )
@@ -4774,6 +4857,8 @@ class AgentWorkflowEnv:
         # frozen model catalog or leave a stale failure receipt.
         self._unavailable_model_ids.clear()
         self._model_availability_receipts.clear()
+        self._react_attempted_model_ids.clear()
+        self._untried_react_model_repair_used.clear()
         self._component_execution_cache.clear()
         self._clear_progressive_execution()
         return self.snapshot()
@@ -4856,11 +4941,21 @@ class AgentWorkflowEnv:
                 self.require_reciprocal_terminal_artifact_lineage
             ),
             allow_same_provider_transient_repair=self.allow_same_provider_transient_repair,
+            allow_untried_react_model_repair=self.allow_untried_react_model_repair,
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
         result._last_feedback = state.last_feedback
         result._history = list(state.history)
+        result._react_attempted_model_ids = {
+            agent_id: set(models)
+            for agent_id, models in self._react_attempted_model_ids.items()
+            if result._graph.has_node(agent_id)
+        }
+        result._untried_react_model_repair_used = {
+            agent_id for agent_id in self._untried_react_model_repair_used
+            if result._graph.has_node(agent_id)
+        }
         return result
 
     async def step(self, action_or_response: Union[AgentAction, str]) -> AgentWorkflowStepResult:
@@ -5221,9 +5316,16 @@ class AgentWorkflowEnv:
             candidate,
             action,
         )
+        untried_model_repair = bool(
+            action.action_type is AgentActionType.MODIFY_AGENT
+            and action.agent_id is not None
+            and action.model_id in self._untried_react_repair_model_ids(action.agent_id)
+        )
         self._graph = candidate
         current_agent_ids = {node.id for node in self._graph.nodes}
         self._retain_current_failure_state(current_agent_ids)
+        if untried_model_repair:
+            self._untried_react_model_repair_used.add(action.agent_id)
         # One accepted edit is one FlowSteer execute-and-feedback boundary.
         # A repair baseline must never leak into a later unrelated edit.
         self._pending_repair_receipt_count_by_agent.clear()
@@ -5344,6 +5446,7 @@ class AgentWorkflowEnv:
                     execution_error = exc
                     partial_execution = exc.partial_result
                     if partial_execution is not None:
+                        self._record_react_execution_models(partial_execution)
                         partial_outputs = dict(partial_execution.outputs)
                         partial_metadata = {
                             agent_id: dict(metadata)
@@ -5394,6 +5497,7 @@ class AgentWorkflowEnv:
                         current_agent_ids=current_agent_ids,
                     )
                 else:
+                    self._record_react_execution_models(execution)
                     execution_reused = bool(
                         not execution.calls
                         and execution.execution_reuse_receipts
@@ -6897,6 +7001,11 @@ class AgentWorkflowEnv:
         self._diagnosed_unusable_agent_ids.intersection_update(current_agent_ids)
         self._react_exhausted_agent_ids.intersection_update(current_agent_ids)
         self._repair_exhausted_agent_ids.intersection_update(current_agent_ids)
+        self._untried_react_model_repair_used.intersection_update(current_agent_ids)
+        self._react_attempted_model_ids = {
+            agent_id: models for agent_id, models in self._react_attempted_model_ids.items()
+            if agent_id in current_agent_ids
+        }
         self._latest_failure_record_by_agent = {
             agent_id: record
             for agent_id, record in self._latest_failure_record_by_agent.items()
@@ -7152,6 +7261,18 @@ class AgentWorkflowEnv:
             category, retryability, status_code = (
                 self._execution_failure_diagnosis(record)
             )
+            if (
+                self.allow_untried_react_model_repair
+                and self._graph.get_node(record.agent_id).execution_mode.value == "react"
+                and record.metadata.get("model_calls")
+                and category != "sibling_fail_fast_cancellation"
+            ):
+                model_id = record.metadata.get("model_id")
+                if model_id not in self.model_registry.model_ids:
+                    model_id = self._graph.get_node(record.agent_id).model_id
+                self._react_attempted_model_ids.setdefault(
+                    record.agent_id, set(),
+                ).add(model_id)
             self._record_model_unavailability(
                 record,
                 category=category,
@@ -8280,6 +8401,12 @@ class AgentWorkflowEnv:
             r"([A-Za-z][A-Za-z0-9'\’-]{2,})\b",
             flags=re.IGNORECASE,
         )
+        output_attachment = re.compile(
+            r"(?:(?:clear|concise|complete|brief|explicit|relevant)\s+)*"
+            r"(?:citations?|references?|source\s+(?:ids?|identifiers?)|"
+            r"provenance)\b",
+            flags=re.IGNORECASE,
+        )
         generic_entity_slot_heads = {
             "comparable",
             "complex",
@@ -8303,6 +8430,47 @@ class AgentWorkflowEnv:
                 self._contains_lexical_span(text, literal)
                 for text in public_texts
             )
+
+        def inquiry_literal_text(contract: str) -> str:
+            # Necessary lexical adaptation of the existing Canvas guard,
+            # not an alias dictionary or an assertion that an expansion is
+            # true. A named search target retaining the task's acronym can
+            # be investigated. An explicit diagnosis/conclusion cannot use
+            # this exemption; public evidence still grounds answer literals.
+            parts = re.split(r"(?<=[.!?;])\s+|\n+", contract)
+            for index, clause in enumerate(parts):
+                if not re.search(
+                    r"\b(?:search|retrieve|investigate|identify)\b", clause,
+                    flags=re.IGNORECASE,
+                ) or re.search(
+                    r"\b(?:diagnose|recommend|prescribe|conclude|assert|"
+                    r"confirm|declare|means|stands\s+for)\b|"
+                    r"\b(?:answer|diagnosis|conclusion)\s+(?:is|must\s+be)\b|"
+                    r"\b(?:as|is|are)\s+(?:the\s+)?(?:correct|recommended|"
+                    r"preferred|best|final|confirmed|definitive|diagnosis|answer)\b",
+                    clause, flags=re.IGNORECASE,
+                ):
+                    continue
+
+                def retain_task_acronym(match: re.Match[str]) -> str:
+                    expansion, acronym = match.group(1), match.group(2)
+                    words = expansion.split()
+                    prefix = ""
+                    if words[0].casefold() in {"search", "retrieve", "investigate", "identify"}:
+                        prefix = words.pop(0) + " "
+                    initials = "".join(word[0] for word in words)
+                    if initials == acronym and self._contains_lexical_span(
+                        self._problem, acronym,
+                    ):
+                        return prefix + acronym
+                    return match.group(0)
+
+                parts[index] = re.sub(
+                    r"\b([A-Z][A-Za-z'’-]*(?:\s+[A-Z][A-Za-z'’-]*){1,5})"
+                    r"\s*\(([A-Z]{2,}[A-Z0-9]*)\)",
+                    retain_task_acronym, clause,
+                )
+            return "\n".join(parts)
 
         for agent_id, contract in entries:
             # NECESSARY_PROJECT_ADAPTATION: keep the existing FlowSteer Canvas
@@ -8355,16 +8523,20 @@ class AgentWorkflowEnv:
                         "limitations, uncertainty, or escalation guidance"
                     )
             external_literals: list[str] = []
+            literal_contract = inquiry_literal_text(contract)
             if unresolved_task_anchors:
-                for match in entity_slot_candidate.finditer(contract):
+                for match in entity_slot_candidate.finditer(literal_contract):
                     candidate = " ".join(match.group(1).split()).strip()
                     if (
                         candidate
                         and candidate.casefold() not in generic_entity_slot_heads
+                        and output_attachment.match(
+                            literal_contract, match.start(1),
+                        ) is None
                         and not is_grounded(candidate)
                     ):
                         external_literals.append(candidate)
-            for match in alias_candidate.finditer(contract):
+            for match in alias_candidate.finditer(literal_contract):
                 source = match.group(1) or match.group(3) or ""
                 replacement = match.group(2) or match.group(4) or ""
                 source = " ".join(source.split()).strip(" .,:;")
@@ -8372,7 +8544,7 @@ class AgentWorkflowEnv:
                 if source and replacement and is_grounded(source):
                     if not is_grounded(replacement):
                         external_literals.append(replacement)
-            for clause in re.split(r"(?<=[.!?;])\s+|\n+", contract):
+            for clause in re.split(r"(?<=[.!?;])\s+|\n+", literal_contract):
                 if decisive_assertion.search(clause) is None:
                     continue
                 # Agent IDs are Canvas references rather than domain facts.
@@ -12599,7 +12771,21 @@ class AgentWorkflowEnv:
                 item["react_public_error_summary"] = (
                     self._react_public_error_summary(record)
                 )
-                if record.agent_id in self._repair_exhausted_agent_ids:
+                untried_models = self._untried_react_repair_model_ids(record.agent_id)
+                if untried_models:
+                    item["preferred_repair"] = {
+                        "action": "modify_agent",
+                        "agent_id": record.agent_id,
+                        "field": "model_id",
+                        "admitted_model_ids": list(untried_models),
+                        "additional_model_repair_attempts_remaining": 1,
+                        "preserve_fields": [
+                            "contract", "role_family", "allowed_tools",
+                            "execution_mode", "artifact_type", "completion_condition",
+                            "relations", "react_trace", "existing_tool_receipts",
+                        ],
+                    }
+                elif record.agent_id in self._repair_exhausted_agent_ids:
                     action_order = [
                         action_type
                         for action_type in (
