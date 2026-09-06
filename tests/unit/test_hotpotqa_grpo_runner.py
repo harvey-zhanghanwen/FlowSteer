@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import sys
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -29,6 +31,7 @@ HotpotTrainingError = _MODULE.HotpotTrainingError
 run_hotpotqa_training = _MODULE.run_hotpotqa_training
 sample_hotpotqa_tasks = _MODULE.sample_hotpotqa_tasks
 validate_hotpotqa_training_config = _MODULE.validate_hotpotqa_training_config
+WandbTracker = _MODULE.WandbTracker
 
 
 class FakeTracker:
@@ -240,6 +243,8 @@ def _create_project(root: Path) -> Path:
     config["experiment"]["output_dir"] = "artifacts/training"
     config["experiment"]["training_enabled"] = True
     config["gpu"]["training_enabled"] = True
+    config["tracking"]["validation_protocol"]["status"] = "frozen"
+    config["tracking"]["checkpoint_artifact"]["status"] = "ready"
     config["md_compliance"].update(
         phase_0_status="passed",
         real_step_authorized=True,
@@ -262,9 +267,40 @@ class ConfigAndSamplingTests(unittest.TestCase):
     def test_config_fixes_grpo_and_disables_other_learning_flows(self) -> None:
         config = yaml.safe_load(_CONFIG.read_text(encoding="utf-8"))
         validate_hotpotqa_training_config(config)
+        self.assertEqual("WANDB_BINDING_20260906_V1", config["tracking"]["binding_marker"])
+        self.assertEqual("zhanghanwen6660909-dut", config["tracking"]["entity"])
+        self.assertEqual("flowsteer-hotpotqa", config["tracking"]["project"])
         config["grpo"]["ttb_enabled"] = True
         with self.assertRaisesRegex(Exception, "TTB"):
             validate_hotpotqa_training_config(config)
+
+    def test_wandb_uses_sdk_default_credentials_and_requires_real_url(self) -> None:
+        config = yaml.safe_load(_CONFIG.read_text(encoding="utf-8"))
+        captured: dict = {}
+        run = SimpleNamespace(
+            id="run-test",
+            url="https://wandb.invalid/run-test",
+            summary=SimpleNamespace(update=lambda values: None),
+            log=lambda values, step, commit: None,
+            finish=lambda exit_code: None,
+        )
+        module = ModuleType("wandb")
+
+        def init(**kwargs):
+            captured.update(kwargs)
+            return run
+
+        module.init = init  # type: ignore[attr-defined]
+        with (
+            patch.dict(sys.modules, {"wandb": module}),
+            patch.dict(_MODULE.os.environ, {"WANDB_API_KEY": ""}),
+        ):
+            tracker = WandbTracker(config)
+        self.assertEqual("run-test", tracker.run_id)
+        self.assertEqual("https://wandb.invalid/run-test", tracker.run_url)
+        self.assertEqual("zhanghanwen6660909-dut", captured["entity"])
+        self.assertEqual("flowsteer-hotpotqa", captured["project"])
+        self.assertEqual("online", captured["mode"])
 
     def test_skillflow_seeded_sample_is_repeatable_and_unique(self) -> None:
         pool = tuple(_task(index) for index in range(10))

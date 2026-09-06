@@ -69,9 +69,18 @@
 
 单步验收通过前，`long_training_authorized=false`；不会进入 250–300 optimizer steps。
 
+## WANDB_BINDING_20260906_V1
+
+- entity：`zhanghanwen6660909-dut`。
+- project：`flowsteer-hotpotqa`。
+- mode：`online`。
+- credential source：W&B SDK 默认凭据；代码不要求、读取或记录显式 API key 字段。
+- run URL：尚无，因为当前没有创建 W&B run，也没有启动训练。
+- 每步 required fields、`latest`/`best` checkpoint aliases 和恢复元数据契约已写入主配置。
+- 当前仍阻塞：训练环境需统一到包含 W&B SDK 的环境；per-step validation protocol 尚未冻结；checkpoint 尚缺 scheduler/RNG；checkpoint artifact 上传/引用尚未接入 runner。因此不得将配置绑定描述为 W&B 已连接。
+
 ## Commit-exact 原始代码版本
 
 - FlowSteer：`beita6969/FlowSteer@a329b577a8e8c2f2d5492983b492473a06a8e718`（与论文 v4 对齐）。
 - SkillFlow：`beita6969/SkillFlow@74be52bb6bd9f0e9e68dacb72636b75649197983`，本地只读 checkout：`/ssd1/iclr/owner/skillflow-iclr/06_GITHUB_RELEASE_20260816`。
 - HotpotQA 起点：`backup/hotpotqa-compliant-best-round01-20260906@740e53ec6ccac635ecbe7f1f379b002bfb2574d1`，不改写。
-

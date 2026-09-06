@@ -158,13 +158,48 @@ policy_sync:
   post_update_canary_count: 1
 
 tracking:
+  binding_marker: "WANDB_BINDING_20260906_V1"
   enabled: true
   mode: "online"
   project: "flowsteer-hotpotqa"
-  entity: "${WANDB_ENTITY:-}"
+  entity: "zhanghanwen6660909-dut"
+  credential_source: "wandb_sdk_default"
+  require_run_url: true
   run_name: "hotpotqa-qwen35-9b-grpo-300step"
   run_id: "${WANDB_RUN_ID:-}"
   tags: [flowsteer, hotpotqa, qwen3.5-9b, action-masked-one-pass-grpo]
+  required_step_fields:
+    - global_step
+    - dataset
+    - policy/behavior_version
+    - policy/updated_version
+    - checkpoint/version
+    - terminal_reward/mean
+    - group_reward/mean
+    - group_reward/std
+    - rollout/valid_count
+    - train/grpo_loss
+    - train/grad_norm
+    - train/lora_update_l2
+    - train/exact_match
+    - train/token_f1
+    - validation/exact_match
+    - validation/token_f1
+    - gpu/memory
+    - timing/step_seconds
+    - checkpoint/saved
+    - policy/publish_success
+    - policy/route_switch_success
+    - policy/canary_success
+  validation_protocol:
+    required_each_step: true
+    status: "not_frozen"
+  checkpoint_artifact:
+    enabled: true
+    type: "model"
+    aliases: [latest, best]
+    recovery_metadata_required: true
+    status: "blocked_incomplete_recovery_checkpoint"
 
 # Separate evidence flows are intentionally excluded from this run.  The MD
 # forbids mixing forced probes/posterior or unvalidated Skills into GRPO.

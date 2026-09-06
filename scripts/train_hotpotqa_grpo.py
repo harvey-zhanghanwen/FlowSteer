@@ -100,8 +100,6 @@ class WandbTracker:
         tracking = _mapping(config["tracking"], "tracking")
         if tracking.get("enabled") is not True or tracking.get("mode") != "online":
             raise ConfigurationError("tracking must be enabled in online mode")
-        if not os.environ.get("WANDB_API_KEY", "").strip():
-            raise ConfigurationError("WANDB_API_KEY is required for online training")
         try:
             import wandb
         except ImportError as exc:  # pragma: no cover - runtime dependency
@@ -164,8 +162,22 @@ class WandbTracker:
         self._run = run
         self.run_id = str(run.id)
         self.run_url = str(getattr(run, "url", "") or "")
+        if tracking.get("require_run_url") is True and not self.run_url.strip():
+            try:
+                run.finish(exit_code=1)
+            finally:
+                raise RuntimeError("Weights & Biases returned no run URL")
+        self._required_step_fields = frozenset(
+            str(name) for name in tracking.get("required_step_fields", ())
+        )
 
     def log(self, values: Mapping[str, Any], *, step: int) -> None:
+        missing = self._required_step_fields - set(values)
+        if missing:
+            raise RuntimeError(
+                "Weights & Biases step metrics are incomplete: "
+                + ", ".join(sorted(missing))
+            )
         try:
             self._run.log(dict(values), step=step, commit=True)
         except Exception as exc:  # pragma: no cover - network/account runtime
@@ -305,6 +317,13 @@ def validate_hotpotqa_training_config(config: Mapping[str, Any]) -> None:
         == 1,
         "tracking.enabled": tracking.get("enabled") is True,
         "tracking.mode": tracking.get("mode") == "online",
+        "tracking.binding_marker": tracking.get("binding_marker")
+        == "WANDB_BINDING_20260906_V1",
+        "tracking.entity": tracking.get("entity") == "zhanghanwen6660909-dut",
+        "tracking.project": tracking.get("project") == "flowsteer-hotpotqa",
+        "tracking.credential_source": tracking.get("credential_source")
+        == "wandb_sdk_default",
+        "tracking.require_run_url": tracking.get("require_run_url") is True,
         "exploration.enabled": exploration.get("enabled") is False,
         "skills.enabled": skills.get("enabled") is False,
     }
@@ -337,6 +356,48 @@ def validate_hotpotqa_training_config(config: Mapping[str, Any]) -> None:
         raise ConfigurationError(
             "Bayesian posterior updates must remain disabled in this task-learning run"
         )
+    required_wandb_fields = {
+        "global_step",
+        "dataset",
+        "policy/behavior_version",
+        "policy/updated_version",
+        "checkpoint/version",
+        "terminal_reward/mean",
+        "group_reward/mean",
+        "group_reward/std",
+        "rollout/valid_count",
+        "train/grpo_loss",
+        "train/grad_norm",
+        "train/lora_update_l2",
+        "train/exact_match",
+        "train/token_f1",
+        "validation/exact_match",
+        "validation/token_f1",
+        "gpu/memory",
+        "timing/step_seconds",
+        "checkpoint/saved",
+        "policy/publish_success",
+        "policy/route_switch_success",
+        "policy/canary_success",
+    }
+    configured_wandb_fields = set(tracking.get("required_step_fields", ()))
+    if not required_wandb_fields.issubset(configured_wandb_fields):
+        raise ConfigurationError("tracking.required_step_fields is incomplete")
+    if experiment.get("training_enabled") is True:
+        validation_protocol = _mapping(
+            tracking.get("validation_protocol"), "tracking.validation_protocol"
+        )
+        artifact = _mapping(
+            tracking.get("checkpoint_artifact"), "tracking.checkpoint_artifact"
+        )
+        if validation_protocol.get("status") != "frozen":
+            raise ConfigurationError(
+                "per-step validation protocol must be frozen before training"
+            )
+        if artifact.get("status") != "ready":
+            raise ConfigurationError(
+                "recoverable W&B checkpoint artifact contract is not ready"
+            )
 
     oom = _mapping(_mapping(config["gpu"], "gpu")["oom_policy"], "gpu.oom_policy")
     if tuple(oom.get("micro_batch_schedule", ())) != (4, 2, 1):

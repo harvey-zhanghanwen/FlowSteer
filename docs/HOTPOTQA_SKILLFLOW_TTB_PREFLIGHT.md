@@ -14,7 +14,7 @@
 1. 当前处于 Phase 0 数据可信性，尚未以 fresh HotpotQA trajectory 完成 terminal reward lineage 与 snapshot replay 验收。
 2. Phase 1–4 只有部分 primitive/schema/unit test；没有真实阶段实验与晋级证据。
 3. 当前 θ checkpoint 只覆盖 adapter 与 AdamW state；scheduler、Python/NumPy/PyTorch/CUDA RNG 和完整训练元数据的保存/恢复尚未完成。
-4. W&B online fail-closed 前置尚未验证。
+4. W&B 已固定绑定 `zhanghanwen6660909-dut/flowsteer-hotpotqa` 与 online 模式，但尚未创建 run；per-step validation 和 recoverable checkpoint artifact 接线未完成，因此没有 run URL。
 5. 尚未执行不冲突 GPU resource admission。
 6. 一个真实 GRPO optimizer step 及其 checkpoint→publish→route switch→canary→new-policy rollout 尚未运行。
 
