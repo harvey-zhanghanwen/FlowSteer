@@ -1,0 +1,60 @@
+# Unvalidated, predeclared prompt conditions; no ACTIVE Skill publication.
+# Wire format: run_joint_qa_mace_skill.py::_prompt_condition.
+# Method boundary: project MD sections 10 and 11; no medical answer content.
+schema_version: flowsteer.healthbench-candidate-skill-profile.v1
+profile_version: healthbench.orchestration-candidates.v2.41
+dataset_key: healthbench_professional
+status: candidate
+training_enabled: false
+skill_publication_enabled: false
+candidates:
+  - condition_id: preserve_scope_and_evidence_binding_v241
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: >-
+      Planning or revising a contract, query, or dependency that interprets the
+      supplied conversation.
+    action:
+      instruction: >-
+        Preserve the original requested relation and scope. Distinguish the
+        user's constraints from assumptions introduced by an Agent. Bind each
+        source statement to its actual entity and applicability before using
+        it downstream. Resolve ambiguity from observations rather than adding
+        an unsupported interpretation.
+  - condition_id: repair_from_existing_receipts_v241
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: >-
+      Actual Canvas feedback reports a Tool, artifact, or dependency failure.
+    action:
+      instruction: >-
+        Preserve valid artifacts and working relations. Diagnose the reported
+        failure before changing the affected node or relation. Reuse existing
+        receipts and read the original source when needed; do not repeat an
+        unchanged search or invent a replacement quotation. Pass faithful
+        evidence and its provenance separately from interpretation. Add a
+        repair unit only for an unresolved need.
+  - condition_id: complete_evidence_aware_response_v241
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: before_final_answer
+      required_tools: []
+    trigger: >-
+      The graph is structurally complete and an output is being assessed for
+      final submission; structural completeness alone does not mean FINISH
+      is admissible.
+    action:
+      instruction: >-
+        Check that the output addresses the entire original request and keeps
+        relevant applicability, limitations, and uncertainty from upstream
+        evidence. Avoid duplicate claims without discarding necessary
+        conditions. Add an independent check only for a concrete unresolved
+        conflict or requirement; choose its model and relations freely. When
+        the response is complete and FINISH is admissible, submit it.

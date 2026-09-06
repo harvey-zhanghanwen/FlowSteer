@@ -762,6 +762,7 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
         require_refinement_on_insufficient_evidence: bool = False,
         require_structured_evidence_artifact: bool = False,
         require_complete_natural_language_artifact: bool = False,
+        enable_evidence_repair_feedback: bool = False,
         completion_quality_profile: str = (
             HEALTHBENCH_COMPLETION_QUALITY_PROFILE_V1
         ),
@@ -771,6 +772,8 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
     ) -> None:
         if type(require_initial_search) is not bool:
             raise TypeError("require_initial_search must be boolean")
+        if type(enable_evidence_repair_feedback) is not bool:
+            raise TypeError("enable_evidence_repair_feedback must be boolean")
         if type(require_relevant_evidence) is not bool:
             raise TypeError("require_relevant_evidence must be boolean")
         if type(require_task_query_anchor) is not bool:
@@ -819,6 +822,7 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
                 "max_successful_searches must be between 1 and max_tool_calls"
             )
         self._require_initial_search = require_initial_search
+        self._enable_evidence_repair_feedback = enable_evidence_repair_feedback
         self._require_relevant_evidence = require_relevant_evidence
         self._require_task_query_anchor = require_task_query_anchor
         self._require_refinement_on_insufficient_evidence = (
@@ -1329,6 +1333,83 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
     @staticmethod
     def _normalized_evidence_text(value: object) -> str:
         return " ".join(str(value).split()) if isinstance(value, str) else ""
+
+    def _action_error_feedback(
+        self, *, request, action, public_error_code, tool_receipts, observations,
+    ) -> Mapping[str, object]:
+        """Explain exact receipt mismatches without choosing an answer.
+
+        Necessary HealthBench adaptation of SkillFlow BoundedAgent's public
+        invalid-action Observation. Sources come only from observed Tool
+        results and Runtime-delivered provenance. Never repair a submitted
+        claim, silently canonicalize its metadata, or relax span validation.
+        """
+        inherited = super()._action_error_feedback(
+            request=request, action=action, public_error_code=public_error_code,
+            tool_receipts=tool_receipts, observations=observations,
+        )
+        if not self._enable_evidence_repair_feedback or public_error_code not in {
+            "structured_evidence_item_receipt_binding_invalid",
+            "structured_evidence_item_span_not_in_receipt",
+            "structured_evidence_item_duplicate",
+        }:
+            return inherited
+        value = action.arguments.get("value")
+        items = value.get("evidence_items") if isinstance(value, Mapping) else None
+        if not isinstance(items, list):
+            return inherited
+        sources = self._successful_search_evidence(tool_receipts)
+        sources += self._successful_search_evidence(list(_routed_evidence_receipts(request)))
+        fields = ("document_id", "source", "title", "date", "url")
+        seen = set()
+        for index, item in enumerate(items):
+            if not isinstance(item, Mapping):
+                continue
+            span = self._normalized_evidence_text(item.get("evidence_span"))
+            identity = (item.get("document_id"), span.casefold())
+            same_document = tuple(row for row in sources if row.get("document_id") == item.get("document_id"))
+            matching = tuple(row for row in same_document if all(row.get(field) == item.get(field) for field in fields))
+            mismatch = not matching
+            span_invalid = matching and not any(span and span in self._normalized_evidence_text(row.get("excerpt")) for row in matching)
+            if identity in seen or mismatch or span_invalid:
+                context: dict[str, object] = {"evidence_item_index": index, "index_base": 0}
+                if identity in seen:
+                    context["mismatched_fields"] = ["duplicate_evidence_item"]
+                elif not same_document:
+                    context["mismatched_fields"] = ["document_id"]
+                    context["observed_document_ids"] = list(dict.fromkeys(
+                        str(row["document_id"]) for row in sources if row.get("document_id")
+                    ))[:6]
+                else:
+                    # At most two actual variants of this document, not the
+                    # full source collection. A preview is continuous source
+                    # text, not an assertion that it supports the model claim.
+                    candidates = []
+                    for row in matching or same_document:
+                        if not any(all(previous.get(field) == row.get(field) for field in (*fields, "excerpt")) for previous in candidates):
+                            candidates.append(row)
+                        if len(candidates) == 2:
+                            break
+                    context["receipt_candidates"] = [{
+                        "canonical_metadata": {field: row.get(field) for field in fields},
+                        "mismatched_fields": [field for field in fields if row.get(field) != item.get(field)]
+                            + (["evidence_span"] if span_invalid else []),
+                        "verbatim_excerpt_preview": str(row.get("excerpt") or "")[:400],
+                        "preview_is_complete_excerpt": len(str(row.get("excerpt") or "")) <= 400,
+                        **{field: row[field] for field in ("source_id", "full_text_source_id", "truncated", "next_offset") if field in row},
+                    } for row in candidates]
+                return {
+                    "repair_context": context,
+                    "repair_instruction": (
+                        "Repair the indicated evidence item using one actual receipt: copy its metadata exactly "
+                        "and one contiguous span from its excerpt; do not join phrases with ellipses or paraphrase a quote. "
+                        "The preview is source text, not a suggested claim. Use source.read with an observed source_id "
+                        "and next_offset if needed and admitted; metadata-only hits do not establish clinical findings. "
+                        "Keep supported content; state unresolved limits instead of inventing evidence."
+                    ),
+                }
+            seen.add(identity)
+        return inherited
 
     def _structured_evidence_artifact_error(
         self,

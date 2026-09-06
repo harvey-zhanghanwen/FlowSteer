@@ -1048,6 +1048,15 @@ def _healthbench_tool_runtime_settings(
             "require_initial_query_fidelity must be bool and requires an optional clinical toolset"
         )
     settings["require_initial_query_fidelity"] = initial_query_fidelity
+    evidence_repair_feedback = section.get("enable_evidence_repair_feedback", False)
+    if type(evidence_repair_feedback) is not bool or (
+        evidence_repair_feedback
+        and runtime_mode != HEALTHBENCH_AUTHORITATIVE_TOOL_RUNTIME_MODE
+    ):
+        raise ConfigurationError(
+            "enable_evidence_repair_feedback must be bool and requires authoritative mode"
+        )
+    settings["enable_evidence_repair_feedback"] = evidence_repair_feedback
     if toolset == "source_separated_clinical_v1":
         for key in ("knowledge_root", "skillflow_source"):
             value = section.get(key)
@@ -2610,6 +2619,9 @@ class LiveSmokeBackend:
                     ),
                 }
                 if authoritative:
+                    adapter_arguments["enable_evidence_repair_feedback"] = (
+                        healthbench_settings["enable_evidence_repair_feedback"]
+                    )
                     if healthbench_settings["toolset"] in {
                         "optional_clinical_v1", "source_separated_clinical_v1"
                     }:
@@ -2956,6 +2968,19 @@ class LiveSmokeBackend:
             raise ConfigurationError(
                 "director.max_context_tokens must be a positive integer when supplied"
             )
+        context_projection = director.get("context_projection", False)
+        if type(context_projection) is not bool:
+            raise ConfigurationError("director.context_projection must be a bool")
+        max_prompt_tokens = director.get("max_prompt_tokens")
+        if max_prompt_tokens is not None and (
+            type(max_prompt_tokens) is not int or max_prompt_tokens < 1
+        ):
+            raise ConfigurationError("director.max_prompt_tokens must be a positive integer or null")
+        if context_projection and max_prompt_tokens is None:
+            raise ConfigurationError("director.context_projection requires max_prompt_tokens")
+        reasoning_context_reserve_tokens = director.get("reasoning_context_reserve_tokens", 0)
+        if type(reasoning_context_reserve_tokens) is not int or reasoning_context_reserve_tokens < 0:
+            raise ConfigurationError("director.reasoning_context_reserve_tokens must be a non-negative integer")
         if two_phase_generation:
             if not chat_template_enable_thinking:
                 raise ConfigurationError(
@@ -3088,6 +3113,7 @@ class LiveSmokeBackend:
             ),
             repetition_penalty=float(director_repetition_penalty),
             max_context_tokens=raw_max_context_tokens,
+            reasoning_context_reserve_tokens=reasoning_context_reserve_tokens,
         )
 
         gateway = OpenAICompatibleGateway(
@@ -3869,6 +3895,8 @@ class LiveSmokeBackend:
                     f"{experiment['seed']}:{catalog_order_namespace}:{task.task_id}"
                 ),
                 history_window=int(director["history_window"]),
+                context_projection=director.get("context_projection", False),
+                max_prompt_tokens=director.get("max_prompt_tokens"),
                 sampling_base_seed=base_seed,
                 sampling_coordinate=sampling_coordinate,
                 tool_registry=task_tool_registry,

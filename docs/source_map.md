@@ -1,3 +1,20 @@
+# Dataset adaptation source map
+
+## HealthBench v2.41 — inference-only bounded recovery and candidate conditions
+
+| Changed module | Concrete source / reuse | Necessary adaptation |
+| --- | --- | --- |
+| `director.py`, `rollout_collector.py` | SkillFlow `runtime/bounded_agent.py::execute_turn`, `rollout/engine.py` two-phase reasoning/action; FlowSteer `workflow_env.py::step`; existing project artifact projection | Opt-in token-budgeted Director observation, with full original task/latest graph preserved and separate action-generation reserve. Complete runtime feedback remains in trajectory. |
+| `react_execution.py`, `healthbench_evidence_adapter.py`, `healthbench_clinical_react.py` | SkillFlow bounded-agent invalid-action feedback and completion validation; project `_successful_search_evidence`, `_routed_evidence_receipts` and existing ReAct continuation | Return first failing artifact item and bounded real source metadata/excerpt; reject unobserved source IDs while retaining public conversation references. Strict evidence validators and tool limits unchanged. |
+| `healthbench_candidate_skill_profile.py`, candidate YAML | Project `run_joint_qa_mace_skill.py::_prompt_condition` and `LiveSmokeBackend.collect(prompt_priors=..., forced_probe=True)`; MD §§10–11 | Three optional, unvalidated orchestration priors. No fixed medical roles, answer content, ACTIVE publication or posterior/optimizer update. |
+| `train_agentgraph_smoke.py`, evaluation runners | Existing inference-only factory, shared HotpotQA collector and official HealthBench evaluator | Thin opt-in configuration/argument forwarding, candidate profile frozen in manifest, separate condition directories and explicit candidate labels. No new runner or evaluator. |
+
+Source locations and candidate boundary: `docs/healthbench_v241_skill_plan.md`.
+The input projection is not training-context reconstruction: exact transmitted
+prompts continue to be recorded and this experiment is inference-only.
+Candidate-conditioned results are not silently promoted to natural Skill-off
+baselines or evidence-gated ACTIVE Skill results.
+
 # AIME 2026 initial-adaptation source map
 
 This file records the executable sources used by the AIME 2026 initial

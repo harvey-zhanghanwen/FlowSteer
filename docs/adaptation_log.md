@@ -1,3 +1,30 @@
+# Dataset adaptation log
+
+## 2026-09-06 — HealthBench v2.41
+
+Scope: repair concrete v2.40 context exhaustion and repeated evidence completion
+errors, then evaluate three optional candidate orchestration conditions. No
+training, backward, optimizer, LoRA publication, MACE, Bayesian or Skill evolution.
+
+- Context repair preserves original conversation and current graph, summarizes
+  redundant history/tool schema and reserves ACTION budget during REASONING.
+  Offline replay of Barrett round 7 fell from 32,423 to 19,702 tokens with the
+  full task and all ten messages retained; this is not a generated answer/score.
+- Evidence repair keeps strict metadata and exact-span validation, but shows the
+  failing item and real receipt fields so the model can repair its submission.
+  Unknown source IDs are rejected early rather than querying unrelated content.
+- Candidate scope/evidence preservation, local recovery and complete response
+  priors reuse the existing forced-probe prompt interface; no mandatory topology
+  or role is introduced. Candidate results remain separately labelled.
+- Reuse existing frozen five development tasks for engineering and paired
+  candidate checks; only then run the authorized single full-525 Graph condition.
+  The five previously inspected test examples are not an unbiased held-out score.
+- N/A remains N/A for missing operational/evaluator results. No timeout answer
+  salvage, implicit FINISH, zero substitution or evaluator relaxation is added.
+
+Implementation tests and actual scores are recorded in versioned run reports;
+this log alone does not claim that evaluation has completed or improved.
+
 # AIME 2026 initial-adaptation log
 
 ## Scope

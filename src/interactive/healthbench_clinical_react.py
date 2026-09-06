@@ -253,6 +253,19 @@ class HealthBenchClinicalReactExecutionAdapter(
         if inherited is not None:
             return inherited
         if (
+            self._enable_evidence_repair_feedback
+            and action.resource_id == "healthbench-source.read"
+            and action.name == "read_source"
+            and isinstance(action.arguments, Mapping)
+            and isinstance((source_id := action.arguments.get("source_id")), str)
+            and source_id.strip()
+            and source_id not in self._visible_source_ids(request, observations)
+            and not self._explicit_public_source(request, source_id)
+        ):
+            # source.read is ID-based, not another search. Reject a guessed
+            # identifier before dispatch; never replace it with a chosen hit.
+            return "source_read_identifier_not_observed"
+        if (
             self._require_initial_query_fidelity
             and action.resource_id in _SEARCH_TOOLS
             and action.name == "search"
@@ -305,3 +318,57 @@ class HealthBenchClinicalReactExecutionAdapter(
             ):
                 return "duplicate_tool_request"
         return None
+
+    @staticmethod
+    def _visible_source_ids(request, observations) -> tuple[str, ...]:
+        """Project existing successful Action--Observation and routed sources."""
+        receipts = list(_routed_evidence_receipts(request))
+        for observation in observations:
+            action = observation.get("executed_action")
+            if (observation.get("observation_status") != "success"
+                    or not isinstance(action, Mapping)
+                    or not isinstance(observation.get("result"), Mapping)):
+                continue
+            receipts.append({
+                "tool_id": action.get("resource_id"), "error_type": None,
+                "request": {"action": action.get("name"), "arguments": action.get("arguments")},
+                "result": {"completed": observation.get("completed", True), "value": observation["result"]},
+            })
+        return tuple(dict.fromkeys(
+            row[field]
+            for _, _, row in _healthbench_search_candidates(receipts)
+            for field in ("source_id", "full_text_source_id", "document_id")
+            if isinstance(row.get(field), str) and row[field].strip()
+        ))
+
+    @staticmethod
+    def _explicit_public_source(request, source_id) -> bool:
+        try:
+            messages = parse_model_visible_conversation(request.problem)
+            text = "\n".join(message["content"] for message in messages)
+        except ValueError:
+            text = request.problem
+        # Preserve direct reads of user-supplied references. A shorter guessed
+        # identifier must not match the prefix of a different actual source.
+        return re.search(
+            r"(?<![\w:/.-])" + re.escape(source_id)
+            + r"(?=$|[^\w:/.-]|\.(?=\s|$))", text,
+        ) is not None
+
+    def _action_error_feedback(
+        self, *, request, action, public_error_code, tool_receipts, observations,
+    ):
+        if self._enable_evidence_repair_feedback and public_error_code == "source_read_identifier_not_observed":
+            return {
+                "repair_context": {"observed_source_ids": list(self._visible_source_ids(request, observations))[:8]},
+                "repair_instruction": (
+                    "source.read requires an exact source identifier returned by a visible Tool observation "
+                    "or explicitly supplied in the original conversation. Copy an observed source_id or "
+                    "full_text_source_id without inventing a PMC identifier, URL, or prefix. If no source is "
+                    "available, use an admitted search/lookup to locate it, or complete with the evidence limits."
+                ),
+            }
+        return super()._action_error_feedback(
+            request=request, action=action, public_error_code=public_error_code,
+            tool_receipts=tool_receipts, observations=observations,
+        )

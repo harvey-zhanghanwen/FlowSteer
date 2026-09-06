@@ -486,6 +486,7 @@ class SGLangReceiptDirectorClient:
         max_action_tokens: Optional[int] = None,
         repetition_penalty: float = 1.0,
         max_context_tokens: Optional[int] = None,
+        reasoning_context_reserve_tokens: int = 0,
     ) -> None:
         if not hasattr(tokenizer, "apply_chat_template") or not hasattr(tokenizer, "decode"):
             raise ValueError("tokenizer must expose apply_chat_template() and decode()")
@@ -548,6 +549,10 @@ class SGLangReceiptDirectorClient:
             type(max_context_tokens) is not int or max_context_tokens <= 0
         ):
             raise ValueError("max_context_tokens must be a positive integer")
+        if type(reasoning_context_reserve_tokens) is not int or reasoning_context_reserve_tokens < 0:
+            raise ValueError("reasoning_context_reserve_tokens must be a non-negative integer")
+        if reasoning_context_reserve_tokens and (not two_phase_generation or max_context_tokens is None):
+            raise ValueError("reasoning context reserve requires two-phase generation and max_context_tokens")
         if not two_phase_generation and (
             max_reasoning_tokens is not None or max_action_tokens is not None
         ):
@@ -587,6 +592,7 @@ class SGLangReceiptDirectorClient:
         self.max_action_tokens = int(max_action_tokens or max_tokens)
         self.repetition_penalty = float(repetition_penalty)
         self.max_context_tokens = max_context_tokens
+        self.reasoning_context_reserve_tokens = reasoning_context_reserve_tokens
 
     @property
     def generate_url(self) -> str:
@@ -807,6 +813,7 @@ class SGLangReceiptDirectorClient:
 
     def _context_budget(
         self, configured_max_new_tokens: int, input_tokens: int,
+        *, reserved_output_tokens: int = 0,
     ) -> Optional[dict[str, Any]]:
         """Measure generation space without dropping task or receipt tokens.
 
@@ -817,16 +824,17 @@ class SGLangReceiptDirectorClient:
         """
         if self.max_context_tokens is None:
             return None
-        remaining = self.max_context_tokens - input_tokens
+        remaining = self.max_context_tokens - input_tokens - reserved_output_tokens
         if remaining <= 0:
             raise ReceiptValidationError(
                 "Director context exhausted before generation: "
                 f"input_tokens={input_tokens}, "
                 f"max_context_tokens={self.max_context_tokens}, "
+                f"reserved_output_tokens={reserved_output_tokens}, "
                 "remaining_output_tokens<=0; input was not truncated"
             )
         effective = min(configured_max_new_tokens, remaining)
-        return {
+        receipt = {
             "profile": "sglang-exact-input-context-budget.v1",
             "max_context_tokens": self.max_context_tokens,
             "input_tokens": input_tokens,
@@ -835,14 +843,23 @@ class SGLangReceiptDirectorClient:
             "context_limited": effective < configured_max_new_tokens,
             "input_truncated": False,
         }
+        if reserved_output_tokens:
+            receipt.update({
+                "profile": "sglang-exact-input-context-budget.v2",
+                "reserved_for_action_and_template_tokens": reserved_output_tokens,
+            })
+        return receipt
 
     def _with_context_budget(
         self, payload: Mapping[str, Any], configured_max_new_tokens: int,
     ) -> dict[str, Any]:
         value = dict(payload)
+        metadata = payload.get("_flowsteer_request_metadata", {})
         budget = self._context_budget(
             configured_max_new_tokens,
             len(_token_ids(payload.get("input_ids"), "prompt_token_ids")),
+            reserved_output_tokens=(self.reasoning_context_reserve_tokens
+                if metadata.get("generation_phase") == "reasoning" else 0),
         )
         if budget is not None:
             value["sampling_params"] = {
@@ -858,9 +875,12 @@ class SGLangReceiptDirectorClient:
     def _validate_context_budget(
         self, payload: Mapping[str, Any], configured_max_new_tokens: int,
     ) -> Optional[dict[str, Any]]:
+        request_metadata = payload.get("_flowsteer_request_metadata", {})
         budget = self._context_budget(
             configured_max_new_tokens,
             len(_token_ids(payload.get("input_ids"), "prompt_token_ids")),
+            reserved_output_tokens=(self.reasoning_context_reserve_tokens
+                if request_metadata.get("generation_phase") == "reasoning" else 0),
         )
         expected = (
             configured_max_new_tokens if budget is None

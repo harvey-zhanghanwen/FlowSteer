@@ -37,6 +37,11 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 import evaluate_hotpotqa_round as hotpot_round
+from healthbench_candidate_skill_profile import (
+    build_candidate_prompt_priors,
+    load_candidate_skill_profile,
+    validate_candidate_skill_run_config,
+)
 from scripts.prompts.prompt import ANSWER_GENERATION_PROMPT
 from scripts.formatter import XmlFormatter
 from scripts.operator_analysis import AnswerGenerateOp
@@ -295,6 +300,15 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
     section_name, bounded = _evaluation_section(config)
     dataset_key = str(bounded["dataset_key"])
     specification = _BENCHMARKS[dataset_key]
+    candidate = config.get("candidate_skill_evaluation", {})
+    if not isinstance(candidate, Mapping) or type(candidate.get("enabled", False)) is not bool:
+        raise ConfigurationError("candidate_skill_evaluation.enabled must be boolean")
+    if candidate.get("enabled", False):
+        if dataset_key != "healthbench_professional":
+            raise ConfigurationError("candidate profile is HealthBench-specific")
+        if not isinstance(candidate.get("profile_path"), str) or not candidate["profile_path"].strip():
+            raise ConfigurationError("candidate evaluation requires profile_path")
+        validate_candidate_skill_run_config(config)
     experiment = _mapping(config.get("experiment"), "experiment")
     data = _mapping(config.get("data"), "data")
     director = _mapping(config.get("director"), "director")
@@ -4565,9 +4579,14 @@ def _report(
         "policy_adapter": config["director"].get("behavior_adapter_name"),
         "model_catalog_path": str(config["agent_graph"]["model_catalog_path"]),
         "training_performed": False,
-        "skill_injection_performed": bool(config.get("skills", {}).get("enabled", False)),
+        "skill_injection_performed": bool(
+            config.get("skills", {}).get("enabled", False)
+            or config.get("candidate_skill_evaluation", {}).get("enabled", False)
+        ),
         "skill_evaluation_mode": (
-            "memory_on_active_only"
+            "candidate_prompt_prior"
+            if config.get("candidate_skill_evaluation", {}).get("enabled", False)
+            else "memory_on_active_only"
             if bool(config.get("skills", {}).get("enabled", False))
             else "memory_off"
         ),
@@ -4586,7 +4605,9 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         f"- `{name}`: {count}" for name, count in report["failure_types"].items()
     ) or "- None"
     skill_sentence = (
-        "Only evidence-gated ACTIVE Skills were retrieved as rejectable prompt priors."
+        "Unvalidated, rejectable candidate prompt priors were supplied; no ACTIVE Skill was published."
+        if report.get("skill_evaluation_mode") == "candidate_prompt_prior"
+        else "Only evidence-gated ACTIVE Skills were retrieved as rejectable prompt priors."
         if report.get("skill_injection_performed")
         else "No Skill was injected."
     )
@@ -5024,6 +5045,8 @@ def _finish_collection_arm(
         "dataset_key": dataset_key, "collection_arm": arm,
         "sample_count": len(selected), "collection_arm_completed": complete,
         "metrics": {arm: metrics}, "paired_comparison_available": False,
+        "candidate_skill_evaluation": manifest.get("candidate_skill_evaluation"),
+        "training_performed": False,
         "manifest_path": str(paths["manifest"]), "completed_at": manifest["completed_at"],
     })
     return manifest
@@ -5060,6 +5083,25 @@ async def run_completion_benchmark_round(
     dataset_key = str(bounded["dataset_key"])
     dataset_registry_validation = _validate_runtime_dataset_registry(config, root)
     paths = _paths(config, root)
+    candidate_profile = None
+    candidate_priors: tuple[dict[str, Any], ...] = ()
+    if config.get("candidate_skill_evaluation", {}).get("enabled", False):
+        if collection_arm != "agentgraph":
+            raise ConfigurationError("candidate evaluation requires collection_arm=agentgraph")
+        candidate_profile = load_candidate_skill_profile(
+            _resolve(root, config["candidate_skill_evaluation"]["profile_path"]),
+            run_config=config, dataset_key=dataset_key,
+        )
+        candidate_priors = build_candidate_prompt_priors(candidate_profile, dataset_key=dataset_key)
+    # A resumed condition must not silently change or remove suggestions.
+    if paths["manifest"].exists():
+        previous = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+        prior_candidate = previous.get("candidate_skill_evaluation")
+        prior_profile = (
+            prior_candidate.get("profile") if isinstance(prior_candidate, Mapping) else None
+        )
+        if prior_profile != candidate_profile:
+            raise ConfigurationError("candidate profile changed; use a new condition/output directory")
     selected = _select_tasks(config, root, paths["selected"])
     direct_reference = _healthbench_direct_reference(config, root, selected)
     failures = _read_jsonl(paths["failures"])
@@ -5113,6 +5155,13 @@ async def run_completion_benchmark_round(
         },
         "training_enabled": False,
         "optimizer_updates": 0,
+        "candidate_skill_evaluation": {
+            "enabled": bool(candidate_priors),
+            "profile": candidate_profile,
+            "prompt_priors": list(candidate_priors),
+            "publication_performed": False,
+            "mode": "candidate_prompt_prior" if candidate_priors else "memory_off",
+        },
         "direct_only": direct_only,
         "collection_arm": collection_arm,
         "direct_reference": direct_reference["receipt"] if direct_reference else None,
@@ -5362,6 +5411,7 @@ async def run_completion_benchmark_round(
                 additional_trajectory_identity_match=graph_resume_identity_match,
                 project_root=root,
                 run_attempt_id=run_attempt_id,
+                **({"prompt_priors": candidate_priors} if candidate_priors else {}),
             )
         _atomic_jsonl(paths["failures"], failures)
 

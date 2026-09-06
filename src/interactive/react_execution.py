@@ -330,6 +330,7 @@ class ToolReactExecutionAdapter:
             "expected_top_level_fields",
             "forbidden_wrapper_fields",
             "repair_instruction",
+            "repair_context",
         )
         for observation in observations:
             if observation.get("observation_status") in {
@@ -380,6 +381,7 @@ class ToolReactExecutionAdapter:
                     "expected_top_level_fields",
                     "forbidden_wrapper_fields",
                     "repair_instruction",
+                    "repair_context",
                     "executed_action",
                     "error_type",
                 )
@@ -854,6 +856,12 @@ class ToolReactExecutionAdapter:
                             "observation_status": "schema_invalid",
                             "public_error_code": completion_error,
                             "executed_action": action.to_value(),
+                            **self._action_error_feedback(
+                                request=request, action=action,
+                                public_error_code=completion_error,
+                                tool_receipts=tool_receipts,
+                                observations=observations,
+                            ),
                         }
                     )
                     entry.update(observation)
@@ -953,6 +961,12 @@ class ToolReactExecutionAdapter:
                         "observation_status": "schema_invalid",
                         "public_error_code": admission_error,
                         "executed_action": action.to_value(),
+                        **self._action_error_feedback(
+                            request=request, action=action,
+                            public_error_code=admission_error,
+                            tool_receipts=tool_receipts,
+                            observations=observations,
+                        ),
                     }
                 )
                 entry.update(observation)
@@ -1110,6 +1124,19 @@ class ToolReactExecutionAdapter:
 
         del action, artifact, tool_receipts
         return None
+
+    def _action_error_feedback(
+        self, *, request: AgentRequest, action: StructuredAction,
+        public_error_code: str, tool_receipts: list[dict[str, object]],
+        observations: list[Mapping[str, object]],
+    ) -> Mapping[str, object]:
+        """Optional task-specific detail on SkillFlow's invalid Observation.
+
+        This hook never repairs or accepts an action. The same strict parser,
+        validator and measured bounded loop own the next model-authored turn.
+        """
+        del request, action, public_error_code, tool_receipts, observations
+        return {}
 
     def _tool_action_error(
         self,
