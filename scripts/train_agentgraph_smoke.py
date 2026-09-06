@@ -2914,6 +2914,13 @@ class LiveSmokeBackend:
             raise ConfigurationError(
                 "director.max_action_tokens must be a positive integer"
             )
+        raw_max_context_tokens = director.get("max_context_tokens")
+        if raw_max_context_tokens is not None and (
+            type(raw_max_context_tokens) is not int or raw_max_context_tokens < 1
+        ):
+            raise ConfigurationError(
+                "director.max_context_tokens must be a positive integer when supplied"
+            )
         if two_phase_generation:
             if not chat_template_enable_thinking:
                 raise ConfigurationError(
@@ -3045,6 +3052,7 @@ class LiveSmokeBackend:
                 raw_max_action_tokens if two_phase_generation else None
             ),
             repetition_penalty=float(director_repetition_penalty),
+            max_context_tokens=raw_max_context_tokens,
         )
 
         gateway = OpenAICompatibleGateway(

@@ -1734,3 +1734,14 @@ resource/output boundaries are documented in the parallel run report.
   外部工具新增 v2.36 本地索引，所以旧版对照是端到端版本比较，不是单项消融。
 - 无训练、GRPO、backward、optimizer、LoRA、MACE、Bayesian 或 Skill evolution。
   实测分数仅在本版五题完成后写入结果报告；不自动扩展到全量。
+
+### 首轮真实结果与未评测的后续修复
+
+首轮 c4fbacd 已结束：5 题中 3 题 evaluator-valid/FINISH，1 题 Director
+context overflow HTTP400，1 题 900 秒 TimeoutError；五题 strict 指标 N/A。
+同一有效三题：v2.35 raw 12.12%、length-adjusted 6.54%；v2.37 聚合后均为
+0.00%（包含 MDT 的负分后按原 evaluator 裁剪）。没有证明提升。
+
+已补上下文预算代码及 15 项离线定向测试；不裁剪输入，39102 等大于上下文
+的输入仍本地失败，29102 输入对应最多 3666 生成 tokens。补丁没有重新运行
+模型，因此不报告它的新得分，也不把首轮已完成三题改标为补丁版本。

@@ -985,3 +985,14 @@ HealthBench infrastructure and not evidence of a score improvement.
 Director 仍为本地 Qwen3.5-9B、minimal-neutral.v20；模型池及 thinking、
 唯一 Output、有限双向通信、Canvas 功能单元执行边界均不改。MD/两篇论文
 没有提供这几条 HealthBench 修复的现成实现，故只在已有 task adapter 边界适配。
+
+### 首轮暴露的 Director 上下文预算修复（评测后，尚无新分数）
+
+`rollout_collector.SGLangReceiptDirectorClient` 继续复用 SkillFlow
+`src/skillev/rollout/engine.py` 的 REASONING/ACTION 两阶段生成；原上游及本项目
+固定阶段预算并未对最终 chat-template 后的输入计算剩余 context。真实失败
+为 29102 + 4096 > 32768。**必要 SGLang 适配**：工厂传入已有 context 配置，
+每阶段实际 input_ids 完整形成后将生成上限限制到剩余 token，并在 exact
+receipt 同时记录 configured/effective budget。零余量在本地拒绝；不删任务、
+证据或关闭 thinking。此修复在首轮结束后完成，不归因到首轮评分，也不称为
+SkillFlow 原有动态预算实现。
