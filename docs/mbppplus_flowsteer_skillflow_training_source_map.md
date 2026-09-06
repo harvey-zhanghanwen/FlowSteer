@@ -174,4 +174,3 @@ on-policy rollout
 
 只有上述 receipt 被接受后，`long_run_allowed` 才能设为 true。约 20 分钟/step
 和 100 多步收敛只是用户预期；W&B 曲线和 held-out evaluator 才是实际证据。
-
