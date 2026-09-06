@@ -1844,3 +1844,19 @@ contract把原命名对象换成推测含义，后续扩展query偏离；不向p
 collector/runner114 tests；存在交叉，未相加成唯一总数。新增运行接线3项通过，
 prepare-only通过。测试夹具中的condition_id不一致已改正，未放宽生产条件。
 此时新真实评分仍N/A，等待同五题单次AgentGraph正式运行；没有训练或Direct重跑。
+
+v2.40同五题已于2026-09-06 11:28:01 UTC结束，源码固定6b9bb5a。
+仅2/5 FINISH且官方grader有效：WATERFALL raw50.00%、adjusted49.61%；
+IBD/HIV raw53.33%、adjusted56.81%。ASTRONAUT与MDT各一次900秒Timeout，
+Barrett因Director输入32798 tokens超过32768而拒绝。全五题两项均分N/A，
+已完成两题描述性均分51.67%/53.21%，不与旧完成三题的均分宣称提升。
+有效完成率从v2.39的3/5降为2/5，不提升为best-profile、不声称修复闭环完成。
+
+partial diagnostics保存3条，可确认来源字段/原文span反复写错、JSON解析/
+length和长feedback积累等失败；WATERFALL首搜反馈实际触发且找到相关文献，
+但source.read使用了错误ID；IBD证据有异质性但回答省略。双向DRAFT/REVISION
+在ASTRONAUT确实发生，但仍绑定失败。详见v2.40/evaluation_report_zh.md。
+
+离线报告仅修正“没有终局轨迹等于没有任何中间证据”的过度断言，指向本轮
+non-scoreable partial文件；不改变指标、运行源码、FINISH或官方评估。
+报告生成不发出模型/Tool/grader请求，没有重新跑失败题或扩大到525题。

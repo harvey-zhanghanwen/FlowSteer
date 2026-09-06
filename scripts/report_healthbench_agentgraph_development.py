@@ -343,7 +343,7 @@ def _operational_evidence(
                            "collection_failures": task_failures, "run_attempt_id": attempt_id,
                            "condition_id": next(iter(conditions)),
                            "trajectory_available": False,
-                           "recoverability": "Full Agent inputs/outputs, Tool and terminal/evaluator receipts were not persisted and cannot be recovered from these progress/failure records."}
+                           "recoverability": "No terminal trajectory or evaluator receipt is available. Progress/failure records cannot reconstruct missing calls. If evaluator_private/partial_trajectories.jsonl exists, its matching run/task diagnostics may preserve returned intermediate calls; they are non-scoreable and are not included in this report's terminal-trajectory totals."}
     return result
 
 
@@ -361,7 +361,7 @@ def _private_operational_demo(evidence: Mapping[str, Any]) -> str:
     return "\n".join([
         f"## {evidence['task_id']} — operational failure / no terminal trajectory", "",
         "本题仍计入固定五题分母；raw、length-adjusted、valid、FINISH、完整调用/token/latency 均 N/A。",
-        "完整 Agent 输入输出、Tool Observation/receipt、terminal/evaluator receipt 未落盘，无法从 progress 或 collect failure 恢复；不补造、不重试、不评分。", "",
+        "终局 trajectory 与 evaluator receipt 未落盘，不能评分；progress/collect failure 不能恢复未返回的调用。如存在同目录 partial_trajectories.jsonl，请按本轮 run_attempt_id/task_id 查看已返回的中间调用诊断；这些不是终局轨迹，不计入本报告调用总量。", "",
         _json_details("本轮 selected question、progress 与 collect failure（完整原始证据）", evidence), "",
     ])
 
@@ -398,7 +398,7 @@ def _public_report(summary: Mapping[str, Any]) -> str:
     for row in rows:
         if not row["trajectory_available"]:
             lines += [f"### {row['task_id']}", "",
-                      "本轮 collection failure 有 task/condition 依据，但 terminal trajectory 未落盘。分数、valid/FINISH、图、调用、token、latency 均 N/A；完整执行不可恢复。原始 selected question、progress 与 collect failure 仅在 evaluator-private demo。", ""]
+                      "本轮 collection failure 有 task/condition 依据，但 terminal trajectory 未落盘，终局分数和终局统计均 N/A。原始 selected question、progress 与 collect failure 见 evaluator-private demo；若 evaluator_private/partial_trajectories.jsonl 存在，还可查看同次运行的中间诊断，但不得据此补造终局或评分。", ""]
             continue
         lines += [f"### {row['task_id']}", "",
                   f"- Agent model calls：`{json.dumps(row['agent_model']['by_model'], ensure_ascii=False, sort_keys=True)}`；missing-source receipts={row['agent_model']['sources_without_model_receipts']}",
