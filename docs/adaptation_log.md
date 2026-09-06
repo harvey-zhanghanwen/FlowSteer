@@ -1826,3 +1826,21 @@ ASTRONAUT/WATERFALL仍在Director初始contract发生语义漂移。双向阶段
 离线新增AgentGraph-only报告适配，复用现有I/O与receipt渲染；默认仍要求完整
 收束，显式允许operational failure时固定五题、严格指标N/A，缺失题仅投影
 本轮selected question/progress/collect失败，不构造假轨迹。没有新增API调用。
+
+### v2.40（用户授权：修复后重跑同五题，不在提示词作弊）
+
+从941f892创建独立候选分支，不覆盖v2.39。先定位到：上游receipt可见却不能
+被completion绑定、双向自身DRAFT来源未进入自身REVISION两个确定接口缺口。
+它们已用合成来源/虚构任务的真实ReAct→Runtime→Canvas→FINISH定向测试复现
+并修正；不把缺失trace的旧两题超时单因归给它们。旧零分题的可见首错则为
+contract把原命名对象换成推测含义，后续扩展query偏离；不向prompt提供正确解释。
+
+本版给短原输入首搜加opt-in词面保真校验，首搜被拒时只返回原始公开query；
+保持自由模型/Agent/拓扑/后续检索。metadata空正文不占有效正文搜索slot。
+取消记录另存partial_trajectories.jsonl，明确不可评分，以便下次失败可直接
+检查已有模型返回和Canvas记录；不延长900秒或放宽FINISH。
+
+分组验证：检索/来源95 tests+43 subtests、Runtime相关100 tests+12subtests、
+collector/runner114 tests；存在交叉，未相加成唯一总数。新增运行接线3项通过，
+prepare-only通过。测试夹具中的condition_id不一致已改正，未放宽生产条件。
+此时新真实评分仍N/A，等待同五题单次AgentGraph正式运行；没有训练或Direct重跑。

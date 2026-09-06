@@ -31,7 +31,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
-from .agent_runtime import AgentRequest, GatewayResponse
+from .agent_runtime import AgentRequest, CommunicationCondition, GatewayResponse
 from .healthbench_professional_adapter import parse_model_visible_conversation
 from .healthbench_tool_adapter import (
     HEALTHBENCH_PROFESSIONAL_DATASET_SCOPE,
@@ -688,6 +688,13 @@ def _evidence_preserves_query_anchors(
     evidence = result.get("evidence") if isinstance(result, Mapping) else None
     if not isinstance(evidence, list) or not evidence:
         return False
+    # A discoverable title/identifier is not retrieved source content. Keep
+    # metadata hits visible, but do not spend a content-bearing search slot
+    # before a source read has supplied an actual excerpt.
+    evidence = [item for item in evidence if isinstance(item, Mapping)
+                and isinstance(item.get("excerpt"), str) and item["excerpt"].strip()]
+    if not evidence:
+        return False
     executed = observation.get("executed_action")
     arguments = (
         executed.get("arguments")
@@ -713,6 +720,33 @@ def _evidence_preserves_query_anchors(
         any(anchor in surface for surface in evidence_surfaces)
         for anchor in anchors
     )
+
+
+def _routed_evidence_receipts(request: AgentRequest):
+    """Reuse the knowledge adapter's bounded, graph-delivered source walk.
+
+    These are evidence inputs, not this invocation's Tool/control history.
+    Only Runtime envelopes and their provenance are traversed; never parse an
+    Agent's contract or summary into a source, or read global graph outputs.
+    """
+    yield from request.prior_tool_receipts
+    if request.communication_condition is CommunicationCondition.UPSTREAM_MASKED:
+        return
+    pending = [item.to_dict() for item in request.upstream]
+    if request.peer_draft is not None:
+        pending.append(request.peer_draft.to_dict())
+    seen = set()
+    examined = 0
+    while pending and examined < 16:
+        item = pending.pop(0)
+        identity = (item.get("source_agent_id"), item.get("artifact_version"),
+                    item.get("graph_revision"), item.get("content", item.get("artifact", "")))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        examined += 1
+        yield from (receipt for receipt in item.get("tool_receipts", ()) if isinstance(receipt, Mapping))
+        pending.extend(value for value in item.get("input_artifact_provenance", ()) if isinstance(value, Mapping))
 
 
 class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
@@ -1351,6 +1385,15 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
                 return "insufficient_evidence_requires_distinct_refined_search"
 
         receipt_evidence = self._successful_search_evidence(tool_receipts)
+        request = _COMPLETION_REQUEST.get()
+        if request is not None:
+            # DIRECT_REUSE: successful-source projection plus the existing
+            # knowledge adapter's routed-envelope boundary. Historical and
+            # peer sources are visible inputs, but not newly dispatched calls:
+            # do not add them to tool_receipts or the budget checks above.
+            receipt_evidence += self._successful_search_evidence(
+                list(_routed_evidence_receipts(request))
+            )
         expected_item_keys = {
             "supported_claim",
             "conditions_or_qualifiers",

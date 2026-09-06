@@ -1071,3 +1071,19 @@ _tool_receipts` 与 `_atomic_text`。旧报告要求 Direct/paired 文件，本�
 
 真实运行3/5完成、2题collect超时，完整五题分数N/A；已完成子集不能代表
 完整 benchmark。新增来源收益未证实，不能因定向测试通过而标为闭环全部修好。
+
+## 2026-09-06 — v2.40：查询保真、阶段来源绑定、取消诊断
+
+| 修改位置 | 真实复用与必要适配 |
+|---|---|
+| `healthbench_evidence_adapter._routed_evidence_receipts/_structured_evidence_artifact_error` | 将本项目 `healthbench_knowledge_tools._routed_receipts` 的既有16-envelope有界遍历移为共享函数；知识索引与completion校验使用相同真实上游、peer、历史receipt。只新增来源绑定入口，不把来源灌入Tool控制预算，不允许自由摘要/contract充当来源。 |
+| `agent_runtime._execute_block/_request` | 用户MD §3.3要求有限DRAFT→REVISION；沿既有FlowSteer-derived Runtime四次调用与UpstreamMessage边界，给自身REVISION保留自身DRAFT真实来源。复用reference-only historical_evidence，不新增自边、不进入live input versions，不影响QA专用语义分支。 |
+| `healthbench_clinical_react._tool_action_error/_model_visible_observations` | SkillFlow `training/task_prompts.py` 的具体实体query及 `runtime/bounded_agent.py::execute_turn` 的非法动作→Observation→继续。必要task适配：显式 `require_initial_query_fidelity` 仅保护单user、1–6关键词、可直接检索的原输入首搜，反馈原始query；无医学名称、答案或rubric模板。后续仍由Agent自由选择来源、refinement或completion。 |
+| `healthbench_evidence_adapter._evidence_preserves_query_anchors` | 复用现有相关来源计数；空excerpt的标题/元数据不当成已取得正文，仍遵守原总Tool预算。 |
+| `rollout_collector.collect/_emit_partial_trajectory`、completion runner | 复用FlowSteer edit→execution→history和既有TurnRecord/Runtime receipts；参考SkillFlow bounded_agent公开事件及rollout失败边界。必要诊断适配：默认关闭的callback仅将取消/异常前真实状态写独立evaluator-private文件，complete=false、non_scoreable=true、evaluation=null；原异常继续传播，绝不进入评分/训练/成功checkpoint。 |
+| `train_agentgraph_smoke._healthbench_tool_runtime_settings/_runtime_for_task` | 只接线推理工厂中的opt-in布尔开关，不调用训练函数。 |
+
+Director仍为minimal-neutral.v20，提示词没有修改。原5个开发task、模型目录、
+generation、seed、并发4、900秒时限、20轮上限及官方grader均保持原值；
+没有重新解释试验名或向模型提供评分目标。Europe PMC官方协议确认默认
+relevance排序，未发现确定排序bug，因此未改其客户端。

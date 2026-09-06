@@ -2562,6 +2562,7 @@ class AgentRuntime:
             phase=ExecutionPhase.REVISION,
             upstream=left_upstream,
             own_draft=left_draft.text,
+            own_draft_metadata=left_draft_metadata,
             peer_draft=UpstreamMessage(
                 right_id,
                 left_id,
@@ -2604,6 +2605,7 @@ class AgentRuntime:
             phase=ExecutionPhase.REVISION,
             upstream=right_upstream,
             own_draft=right_draft.text,
+            own_draft_metadata=right_draft_metadata,
             peer_draft=UpstreamMessage(
                 left_id,
                 right_id,
@@ -2844,6 +2846,7 @@ class AgentRuntime:
         run_id: str,
         graph_revision: int,
         own_draft: Optional[str] = None,
+        own_draft_metadata: Optional[Mapping[str, object]] = None,
         peer_draft: Optional[UpstreamMessage] = None,
         output_agent_id: Optional[str],
         format_output_agent: bool,
@@ -2854,6 +2857,38 @@ class AgentRuntime:
         model = self.model_registry.require_model(agent.model_id)
         provider = self.model_registry.provider_for(agent.model_id)
         request_id = f"{run_id}:{graph_revision}:{agent.id}:{phase.value}"
+        if phase is ExecutionPhase.REVISION and own_draft_metadata is not None:
+            draft_receipts = _tool_receipts_from_metadata(own_draft_metadata)
+            draft_provenance = _input_artifact_provenance_from_metadata(
+                own_draft_metadata
+            )
+            if draft_receipts or draft_provenance:
+                # MD section 3.3 supplies the immutable own draft to revision.
+                # Preserve its public source observations through FlowSteer's
+                # existing envelope as well: text alone loses the exact Tool
+                # binding needed by a receipt-grounded completion. This is
+                # phase input, never SkillFlow Action--Observation continuation
+                # or a charge/replenishment of the revision's Tool budget.
+                upstream = (*upstream, UpstreamMessage(
+                    agent.id,
+                    agent.id,
+                    "Source observations from your own completed draft in "
+                    "this graph revision. Revalidate them while revising the "
+                    "immutable draft; this is not an execution continuation.",
+                    # Reuse the reference-only envelope boundary. The draft
+                    # version remains explicit provenance but is not a new
+                    # self-edge in the live input dependency/version map.
+                    message_type="historical_evidence",
+                    graph_revision=graph_revision,
+                    artifact_version=own_draft_metadata.get("artifact_version"),
+                    tool_receipts=draft_receipts,
+                    input_artifact_provenance=draft_provenance,
+                    **_producer_context(
+                        agent,
+                        own_draft_metadata,
+                        artifact_communication_profile=self.artifact_communication_profile,
+                    ),
+                ))
         continuation = dict(continuation_metadata or {})
         continuation_phase = continuation.get("execution_phase")
         if (

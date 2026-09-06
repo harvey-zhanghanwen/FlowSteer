@@ -1039,6 +1039,15 @@ def _healthbench_tool_runtime_settings(
             "clinical_reference_sources_enabled must be bool and requires source_separated_clinical_v1"
         )
     settings["clinical_reference_sources_enabled"] = clinical_references
+    initial_query_fidelity = section.get("require_initial_query_fidelity", False)
+    if type(initial_query_fidelity) is not bool or (
+        initial_query_fidelity
+        and toolset not in {"optional_clinical_v1", "source_separated_clinical_v1"}
+    ):
+        raise ConfigurationError(
+            "require_initial_query_fidelity must be bool and requires an optional clinical toolset"
+        )
+    settings["require_initial_query_fidelity"] = initial_query_fidelity
     if toolset == "source_separated_clinical_v1":
         for key in ("knowledge_root", "skillflow_source"):
             value = section.get(key)
@@ -2601,6 +2610,12 @@ class LiveSmokeBackend:
                     ),
                 }
                 if authoritative:
+                    if healthbench_settings["toolset"] in {
+                        "optional_clinical_v1", "source_separated_clinical_v1"
+                    }:
+                        adapter_arguments["require_initial_query_fidelity"] = (
+                            healthbench_settings["require_initial_query_fidelity"]
+                        )
                     if healthbench_settings["toolset"] == "source_separated_clinical_v1":
                         adapter_arguments.update(
                             knowledge_root=_resolve(self.project_root, healthbench_settings["knowledge_root"]),

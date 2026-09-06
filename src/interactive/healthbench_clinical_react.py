@@ -12,14 +12,20 @@ rubric access, patient simulator or clinical scoring rule.
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from typing import Any, Mapping
 
 from .agent_runtime import AgentRequest
 from .healthbench_evidence_adapter import (
+    AUTHORITATIVE_QUERY_MAX_CHARACTERS,
     HealthBenchAuthoritativeReactExecutionAdapter,
+    _COMPLETION_REQUEST,
     _evidence_preserves_query_anchors,
+    _normalized_query_tokens,
     _query_preserves_task_surface,
+    _routed_evidence_receipts,
 )
+from .healthbench_professional_adapter import parse_model_visible_conversation
 from .openai_gateway import (
     _healthbench_medrag_evidence,
     _healthbench_search_candidates,
@@ -35,12 +41,35 @@ _SEARCH_TOOLS = frozenset({
 })
 
 
+def _short_public_query(request: AgentRequest) -> str | None:
+    """Recognize only an already-searchable public keyword input.
+
+    No entity or diagnosis classifier is involved. Longer conversations,
+    sentence punctuation and non-ASCII input retain model-authored queries.
+    """
+    try:
+        messages = parse_model_visible_conversation(request.problem)
+    except ValueError:
+        return None
+    if len(messages) != 1 or messages[0]["role"] != "user":
+        return None
+    query = messages[0]["content"].strip()
+    if len(query) > AUTHORITATIVE_QUERY_MAX_CHARACTERS or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9 '\"/–—-]*", query,
+    ):
+        return None
+    return query if 1 <= len(_normalized_query_tokens(query)) <= 6 else None
+
+
 class HealthBenchClinicalReactExecutionAdapter(
     HealthBenchAuthoritativeReactExecutionAdapter
 ):
     """Admit optional declared tools, never require a medical role or search."""
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, *, require_initial_query_fidelity: bool = False, **kwargs: Any) -> None:
+        if type(require_initial_query_fidelity) is not bool:
+            raise TypeError("require_initial_query_fidelity must be boolean")
+        self._require_initial_query_fidelity = require_initial_query_fidelity
         for flag in (
             "require_initial_search", "require_refinement_on_insufficient_evidence",
         ):
@@ -179,6 +208,16 @@ class HealthBenchClinicalReactExecutionAdapter(
     ) -> list[dict[str, object]]:
         visible = HealthBenchAuthoritativeReactExecutionAdapter._model_visible_observations(observations)
         for observation in visible:
+            if observation.get("public_error_code") == "initial_query_must_preserve_public_input":
+                request = _COMPLETION_REQUEST.get()
+                original_query = _short_public_query(request) if request is not None else None
+                if original_query is not None:
+                    observation["original_public_query"] = original_query
+                    observation["repair_instruction"] = (
+                        "The first search added or removed terms from the short public input "
+                        "before obtaining sources. Preserve those original terms without a "
+                        "contract-inferred meaning; refine after its observation, or complete."
+                    )
             action = observation.get("executed_action")
             result = observation.get("result")
             if (
@@ -213,6 +252,30 @@ class HealthBenchClinicalReactExecutionAdapter(
         )
         if inherited is not None:
             return inherited
+        if (
+            self._require_initial_query_fidelity
+            and action.resource_id in _SEARCH_TOOLS
+            and action.name == "search"
+            and (original_query := _short_public_query(request)) is not None
+            and not any(
+                observation.get("observation_status") in {"success", "tool_error"}
+                and isinstance(observation.get("executed_action"), Mapping)
+                and observation["executed_action"].get("resource_id") in _SEARCH_TOOLS
+                and observation["executed_action"].get("name") == "search"
+                for observation in observations
+            )
+            and not any(
+                item.get("title") or item.get("excerpt")
+                for _, _, item in _healthbench_search_candidates(list(_routed_evidence_receipts(request)))
+            )
+            and set(_normalized_query_tokens(action.arguments.get("query")))
+            != set(_normalized_query_tokens(original_query))
+        ):
+            # Necessary opt-in adaptation of SkillFlow's entity-specific
+            # query + public invalid-action continuation, not a forced Tool
+            # dispatch or an interpretation of the user's entity. The model
+            # still chooses the source, subsequent refinement and completion.
+            return "initial_query_must_preserve_public_input"
         # The parent's check is scoped to authoritative.search. Reuse only
         # its existing lexical task-anchor boundary for the optional local
         # MedRAG and external literature/registry searches; do not add a medical vocabulary, rewrite entities,

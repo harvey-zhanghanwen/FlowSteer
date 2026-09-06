@@ -14,9 +14,10 @@ import json
 from pathlib import Path
 from typing import Mapping
 
-from .agent_runtime import AgentRequest, AgentResponse, CommunicationCondition
+from .agent_runtime import AgentRequest, AgentResponse
 from .healthbench_clinical_react import HealthBenchClinicalReactExecutionAdapter
 from .healthbench_clinical_tools import open_healthbench_clinical_tool_registry
+from .healthbench_evidence_adapter import _routed_evidence_receipts
 from .healthbench_knowledge_store import HealthBenchKnowledgeStore
 from .healthbench_professional_adapter import parse_model_visible_conversation
 from .openai_gateway import _healthbench_search_candidates
@@ -63,24 +64,7 @@ def _routed_receipts(request: AgentRequest):
     Reuse the V3 receipt projection's bounded envelope traversal. Do not index
     the Agent's free-text summary; those statements are not published evidence.
     """
-    yield from request.prior_tool_receipts
-    if request.communication_condition is CommunicationCondition.UPSTREAM_MASKED:
-        return
-    pending = [item.to_dict() for item in request.upstream]
-    if request.peer_draft is not None:
-        pending.append(request.peer_draft.to_dict())
-    seen = set()
-    examined = 0
-    while pending and examined < 16:
-        item = pending.pop(0)
-        identity = (item.get("source_agent_id"), item.get("artifact_version"),
-                    item.get("graph_revision"), item.get("content", item.get("artifact", "")))
-        if identity in seen:
-            continue
-        seen.add(identity)
-        examined += 1
-        yield from (r for r in item.get("tool_receipts", ()) if isinstance(r, Mapping))
-        pending.extend(r for r in item.get("input_artifact_provenance", ()) if isinstance(r, Mapping))
+    yield from _routed_evidence_receipts(request)
 
 
 @dataclass(frozen=True, slots=True)

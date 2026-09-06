@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import threading
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -79,7 +80,11 @@ from src.interactive.openai_gateway import (
 )
 from src.interactive.persistence import stable_id
 from src.interactive.records import TaskRecord, TrajectoryRecord
-from src.interactive.rollout_collector import execution_record_from_call
+from src.interactive.rollout_collector import (
+    PartialTrajectoryCallback,
+    execution_record_from_call,
+    partial_trajectory_diagnostic_scope,
+)
 from src.interactive.scientific_sampling import (
     GenerationPhase,
     SCIENTIFIC_SAMPLING_ALGORITHM,
@@ -1031,7 +1036,70 @@ def _paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
                 "storage.rollout_progress_path must be non-empty text when configured"
             )
         paths["rollout_progress"] = _resolve(root, progress_path)
+    partial_path = storage.get("partial_trajectories_path")
+    if partial_path is not None:
+        if not isinstance(partial_path, str) or not partial_path.strip():
+            raise ConfigurationError(
+                "storage.partial_trajectories_path must be non-empty text when configured"
+            )
+        resolved = _resolve(root, partial_path).resolve()
+        if "evaluator_private" not in resolved.parts:
+            raise ConfigurationError(
+                "storage.partial_trajectories_path must stay under evaluator_private"
+            )
+        if resolved in {path.resolve() for path in paths.values()}:
+            raise ConfigurationError(
+                "partial trajectories must not overlap scored checkpoints or other outputs"
+            )
+        paths["partial_trajectories"] = resolved
     return paths
+
+
+class _PartialTrajectoryJsonlSink:
+    """Atomic diagnostic snapshots, isolated from all scored/resume streams."""
+
+    def __init__(self, path: Path, *, run_attempt_id: str, condition_id: str) -> None:
+        self.path = path
+        self.run_attempt_id = run_attempt_id
+        self.condition_id = condition_id
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _key(value: Mapping[str, Any]) -> tuple[object, ...]:
+        return tuple(value.get(field) for field in (
+            "run_attempt_id", "task_id", "condition_id", "rollout_id",
+        ))
+
+    def __call__(self, value: Mapping[str, object]) -> None:
+        if (
+            value.get("condition_id") != self.condition_id
+            or value.get("complete") is not False
+            or value.get("non_scoreable") is not True
+            or value.get("evaluation") is not None
+            or value.get("final_answer") is not None
+            or not all(isinstance(value.get(field), str) and value[field]
+                       for field in ("task_id", "rollout_id"))
+        ):
+            raise ValueError("partial diagnostic has incompatible identity or scoreability")
+        envelope = {**value, "run_attempt_id": self.run_attempt_id}
+        with self._lock:
+            # The runner's existing atomic writer preserves successful
+            # checkpoints elsewhere. Repeated delivery updates only this
+            # task/condition/rollout/attempt's diagnostic snapshot.
+            values = [row for row in _read_jsonl(self.path)
+                      if self._key(row) != self._key(envelope)]
+            _atomic_jsonl(self.path, [*values, envelope])
+
+
+def _partial_trajectory_callback(
+    paths: Mapping[str, Path], *, run_attempt_id: str, condition_id: str,
+) -> Optional[PartialTrajectoryCallback]:
+    path = paths.get("partial_trajectories")
+    if path is None:
+        return None
+    return _PartialTrajectoryJsonlSink(
+        path, run_attempt_id=run_attempt_id, condition_id=condition_id,
+    )
 
 
 def _benchmark_slice(task: TaskRecord) -> str:
@@ -5278,19 +5346,23 @@ async def run_completion_benchmark_round(
     else:
         manifest["status"] = "agentgraph"
         _write_json(paths["manifest"], manifest)
-        trajectories = await _collect_graph(
-            backend,
-            active,
-            _compatibility_config(config, bounded),
-            paths["trajectories"],
-            failures,
-            manifest,
-            paths["manifest"],
-            failure_path=paths["failures"],
-            additional_trajectory_identity_match=graph_resume_identity_match,
-            project_root=root,
-            run_attempt_id=run_attempt_id,
-        )
+        with partial_trajectory_diagnostic_scope(_partial_trajectory_callback(
+            paths, run_attempt_id=run_attempt_id,
+            condition_id=str(config["experiment"]["condition_id"]),
+        )):
+            trajectories = await _collect_graph(
+                backend,
+                active,
+                _compatibility_config(config, bounded),
+                paths["trajectories"],
+                failures,
+                manifest,
+                paths["manifest"],
+                failure_path=paths["failures"],
+                additional_trajectory_identity_match=graph_resume_identity_match,
+                project_root=root,
+                run_attempt_id=run_attempt_id,
+            )
         _atomic_jsonl(paths["failures"], failures)
 
     if collection_arm == "agentgraph":
