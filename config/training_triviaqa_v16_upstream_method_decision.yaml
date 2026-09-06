@@ -1,0 +1,163 @@
+# Non-executable decision gate produced from the FlowSteer and SkillFlow
+# released source trees plus the project design document. This is not a new
+# trainer and does not combine objectives.
+
+schema_version: "flowsteer.triviaqa.upstream_method_decision.v1"
+
+experiment:
+  name: "triviaqa_v16_upstream_method_decision"
+  status: "blocked_method_conflict"
+  execution_enabled: false
+  requested_optimizer_steps: "250-300"
+  starting_branch: "backup/triviaqa-fact-memory-v16-best-82p81-20260906"
+  starting_commit: "114bd8b6378af55fbd1f40cdfdda91c79314a771"
+  training_branch: "train/triviaqa-v16-skillflow-300step-20260906"
+  architecture_profile: "config/evaluation_triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive.yaml"
+  scope: "TriviaQA project adaptation; not a bit-exact paper reproduction"
+
+sources:
+  flowsteer_paper: "/ssd1/iclr/1/.codex/attachments/a58ade6e-bd85-4cba-a557-a12fd8b064a7/FlowSteer__Towards_Agents_Designing_Agentic_Workflows_via_Reinforced_Progressive_Canvas_Editing__3_(1).pdf"
+  flowsteer_released_tree: "/ssd1/iclr/icassp/code/FlowSteer"
+  flowsteer_released_revision: "1c9f2abf55cb9b8ea2ca2e3359cdb91acb9964e9"
+  flowsteer_arxiv_v4_alignment_revision: "a329b577a8e8c2f2d5492983b492473a06a8e718"
+  skillflow_paper: "/ssd1/iclr/1/.codex/attachments/402fe9a0-0b41-4585-9bcc-9fa0d8d73915/SkillFlow.pdf"
+  skillflow_released_tree: "/ssd1/iclr/2/SkillFlow"
+  skillflow_released_revision: "74be52bb6bd9f0e9e68dacb72636b75649197983"
+  design_document: "/ssd1/iclr/1/.codex/attachments/2ab716b4-c016-4dee-bb50-e96e928e7a8f/FlowSteer_MACE_Bayesian_Skill_Design.md"
+  source_map: "docs/TRIVIAQA_V16_UPSTREAM_TRAINING_SOURCE_MAP.md"
+
+method_decision:
+  selected: null
+  loss_mixing_allowed: false
+  one_step_before_selection_allowed: false
+  long_run_before_one_step_acceptance_allowed: false
+  choices:
+    flowsteer_paper_grpo:
+      label: "A"
+      objective: "canvas-masked clipped GRPO"
+      reward: "-1 + structural_diversity + gated_terminal_answer_reward"
+      same_question_multiple_rollouts: true
+      trainable_parameters: ["director_theta_lora"]
+      note: >-
+        Requires filling gaps between the paper and released FlowSteer code:
+        pi_old/ref log-probabilities, ratio, clipping, KL/entropy, and correct
+        same-question grouping. It is not the design-document objective.
+    design_document_one_pass_grpo:
+      label: "B"
+      objective: "action-masked one-pass group policy gradient using GRPO same-question advantages"
+      reward: "terminal_task_reward_only"
+      same_question_same_condition_same_policy_group: true
+      trainable_parameters: ["director_theta_lora"]
+      note: >-
+        Uses the existing project objective and exact receipts. It reuses
+        FlowSteer Canvas/rollout boundaries and thinly adapts SkillFlow's
+        Qwen3.5/SGLang/LoRA runtime, but it is not SkillFlow's main TTB method
+        and must not be called clipped GRPO.
+    skillflow_ttb:
+      label: "C"
+      objective: "trajectory token balance regression"
+      reward: "outcome_reward_transformed_with_epsilon_min"
+      effective_batch: "7 questions x 4 trajectories = 28"
+      max_episode_steps: 12
+      trainable_parameters: ["theta_lora", "phi_lora", "task_conditioned_Z"]
+      note: >-
+        Directly follows SkillFlow's main learning objective after mapping a
+        FlowSteer Canvas action to SkillFlow's structured action. It conflicts
+        with the design document if made the primary objective.
+
+reference_profiles:
+  flowsteer_paper:
+    director: "Qwen3-8B"
+    theta_lora: {rank: 64, alpha: 64, target_modules: [q_proj, k_proj, v_proj, o_proj], dropout: 0.05}
+    optimizer: "AdamW"
+    learning_rate: 1.0e-5
+    max_grad_norm: 1.0
+    batch_size: 36
+    max_canvas_turns: 20
+    steps: 300
+    clip_range: 0.20
+    kl_coefficient: 0.005
+    entropy_coefficient: 0.005
+  skillflow_paper_main:
+    director: "Qwen3.5-9B"
+    theta_lora: {rank: 64, alpha: 128, target_modules: [q_proj, k_proj, v_proj, o_proj]}
+    phi_lora: {rank: 16, alpha: 32, target_modules: [q_proj, v_proj]}
+    phi_rank_ambiguity: "Appendix main-run table/released config=16; Appendix L.3=32"
+    partition_function: "task-conditioned Z, separately optimized"
+    beta: 1.0
+    epsilon_min: 0.1
+    optimizer: "AdamW"
+    learning_rate: 1.0e-4
+    max_grad_norm: 3.0
+    kl_coefficient: 0.01
+    effective_batch: 28
+    max_episode_steps: 12
+    steps: 250
+    checkpoint_interval_steps: 10
+
+common_runtime_contract_after_method_selection:
+  director: "local Qwen3.5-9B"
+  executor_frozen: true
+  exact_rollout_context_receipt_required: true
+  behavior_policy_version_required: true
+  cross_step_rollout_prefetch: false
+  order:
+    - "rollout(policy_vN)"
+    - "terminal evaluator reward"
+    - "selected objective backward"
+    - "optimizer.step"
+    - "nonzero gradient and parameter-delta evidence"
+    - "publish theta policy_vN_plus_1"
+    - "version verification and canary"
+    - "rollout(policy_vN_plus_1)"
+  sync_failure_policy: "fail_closed"
+  wandb: "required_online_fail_closed"
+
+source_implementation_gaps:
+  flowsteer_released_code:
+    - "Configured clip/KL/entropy are not used by the formal loss function."
+    - "No pi_old/ref ratio, clipping, reference KL, or entropy term is implemented."
+    - "Advantages are grouped by dataset/source rather than multiple trajectories of the same question."
+    - "Training context is reconstructed from response plus feedback rather than exact sampled prompt IDs."
+    - "LoRA sync failure may continue with the base model."
+    - "W&B is optional and fail-open."
+  skillflow_released_code:
+    - "The next rollout is prefetched before the current optimizer update and may use stale theta."
+    - "Published checkpoint omits optimizer/RNG/current-step state; resume omits phi and optimizer state."
+    - "W&B is fail-open and lacks the required policy/update/runtime fields."
+    - "Z and phi learning-rate multipliers and residual clamp are released-code details not fixed by the paper table."
+
+project_status:
+  direct_reuse:
+    - "FlowSteer action parser, progressive Canvas FSM, structured control blocks, execution feedback, trajectory skeleton"
+    - "FlowSteer terminal evaluator boundary"
+    - "SkillFlow Qwen3.5 named-LoRA model loading and SGLang tensor hot-load primitives"
+  thin_adaptation_required:
+    - "FlowSteer structured Canvas action to the selected objective's exact token/context receipt"
+    - "TriviaQA evaluator receipt to the selected reward input"
+    - "optimizer-step-before-sync-before-next-rollout ordering"
+    - "policy/adapter version barrier and fail-closed W&B fields"
+  project_additions_not_upstream_claims:
+    - "transaction receipt, route barrier, post-sync canary, parameter-delta evidence"
+  not_implemented:
+    - "MACE posterior"
+    - "joint Bayesian posterior"
+    - "EVSI scheduling"
+    - "paired intervention"
+    - "automatic Skill publication/revocation"
+
+acceptance_gates:
+  method_selected_by_user: false
+  gpu_inventory_and_nonconflicting_allocation_verified: false
+  wandb_online_fail_closed_ready: false
+  exact_training_data_materialized: false
+  selected_loss_and_token_mask_verified: false
+  one_real_step_closed_loop_verified: false
+  updated_weight_used_by_next_rollout_verified: false
+  one_step_counters:
+    rollout_batches: 0
+    backward_passes: 0
+    optimizer_steps: 0
+    adapter_publications: 0
+    post_update_rollouts: 0
+    wandb_runs: 0

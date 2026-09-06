@@ -1,287 +1,36 @@
-# Frozen training protocol for the TriviaQA v16 AgentGraph adaptation.
-# This file is intentionally fail-closed until every preflight gate passes.
+# Compatibility redirect retained for the protocol committed before the
+# FlowSteer/SkillFlow source-code comparison was complete. It is deliberately
+# non-executable: TTB is no longer selected implicitly.
 
-schema_version: "flowsteer.triviaqa.skillflow_ttb.training_protocol.v1"
+schema_version: "flowsteer.triviaqa.training_method_redirect.v2"
 
 experiment:
-  name: "triviaqa_v16_skillflow_ttb_250step"
-  status: "blocked_preflight"
+  name: "triviaqa_v16_training_method_unresolved"
+  status: "blocked_method_conflict"
   execution_enabled: false
-  requested_steps: 250
   starting_branch: "backup/triviaqa-fact-memory-v16-best-82p81-20260906"
   starting_commit: "114bd8b6378af55fbd1f40cdfdda91c79314a771"
   training_branch: "train/triviaqa-v16-skillflow-300step-20260906"
-  architecture_profile: "config/evaluation_triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive.yaml"
-  paper_replication: false
-  scope_note: >-
-    This is a TriviaQA-only project adaptation. SkillFlow's main experiment
-    jointly trains seven IID tasks, so this run must not be described as a
-    bit-exact reproduction of the paper.
 
-provenance:
-  design_document: "/ssd1/iclr/1/.codex/attachments/2ab716b4-c016-4dee-bb50-e96e928e7a8f/FlowSteer_MACE_Bayesian_Skill_Design.md"
-  skillflow_paper: "/ssd1/iclr/1/.codex/attachments/402fe9a0-0b41-4585-9bcc-9fa0d8d73915/SkillFlow.pdf"
-  released_skillflow_source: "/ssd1/iclr/2/SkillFlow"
-  released_skillflow_revision: "74be52bb6bd9f0e9e68dacb72636b75649197983"
-  source_map: "docs/TRIVIAQA_V16_SKILLFLOW_TTB_TRAINING_SOURCE_MAP.md"
-
-objective:
-  primary_method: "trajectory_token_balance"
-  abbreviation: "TTB"
-  reward_mode: "outcome_only"
+method:
+  primary_objective: "unresolved"
+  ttb_selected: false
+  grpo_selected: false
   loss_mixing_allowed: false
-  grpo:
-    enabled: false
-    role: "baseline_or_ablation_only"
-    prohibited_as_primary_method: true
-  conflict_resolution:
-    status: "explicit_user_override_for_this_run"
-    design_document_method: "action_masked_one_pass_grpo"
-    selected_method: "skillflow_ttb"
-    note: >-
-      The two objectives are not combined. The design document's GRPO
-      implementation remains available only as a disabled baseline/ablation.
-  ttb:
-    residual: >-
-      log Z_theta(q) + sum_t mean_action_tokens(log pi_theta)
-      - beta * log(R + epsilon_min)
-      - sum_t mean_action_tokens(log P_phi)
-    loss: "mean((delta / trajectory_action_edges) ** 2)"
-    edge_logprob_reduction: "mean_over_structured_action_tokens"
-    action_tokens_only: true
-    action_token_schema: "agentgraph.canvas-action-json-schema.v1"
-    reasoning_tokens: "context_only"
-    reasoning_tokens_in_loss: false
-    on_policy: true
-    allowed_policy_staleness_steps: 0
-    beta: 1.0
-    epsilon_min: 0.1
-
-rollout:
-  behavior_policy: "current_theta"
-  questions_per_step: 7
-  trajectories_per_question: 4
-  effective_batch_size: 28
-  max_episode_steps: 12
-  executor_frozen: true
-  next_step_must_wait_for_optimizer_and_sync: true
-  inter_step_rollout_prefetch: false
-  parallel_worker_count: null
-  parallel_worker_count_source: "unset_until_local_resource_preflight"
-  sampling:
-    temperature: null
-    top_p: null
-    top_k: null
-    source: "not_specified_by_skillflow_paper"
-    freeze_before_first_rollout: true
-
-model:
-  supervisor: "Qwen3.5-9B-Instruct"
-  base_model_path_env: "QWEN35_9B_MODEL_PATH"
-  tokenizer_path_env: "QWEN35_9B_TOKENIZER_PATH"
-  theta_lora:
-    rank: 64
-    alpha: 128
-    target_modules: [q_proj, k_proj, v_proj, o_proj]
-  phi_lora:
-    rank: 16
-    alpha: 32
-    target_modules: [q_proj, v_proj]
-    paper_ambiguity: >-
-      Appendix P main-run table reports rank 16, while Appendix L.3 mentions
-      rank 32. This protocol selects rank 16 because the main-run table and
-      released configuration agree on rank 16.
-  partition_function:
-    task_conditioned: true
-    separately_optimized: true
-  named_lora_selection: true
-
-optimization:
-  optimizer: "AdamW"
-  learning_rate: 1.0e-4
-  theta_learning_rate: 1.0e-4
-  phi_learning_rate: 1.0e-4
-  partition_function_learning_rate: 1.0e-4
-  max_grad_norm: 3.0
-  kl_coefficient: 0.01
-  checkpoint_interval_steps: 10
-  target_steps: 250
-  require_nonzero_gradient_evidence: [theta, phi, partition_function]
-  require_nonzero_parameter_update_evidence: [theta, phi, partition_function]
-  released_code_differences:
-    - "Released code defaults phi LR to 0.5x and Z LR to 1.5x; those ratios are not stated in the paper."
-    - "Released code clamps the normalized TTB residual; that clamp is not stated in the paper."
-    - "Released code's concrete Z network is an implementation detail beyond the paper's task-conditioned Z specification."
-
-data:
-  benchmark: "TriviaQA"
-  training_scope: "single_dataset_project_adaptation"
-  train_path_env: "TRIVIAQA_TTB_TRAIN_PATH"
-  validation_path_env: "TRIVIAQA_TTB_VALIDATION_PATH"
-  expected_train_rows: 512
-  expected_validation_rows: 128
-  split_isolation_required: true
-  evaluator: "triviaqa.official.answer.v1"
-  reward_source: "terminal_evaluator_receipt"
-  forced_probe_in_training: false
-  skill_confirmatory_data_in_training: false
-
-policy_update_contract:
-  required_step_order:
-    - "on_policy_rollout"
-    - "terminal_reward"
-    - "action_token_logprob"
-    - "ttb_backward"
-    - "theta_phi_z_optimizer_step"
-    - "theta_adapter_publish"
-    - "adapter_sync_verification"
-    - "post_sync_canary"
-    - "next_step_rollout"
-  per_step_receipt_fields:
-    - "behavior_policy_version"
-    - "theta_pre_step_version"
-    - "theta_post_step_version"
-    - "phi_pre_step_version"
-    - "phi_post_step_version"
-    - "partition_function_pre_step_version"
-    - "partition_function_post_step_version"
-    - "requested_rollouts"
-    - "valid_rollouts"
-    - "filtered_rollouts"
-    - "filter_reasons"
-    - "reward_statistics"
-    - "trajectory_action_edges"
-    - "action_token_count"
-    - "reasoning_context_token_count"
-    - "delta"
-    - "delta_squared"
-    - "ttb_loss"
-    - "kl_loss"
-    - "theta_grad_norm"
-    - "phi_grad_norm"
-    - "partition_function_grad_norm"
-    - "theta_update_norm"
-    - "phi_update_norm"
-    - "partition_function_update_norm"
-    - "optimizer_step_count"
-    - "adapter_publish_version"
-    - "adapter_sync_status"
-    - "post_sync_canary_status"
-    - "next_rollout_policy_version"
-    - "checkpoint_path"
-    - "gpu_peak_memory"
-    - "throughput"
-    - "errors"
-  commit_assertion: >-
-    A step is committed only if theta, phi, and Z were updated, the theta
-    adapter was published and verified, and the next behavior-policy version
-    equals the published theta version.
-
-paper_hardware_report:
-  gpu_count: 4
-  gpu_model: "NVIDIA A100-SXM4 80GB"
-  approximate_peak_memory_per_gpu_gb: 70
-  paper_does_not_specify:
-    - "tensor_parallel_layout"
-    - "data_parallel_layout"
-    - "zero_stage"
-    - "gpu_role_mapping"
-    - "parallel_worker_count"
-    - "micro_batch_size"
-    - "sampling_parameters"
-
-local_resource_gate:
-  required: true
-  status: "blocked_device_namespace"
-  cuda_devices_visible: false
-  local_gpu_assignment: null
-  allocation_queued: false
-  prohibited_behavior: "do_not_start_without_host_level_gpu_inventory"
-  project_engineering_only:
-    - "gpu_role_mapping"
-    - "distributed_gradient_sharding"
-    - "oom_micro_batch_replay"
-
-adapter_synchronization:
-  paper_scope: "named_lora_selection_and_per_step_hot_swap"
-  project_engineering_requirements:
-    allowed_staleness_steps: 0
-    pause_and_drain: "required_not_yet_integrated_for_this_profile"
-    load_and_verify: "required_not_yet_integrated_for_this_profile"
-    atomic_route_switch: "required_not_yet_integrated_for_this_profile"
-    post_sync_canary: "required_not_yet_integrated_for_this_profile"
+  decision_gate: "config/training_triviaqa_v16_upstream_method_decision.yaml"
+  source_map: "docs/TRIVIAQA_V16_UPSTREAM_TRAINING_SOURCE_MAP.md"
   note: >-
-    Barrier, atomic route switching, canary semantics, and failure recovery are
-    project engineering requirements; they are not claims about paper text.
+    FlowSteer paper GRPO, the released FlowSteer implementation, the design
+    document's Action-Masked One-Pass GRPO, and SkillFlow TTB are not the same
+    objective. This compatibility filename must never be treated as approval
+    to run TTB.
 
-wandb:
-  required: true
-  mode: "online"
-  fail_closed: true
-  api_key_env: "WANDB_API_KEY"
-  api_key_in_config: false
-  project: "flowsteer-triviaqa-skillflow-ttb"
-  run_id: null
-  status: "blocked_client_and_auth_unavailable"
-  required_metrics:
-    - "step"
-    - "behavior_policy_version"
-    - "adapter_version"
-    - "ttb_loss"
-    - "delta_squared"
-    - "reward"
-    - "trajectory_length"
-    - "valid_rollouts"
-    - "filtered_rollouts"
-    - "gpu_memory"
-    - "throughput"
-    - "errors"
-    - "theta_grad_norm"
-    - "phi_grad_norm"
-    - "partition_function_grad_norm"
-    - "theta_update_norm"
-    - "phi_update_norm"
-    - "partition_function_update_norm"
-    - "checkpoint"
-    - "skill_phase_event"
-  schedule_expectation_note: >-
-    Twenty minutes per step and convergence near one hundred steps are user
-    expectations, not guarantees from the paper or this run.
-
-implementation_status:
-  direct_reuse_available:
-    - "SkillFlow TTB residual and action-token log-probability computation"
-    - "SkillFlow theta/phi LoRA and task-conditioned partition function"
-    - "FlowSteer AgentGraph Canvas and terminal evaluator receipts"
-  required_adaptations_not_yet_verified:
-    - "TriviaQA v16 AgentGraph trajectory to SkillFlow TTB trajectory adapter"
-    - "strict optimizer-step then adapter-sync then next-rollout ordering"
-    - "fail-closed W&B integration with the required per-step fields"
-    - "complete theta/phi/Z optimizer and RNG checkpoint recovery"
-  not_implemented:
-    mace: true
-    joint_bayesian_posterior: true
-    evsi: true
-    paired_intervention: true
-    automatic_skill_publication: true
-  skill_phase_event_status: "not_run_not_implemented"
-
-preflight_gates:
-  gpu_inventory_verified: false
-  gpu_allocation_nonconflicting: false
-  wandb_client_available: false
-  wandb_authenticated: false
-  train_data_materialized: false
-  validation_data_materialized: false
-  triviaqa_agentgraph_ttb_adapter_verified: false
-  one_step_ttb_transaction_verified: false
-  next_rollout_uses_published_theta_verified: false
-  all_required: true
-
-storage:
-  output_root: "artifacts/triviaqa_v16_skillflow_ttb_250step"
-  run_manifest: "artifacts/triviaqa_v16_skillflow_ttb_250step/run_manifest.json"
-  preflight_receipt: "artifacts/triviaqa_v16_skillflow_ttb_250step/preflight_receipt.json"
-  step_directory_pattern: "artifacts/triviaqa_v16_skillflow_ttb_250step/steps/step_{step:06d}"
-  checkpoint_directory_pattern: "artifacts/triviaqa_v16_skillflow_ttb_250step/checkpoints/step_{step:06d}"
-
+execution_gate:
+  method_selected_by_user: false
+  one_real_step_allowed: false
+  long_run_allowed: false
+  rollout_batches_completed: 0
+  backward_passes_completed: 0
+  optimizer_steps_completed: 0
+  adapter_publications_completed: 0
+  wandb_runs_started: 0
