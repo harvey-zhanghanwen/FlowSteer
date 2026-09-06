@@ -951,3 +951,18 @@ HealthBench infrastructure and not evidence of a score improvement.
 知识库模块已用合成数据运行真实 upstream FTS5 的 10 项定向测试（另有 4 个
 参数化子项），没有模型、HTTP 或 grader 调用。工具接线、运行配置与最终整合
 由主线另行核验；此记录不声称 v2.36 已完成正式评测，也不声称分数提升。
+
+## 2026-09-06 v2.35 parallel evaluation
+
+- **Direct reuse:** `start_qwen35_director_server.sh` / `run_on_gpu_role.sh`
+  retain SkillFlow Qwen3.5 SGLang startup, changing only GPU and port.
+- **Necessary operational adapter:** `evaluate_completion_benchmark_round`
+  adds `collection_arm`, calling the same `_collect_direct` or `_collect_graph`
+  and exact-resume/evaluator. `_finish_collection_arm` projects only its arm
+  into existing `_metrics`/`_aggregate`; no substitute grader or paired zero.
+- **Necessary bug fix:** `_direct_one` compares exact Tool membership rather
+  than declared order against sorted `ToolRegistry.resource_ids`; receipt
+  retains config order for existing identity/resume checks and separately
+  records registry order. No Tool capability is added or removed.
+- FlowSteer/MD free AgentGraph, Canvas, per-node ReAct and all v2.35 sources
+  remain unchanged. This does not include v2.36 databases or training.

@@ -1698,3 +1698,20 @@ change was made during profile selection.
   均可使用六项工具，未复用不同工具条件的 Direct。525 题 prepare-only
   返回 `prepared`、`metrics=null`，未启动模型/API/grader。当前 v2.35 队列
   不变，v2.36 仅完成候选准备和独立备份。
+
+## 2026-09-06 — v2.35 GPU5 Direct / GPU6 AgentGraph
+
+User requested GPU6 AgentGraph alongside GPU5 Direct. An independent worktree
+based on v2.35 a3dd5e6 retains the frozen scientific configuration and adds
+single-arm collection/storage boundaries. Original sequential Direct is stopped
+before Direct-only resumes, so it cannot later schedule a duplicate Graph.
+GPU6 reuses existing SkillFlow SGLang startup and no downloaded model.
+
+The original Direct entry rejected equal Tool sets because registry order was
+sorted but config order was not. Repeated synchronous corpus reads then failed
+before the first model call. Exact sorted-membership comparison plus retaining
+config order in the stored receipt fixes both entry and strict resume; actual
+registry order is additionally recorded. This is an engineering correction,
+not a model/Tool/search-space change. Separate arm reports do not invent the
+other arm or full-population scores for incomplete evaluations. Tests and
+resource/output boundaries are documented in the parallel run report.
