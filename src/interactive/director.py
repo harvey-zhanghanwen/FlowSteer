@@ -136,6 +136,37 @@ A search that finds no support does not establish that an entity, term or update
 
 The Output artifact must answer the original request completely and directly, not provide an intermediate query or evidence list. When adding its producer, set output_agent_id in that transaction. A later set_output only selects an already complete user-facing artifact; it does not execute again. Avoid internal artifact labels and repetition, not necessary answer content. Preserve useful artifacts when repairing or augmenting the graph. Use finish only when finish_admissibility is present and admissible; when the Output is adequate and no material public conflict remains, finish."""
 
+# FlowSteer step -> execution feedback and SkillFlow public Observation remain
+# the control boundary. v20 tells the policy how to use the richer revision-live
+# evidence receipt; it adds neither medical roles nor a semantic FINISH gate.
+DIRECTOR_SYSTEM_PROMPT_V20 = DIRECTOR_SYSTEM_PROMPT_V19.replace(
+    "inspect its real Canvas validation, execution feedback and current artifacts "
+    "before the next action.",
+    "inspect its real Canvas validation, ordered Agent/Tool Action-Observation "
+    "receipts and current artifacts before the next action. Use the full task "
+    "and current_artifact_receipts, not a short preview, to assess progress. "
+    "Successful execution or admissible FINISH does not establish answer correctness.",
+).replace(
+    "Write distinct free-text contracts stating responsibility, required inputs, "
+    "expected artifact and completion condition.",
+    "Write distinct free-text contracts stating responsibility, required inputs, "
+    "expected artifact and completion condition. A Tool repair changes its query "
+    "or execution constraints, not the Agent's original responsibility or the "
+    "user's requested deliverable. Missing case-specific facts remain unknown; "
+    "do not request invented details.",
+).replace(
+    "When public artifacts conflict, repair the responsible work or obtain a "
+    "grounded correction and route it to the Output producer; do not discard "
+    "valid evidence because another Agent disagrees.",
+    "Compare the Output with upstream findings, their applicability and "
+    "uncertainties. When a material finding is omitted or contradicted, repair "
+    "the responsible contract or use a distinct assessment and route its artifact "
+    "to the Output producer. State the unresolved question, not a predetermined "
+    "answer, in that contract. Preserve independent interpretations and their "
+    "source references; repeated agreement is not independent evidence. Do not "
+    "discard valid evidence because another Agent disagrees.",
+)
+
 LEGACY_SCALAR_DIRECTOR_SYSTEM_PROMPT_V1 = """You are the Flow-Director. Incrementally edit the executable AgentGraph from the latest Canvas observation. Return exactly one valid JSON action each turn and no other text.
 
 Use only action types listed in admissible_action_types, model_id values from model_catalog, and exact tool_id values from tool_catalog. add_agent adds one Agent with a free-text contract. A directed relation routes the source artifact to the target. A bidirectional relation performs one bounded two-Agent exchange.
@@ -193,6 +224,7 @@ DIRECTOR_PROMPT_VERSION_V16 = "agentgraph.director.minimal-neutral.v16"
 DIRECTOR_PROMPT_VERSION_V17 = "agentgraph.director.minimal-neutral.v17"
 DIRECTOR_PROMPT_VERSION_V18 = "agentgraph.director.minimal-neutral.v18"
 DIRECTOR_PROMPT_VERSION_V19 = "agentgraph.director.minimal-neutral.v19"
+DIRECTOR_PROMPT_VERSION_V20 = "agentgraph.director.minimal-neutral.v20"
 SCALAR_DIRECTOR_PROMPT_VERSION = "agentgraph.director.minimal-neutral-scalar.v2"
 SCALAR_DIRECTOR_PROMPT_VERSION_V3 = (
     "agentgraph.director.minimal-neutral-scalar.v3"
@@ -665,6 +697,7 @@ def director_system_prompt_for_version(prompt_version: str) -> str:
         DIRECTOR_PROMPT_VERSION_V17: DIRECTOR_SYSTEM_PROMPT_V17,
         DIRECTOR_PROMPT_VERSION_V18: DIRECTOR_SYSTEM_PROMPT_V18,
         DIRECTOR_PROMPT_VERSION_V19: DIRECTOR_SYSTEM_PROMPT_V19,
+        DIRECTOR_PROMPT_VERSION_V20: DIRECTOR_SYSTEM_PROMPT_V20,
         SCALAR_DIRECTOR_PROMPT_VERSION: SCALAR_DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_PROMPT_VERSION_V3: SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_PROMPT_VERSION_V4: SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
@@ -744,6 +777,7 @@ _SUPPORTED_DIRECTOR_SYSTEM_PROMPTS = frozenset(
         DIRECTOR_SYSTEM_PROMPT_V17,
         DIRECTOR_SYSTEM_PROMPT_V18,
         DIRECTOR_SYSTEM_PROMPT_V19,
+        DIRECTOR_SYSTEM_PROMPT_V20,
         SCALAR_DIRECTOR_SYSTEM_PROMPT,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
         SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
@@ -5187,6 +5221,7 @@ class AgentGraphOrchestrator:
             DIRECTOR_PROMPT_VERSION_V16,
             DIRECTOR_PROMPT_VERSION_V18,
             DIRECTOR_PROMPT_VERSION_V19,
+            DIRECTOR_PROMPT_VERSION_V20,
         }:
             return copied
         return self._compact_qa_historical_messages(copied)
@@ -5406,6 +5441,7 @@ __all__ = [
     "DIRECTOR_SYSTEM_PROMPT_V17",
     "DIRECTOR_SYSTEM_PROMPT_V18",
     "DIRECTOR_SYSTEM_PROMPT_V19",
+    "DIRECTOR_SYSTEM_PROMPT_V20",
     "DIRECTOR_PROMPT_VERSION",
     "DIRECTOR_PROMPT_VERSION_V11",
     "DIRECTOR_PROMPT_VERSION_V12",
@@ -5416,6 +5452,7 @@ __all__ = [
     "DIRECTOR_PROMPT_VERSION_V17",
     "DIRECTOR_PROMPT_VERSION_V18",
     "DIRECTOR_PROMPT_VERSION_V19",
+    "DIRECTOR_PROMPT_VERSION_V20",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT",
     "SCALAR_DIRECTOR_PROMPT_VERSION",
     "SCALAR_DIRECTOR_SYSTEM_PROMPT_V3",

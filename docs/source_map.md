@@ -885,3 +885,22 @@ The 525 public tasks have informed development. New runs are explicitly
 post-development diagnostic replays, not untouched held-out generalization
 estimates. Rubrics/reference answers remain evaluator-only; no sample-specific
 answer, medical template, extra judge Agent, training or Skill update is added.
+
+### 2026-09-06: v2.34 evidence-bearing Director observation
+
+| Boundary | Source and classification |
+| --- | --- |
+| Canvas edit → functional-unit execution → next Director observation | **Direct reuse:** FlowSteer `InteractiveWorkflowEnv.step/_step_internal/_execute_workflow`; current `AgentWorkflowEnv.step`, `AgentRuntime.execute`, `AgentGraphOrchestrator.continue_prompt`. MD §§2.1, 3, 4.1 require free AgentGraph and finite reciprocal execution. The unit remains one accepted subgraph edit, not a newly invented per-Tool Director scheduler. |
+| Ordered public Agent/Tool feedback and persistent artifacts | **Thin adaptation:** SkillFlow `training/environment.py::GenericTaskEnvironment.step` records a public Observation alongside each action (lines 796–842), and `_compress_memory_items` folds exact duplicates (3186). Current `_agent_call_receipts`, `current_artifact_receipts` and `_compact_react_action_observations` are extended only for HealthBench communication v4. Hidden thinking and private evaluation data are not projected. |
+| Evidence visible to Director | **Direct reuse of the project's already-tested v3 projection:** `openai_gateway._healthbench_v3_artifact/_healthbench_v3_receipts` supplies bounded, deduplicated excerpts, provenance and receipt-bound producer interpretations. `AgentWorkflowEnv._healthbench_artifact_feedback_v4` is a necessary adapter from those public envelopes to the existing Canvas observation. Total live artifact receipt budget is 24,000 characters, with explicit omissions; it is not lossless raw-context replay. |
+| Failure recovery and artifact version attribution | **Necessary correction of the existing public feedback:** `_failure_continuations`, `_previous_revision_outputs`, `_latest_failure_record_by_agent` and stored input provenance remain the sources. A failed attempt's inputs cannot relabel an earlier successful artifact. Retained artifacts are marked stale; current node declarations are distinguished from the artifact's producing request. Existing recovery and FINISH admission are unchanged. |
+| Directed/reciprocal communication and reused calls | **Existing runtime reused:** the public feedback now covers all seven incoming producers allowed by the eight-node graph limit, and distinguishes reciprocal draft versus revised artifact versions. The Director can inspect public graph state; no extra Agent-to-Agent broadcast channel or relation is introduced. |
+| Director v20 | **Versioned task-neutral prompt adaptation of v19:** inspect the richer live receipt, distinguish executable completion from answer correctness, preserve the original responsibility while repairing Tool constraints, avoid inserting missing case-specific facts, and route grounded corrections to Output. No fixed roles, mandatory chain, minimum Agent count, evaluator-guided answer or new Skill. |
+| V4 model interface / Direct | **Thin registration only:** runtime/config/factory/Gateway allowlists accept the explicit v4 profile; downstream Agent messages still use the v3 renderer. Direct remains the unchanged v2.32 control with its own v2 profile. No evaluator, generation setting, model catalog, Tool protocol or Direct answer is rewritten. |
+| Monitoring and old-to-new evaluation handoff | **Project operational adapter, not an orchestration algorithm:** uses the existing completion runner's exact-resume and evaluator-only retry paths. An exit code or `completed_with_operational_failures` alone is not completion; fixed task IDs, admitted results, evaluator pending count and process locks determine handoff. No training, model calls for monitoring, or automatic source rewriting. |
+
+The low-score panel used for this change is documented in the v2.34 report
+directory. It includes cases where evidence **was already received by the
+downstream model but was not used correctly**. Increased feedback visibility
+does not prove semantic or clinical correctness. Scores on these public tasks
+are post-development re-evaluation, not untouched held-out generalization.

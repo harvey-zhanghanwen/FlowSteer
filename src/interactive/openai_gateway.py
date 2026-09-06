@@ -16,6 +16,7 @@ from scripts.prompts.prompt import FORMAT_PROMPT
 from .agent_runtime import (
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V4,
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
     AgentRequest,
     AgentResponse,
@@ -399,6 +400,7 @@ _PRODUCER_CONTEXT_PROFILES = frozenset(
         ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
         ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
         ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+        ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V4,
     }
 )
 
@@ -961,8 +963,13 @@ def _format_upstream(
     if (
         project_healthbench_structured_evidence
         and artifact_communication_profile
-        == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3
+        in {
+            ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+            ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V4,
+        }
     ):
+        # V4 changes Canvas-to-Director feedback only.  Downstream and reciprocal
+        # Agent payloads retain the exact V3 receipt projection and its bounds.
         return _format_healthbench_upstream_v3(
             messages, condition, include_dependency=include_dependency,
             state=healthbench_projection_state if healthbench_projection_state is not None else {
@@ -1502,7 +1509,10 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "(takes precedence over an Agent contract):\n"
             + _healthbench_execution_protocol(request)
         )
-        if request.artifact_communication_profile == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3:
+        if request.artifact_communication_profile in {
+            ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+            ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V4,
+        }:
             system += _HEALTHBENCH_V3_EXECUTION_SUPPLEMENT
     healthbench_projection_state: dict[str, Any] = {
         "remaining": _HEALTHBENCH_V3_PROMPT_CHARS,
@@ -1522,6 +1532,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             in {
                 ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
                 ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V4,
             }
         ),
         artifact_communication_profile=(
@@ -1631,6 +1642,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                     in {
                         ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
                         ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+                        ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V4,
                     }
                 ),
                 artifact_communication_profile=(

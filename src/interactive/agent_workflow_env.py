@@ -25,11 +25,13 @@ from .agent_graph import (
 )
 from .agent_runtime import (
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V4,
     AgentFailureRecord,
     AgentGateway,
     AgentRuntime,
     AgentRuntimeError,
     AgentRuntimeResult,
+    UpstreamMessage,
 )
 from .model_registry import ModelRegistry
 from .healthbench_professional_adapter import parse_model_visible_conversation
@@ -665,14 +667,35 @@ class AgentWorkflowEnv:
     def task_goal_receipt(self) -> dict[str, object]:
         """Return the bounded, immutable task objective visible after each edit."""
 
-        return {
+        receipt: dict[str, object] = {
             "source": "immutable_initial_task",
             "preserve_original_scope": True,
             "task_preview": _artifact_head_tail_preview(
                 self._problem,
-                limit=320,
+                limit=1600 if self._uses_healthbench_feedback_v4() else 320,
             ),
         }
+        if self._uses_healthbench_feedback_v4():
+            receipt["task_characters"] = len(self._problem)
+            receipt["preview_truncated"] = len(" ".join(self._problem.split())) > 1600
+            try:
+                conversation = parse_model_visible_conversation(self._problem)
+            except ValueError:
+                conversation = ()
+            for message in reversed(conversation or ()):
+                if message.get("role") == "user":
+                    text = str(message.get("content", ""))
+                    receipt["latest_user_request"] = _artifact_head_tail_preview(text, limit=2400)
+                    receipt["latest_user_request_truncated"] = len(" ".join(text.split())) > 2400
+                    break
+        return receipt
+
+    def _uses_healthbench_feedback_v4(self) -> bool:
+        return bool(
+            self.runtime.dataset_id == "healthbench_professional"
+            and self.runtime.artifact_communication_profile
+            == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V4
+        )
 
     @property
     def graph(self) -> AgentGraph:
@@ -5413,6 +5436,8 @@ class AgentWorkflowEnv:
     @staticmethod
     def _compact_react_action_observations(
         metadata: Mapping[str, object],
+        *,
+        enriched: bool = False,
     ) -> list[dict[str, object]]:
         """Project public ReAct Action--Observation receipts for the Director.
 
@@ -5528,6 +5553,9 @@ class AgentWorkflowEnv:
                         if isinstance(evidence, Mapping)
                     ]
                 if result_receipt:
+                    if enriched:
+                        result_receipt["evidence_body_location"] = "current_artifact_receipts"
+                        result_receipt["omitted_evidence_provenance_count"] = max(0, len(raw_evidence) - 3) if isinstance(raw_evidence, (list, tuple)) else 0
                     observation_receipt["result"] = result_receipt
             projected.append(
                 {
@@ -5542,6 +5570,8 @@ class AgentWorkflowEnv:
     def _agent_call_receipts(
         cls,
         execution: AgentRuntimeResult,
+        *,
+        enriched: bool = False,
     ) -> list[dict[str, object]]:
         """Return every Agent call phase and its bounded communication state."""
 
@@ -5562,7 +5592,7 @@ class AgentWorkflowEnv:
                         limit=160,
                     ),
                 }
-                for message in request.upstream[:6]
+                for message in (request.upstream if enriched else request.upstream[:6])
             ]
             peer_draft = request.peer_draft
             event: dict[str, object] = {
@@ -5605,10 +5635,33 @@ class AgentWorkflowEnv:
                 ),
             }
             react_events = cls._compact_react_action_observations(
-                response.metadata
+                response.metadata, enriched=enriched
             )
             if react_events:
                 event["react_action_observations"] = react_events
+            if enriched:
+                # The current Artifact projection owns evidence bodies; these
+                # ordered call receipts identify the exact consumed versions.
+                artifact_is_current = (
+                    execution.output_metadata.get(request.agent.id, {}).get("artifact_version")
+                    == request.request_id
+                )
+                event.update({
+                    "model_id": request.agent.model_id,
+                    "contract": _artifact_head_tail_preview(request.agent.contract, limit=640),
+                    "artifact_version": request.request_id,
+                    "input_artifact_versions": {
+                        message.source_agent_id: message.artifact_version
+                        for message in (*request.upstream, *((request.peer_draft,) if request.peer_draft else ()))
+                        if message.artifact_version is not None
+                    },
+                    "completion_status": response.metadata.get("finish_reason"),
+                    "artifact_is_current": artifact_is_current,
+                    "artifact_body_location": (
+                        "current_artifact_receipts" if artifact_is_current
+                        else "trajectory.agent_execution"
+                    ),
+                })
             raw_tool_receipts = response.metadata.get("tool_receipts", ())
             if isinstance(raw_tool_receipts, (list, tuple)):
                 receipts = [
@@ -5661,6 +5714,8 @@ class AgentWorkflowEnv:
         adding a benchmark-specific candidate parser or role inventory.
         """
 
+        if self._uses_healthbench_feedback_v4():
+            return self._healthbench_artifact_feedback_v4()
         receipts: list[dict[str, object]] = []
         for agent_id, artifact in sorted(self._progressive_outputs.items()):
             if not self._graph.has_node(agent_id):
@@ -5789,6 +5844,171 @@ class AgentWorkflowEnv:
             )
         return receipts
 
+    def _healthbench_artifact_feedback_v4(self) -> list[dict[str, object]]:
+        """Reuse the routed v3 evidence projection at the Canvas boundary.
+
+        SkillFlow retains Tool Observations independently of final artifacts;
+        FlowSteer returns the executed result after each Canvas edit. This thin
+        projection joins those existing public receipts, including successful
+        retrieval before a failed completion. No new execution or graph edge
+        is introduced. Repeated source bodies are emitted once, while bound
+        producer interpretations remain distinct.
+        """
+        from .openai_gateway import (
+            _healthbench_v3_artifact,
+            _healthbench_v3_receipts,
+            _healthbench_v3_text,
+        )
+
+        budget = 24_000
+        serialized_size = lambda value: len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        agent_ids = sorted(
+            (set(self._progressive_outputs) | set(self._failure_continuations)
+             | set(self._latest_failure_record_by_agent))
+            & {node.id for node in self._graph.nodes},
+            key=lambda agent_id: (
+                agent_id != self._graph.output_agent_id,
+                agent_id not in self._failure_continuations,
+                agent_id,
+            ),
+        )
+        receipts: list[dict[str, object]] = []
+        seen_sources: set[tuple[str, str]] = set()
+        for index, agent_id in enumerate(agent_ids):
+            node = self._graph.get_node(agent_id)
+            continuation = self._failure_continuations.get(agent_id, {})
+            failure_record = self._latest_failure_record_by_agent.get(agent_id)
+            failed_attempt = bool(continuation or failure_record)
+            retained_previous = bool(
+                failed_attempt and agent_id not in self._progressive_outputs
+                and agent_id in self._previous_revision_outputs
+            )
+            artifact = (
+                self._previous_revision_outputs.get(agent_id, "")
+                if retained_previous else self._progressive_outputs.get(agent_id, "")
+            )
+            metadata = dict((
+                self._previous_revision_output_metadata if retained_previous
+                else self._progressive_output_metadata
+            ).get(agent_id, {}))
+            # A failed attempt has its own consumed versions. Do not relabel a
+            # retained successful artifact with the continuation's new inputs.
+            raw_provenance = metadata.get("input_artifact_provenance", ())
+            provenance = tuple(item for item in raw_provenance if isinstance(item, Mapping)) if isinstance(raw_provenance, (list, tuple)) else ()
+            raw_tools = metadata.get("tool_receipts", ())
+            tools = tuple(item for item in raw_tools if isinstance(item, Mapping)) if isinstance(raw_tools, (list, tuple)) else ()
+            raw_failed_tools = continuation.get("tool_receipts", ())
+            failed_tools = tuple(item for item in raw_failed_tools if isinstance(item, Mapping)) if isinstance(raw_failed_tools, (list, tuple)) else ()
+            raw_failed_provenance = failure_record.metadata.get("input_artifact_provenance", ()) if failure_record else ()
+            failed_provenance = tuple(item for item in raw_failed_provenance if isinstance(item, Mapping)) if isinstance(raw_failed_provenance, (list, tuple)) else ()
+            projection_provenance = provenance
+            if failed_tools or failed_provenance:
+                projection_provenance += ({
+                    "source_agent_id": agent_id,
+                    "artifact": "No completed artifact for this failed attempt.",
+                    "tool_receipts": failed_tools,
+                    "input_artifact_provenance": failed_provenance,
+                },)
+            versions = metadata.get("input_artifact_versions", {})
+            versions = versions if isinstance(versions, Mapping) else {}
+            upstream = [{
+                key: _healthbench_v3_text(item[key], 180) if isinstance(item.get(key), str) else item.get(key)
+                for key in ("source_agent_id", "target_agent_id", "artifact_version", "message_type", "source_execution_mode")
+                if item.get(key) is not None
+            } for item in provenance[:8]]
+            record: dict[str, object] = {
+                "feedback_profile": "healthbench.director-evidence.v4",
+                "agent_id": agent_id,
+                "artifact_version": metadata.get("artifact_version", metadata.get("artifact_id")),
+                "graph_revision": metadata.get("graph_revision"),
+                "current_graph_revision": self._graph.revision,
+                "model_id": node.model_id,
+                "contract": _healthbench_v3_text(node.contract, 640),
+                # MODIFY may have changed the node since a retained artifact
+                # was produced. Its producer is identified by artifact_version,
+                # not reconstructed from the current node declaration.
+                "node_declaration_scope": "current_graph_not_artifact_producer",
+                "artifact_producer_request_id": metadata.get("artifact_version"),
+                "execution_mode": node.execution_mode.value,
+                "allowed_tools": list(node.allowed_tools),
+                "is_output_agent": agent_id == self._graph.output_agent_id,
+                "artifact_fresh": bool(artifact) and not failed_attempt and agent_id not in self._unresolved_dirty_agents,
+                "retained_previous_artifact": retained_previous,
+                "artifact_complete": bool(artifact) and metadata.get("finish_reason") != "length" and metadata.get("artifact_complete", True) is not False,
+                "generated_as_output_agent": metadata.get("generated_as_output_agent") is True,
+                "execution_status": "failed" if failed_attempt else "completed",
+                "finish_reason": metadata.get("finish_reason"),
+                "artifact_character_count": len(artifact),
+                "input_artifact_versions": dict(versions),
+                "upstream_artifacts": upstream,
+                "tool_receipt_count": len(tools),
+                "failed_attempt_tool_receipt_count": len(failed_tools),
+                "provenance_status": "unverified_work_product",
+                "projection_truncated": len(provenance) > 8,
+            }
+            # Reserve a share for every live producer instead of filling the
+            # entire budget with the first Output or failed node.
+            remaining = max(0, budget - serialized_size(receipts) - 16)
+            allowance = remaining // max(1, len(agent_ids) - index)
+            projected_artifact = _healthbench_v3_artifact(artifact)
+            if (
+                isinstance(projected_artifact, Mapping)
+                and projected_artifact.get("projection_status") == "partial"
+            ) or (isinstance(projected_artifact, str) and projected_artifact != artifact):
+                record["projection_truncated"] = True
+            if serialized_size(projected_artifact) > max(300, allowance // 3):
+                projected_artifact = _healthbench_v3_text(artifact, max(300, allowance // 3))
+                record["projection_truncated"] = True
+            record["producer_artifact"] = projected_artifact
+            if failed_attempt:
+                failed_metadata = failure_record.metadata if failure_record else {}
+                failed_versions = continuation.get(
+                    "input_artifact_versions", failed_metadata.get("input_artifact_versions", {})
+                )
+                record["failed_attempt_input_artifact_versions"] = dict(failed_versions) if isinstance(failed_versions, Mapping) else {}
+                if failure_record:
+                    record["failed_attempt_request_id"] = failure_record.request_id
+                    record["failed_attempt_graph_revision"] = failure_record.graph_revision
+                    record["failed_attempt_phase"] = failure_record.phase.value
+                    record["failed_attempt_error_type"] = failure_record.error_type
+            if continuation:
+                # Preserve every public action/status even if large result
+                # bodies must be omitted from this bounded live projection.
+                record["public_action_observations"] = [
+                    {"turn": event["turn"], "action": event["action"],
+                     "observation": {key: value for key, value in event["observation"].items() if key != "result"}}
+                    for event in self._compact_react_action_observations(continuation)
+                ]
+            available_evidence = allowance - serialized_size(record) - 80
+            projected_sources = set(seen_sources)
+            has_evidence_state = bool(tools or projection_provenance)
+            if has_evidence_state and available_evidence > 250:
+                projected = _healthbench_v3_receipts(
+                    UpstreamMessage(agent_id, "director", artifact or "No completed artifact; retained public Tool Observations.",
+                                    tool_receipts=tools, input_artifact_provenance=projection_provenance),
+                    seen_sources=projected_sources,
+                    char_budget=available_evidence,
+                )
+                record["retrieval_evidence"] = projected
+                record["projection_truncated"] = bool(record["projection_truncated"] or projected["projection_truncated"])
+            elif has_evidence_state:
+                record["projection_truncated"] = True
+                record["retrieval_evidence_omitted"] = "current feedback budget; full Tool receipts retained in trajectory"
+            # An unusually large number of failures may exceed a normal
+            # per-node share. Never discard identity or quietly crop JSON.
+            if serialized_size(receipts + [record]) > budget - 512 * (len(agent_ids) - index - 1):
+                record = {
+                    "feedback_profile": "healthbench.director-evidence.v4", "agent_id": agent_id,
+                    "artifact_version": metadata.get("artifact_version"), "execution_status": record["execution_status"],
+                    "artifact_character_count": len(artifact), "tool_receipt_count": len(tools),
+                    "failed_attempt_tool_receipt_count": len(failed_tools),
+                    "projection_truncated": True, "omitted_content": "feedback budget; full receipt retained in trajectory",
+                }
+            else:
+                seen_sources.update(projected_sources)
+            receipts.append(record)
+        return receipts
+
     def _accepted_feedback(
         self,
         action: AgentAction,
@@ -5824,6 +6044,7 @@ class AgentWorkflowEnv:
         enriched_artifact_feedback = (
             self.runtime.artifact_communication_profile
             == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1
+            or self._uses_healthbench_feedback_v4()
         )
 
         def input_records(
@@ -6054,7 +6275,7 @@ class AgentWorkflowEnv:
                 "output_inbox": output_inbox,
                 "agent_artifacts": agent_artifacts,
                 "agent_call_receipts": self._agent_call_receipts(
-                    execution
+                    execution, enriched=self._uses_healthbench_feedback_v4()
                 ),
                 **(
                     {

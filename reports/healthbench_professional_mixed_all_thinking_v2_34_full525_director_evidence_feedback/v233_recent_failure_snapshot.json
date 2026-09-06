@@ -1,0 +1,36 @@
+{
+  "schema_version": "analysis_snapshot.v1",
+  "source": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v233/artifacts/healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context/evaluation/agentgraph_trajectories.jsonl",
+  "append_line_start": 324,
+  "append_line_end": 426,
+  "denominator": 103,
+  "evaluator_valid": 103,
+  "raw_score_mean": 0.28947085514559373,
+  "length_adjusted_score_mean": 0.2712582687378267,
+  "score_counts": {"full": 30, "positive_partial": 26, "zero": 34, "negative": 13},
+  "termination_counts": {"finish": 103, "terminal_failure": 0},
+  "final_agent_counts": {"1": 13, "2": 13, "3": 65, "4": 10, "5": 1, "6": 1},
+  "rubric_counts": {"positive_met": 80, "positive_missed": 82, "negative_triggered": 20, "negative_avoided": 27},
+  "classification_method": "Manual exclusive primary output/rubric failure classification; not official taxonomy and not an assertion of causal code bugs for all samples.",
+  "classification_denominator": 73,
+  "classification_lines": {
+    "knowledge_evidence_coverage": [325,326,327,328,330,336,337,339,345,346,350,353,356,359,360,363,364,366,368,369,376,378,381,382,383,385,392,393,394,396,399,400,401,403,411,413,414,416,421,422],
+    "calculation_application": [331,332,334,372,373,374,375,377,379,418],
+    "context_premise": [338,340,341,352,354,355,357,358,380,391,397,402,406,407,408,410,417,420,424],
+    "patient_fabrication": [342,390],
+    "presentation": [347],
+    "intermediate_query": [329]
+  },
+  "deep_demo_first_observable_content_failure": [
+    {"line": 329, "task_id": "healthbench-professional:a2341b190c3f7e6591c26ca5a0b87b10", "first_layer": "retrieval_relevance", "propagation": "repair_contract_scope_narrowing_then_intermediate_query_finish"},
+    {"line": 342, "task_id": "healthbench-professional:8806130930dcbba8864220bfe62aac78", "first_layer": "node_2_patient_fact_fabrication", "propagation": "node_3_and_node_4_repeat_and_expand_received_unsupported_facts"},
+    {"line": 408, "task_id": "healthbench-professional:84bd321367f5568594be5d8b6a5e9da3", "first_layer": "director_translation_contract_verifies_source_fidelity_not_embedded_claim", "propagation": "irrelevant_term_search_and_wrong_source_claim_binding_then_uncritical_translation"},
+    {"line": 410, "task_id": "healthbench-professional:79d2e7c5e03aa4949d55bf2bbd819ceb", "first_layer": "director_predetermined_unverified_claim", "propagation": "single_output_agent_complies"},
+    {"line": 420, "task_id": "healthbench-professional:7773f345fcd7cf590aa2f34eaad66baa", "first_layer": "retrieval_relevance_and_entity_precision", "propagation": "node_2_turns_missing_evidence_into_positive_assertion_then_output_repeats"}
+  ],
+  "deep_demo_confirmed_transport_loss": 0,
+  "deep_demo_transport_loss_denominator": 5,
+  "model_or_api_calls_for_analysis": 0,
+  "new_version_evaluated": false,
+  "limitations": ["fixed completed subset, not full 525", "post-development replay interpretation required", "rubrics used offline only", "richer feedback is not proof of score improvement", "individual signed rubric scores are not clamped before averaging"]
+}

@@ -1559,3 +1559,46 @@ change was made during profile selection.
   prepare-only run passed after the isolated worktree registry was pointed at
   the original preparation catalog recorded in the reused data manifest. No
   data, rubric, split or preparation manifest was regenerated or relabeled.
+
+## 2026-09-06: v2.34 Director evidence feedback and completion handoff
+
+- Candidate worktree: `/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v234`, branch
+  `feature/healthbench-v2.34-director-evidence-feedback-20260905`, based on
+  accepted v2.33 source `3b18f7a`. v2.33 remains running from its separate,
+  unchanged worktree; its scores are never relabeled as v2.34.
+- After a stalled integration period, the user requested ongoing observation
+  of v2.33 low-score demos and automatic v2.34 evaluation after the old run
+  completes. The new work is now integrated and verified locally, rather than
+  described as an already-running evaluation.
+- Live Director feedback now uses bounded artifact/evidence projections rather
+  than only 160–400-character previews. Ordered public ReAct observations,
+  artifact/input versions, actual routing and retained failed-attempt evidence
+  remain visible. A 24,000-character total budget and source deduplication
+  bound repeated context; omissions are explicit and raw receipts remain in
+  the original trajectory.
+- Fixed projection bugs: failed-continuation input versions no longer overwrite
+  the retained artifact's versions; failed node modification retains a visibly
+  stale prior artifact; provider failure without a Tool trace does not hide it;
+  indirect/peer evidence is visible even without a direct Tool call; seven-way
+  fan-in is no longer cropped to six; draft/revision references are distinct.
+- Director v20 additionally preserves a node's original responsibility when
+  repairing query syntax/budget, distinguishes unknown case-specific data from
+  evidence, and uses public evidence conflicts to guide free-form repair.
+  These are prompt constraints, not formal guarantees of semantic correctness.
+- The fixed 525-task `--prepare-only` passed with the same original data,
+  evaluator, model catalog v7, thinking settings, sampling schedule, seed,
+  concurrency4 and 900-second task budget. Actual resource binding remains
+  GPU5 / port8025 / context32768 / mem_fraction0.82. No dataset was recreated.
+- Local verification: 41 Director-v19/v20, v3 evidence and Direct-reference
+  tests passed; 127 runtime/Director/config/feedback regression tests passed,
+  with 23 subtests. The latter includes all 13 v4 feedback tests. No model,
+  Tool, grader, backward or optimizer call was made by these tests.
+- Direct stays an explicitly reused control: 459 valid responses plus 66
+  strict-zero terminal failures, raw13.968705% / adjusted16.756929% on all525.
+  No v2.34 AgentGraph score is claimed before it is actually evaluated.
+- Operational handoff is separate from model orchestration: continuously read
+  saved results, record diagnostics locally, wait for true old-run completion
+  and lock release, and invoke the existing new runner only after readiness.
+  Old pending evaluator results reuse their saved answers; missing old tasks
+  use bounded exact resume, not unconditional resampling. Scripts do not
+  autonomously modify architecture or generate Skills from test-set failures.
