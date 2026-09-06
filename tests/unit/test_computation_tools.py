@@ -108,8 +108,16 @@ class AIMEComputationToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(calculator.supports_dataset("hotpotqa"))
         self.assertEqual(["expression"], calculator.input_schema["required"])
         self.assertFalse(calculator.input_schema["additionalProperties"])
+        self.assertIn(
+            "deterministic mathematical expression",
+            calculator.input_schema["description"],
+        )
         self.assertEqual(["code"], python_exec.input_schema["required"])
         self.assertFalse(python_exec.input_schema["additionalProperties"])
+        self.assertIn(
+            "finite, explicitly formalized",
+            python_exec.input_schema["description"],
+        )
         self.assertEqual("none", calculator.side_effect)
         self.assertEqual("isolated_child_process", python_exec.side_effect)
         self.assertEqual(1.0, calculator.timeout_seconds)

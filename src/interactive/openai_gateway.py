@@ -103,15 +103,45 @@ def supports_local_sglang_top_k(request: AgentRequest) -> bool:
     )
 
 
+def supports_local_sglang_thinking_budget(request: AgentRequest) -> bool:
+    """Return whether this model arm admits SGLang ``custom_params``.
+
+    SGLang's OpenAI protocol forwards the top-level ``custom_params`` object
+    into native sampling parameters. Keep that backend-specific extension
+    behind an explicit capability receipt; remote OpenAI-compatible providers
+    still receive only SkillFlow's portable ``chat_template_kwargs`` fields.
+    """
+
+    provider_metadata = request.provider.metadata
+    model_metadata = request.model.metadata
+
+    def declared_value(key: str) -> str:
+        value = model_metadata.get(key, provider_metadata.get(key, ""))
+        return value.strip().casefold() if isinstance(value, str) else ""
+
+    return bool(
+        declared_value("sampling_backend") == "sglang"
+        and declared_value("deployment_locality") == "local"
+        and declared_value("supports_thinking_budget") == "true"
+    )
+
+
 def _requested_sampling(payload: Mapping[str, Any]) -> Dict[str, Any]:
     """Project only the decoding fields placed on the provider request."""
 
+    chat_template_kwargs = payload.get("chat_template_kwargs")
+    thinking_budget = (
+        chat_template_kwargs.get("thinking_budget")
+        if isinstance(chat_template_kwargs, Mapping)
+        else None
+    )
     return {
         "temperature": payload.get("temperature"),
         "top_p": payload.get("top_p"),
         "top_k": payload.get("top_k"),
         "max_tokens": payload.get("max_tokens"),
         "seed": payload.get("seed"),
+        "thinking_budget": thinking_budget,
     }
 
 
@@ -255,6 +285,24 @@ def _format_upstream(
             envelope.append(f"source_model_id: {item.source_model_id}")
         if item.source_contract is not None:
             envelope.append(f"source_contract: {item.source_contract}")
+        if item.artifact_complete is not None:
+            envelope.append(
+                "artifact_complete: "
+                + ("true" if item.artifact_complete else "false")
+            )
+            envelope.append(
+                "artifact_status: "
+                + ("complete" if item.artifact_complete else "incomplete")
+            )
+        if item.execution_diagnostic_codes:
+            envelope.append(
+                "execution_diagnostic_codes: "
+                + json.dumps(
+                    list(item.execution_diagnostic_codes),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
         if (
             artifact_assessment_protocol
             in {
@@ -299,6 +347,19 @@ def _format_upstream(
                 "tool_receipts: "
                 + json.dumps(
                     list(visible_tool_receipts),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        if item.input_artifact_provenance:
+            envelope.append(
+                "input_artifact_provenance: "
+                + json.dumps(
+                    [
+                        dict(provenance)
+                        for provenance in item.input_artifact_provenance
+                    ],
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
@@ -650,7 +711,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "provenance_bound_candidate_assessment_v1",
             "provenance_bound_candidate_assessment_v2",
         }
-        and request.upstream
+        and (request.upstream or request.peer_draft is not None)
         and not request.is_format_agent
     ):
         protocol += (
@@ -658,14 +719,23 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "one <artifact_assessments>...</artifact_assessments> block. Do not "
             "add an Artifact Assessment heading, Markdown code fence, or object "
             "wrapper. The first character inside the opening tag must be [. Its "
-            "contents must be a JSON array with one object for every upstream "
-            "artifact that exposes an AIME integer candidate. Each object has "
+            "contents must be a JSON array with one object for every routed "
+            "input artifact that exposes an AIME integer candidate, including "
+            "ordinary upstream artifacts and the peer draft during a revision. "
+            "The block must be strict JSON: either write mathematical basis "
+            "in plain text or escape every literal backslash inside JSON "
+            "strings (for example, write `\\\\cos` rather than `\\cos`). "
+            "Each object has "
             "exactly assessed_artifact_id, candidate, assessment, basis, and "
             "counterexample. Copy assessed_artifact_id from that source's "
             "artifact_id and copy its candidate without alteration. Assess only "
             "an artifact whose typed envelope has a non-null candidate and "
             "candidate_parsing_status parsed; do not infer a candidate from its "
             "raw artifact text when the envelope says failed. assessment "
+            "must use artifact_complete and execution_diagnostic_codes as "
+            "runtime receipts: an incomplete artifact is insufficient, and a "
+            "recovered execution error must be addressed by the public "
+            "derivation rather than ignored. assessment "
             "is supported only when the public derivation is sufficient; use "
             "insufficient_evidence when it is not; use refuted only with a "
             "concrete counterexample stated in counterexample. Set "
@@ -685,7 +755,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             == "provenance_bound_candidate_assessment_v2"
         ):
             protocol += (
-                " If every upstream artifact that exposes an AIME integer "
+                " If every routed input artifact that exposes an AIME integer "
                 "candidate is assessed supported and all copied candidate "
                 "values are identical, emit exactly one `Final Answer: "
                 "<candidate>` line immediately before the assessment block. "
@@ -805,42 +875,24 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
     elif request.phase is ExecutionPhase.REVISION:
         if request.own_draft is None or request.peer_draft is None:
             raise OpenAICompatibleGatewayError("revision request is missing immutable drafts")
+        peer_artifact_envelope = _format_upstream(
+            (request.peer_draft,),
+            request.communication_condition,
+            include_dependency=True,
+            project_artifact_read_receipts=(
+                semantic_lineage
+                and semantic_role in {"reasoner", "verifier"}
+            ),
+            artifact_assessment_protocol=(
+                request.artifact_assessment_protocol
+            ),
+        )
         phase = (
             "This is the revision phase. Revise your own draft after reading the peer's "
             "previous-phase draft. You cannot observe the peer's current revision.\n\n"
             f"Your draft:\n{request.own_draft}\n\n"
             "Peer artifact envelope:\n"
-            f"source_agent: {request.peer_draft.source_agent_id}\n"
-            f"target_agent: {request.peer_draft.target_agent_id}\n"
-            f"message_type: {request.peer_draft.message_type}\n"
-            f"artifact_type: {request.peer_draft.artifact_type}\n"
-            f"graph_revision: {request.peer_draft.graph_revision}\n"
-            + (
-                f"artifact_id: {request.peer_draft.artifact_id}\n"
-                if request.peer_draft.artifact_id is not None
-                else ""
-            )
-            + "provenance_status: unverified_work_product\n"
-            + (
-                "environment_revision: "
-                f"{request.peer_draft.environment_revision}\n"
-                if request.peer_draft.environment_revision is not None
-                else ""
-            )
-            + (
-                "tool_receipts: "
-                + json.dumps(
-                    [dict(receipt) for receipt in request.peer_draft.tool_receipts],
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                + "\n"
-                if request.peer_draft.tool_receipts
-                else ""
-            )
-            + "artifact:\n"
-            f"{_visible_message_content(request.peer_draft.content, request.communication_condition)}"
+            f"{peer_artifact_envelope}"
         )
     else:  # pragma: no cover - enum exhaustiveness guard
         raise OpenAICompatibleGatewayError(f"unsupported execution phase: {request.phase}")
@@ -849,19 +901,31 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
         {"role": "user", "content": common + "\n\n" + phase},
     ]
     if request.partial_artifact is not None:
-        messages.extend(
+        continuation_instruction = (
             (
-                {"role": "assistant", "content": request.partial_artifact},
-                {
-                    "role": "user",
-                    "content": (
-                        "Continue from the interruption and complete the same "
-                        "artifact. Do not restart or change the task, model, "
-                        "contract, tools, upstream artifacts, or answer protocol. "
-                        "Complete only the missing suffix concisely."
-                    ),
-                },
+                "Continue from the interruption and complete the same "
+                "artifact. Do not restart or change the task, model, "
+                "contract, tools, upstream artifacts, or answer protocol. "
+                "Complete only the missing suffix concisely."
             )
+            if request.partial_artifact
+            else (
+                "Your previous response exhausted its token allowance before "
+                "producing a public artifact. Produce the complete same "
+                "artifact now, concisely. Do not change the task, model, "
+                "contract, tools, upstream artifacts, or answer protocol, and "
+                "do not infer or quote any unavailable private reasoning."
+            )
+        )
+        if request.partial_artifact:
+            messages.append(
+                {"role": "assistant", "content": request.partial_artifact}
+            )
+        messages.append(
+            {
+                "role": "user",
+                "content": continuation_instruction,
+            }
         )
     return messages
 
@@ -969,6 +1033,42 @@ class OpenAICompatibleGateway:
             payload["chat_template_kwargs"] = {
                 "enable_thinking": normalized == "true"
             }
+            raw_thinking_budget = metadata.get("thinking_budget_tokens")
+            if raw_thinking_budget is not None:
+                if normalized != "true":
+                    raise OpenAICompatibleGatewayError(
+                        "model metadata thinking_budget_tokens requires "
+                        "chat_template_enable_thinking=true"
+                    )
+                try:
+                    thinking_budget = int(raw_thinking_budget)
+                except (TypeError, ValueError) as exc:
+                    raise OpenAICompatibleGatewayError(
+                        "model metadata thinking_budget_tokens must be an integer"
+                    ) from exc
+                if (
+                    isinstance(raw_thinking_budget, bool)
+                    or thinking_budget < 1
+                    or thinking_budget >= int(payload["max_tokens"])
+                ):
+                    raise OpenAICompatibleGatewayError(
+                        "model metadata thinking_budget_tokens must be positive "
+                        "and smaller than max_tokens"
+                    )
+                # DIRECT_REUSE: SkillFlow's thinking-enabled Supervisor places
+                # this limit beside enable_thinking in chat_template_kwargs.
+                payload["chat_template_kwargs"]["thinking_budget"] = (
+                    thinking_budget
+                )
+                if supports_local_sglang_thinking_budget(request):
+                    # NECESSARY_ADAPTATION: deployed SGLang 0.5.15 reads the
+                    # enforced ReasonerGrammar budget from SamplingParams'
+                    # custom_params. Its OpenAI protocol maps this top-level
+                    # field into that native request without affecting remote
+                    # provider payloads.
+                    payload["custom_params"] = {
+                        "thinking_budget": thinking_budget
+                    }
         response_schema_text = metadata.get("response_json_schema")
         if response_schema_text is not None:
             if not isinstance(response_schema_text, str) or not response_schema_text.strip():
@@ -1176,6 +1276,48 @@ class OpenAICompatibleGateway:
             "total_tokens": usage.get("total_tokens"),
             "provider_request_id": response.get("id"),
         }
+        configured_thinking = request.model.metadata.get(
+            "chat_template_enable_thinking"
+        )
+        if configured_thinking is not None:
+            normalized_thinking = configured_thinking.strip().lower()
+            if normalized_thinking not in {"true", "false"}:
+                raise OpenAICompatibleGatewayError(
+                    "model metadata chat_template_enable_thinking must be true or false"
+                )
+            metadata["chat_template_enable_thinking"] = (
+                normalized_thinking == "true"
+            )
+            reasoning_content_present = bool(
+                isinstance(message.get("reasoning_content"), str)
+                and message["reasoning_content"].strip()
+            )
+            inline_reasoning_present = (
+                "<think>" in message["content"]
+                and "</think>" in message["content"]
+            )
+            metadata["reasoning_content_present"] = reasoning_content_present
+            metadata["inline_reasoning_present"] = inline_reasoning_present
+            metadata["reasoning_trace_present"] = (
+                reasoning_content_present or inline_reasoning_present
+            )
+        required_reasoning = request.model.metadata.get(
+            "require_reasoning_trace"
+        )
+        if required_reasoning is not None:
+            normalized_required = required_reasoning.strip().lower()
+            if normalized_required not in {"true", "false"}:
+                raise OpenAICompatibleGatewayError(
+                    "model metadata require_reasoning_trace must be true or false"
+                )
+            metadata["reasoning_trace_required"] = normalized_required == "true"
+            if (
+                normalized_required == "true"
+                and metadata.get("reasoning_trace_present") is not True
+            ):
+                raise OpenAICompatibleGatewayError(
+                    "provider response is missing the required reasoning trace"
+                )
         return AgentResponse(text=message["content"], metadata=metadata)
 
 

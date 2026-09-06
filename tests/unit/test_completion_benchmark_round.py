@@ -109,6 +109,134 @@ def test_supported_configs_are_evaluation_only():
             raise AssertionError("an optimizer-enabled evaluation config was accepted")
 
 
+def _thinking_json_schema_config() -> dict:
+    config = _evaluation_config("aime_2026")
+    config["director"].update(
+        {
+            "enable_thinking": True,
+            "action_decoding": "json_schema",
+            "max_context_tokens": 65536,
+        }
+    )
+    return config
+
+
+def test_thinking_json_schema_runtime_preflight_accepts_exact_qwen3_parser():
+    receipt = _MODULE._validate_sglang_thinking_runtime(
+        _thinking_json_schema_config(),
+        {
+            "context_length": 65536,
+            "reasoning_parser": "qwen3",
+            "grammar_backend": "xgrammar",
+            "enable_strict_thinking": True,
+        },
+    )
+
+    assert receipt == {
+        "schema_version": "flowsteer.sglang.thinking-runtime-preflight.v2",
+        "required": True,
+        "passed": True,
+        "enable_thinking": True,
+        "action_decoding": "json_schema",
+        "status": "validated",
+        "required_reasoning_parser": "qwen3",
+        "actual_reasoning_parser": "qwen3",
+        "required_grammar_backend": "xgrammar",
+        "actual_grammar_backend": "xgrammar",
+        "required_strict_thinking": True,
+        "actual_strict_thinking": True,
+        "required_context_length": 65536,
+        "actual_context_length": 65536,
+    }
+
+
+def test_thinking_json_schema_runtime_preflight_rejects_parser_alias():
+    try:
+        _MODULE._validate_sglang_thinking_runtime(
+            _thinking_json_schema_config(),
+            {
+                "context_length": 65536,
+                "reasoning_parser": "qwen3-thinking",
+                "grammar_backend": "xgrammar",
+                "enable_strict_thinking": True,
+            },
+        )
+    except Exception as exc:
+        assert "reasoning_parser must equal 'qwen3'" in str(exc)
+        assert "qwen3-thinking" in str(exc)
+    else:  # pragma: no cover - fail-closed guard
+        raise AssertionError("an unverified reasoning-parser alias was accepted")
+
+
+def test_thinking_json_schema_runtime_preflight_rejects_short_context():
+    try:
+        _MODULE._validate_sglang_thinking_runtime(
+            _thinking_json_schema_config(),
+            {
+                "context_length": 32768,
+                "reasoning_parser": "qwen3",
+                "grammar_backend": "xgrammar",
+                "enable_strict_thinking": True,
+            },
+        )
+    except Exception as exc:
+        assert "context_length must be at least" in str(exc)
+        assert "65536" in str(exc)
+        assert "32768" in str(exc)
+    else:  # pragma: no cover - fail-closed guard
+        raise AssertionError("an undersized deployed context was accepted")
+
+
+def test_thinking_json_schema_runtime_preflight_requires_xgrammar_and_strict_mode():
+    invalid_runtimes = (
+        {
+            "context_length": 65536,
+            "reasoning_parser": "qwen3",
+            "grammar_backend": "outlines",
+            "enable_strict_thinking": True,
+        },
+        {
+            "context_length": 65536,
+            "reasoning_parser": "qwen3",
+            "grammar_backend": "xgrammar",
+            "enable_strict_thinking": False,
+        },
+    )
+    expected_messages = (
+        "grammar_backend must equal 'xgrammar'",
+        "enable_strict_thinking must be true",
+    )
+    for server_runtime, expected in zip(invalid_runtimes, expected_messages):
+        try:
+            _MODULE._validate_sglang_thinking_runtime(
+                _thinking_json_schema_config(),
+                server_runtime,
+            )
+        except Exception as exc:
+            assert expected in str(exc)
+        else:  # pragma: no cover - fail-closed guard
+            raise AssertionError("an incompatible reasoning grammar was accepted")
+
+
+def test_thinking_runtime_preflight_is_compatible_when_contract_not_required():
+    for enable_thinking, action_decoding in (
+        (False, "json_schema"),
+        (True, "unconstrained"),
+    ):
+        config = _thinking_json_schema_config()
+        config["director"]["enable_thinking"] = enable_thinking
+        config["director"]["action_decoding"] = action_decoding
+
+        receipt = _MODULE._validate_sglang_thinking_runtime(
+            config,
+            {"context_length": 1},
+        )
+
+        assert receipt["passed"] is True
+        assert receipt["required"] is False
+        assert receipt["status"] == "not_required"
+
+
 def test_evaluation_config_allows_base_director_without_lora_adapter():
     config = _evaluation_config("aime_2026")
     config["director"]["behavior_adapter_name"] = None
@@ -217,6 +345,255 @@ def test_aime_runtime_v7_preserves_v3_prompt_with_v5_reliability_only():
     assert config["aime_tool_runtime"]["enabled"] is False
     assert config["experiment"]["training_enabled"] is False
     assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_aime_runtime_v9_restores_free_agentgraph_search_with_strict_finish():
+    config = load_yaml(
+        _ROOT
+        / "config"
+        / "evaluation_aime2026_runtime_v9_free_agentgraph_search.yaml"
+    )
+
+    _MODULE.validate_completion_benchmark_config(config)
+
+    bounded = config["aime2026_evaluation"]
+    graph = config["agent_graph"]
+    assert config["experiment"]["prompt_version"] == (
+        "agentgraph.director.minimal-neutral-scalar.v7"
+    )
+    assert bounded["sample_count"] == 30
+    assert config["execution_timeout"] == 480.0
+    assert bounded["task_timeout_seconds"] == 900.0
+    assert bounded["task_timeout_seconds"] > config["execution_timeout"]
+    assert graph["actions"] == [
+        "add_agent",
+        "modify_agent",
+        "delete_agent",
+        "set_relation",
+        "set_output",
+        "finish",
+    ]
+    assert graph["artifact_consumption_ordering"] is False
+    assert graph["termination_lookahead"] is True
+    assert graph["task_specification_contract_guard"] is True
+    assert graph["artifact_completeness_gate"] is True
+    assert graph["max_length_continuations"] == 1
+    assert graph["length_continuation_max_tokens"] == 512
+    assert graph["artifact_assessment_protocol"] == "none"
+    assert "artifact_assessment_terminal_policy" not in graph
+    assert config["aime_tool_runtime"]["enabled"] is False
+    assert config["experiment"]["training_enabled"] is False
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_aime_runtime_v10_uses_existing_progressive_subgraph_profile():
+    config = load_yaml(
+        _ROOT
+        / "config"
+        / "evaluation_aime2026_runtime_v10_progressive_subgraph.yaml"
+    )
+
+    _MODULE.validate_completion_benchmark_config(config)
+
+    graph = config["agent_graph"]
+    assert config["experiment"]["prompt_version"] == (
+        "agentgraph.director.minimal-neutral.v10"
+    )
+    assert config["director"]["sampling_schema_version"] == (
+        "agentgraph.model-admissible-action-mask.v2"
+    )
+    assert config["aime2026_evaluation"]["sample_count"] == 30
+    assert graph["actions"] == [
+        "add_subgraph",
+        "modify_agent",
+        "delete_agent",
+        "set_relation",
+        "set_output",
+        "finish",
+    ]
+    assert graph["max_agents_per_subgraph"] == 3
+    assert graph["contract_type"] == "free_text"
+    assert graph["artifact_consumption_ordering"] is False
+    assert graph["termination_lookahead"] is True
+    assert graph["task_specification_contract_guard"] is True
+    assert graph["artifact_completeness_gate"] is True
+    assert config["experiment"]["training_enabled"] is False
+    assert config["aime_tool_runtime"]["enabled"] is False
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_aime_runtime_v11_uses_role_neutral_live_subgraph_mask():
+    config = load_yaml(
+        _ROOT
+        / "config"
+        / "evaluation_aime2026_runtime_v11_live_subgraph.yaml"
+    )
+
+    _MODULE.validate_completion_benchmark_config(config)
+
+    graph = config["agent_graph"]
+    assert config["experiment"]["prompt_version"] == (
+        "agentgraph.director.minimal-neutral.v11"
+    )
+    assert config["director"]["sampling_schema_version"] == (
+        "agentgraph.model-admissible-action-mask.v3"
+    )
+    assert config["aime2026_evaluation"]["sample_count"] == 30
+    assert config["aime2026_evaluation"]["direct_reused_from"] == (
+        "artifacts/aime2026_runtime_v2/evaluation/direct_predictions.jsonl"
+    )
+    assert graph["actions"] == [
+        "add_subgraph",
+        "modify_agent",
+        "delete_agent",
+        "set_relation",
+        "set_output",
+        "finish",
+    ]
+    assert graph["max_agents_per_subgraph"] == 3
+    assert graph["contract_type"] == "free_text"
+    assert graph["artifact_consumption_ordering"] is False
+    assert graph["termination_lookahead"] is True
+    assert graph["artifact_assessment_protocol"] == "none"
+    assert graph["task_specification_contract_guard"] is True
+    assert graph["artifact_completeness_gate"] is True
+    assert config["experiment"]["training_enabled"] is False
+    assert config["director"]["lora"]["enabled"] is False
+    assert config["aime_tool_runtime"]["enabled"] is False
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+    assert config["skills"]["initial_library"] == []
+
+
+def test_aime_runtime_v12_enables_native_qwen_thinking_without_direct_reuse():
+    config = load_yaml(
+        _ROOT
+        / "config"
+        / "evaluation_aime2026_runtime_v12_live_subgraph_thinking.yaml"
+    )
+
+    _MODULE.validate_completion_benchmark_config(config)
+
+    bounded = config["aime2026_evaluation"]
+    assert config["director"]["enable_thinking"] is True
+    assert config["director"]["sampling_schema_version"] == (
+        "agentgraph.model-admissible-action-mask.v3"
+    )
+    assert "direct_reused_from" not in bounded
+    assert bounded["direct_protocol"].endswith("qwen35_thinking")
+    catalog_path = _ROOT / config["agent_graph"]["model_catalog_path"]
+    catalog = load_yaml(catalog_path)
+    local_qwen = next(
+        model
+        for model in catalog["models"]
+        if model["model_id"] == "qwen3.5-9b-local"
+    )
+    assert local_qwen["metadata"]["chat_template_enable_thinking"] == "true"
+    assert len(catalog["models"]) > 1
+    assert config["experiment"]["training_enabled"] is False
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_aime_runtime_v13_preserves_thinking_and_expands_only_local_budget():
+    config = load_yaml(
+        _ROOT
+        / "config"
+        / "evaluation_aime2026_runtime_v13_live_subgraph_thinking_16k.yaml"
+    )
+
+    _MODULE.validate_completion_benchmark_config(config)
+
+    bounded = config["aime2026_evaluation"]
+    assert config["director"]["enable_thinking"] is True
+    assert "direct_reused_from" not in bounded
+    assert bounded["direct_protocol"].endswith("qwen35_thinking_16k")
+    assert "step-by-step" not in bounded["direct_contract"].lower()
+    catalog = load_yaml(_ROOT / config["agent_graph"]["model_catalog_path"])
+    local_qwen = next(
+        model
+        for model in catalog["models"]
+        if model["model_id"] == "qwen3.5-9b-local"
+    )
+    remote_models = [
+        model for model in catalog["models"] if model is not local_qwen
+    ]
+    assert local_qwen["context_window"] == 32768
+    assert local_qwen["metadata"]["max_tokens"] == "16384"
+    assert local_qwen["metadata"]["chat_template_enable_thinking"] == "true"
+    assert all(model["metadata"]["max_tokens"] == "4096" for model in remote_models)
+    assert all(
+        "chat_template_enable_thinking" not in model["metadata"]
+        for model in remote_models
+    )
+    assert config["experiment"]["training_enabled"] is False
+    assert config["grpo"]["enabled"] is False
+    assert config["skills"]["enabled"] is False
+
+
+def test_aime_runtime_v14_uses_scalar_free_graph_thinking_and_computation():
+    config = load_yaml(
+        _ROOT
+        / "config"
+        / "evaluation_aime2026_runtime_v14_scalar_thinking_computation.yaml"
+    )
+
+    _MODULE.validate_completion_benchmark_config(config)
+
+    bounded = config["aime2026_evaluation"]
+    graph = config["agent_graph"]
+    tool_runtime = config["aime_tool_runtime"]
+    assert config["experiment"]["prompt_version"] == (
+        "agentgraph.director.minimal-neutral-scalar.v8"
+    )
+    assert config["director"]["enable_thinking"] is True
+    assert config["director"]["max_context_tokens"] == 65536
+    assert config["director"]["max_action_tokens"] == 4096
+    assert "direct_reused_from" not in bounded
+    assert bounded["protocol_equivalent_to_direct"] is False
+    assert graph["actions"] == [
+        "add_agent",
+        "modify_agent",
+        "delete_agent",
+        "set_relation",
+        "set_output",
+        "finish",
+    ]
+    assert graph["contract_type"] == "free_text"
+    assert graph["artifact_consumption_ordering"] is True
+    assert graph["termination_lookahead"] is True
+    assert graph["artifact_completeness_gate"] is True
+    assert graph["artifact_assessment_terminal_policy"] == "reject_negative"
+    assert tool_runtime == {
+        "enabled": True,
+        "condition_id": config["experiment"]["condition_id"],
+        "mode": "model_driven_computation",
+        "dataset_scope": ["aime_2026"],
+        "max_turns_per_agent_call": 8,
+        "max_tool_calls_per_agent_call": 4,
+        "calculator_timeout_seconds": 2.0,
+        "python_timeout_seconds": 30.0,
+    }
+
+    catalog = load_yaml(_ROOT / graph["model_catalog_path"])
+    source_catalog = load_yaml(
+        _ROOT
+        / "config"
+        / "model_catalog_multidataset_tool_v2_aime_thinking_16k.yaml"
+    )
+    local_qwen = catalog["models"][0]
+    assert local_qwen["model_id"] == "qwen3.5-9b-local"
+    assert local_qwen["context_window"] == 65536
+    assert local_qwen["metadata"]["max_tokens"] == "32768"
+    assert local_qwen["metadata"]["chat_template_enable_thinking"] == "true"
+    assert catalog["providers"] == source_catalog["providers"]
+    assert catalog["models"][1:] == source_catalog["models"][1:]
+    assert config["experiment"]["training_enabled"] is False
+    assert config["grpo"]["enabled"] is False
+    assert config["exploration"]["enabled"] is False
     assert config["skills"]["enabled"] is False
 
 

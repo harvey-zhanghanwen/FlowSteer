@@ -77,6 +77,54 @@ def _artifact_head_tail_preview(value: str, *, limit: int = 320) -> str:
     tail = available - head
     return compact[:head] + marker + compact[-tail:]
 
+
+def _raw_artifact_contains_integer_candidate(
+    raw_output: str,
+    candidate: str,
+) -> bool:
+    """Return whether an exact integer token occurs in a public artifact.
+
+    This is a provenance test, not an answer extractor.  It is consulted only
+    after the downstream artifact already has a canonical candidate and the
+    upstream artifact failed canonical extraction.  Signs, fractions,
+    decimals, alphanumeric suffixes, and longer integers therefore do not
+    count as an exact carry-over.
+    """
+
+    if not re.fullmatch(r"\d+", candidate):
+        return False
+    fraction_spans = tuple(
+        match.span()
+        for match in re.finditer(
+            r"\\(?:d|t)?frac\s*\{[^{}]*\}\s*\{[^{}]*\}",
+            raw_output,
+        )
+    )
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_.+\-/]){re.escape(candidate)}"
+        rf"(?![A-Za-z0-9_]|\.\d|/)"
+    )
+    for match in pattern.finditer(raw_output):
+        start, end = match.span()
+        if any(
+            fraction_start <= start and end <= fraction_end
+            for fraction_start, fraction_end in fraction_spans
+        ):
+            continue
+        grouped_left = bool(
+            start >= 2
+            and raw_output[start - 1] == ","
+            and raw_output[start - 2].isdigit()
+        )
+        grouped_right = bool(
+            end + 1 < len(raw_output)
+            and raw_output[end] == ","
+            and raw_output[end + 1].isdigit()
+        )
+        if not grouped_left and not grouped_right:
+            return True
+    return False
+
 _CHECKPOINT_UNSAFE = object()
 
 
@@ -118,6 +166,7 @@ _BOUNDED_REACT_FAILURE_CATEGORIES = frozenset(
     {
         "react_continuation_request_failure",
         "react_turn_exhaustion",
+        "structured_action_serialization_failure",
         *_TYPED_RETRIEVAL_FAILURE_RETRYABILITY,
     }
 )
@@ -718,6 +767,17 @@ class AgentWorkflowEnv:
         self._diagnosed_unusable_agent_ids: set[str] = set()
         self._react_exhausted_agent_ids: set[str] = set()
         self._repair_exhausted_agent_ids: set[str] = set()
+        # A candidate-bearing provenance-protocol failure is recovered by one
+        # preservation-safe downstream consumer, never by resampling the
+        # immutable candidate owner in place.  Persist exact source artifact
+        # identities so deleting or repairing the consumer cannot reopen an
+        # unbounded assessment-consumer chain.
+        self._artifact_assessment_consumer_attempted_artifact_ids: set[
+            str
+        ] = set()
+        self._artifact_assessment_recovery_consumer_sources: dict[
+            str, Tuple[str, ...]
+        ] = {}
         self._latest_failure_record_by_agent: dict[str, AgentFailureRecord] = {}
         self._pending_repair_receipt_count_by_agent: dict[str, int] = {}
         # Frozen catalog membership remains unchanged during a trajectory.
@@ -799,6 +859,61 @@ class AgentWorkflowEnv:
 
         return self.semantic_protocol == _QA_SEMANTIC_PROTOCOL
 
+    def _allows_role_family_actions(self) -> bool:
+        """Return whether this runtime admits Agent role metadata.
+
+        AIME's adapter explicitly defines the node contract as
+        ``agent_id + model_id + free-text contract`` and therefore forbids a
+        separate role type.  Other existing runtimes retain their historical
+        metadata behavior; evidence-grounded QA and the legacy Format-Agent
+        boundary continue to use ``role_family`` as before.
+        """
+
+        dataset_id = self.runtime.dataset_id
+        role_neutral_aime = bool(
+            isinstance(dataset_id, str)
+            and dataset_id.casefold().replace("-", "_") == "aime_2026"
+            and not self._uses_semantic_lineage_protocol()
+            and not self.require_format_agent
+        )
+        return not role_neutral_aime
+
+    def _free_contract_domain_admits_role_family(self) -> bool:
+        """Expose a role in free-contract decoding only for legacy formatting."""
+
+        return self.require_format_agent
+
+    def _role_family_action_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Reject role metadata outside a task protocol that defines roles."""
+
+        if self._allows_role_family_actions():
+            return None
+        offending_agent_ids: Tuple[str, ...] = ()
+        if action.action_type is AgentActionType.ADD_SUBGRAPH:
+            offending_agent_ids = tuple(
+                spec.agent_id
+                for spec in action.agents
+                if spec.role_family is not None
+            )
+        elif (
+            action.action_type
+            in {AgentActionType.ADD_AGENT, AgentActionType.MODIFY_AGENT}
+            and action.role_family is not None
+        ):
+            offending_agent_ids = (
+                action.agent_id or "<missing_agent_id>",
+            )
+        if not offending_agent_ids:
+            return None
+        return (
+            "role_family is outside the role-neutral task action domain; "
+            "express responsibility only in each Agent's free-text contract; "
+            f"offending_agent_ids={list(offending_agent_ids)!r}"
+        )
+
     def _requires_complete_semantic_lineage(self) -> bool:
         """Return whether FINISH requires the full QA responsibility lineage.
 
@@ -870,6 +985,39 @@ class AgentWorkflowEnv:
             )
             if execution_mode in {"reasoning", "react"}
             and allowed_tools in {(), (required_tool_id,)}
+        )
+
+    def _registered_model_execution_profiles(
+        self,
+    ) -> list[dict[str, object]]:
+        """Return the flat Runtime-registered model/profile union domain."""
+
+        return [
+            {
+                "model_id": model_id,
+                "execution_mode": execution_mode,
+                "allowed_tools": list(allowed_tools),
+            }
+            for model_id in self._available_model_ids()
+            for execution_mode, allowed_tools in (
+                self.runtime.registered_execution_profiles_for_model(model_id)
+            )
+        ]
+
+    def _model_execution_profile_is_registered(
+        self,
+        model_id: str,
+        execution_mode: object,
+        allowed_tools: object,
+    ) -> bool:
+        if model_id not in set(self._available_model_ids()):
+            return False
+        mode_value = getattr(execution_mode, "value", execution_mode)
+        if mode_value is None:
+            mode_value = "reasoning"
+        tool_ids = tuple(allowed_tools or ())
+        return (str(mode_value), tool_ids) in set(
+            self.runtime.registered_execution_profiles_for_model(model_id)
         )
 
     def _role_conditional_execution_profiles_for(
@@ -952,6 +1100,1210 @@ class AgentWorkflowEnv:
             return 1, 1
         return 2, 2
 
+    def _artifact_assessment_protocol_failure_agent_ids(
+        self,
+    ) -> Tuple[str, ...]:
+        """Return fresh consumers with an unbound required assessment block."""
+
+        if self.artifact_assessment_extractor is None:
+            return ()
+        receipts = self.current_artifact_receipts()
+        failed: set[str] = set()
+        for receipt in receipts:
+            agent_id = receipt.get("agent_id")
+            missing = receipt.get(
+                "artifact_assessment_missing_artifact_ids", ()
+            )
+            if (
+                isinstance(agent_id, str)
+                and receipt.get("artifact_fresh") is True
+                and receipt.get("artifact_complete") is True
+                and receipt.get("upstream_artifacts")
+                and receipt.get("artifact_assessment_coverage_complete")
+                is not True
+                and bool(missing)
+                and not self._artifact_assessment_protocol_consumed_by_successor(
+                    receipt,
+                    receipts,
+                )
+            ):
+                failed.add(agent_id)
+        return tuple(
+            node.id for node in self._graph.nodes if node.id in failed
+        )
+
+    def _artifact_assessment_protocol_consumed_by_successor(
+        self,
+        failed_receipt: Mapping[str, object],
+        receipts: Sequence[Mapping[str, object]],
+    ) -> bool:
+        """Return whether a fresh successor consumed the missing provenance.
+
+        The successor must receive both the failed consumer artifact and every
+        candidate artifact whose assessment was missing, then bind an
+        assessment to each exact artifact ID.  The assessment label remains a
+        public work-product judgment; this check never selects a candidate or
+        reads an evaluator target.
+        """
+
+        failed_agent_id = failed_receipt.get("agent_id")
+        failed_artifact_id = failed_receipt.get("artifact_id")
+        raw_missing = failed_receipt.get(
+            "artifact_assessment_missing_artifact_ids", ()
+        )
+        if (
+            not isinstance(failed_agent_id, str)
+            or not isinstance(failed_artifact_id, str)
+            or not isinstance(raw_missing, (list, tuple))
+        ):
+            return False
+        missing_ids = {
+            item for item in raw_missing if isinstance(item, str) and item
+        }
+        if not missing_ids:
+            return False
+        successor_ids = set(
+            self._directed_successors(self._graph, failed_agent_id)
+        )
+        for receipt in receipts:
+            resolver_agent_id = receipt.get("agent_id")
+            if (
+                resolver_agent_id not in successor_ids
+                or receipt.get("artifact_fresh") is not True
+                or receipt.get("artifact_complete") is not True
+                or receipt.get("artifact_assessment_coverage_complete")
+                is not True
+            ):
+                continue
+            upstream_ids = {
+                str(item["artifact_id"])
+                for item in receipt.get("upstream_artifacts", ())
+                if isinstance(item, Mapping)
+                and isinstance(item.get("artifact_id"), str)
+            }
+            assessed_ids = {
+                str(item["assessed_artifact_id"])
+                for item in receipt.get("artifact_assessments", ())
+                if isinstance(item, Mapping)
+                and item.get("provenance_bound") is True
+                and isinstance(item.get("assessed_artifact_id"), str)
+            }
+            required_ids = {failed_artifact_id, *missing_ids}
+            if required_ids.issubset(upstream_ids) and required_ids.issubset(
+                assessed_ids
+            ):
+                return True
+        return False
+
+    def _artifact_assessment_candidate_failure_agent_ids(
+        self,
+    ) -> Tuple[str, ...]:
+        """Return protocol-failed owners of fresh, complete candidates."""
+
+        failed_ids = set(
+            self._artifact_assessment_protocol_failure_agent_ids()
+        )
+        candidate_ids = {
+            str(receipt["agent_id"])
+            for receipt in self.current_artifact_receipts()
+            if receipt.get("agent_id") in failed_ids
+            and receipt.get("artifact_fresh") is True
+            and receipt.get("artifact_complete") is True
+            and isinstance(receipt.get("candidate"), str)
+            and bool(str(receipt["candidate"]).strip())
+        }
+        return tuple(
+            node.id for node in self._graph.nodes if node.id in candidate_ids
+        )
+
+    def _artifact_assessment_non_candidate_failure_agent_ids(
+        self,
+    ) -> Tuple[str, ...]:
+        failed_ids = set(
+            self._artifact_assessment_protocol_failure_agent_ids()
+        )
+        candidate_ids = set(
+            self._artifact_assessment_candidate_failure_agent_ids()
+        )
+        return tuple(
+            node.id
+            for node in self._graph.nodes
+            if node.id in failed_ids - candidate_ids
+        )
+
+    def _artifact_assessment_candidate_consumer_repair_agent_ids(
+        self,
+    ) -> Tuple[str, ...]:
+        """Return the one bounded exact-fan-in consumer repair target.
+
+        ``ADD_SUBGRAPH`` records the immutable source artifact IDs before its
+        newly declared consumer executes.  A candidate-bearing consumer is an
+        in-place protocol-repair target only when its complete direct fan-in
+        is exactly that recorded source set.  This distinguishes the accepted
+        recovery consumer from the original candidate owner and prevents a
+        recursive chain of equivalent consumers.
+        """
+
+        if not self._artifact_assessment_recovery_consumer_sources:
+            return ()
+        candidate_failure_ids = set(
+            self._artifact_assessment_candidate_failure_agent_ids()
+        )
+        repairable: set[str] = set()
+        for receipt in self.current_artifact_receipts():
+            agent_id = receipt.get("agent_id")
+            if (
+                not isinstance(agent_id, str)
+                or agent_id not in candidate_failure_ids
+                or agent_id
+                not in self._artifact_assessment_recovery_consumer_sources
+                or agent_id in self._repair_exhausted_agent_ids
+                or receipt.get("artifact_fresh") is not True
+                or receipt.get("artifact_complete") is not True
+            ):
+                continue
+            upstream_ids = {
+                str(item["artifact_id"])
+                for item in receipt.get("upstream_artifacts", ())
+                if isinstance(item, Mapping)
+                and isinstance(item.get("artifact_id"), str)
+            }
+            expected_source_ids = set(
+                self._artifact_assessment_recovery_consumer_sources[
+                    agent_id
+                ]
+            )
+            if upstream_ids and upstream_ids == expected_source_ids:
+                repairable.add(agent_id)
+        repairable.update(
+            self._artifact_assessment_failed_consumer_repair_agent_ids()
+        )
+        return tuple(
+            node.id for node in self._graph.nodes if node.id in repairable
+        )
+
+    def _artifact_assessment_failed_consumer_repair_agent_ids(
+        self,
+    ) -> Tuple[str, ...]:
+        """Return an exact-fan-in consumer that failed before an artifact.
+
+        A recovery ``ADD_SUBGRAPH`` records the immutable source artifact IDs
+        before executing its new consumer.  A typed bounded ReAct failure can
+        occur before that consumer publishes any artifact, so receipt-only
+        protocol detection cannot identify the accepted consumer.  Project a
+        single in-place repair target only when the current direct inbox still
+        binds exactly to the recorded source artifacts and Runtime recorded the
+        consumer as failed, unresolved, and ReAct-exhausted.  This preserves
+        the accepted fan-in and prevents another equivalent consumer from
+        being appended recursively.
+        """
+
+        if not self._artifact_assessment_recovery_consumer_sources:
+            return ()
+        receipts = self.current_artifact_receipts()
+        fresh_complete_receipt_by_agent = {
+            str(receipt["agent_id"]): receipt
+            for receipt in receipts
+            if isinstance(receipt.get("agent_id"), str)
+            and receipt.get("artifact_fresh") is True
+            and receipt.get("artifact_complete") is True
+        }
+        source_artifact_id_by_agent = {
+            agent_id: str(receipt["artifact_id"])
+            for agent_id, receipt in fresh_complete_receipt_by_agent.items()
+            if isinstance(receipt.get("artifact_id"), str)
+        }
+        repairable: set[str] = set()
+        for agent_id, raw_expected_source_ids in (
+            self._artifact_assessment_recovery_consumer_sources.items()
+        ):
+            if (
+                not self._graph.has_node(agent_id)
+                or agent_id in self._repair_exhausted_agent_ids
+                or agent_id not in self._failed_agent_ids
+                or agent_id not in self._unresolved_dirty_agents
+                or agent_id not in self._react_exhausted_agent_ids
+                or agent_id in fresh_complete_receipt_by_agent
+            ):
+                continue
+            failure_record = self._latest_failure_record_by_agent.get(
+                agent_id
+            )
+            if failure_record is None:
+                continue
+            category, _, _ = self._execution_failure_diagnosis(
+                failure_record
+            )
+            if category not in _BOUNDED_REACT_FAILURE_CATEGORIES:
+                continue
+            predecessor_ids = tuple(
+                self._graph.directed_predecessors(agent_id)
+            )
+            direct_source_artifact_ids = tuple(
+                source_artifact_id_by_agent[source_id]
+                for source_id in predecessor_ids
+                if source_id in source_artifact_id_by_agent
+            )
+            expected_source_ids = {
+                source_id
+                for source_id in raw_expected_source_ids
+                if isinstance(source_id, str) and source_id
+            }
+            if (
+                expected_source_ids
+                and len(direct_source_artifact_ids)
+                == len(predecessor_ids)
+                == len(expected_source_ids)
+                and set(direct_source_artifact_ids)
+                == expected_source_ids
+            ):
+                repairable.add(agent_id)
+        return tuple(
+            node.id for node in self._graph.nodes if node.id in repairable
+        )
+
+    def _artifact_dependency_closure(
+        self,
+        agent_id: str,
+        *,
+        graph: Optional[AgentGraph] = None,
+    ) -> frozenset[str]:
+        """Return the exact upstream artifact dependency closure of one Agent."""
+
+        canvas = self._graph if graph is None else graph
+        if not canvas.has_node(agent_id):
+            return frozenset()
+        closure: set[str] = set()
+        pending = [agent_id]
+        while pending:
+            current = pending.pop()
+            if current in closure:
+                continue
+            closure.add(current)
+            pending.extend(canvas.directed_predecessors(current))
+        return frozenset(closure)
+
+    @staticmethod
+    def _action_touched_agent_ids(action: AgentAction) -> frozenset[str]:
+        """Return Agent declarations or endpoints directly changed by an edit.
+
+        ``dirty_closure`` describes invalidated *consumers*.  It deliberately
+        omits a deleted leaf and a pointer-only ``SET_OUTPUT`` edit, so it is
+        not sufficient on its own to decide whether an edit is local to an
+        Output dependency lineage.  This structural footprint closes that
+        distinction without changing AgentGraph mutation or validation
+        semantics.
+        """
+
+        touched: set[str] = set()
+        if action.agent_id is not None:
+            touched.add(action.agent_id)
+        if action.source_id is not None:
+            touched.add(action.source_id)
+        if action.target_id is not None:
+            touched.add(action.target_id)
+        if action.action_type is AgentActionType.ADD_SUBGRAPH:
+            touched.update(item.agent_id for item in action.agents)
+            for relation in action.relations:
+                touched.add(relation.source_id)
+                touched.add(relation.target_id)
+            if action.output_agent_id is not None:
+                touched.add(action.output_agent_id)
+        return frozenset(touched)
+
+    def _output_dependency_execution_scope(
+        self,
+        candidate: AgentGraph,
+        action: AgentAction,
+        mutation_dirty_agent_ids: Collection[str],
+    ) -> Tuple[str, ...]:
+        """Project one incomplete Canvas edit onto its Output dependency DAG.
+
+        FlowSteer's progressive cache executes the downstream dirty closure of
+        an accepted edit.  SkillFlow's bounded execution likewise consumes
+        only the public artifacts that belong to the invoked functional unit.
+        A complete AgentGraph still executes as the complete graph.  The sole
+        incomplete-Canvas exception is a dependency-closed Output lineage when
+        every terminal validation issue is an off-lineage
+        ``cannot_reach_output`` diagnosis.  In that case an already failed,
+        disconnected sibling must not be scheduled merely because a lineage-
+        local edit (including pointer-only ``SET_OUTPUT``) was accepted.
+
+        This is execution scoping only: the persisted Canvas is unchanged and
+        explicit ``FINISH`` still validates whole-graph reachability.
+        """
+
+        if (
+            not self.artifact_consumption_ordering
+            or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+            or action.action_type is AgentActionType.DELETE_AGENT
+        ):
+            return ()
+        output_agent_id = candidate.output_agent_id
+        if (
+            output_agent_id is None
+            or not candidate.has_node(output_agent_id)
+        ):
+            return ()
+        all_agent_ids = {node.id for node in candidate.nodes}
+        closure = set(
+            self._artifact_dependency_closure(
+                output_agent_id,
+                graph=candidate,
+            )
+        )
+        if not closure or closure == all_agent_ids:
+            return ()
+
+        dirty_agent_ids = set(mutation_dirty_agent_ids)
+        touched_agent_ids = set(self._action_touched_agent_ids(action))
+        if (
+            not dirty_agent_ids.issubset(closure)
+            or not touched_agent_ids
+            or not touched_agent_ids.issubset(closure)
+        ):
+            return ()
+
+        # A measured failure that becomes an Output ancestor is no longer an
+        # off-lineage sibling.  Preserve ordinary full-graph Runtime recovery
+        # in that case, including its failure/cancellation statuses.
+        active_failure_ids = (
+            set(self._failed_agent_ids)
+            | set(self._diagnosed_unusable_agent_ids)
+            | set(self._react_exhausted_agent_ids)
+            | set(self._repair_exhausted_agent_ids)
+            | set(self._unresolved_dirty_agents)
+        )
+        if active_failure_ids.intersection(closure):
+            return ()
+
+        terminal_validation = candidate.validate(
+            self.model_registry,
+            require_complete=True,
+        )
+        if terminal_validation.valid or not terminal_validation.issues:
+            return ()
+        for issue in terminal_validation.issues:
+            if (
+                issue.code != "cannot_reach_output"
+                or not issue.agent_ids
+                or bool(set(issue.agent_ids).intersection(closure))
+            ):
+                return ()
+
+        # Reciprocal collaboration is one bounded execution block.  Although
+        # predecessor closure normally includes both directions, retain this
+        # explicit guard so a future graph traversal change cannot split it.
+        partial_validation = candidate.validate(
+            self.model_registry,
+            require_complete=False,
+        )
+        if not partial_validation.valid:
+            return ()
+        if any(
+            bool(set(component).intersection(closure))
+            and not set(component).issubset(closure)
+            for component in partial_validation.components
+        ):
+            return ()
+
+        execution_graph = self._induced_execution_graph(candidate, closure)
+        if not execution_graph.validate(
+            self.model_registry,
+            require_complete=True,
+        ).valid:
+            return ()
+        return tuple(
+            node.id for node in candidate.nodes if node.id in closure
+        )
+
+    def _artifact_assessment_consumer_repair_execution_scope(
+        self,
+        candidate: AgentGraph,
+        action: AgentAction,
+    ) -> Tuple[str, ...]:
+        """Execute only the repaired exact-fan-in consumer dependency DAG.
+
+        The failed consumer owns no fresh artifact, but its registered source
+        artifacts remain immutable and fresh.  A bounded ``MODIFY_AGENT`` must
+        therefore dirty only that consumer and execute its existing dependency
+        closure instead of rescheduling unrelated failed Canvas branches.  The
+        persisted graph, relations, provenance, and Output pointer are not
+        changed by this execution projection.
+        """
+
+        if (
+            action.action_type is not AgentActionType.MODIFY_AGENT
+            or action.agent_id
+            not in set(
+                self._artifact_assessment_failed_consumer_repair_agent_ids()
+            )
+            or action.agent_id is None
+            or not candidate.has_node(action.agent_id)
+        ):
+            return ()
+        closure = self._artifact_dependency_closure(
+            action.agent_id,
+            graph=candidate,
+        )
+        if not closure:
+            return ()
+        expected_source_ids = set(
+            self._artifact_assessment_recovery_consumer_sources.get(
+                action.agent_id,
+                (),
+            )
+        )
+        receipts_by_agent = {
+            str(receipt["agent_id"]): receipt
+            for receipt in self.current_artifact_receipts()
+            if isinstance(receipt.get("agent_id"), str)
+            and receipt.get("artifact_fresh") is True
+            and receipt.get("artifact_complete") is True
+            and isinstance(receipt.get("artifact_id"), str)
+        }
+        predecessor_ids = tuple(
+            candidate.directed_predecessors(action.agent_id)
+        )
+        direct_artifact_ids = {
+            str(receipts_by_agent[source_id]["artifact_id"])
+            for source_id in predecessor_ids
+            if source_id in receipts_by_agent
+        }
+        if (
+            not expected_source_ids
+            or len(predecessor_ids) != len(expected_source_ids)
+            or len(direct_artifact_ids) != len(expected_source_ids)
+            or direct_artifact_ids != expected_source_ids
+        ):
+            return ()
+        return tuple(
+            node.id for node in candidate.nodes if node.id in closure
+        )
+
+    def _dependency_closed_artifact_output_agent_ids(
+        self,
+    ) -> Tuple[str, ...]:
+        """Return Output-pointer candidates isolated from off-lineage failures.
+
+        This is a target-blind parameter projection.  It never compares
+        candidate values with an evaluator target.  The selected artifact must
+        already be fresh, complete, parseable, and admitted by the configured
+        assessment policy; every failure or dirty input inside its dependency
+        closure remains blocking.  ``cannot_reach_output`` diagnostics wholly
+        outside that closure may be deferred only while choosing the Output
+        pointer; complete-graph reachability remains mandatory for FINISH.
+        """
+
+        if (
+            self._uses_semantic_lineage_protocol()
+            or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+            or not self.artifact_consumption_ordering
+            or self.artifact_assessment_extractor is None
+        ):
+            return ()
+        artifact_admissible_ids = set(
+            self._artifact_admissible_output_agent_ids()
+        )
+        if not artifact_admissible_ids:
+            return ()
+        protocol_failure_ids = set(
+            self._artifact_assessment_protocol_failure_agent_ids()
+        )
+        active_failure_ids = (
+            set(self._failed_agent_ids) | set(self._unresolved_dirty_agents)
+        )
+        admitted: list[str] = []
+        for node in self._graph.nodes:
+            agent_id = node.id
+            if agent_id not in artifact_admissible_ids:
+                continue
+            prospective = self._graph.fork()
+            try:
+                prospective.set_output(agent_id)
+            except GraphMutationError:
+                continue
+            closure = self._artifact_dependency_closure(
+                agent_id,
+                graph=prospective,
+            )
+            if (
+                not closure
+                or protocol_failure_ids.intersection(closure)
+                or active_failure_ids.intersection(closure)
+            ):
+                continue
+            validation = prospective.validate(
+                self.model_registry,
+                require_complete=True,
+            )
+            if any(
+                issue.code != "cannot_reach_output"
+                or bool(set(issue.agent_ids).intersection(closure))
+                for issue in validation.issues
+            ):
+                continue
+            admitted.append(agent_id)
+        return tuple(admitted)
+
+    def _artifact_assessment_existing_output_relation_candidates(
+        self,
+        candidates: Optional[Sequence[Mapping[str, object]]] = None,
+    ) -> list[dict[str, object]]:
+        """Route one missing recovery artifact into the selected consumer.
+
+        SET_OUTPUT is pointer-only.  Once a fresh dependency-closed candidate
+        owns that pointer, this projection exposes one atomic relation edit
+        from an exact protocol-recovery source that is not yet in the Output
+        inbox.  Repeated observations therefore materialize the complete
+        provenance fan-in without prescribing an Agent role or graph shape.
+        Full graph validation and explicit FINISH remain authoritative.
+        """
+
+        output_agent_id = self._graph.output_agent_id
+        if (
+            not isinstance(output_agent_id, str)
+            or output_agent_id
+            not in set(self._dependency_closed_artifact_output_agent_ids())
+        ):
+            return []
+        required_source_ids = set(
+            self._artifact_assessment_protocol_recovery_ingress_agent_ids()
+        )
+        current_predecessors = set(
+            self._graph.directed_predecessors(output_agent_id)
+        )
+        missing_source_ids = (
+            required_source_ids
+            - current_predecessors
+            - {output_agent_id}
+        )
+        if not missing_source_ids:
+            return []
+        provenance_root_ids = {
+            source_id
+            for source_id in missing_source_ids
+            if not (
+                set(self._artifact_dependency_closure(source_id))
+                - {source_id}
+            ).intersection(missing_source_ids)
+        }
+        # A reciprocal block can make every member an ancestor of another.
+        # Preserve the bounded live domain in that case; otherwise route the
+        # provenance roots before their descendants so the consumer receives
+        # the derivation needed to assess a later bare candidate artifact.
+        admitted_source_ids = provenance_root_ids or missing_source_ids
+        source_candidates = (
+            self._all_model_admissible_relation_candidates()
+            if candidates is None
+            else [dict(item) for item in candidates]
+        )
+        result: list[dict[str, object]] = []
+        for item in source_candidates:
+            matching_sources = tuple(
+                source_id
+                for source_id, target_id in self._relation_added_edges(item)
+                if source_id in admitted_source_ids
+                and target_id == output_agent_id
+            )
+            for source_id in matching_sources:
+                normalized = {
+                    "source_id": source_id,
+                    "target_id": output_agent_id,
+                    "source_to_target": True,
+                    "target_to_source": False,
+                }
+                if normalized not in result:
+                    result.append(normalized)
+        return result
+
+    def _dependency_closed_output_termination_costs(
+        self,
+    ) -> Tuple[Tuple[str, int], ...]:
+        """Return exact atomic costs for current dependency-closed targets."""
+
+        recovery_source_ids = set(
+            self._artifact_assessment_protocol_recovery_ingress_agent_ids()
+        )
+        if not recovery_source_ids:
+            return ()
+        costs: list[Tuple[str, int]] = []
+        for agent_id in self._dependency_closed_artifact_output_agent_ids():
+            missing_ingress_ids = (
+                recovery_source_ids
+                - set(self._graph.directed_predecessors(agent_id))
+                - {agent_id}
+            )
+            pointer_cost = int(self._graph.output_agent_id != agent_id)
+            prospective = self._graph.fork()
+            prospective.set_output(agent_id)
+            structural_minimum = prospective.construction_progress().get(
+                "minimum_remaining_actions"
+            )
+            provenance_minimum = len(missing_ingress_ids) + 1
+            # Each missing provenance edge is one atomic SET_RELATION and the
+            # terminal submission remains one explicit FINISH action.  The
+            # complete-graph reachability lower bound remains authoritative
+            # when it is larger than the direct provenance fan-in bound.
+            costs.append(
+                (
+                    agent_id,
+                    pointer_cost
+                    + max(
+                        provenance_minimum,
+                        structural_minimum
+                        if type(structural_minimum) is int
+                        else provenance_minimum,
+                    ),
+                )
+            )
+        return tuple(costs)
+
+    def _artifact_assessment_protocol_recovery_ingress_agent_ids(
+        self,
+    ) -> Tuple[str, ...]:
+        """Return the exact bounded fan-in for candidate artifact recovery.
+
+        One free-contract consumer receives the protocol-failed candidate,
+        each fresh candidate-bearing upstream artifact whose assessment is
+        missing, and every other live candidate owner when public candidates
+        conflict.  Exact source artifact IDs are trajectory-scoped so the same
+        recovery cannot recursively grow another consumer.
+        """
+
+        candidate_failure_ids = set(
+            self._artifact_assessment_candidate_failure_agent_ids()
+        )
+        if not candidate_failure_ids:
+            return ()
+        receipts = self.current_artifact_receipts()
+        receipt_by_agent = {
+            str(receipt["agent_id"]): receipt
+            for receipt in receipts
+            if isinstance(receipt.get("agent_id"), str)
+        }
+        agent_by_artifact_id = {
+            str(receipt["artifact_id"]): str(receipt["agent_id"])
+            for receipt in receipts
+            if isinstance(receipt.get("artifact_id"), str)
+            and isinstance(receipt.get("agent_id"), str)
+            and receipt.get("artifact_fresh") is True
+            and receipt.get("artifact_complete") is True
+        }
+        eligible_failure_ids: set[str] = set()
+        for agent_id in candidate_failure_ids:
+            receipt = receipt_by_agent.get(agent_id)
+            if receipt is None:
+                continue
+            artifact_id = receipt.get("artifact_id")
+            upstream_ids = {
+                str(item["artifact_id"])
+                for item in receipt.get("upstream_artifacts", ())
+                if isinstance(item, Mapping)
+                and isinstance(item.get("artifact_id"), str)
+            }
+            if (
+                not isinstance(artifact_id, str)
+                or artifact_id
+                in self._artifact_assessment_consumer_attempted_artifact_ids
+                or upstream_ids.intersection(
+                    self._artifact_assessment_consumer_attempted_artifact_ids
+                )
+            ):
+                continue
+            eligible_failure_ids.add(agent_id)
+        if not eligible_failure_ids:
+            return ()
+
+        source_ids = set(eligible_failure_ids)
+        for agent_id in eligible_failure_ids:
+            receipt = receipt_by_agent[agent_id]
+            for artifact_id in receipt.get(
+                "artifact_assessment_missing_artifact_ids", ()
+            ):
+                if isinstance(artifact_id, str):
+                    source_agent_id = agent_by_artifact_id.get(artifact_id)
+                    if source_agent_id is not None:
+                        source_ids.add(source_agent_id)
+
+        live_candidate_receipts = [
+            receipt
+            for receipt in receipts
+            if receipt.get("artifact_fresh") is True
+            and receipt.get("artifact_complete") is True
+            and isinstance(receipt.get("candidate"), str)
+        ]
+        if len(
+            {
+                str(receipt["candidate"])
+                for receipt in live_candidate_receipts
+            }
+        ) > 1:
+            source_ids.update(
+                str(receipt["agent_id"])
+                for receipt in live_candidate_receipts
+                if isinstance(receipt.get("agent_id"), str)
+            )
+        return tuple(
+            node.id for node in self._graph.nodes if node.id in source_ids
+        )
+
+    @staticmethod
+    def _modify_action_fields(action: AgentAction) -> Tuple[str, ...]:
+        """Return the declaration fields present in one atomic MODIFY action."""
+
+        fields = [
+            field_name
+            for field_name in (
+                "model_id",
+                "contract",
+                "role_family",
+            )
+            if getattr(action, field_name) is not None
+        ]
+        if action.execution_mode is not None and action.allowed_tools is not None:
+            fields.append("execution_profile")
+        else:
+            if action.allowed_tools is not None:
+                fields.append("allowed_tools")
+            if action.execution_mode is not None:
+                fields.append("execution_mode")
+        fields.extend(
+            field_name
+            for field_name in (
+                "artifact_type",
+                "completion_condition",
+            )
+            if getattr(action, field_name) is not None
+        )
+        return tuple(fields)
+
+    def _artifact_assessment_protocol_repair_mutable_fields(
+        self,
+        agent_id: str,
+    ) -> Tuple[str, ...]:
+        """Project fields that can repair an unbound assessment artifact.
+
+        A provenance-binding failure is a generation/protocol failure, not a
+        Tool, execution-mode, artifact-type, or completion-condition failure.
+        Keep the bounded FlowSteer MODIFY boundary on an answer-free contract
+        or on a catalog-backed model change.  The ordinary contract guards and
+        model registry remain authoritative for the sampled value.
+        """
+
+        candidate_consumer_repair_ids = set(
+            self._artifact_assessment_candidate_consumer_repair_agent_ids()
+        )
+        failed_consumer_repair_ids = set(
+            self._artifact_assessment_failed_consumer_repair_agent_ids()
+        )
+        candidate_failure_ids = set(
+            self._artifact_assessment_candidate_failure_agent_ids()
+        )
+        protocol_failure_ids = set(
+            self._artifact_assessment_protocol_failure_agent_ids()
+        )
+        if (
+            not self._graph.has_node(agent_id)
+            or agent_id
+            not in protocol_failure_ids | failed_consumer_repair_ids
+            or (
+                agent_id in candidate_failure_ids
+                and agent_id not in candidate_consumer_repair_ids
+            )
+            or agent_id in self._repair_exhausted_agent_ids
+        ):
+            return ()
+        node = self._graph.get_node(agent_id)
+        compatible_model_ids = tuple(
+            model_id
+            for model_id in self._available_model_ids()
+            if model_id != node.model_id
+            and self._model_execution_profile_is_registered(
+                model_id,
+                node.execution_mode,
+                node.allowed_tools,
+            )
+        )
+        result: list[str] = ["contract"]
+        if compatible_model_ids:
+            result.append("model_id")
+        if agent_id in failed_consumer_repair_ids:
+            current_profile = (
+                node.execution_mode,
+                tuple(node.allowed_tools),
+            )
+            if any(
+                profile != current_profile
+                for profile in self.runtime.registered_execution_profiles_for_model(
+                    node.model_id
+                )
+            ):
+                result.append("execution_profile")
+        return tuple(result)
+
+    def _artifact_assessment_ingress_agent_ids(
+        self,
+        candidate_state: Optional[Mapping[str, object]] = None,
+        *,
+        ignored_execution_agent_ids: Collection[str] = (),
+    ) -> Tuple[str, ...]:
+        """Return fresh candidate owners requiring one public assessment edge.
+
+        The result is a state-dependent parameter domain, not a role or
+        topology choice.  It is empty while measured execution repair is
+        active, when candidates conflict, or when another fresh candidate is
+        already terminal-admissible.  Otherwise an additive Canvas unit must
+        consume one of these immutable artifacts before destructive graph
+        edits can invalidate it.
+        """
+
+        ignored_ids = set(ignored_execution_agent_ids)
+        if (
+            not self.artifact_consumption_ordering
+            or self.artifact_assessment_extractor is None
+            or self._failed_agent_ids - ignored_ids
+            or self._unresolved_dirty_agents - ignored_ids
+        ):
+            return ()
+        state = (
+            candidate_state
+            if isinstance(candidate_state, Mapping)
+            else self.candidate_state()
+        )
+        if (
+            state.get("unresolved_candidate_conflict") is True
+            or state.get("candidate_assessment_conflict") is True
+            or state.get("supported_output_agent_ids")
+        ):
+            return ()
+        raw_items = state.get("candidate_artifacts", ())
+        items = (
+            tuple(item for item in raw_items if isinstance(item, Mapping))
+            if isinstance(raw_items, (list, tuple))
+            else ()
+        )
+        # Do not force assessment when an equivalent fresh artifact is already
+        # admitted by the configured target-blind terminal policy.
+        if any(
+            item.get("assessment_status") == "unassessed"
+            and item.get("dependency_assessment_required") is not True
+            and item.get("execution_recovery_observed") is not True
+            for item in items
+        ):
+            return ()
+        required = {
+            str(item["agent_id"])
+            for item in items
+            if isinstance(item.get("agent_id"), str)
+            and item.get("artifact_complete") is True
+            and item.get("assessment_status") == "unassessed"
+            and (
+                item.get("dependency_assessment_required") is True
+                or item.get("execution_recovery_observed") is True
+            )
+        }
+        return tuple(
+            node.id for node in self._graph.nodes if node.id in required
+        )
+
+    def _artifact_assessment_consumer_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Enforce the live provenance-consumer ADD parameter boundary."""
+
+        if (
+            action.action_type is AgentActionType.MODIFY_AGENT
+            and action.agent_id in self._provider_repair_agent_ids()
+            and self._provider_repair_admission_issue(action) is None
+        ):
+            # ``step`` has already validated this atomic provider repair.
+            # A separate unresolved assessment artifact must not reject the
+            # model/profile change required to materialize its accepted
+            # downstream consumer.  The next execution observation will
+            # re-evaluate the provenance protocol against the new artifact.
+            return None
+
+        protocol_failures = set(
+            self._artifact_assessment_protocol_failure_agent_ids()
+        )
+        candidate_failure_ids = set(
+            self._artifact_assessment_candidate_failure_agent_ids()
+        )
+        protocol_recovery_source_ids = (
+            self._artifact_assessment_protocol_recovery_ingress_agent_ids()
+        )
+        repairable_failures = (
+            set(self._artifact_assessment_non_candidate_failure_agent_ids())
+            | set(
+                self._artifact_assessment_candidate_consumer_repair_agent_ids()
+            )
+        ) - self._repair_exhausted_agent_ids
+        dependency_closed_output_agent_ids = set(
+            self._dependency_closed_artifact_output_agent_ids()
+        )
+        existing_output_relation_candidates = (
+            self._artifact_assessment_existing_output_relation_candidates()
+        )
+        if protocol_failures and action.action_type is not AgentActionType.FINISH:
+            if (
+                protocol_recovery_source_ids
+                and action.action_type is AgentActionType.SET_OUTPUT
+                and action.agent_id in dependency_closed_output_agent_ids
+            ):
+                return None
+            if (
+                action.action_type is AgentActionType.SET_RELATION
+                and any(
+                    self._relation_action_matches_candidate(action, candidate)
+                    for candidate in existing_output_relation_candidates
+                )
+            ):
+                return None
+            if protocol_recovery_source_ids:
+                unrecoverable_non_candidate_ids = (
+                    set(
+                        self._artifact_assessment_non_candidate_failure_agent_ids()
+                    )
+                    & self._repair_exhausted_agent_ids
+                    - set(self._detachable_repair_exhausted_agent_ids())
+                )
+                if unrecoverable_non_candidate_ids:
+                    return (
+                        "artifact_assessment_protocol_repair_exhausted: "
+                        "candidate recovery cannot bypass an exhausted "
+                        "non-candidate protocol failure with no "
+                        "preservation-safe delete path; "
+                        f"blocking_agent_ids="
+                        f"{sorted(unrecoverable_non_candidate_ids)!r}"
+                    )
+                recovery_capacity_available = bool(
+                    self.max_agents is None
+                    or len(self._graph.nodes) < self.max_agents
+                )
+                if not recovery_capacity_available:
+                    detachable_ids = set(
+                        self._detachable_repair_exhausted_agent_ids()
+                    )
+                    if (
+                        action.action_type is AgentActionType.DELETE_AGENT
+                        and action.agent_id in detachable_ids
+                    ):
+                        return None
+                    return (
+                        "artifact_assessment_candidate_preservation_required: "
+                        "the exact fan-in has no free Agent slot; first delete "
+                        "one preservation-safe dead leaf; "
+                        f"admissible_delete_agent_ids="
+                        f"{sorted(detachable_ids)!r}"
+                    )
+                if action.action_type is not AgentActionType.ADD_SUBGRAPH:
+                    return (
+                        "artifact_assessment_candidate_preservation_required: "
+                        "preserve the fresh candidate artifacts and add one "
+                        "free-contract downstream consumer; "
+                        "required_existing_ingress_agent_ids="
+                        f"{list(protocol_recovery_source_ids)!r}"
+                    )
+                if len(action.agents) != 1:
+                    return (
+                        "artifact_assessment_candidate_preservation_required: "
+                        "add_subgraph must add exactly one downstream consumer"
+                    )
+                if action.output_agent_id is not None:
+                    return (
+                        "artifact_assessment_candidate_preservation_required: "
+                        "preserve the current Output pointer while consuming "
+                        "the immutable artifacts"
+                    )
+                new_agent_id = action.agents[0].agent_id
+                if len(action.relations) != len(
+                    protocol_recovery_source_ids
+                ):
+                    return (
+                        "artifact_assessment_candidate_preservation_required: "
+                        "fan-in must contain exactly one directed relation "
+                        "from every required existing artifact owner; "
+                        f"required_relation_count="
+                        f"{len(protocol_recovery_source_ids)}"
+                    )
+                observed_source_ids: set[str] = set()
+                for relation in action.relations:
+                    if not (
+                        relation.target_id == new_agent_id
+                        and relation.source_to_target is True
+                        and relation.target_to_source is False
+                    ):
+                        return (
+                            "artifact_assessment_candidate_preservation_required: "
+                            "each fan-in relation must be one-way from a "
+                            "required existing artifact owner to the one new "
+                            "consumer"
+                        )
+                    observed_source_ids.add(relation.source_id)
+                if observed_source_ids != set(
+                    protocol_recovery_source_ids
+                ):
+                    return (
+                        "artifact_assessment_candidate_preservation_required: "
+                        "fan-in sources must exactly match the live artifact "
+                        "owners; required_existing_ingress_agent_ids="
+                        f"{list(protocol_recovery_source_ids)!r}"
+                    )
+                return None
+            if not repairable_failures:
+                detachable_ids = set(
+                    self._detachable_repair_exhausted_agent_ids()
+                )
+                if (
+                    action.action_type is AgentActionType.DELETE_AGENT
+                    and action.agent_id in detachable_ids
+                    and action.agent_id in protocol_failures
+                ):
+                    return None
+                return (
+                    "artifact_assessment_protocol_repair_exhausted: the "
+                    "bounded candidate-preserving consumer or non-candidate "
+                    "repair reproduced an unbound assessment block; only a "
+                    "preservation-safe non-candidate dead leaf may be deleted; "
+                    f"candidate_failure_agent_ids="
+                    f"{sorted(candidate_failure_ids)!r}"
+                )
+            if not (
+                action.action_type is AgentActionType.MODIFY_AGENT
+                and action.agent_id in repairable_failures
+            ):
+                return (
+                    "artifact_assessment_protocol_failure: repair exactly one "
+                    "fresh consumer whose required provenance-bound assessment "
+                    "block did not parse or bind; "
+                    f"repairable_agent_ids={sorted(repairable_failures)!r}"
+                )
+            assert action.agent_id is not None
+            mutable_fields = self._modify_action_fields(action)
+            admitted_fields = (
+                self._artifact_assessment_protocol_repair_mutable_fields(
+                    action.agent_id
+                )
+            )
+            if (
+                len(mutable_fields) != 1
+                or mutable_fields[0] not in admitted_fields
+            ):
+                return (
+                    "artifact_assessment_protocol_failure: modify exactly one "
+                    "failure-relevant field while preserving tools, execution "
+                    "mode, artifact type, completion condition, relations, and "
+                    "Output identity; "
+                    f"admitted_mutable_fields={list(admitted_fields)!r}"
+                )
+            if mutable_fields == ("model_id",):
+                node = self._graph.get_node(action.agent_id)
+                admitted_model_ids = tuple(
+                    model_id
+                    for model_id in self._available_model_ids()
+                    if model_id != node.model_id
+                    and self._model_execution_profile_is_registered(
+                        model_id,
+                        node.execution_mode,
+                        node.allowed_tools,
+                    )
+                )
+                if action.model_id not in admitted_model_ids:
+                    return (
+                        "artifact assessment protocol repair model_id must "
+                        "come from the live catalog-backed alternative domain; "
+                        f"admitted_model_ids={list(admitted_model_ids)!r}"
+                    )
+            if mutable_fields == ("execution_profile",):
+                node = self._graph.get_node(action.agent_id)
+                current_profile = (
+                    node.execution_mode,
+                    tuple(node.allowed_tools),
+                )
+                admitted_profiles = tuple(
+                    profile
+                    for profile in (
+                        self.runtime.registered_execution_profiles_for_model(
+                            node.model_id
+                        )
+                    )
+                    if profile != current_profile
+                )
+                sampled_profile = (
+                    str(
+                        getattr(
+                            action.execution_mode,
+                            "value",
+                            action.execution_mode,
+                        )
+                    ),
+                    tuple(action.allowed_tools or ()),
+                )
+                if sampled_profile not in admitted_profiles:
+                    return (
+                        "artifact assessment protocol repair execution_profile "
+                        "must come from the live model-registered alternative "
+                        "domain; admitted_execution_profiles="
+                        f"{[(mode, list(tools)) for mode, tools in admitted_profiles]!r}"
+                    )
+            return None
+
+        if (
+            action.action_type is AgentActionType.DELETE_AGENT
+            and action.agent_id
+            in self._detachable_repair_exhausted_agent_ids()
+        ):
+            # Match the outer live action ordering once the higher-priority
+            # assessment-protocol repair boundary is clear. Removing a proven
+            # dead leaf preserves every retained artifact input and precedes
+            # any new assessment consumer for the incomplete graph. The next
+            # revision re-evaluates ingress against unchanged fresh artifacts.
+            return None
+
+        source_ids = self._artifact_assessment_ingress_agent_ids()
+        if not source_ids or action.action_type is AgentActionType.FINISH:
+            return None
+        if action.action_type is not AgentActionType.ADD_SUBGRAPH:
+            return (
+                "candidate_assessment_ingress_required: preserve the fresh "
+                "candidate and add one executable consumer subgraph before "
+                "mutating existing Agents, relations, or Output identity; "
+                f"required_existing_ingress_agent_ids={list(source_ids)!r}"
+            )
+        if len(action.agents) != 1:
+            return (
+                "candidate_assessment_ingress_required: add_subgraph must add "
+                "exactly one free-contract consumer under the one-relation "
+                "Canvas boundary"
+            )
+        if action.output_agent_id is not None:
+            return (
+                "candidate_assessment_ingress_required: preserve current "
+                "Output identity while the candidate is assessed"
+            )
+        if len(action.relations) != 1:
+            return (
+                "candidate_assessment_ingress_required: add_subgraph must "
+                "include exactly one candidate-owner-to-new-Agent relation"
+            )
+        new_agent_id = action.agents[0].agent_id
+        relation = action.relations[0]
+        if not (
+            relation.source_id in source_ids
+            and relation.target_id == new_agent_id
+            and relation.source_to_target is True
+            and relation.target_to_source is False
+        ):
+            return (
+                "candidate_assessment_ingress_required: relation must carry "
+                "one immutable candidate artifact from an admitted existing "
+                "owner into the newly declared consumer; "
+                f"required_existing_ingress_agent_ids={list(source_ids)!r}"
+            )
+        return None
+
     def model_admissible_action_types(
         self,
         *,
@@ -975,86 +2327,163 @@ class AgentWorkflowEnv:
         if not admitted:
             return admitted
 
-        if self.artifact_consumption_ordering:
-            finish_admitted = (
-                self.finish_admissibility().get("admissible") is True
+        detachable_dead_branch_delete_pending = bool(
+            AgentActionType.DELETE_AGENT.value in admitted
+            and self._detachable_repair_exhausted_agent_ids()
+        )
+        active_artifact_protocol_failure = bool(
+            self._artifact_assessment_protocol_failure_agent_ids()
+        )
+        if (
+            self.artifact_consumption_ordering
+            and not detachable_dead_branch_delete_pending
+            and not active_artifact_protocol_failure
+        ):
+            candidate_state = self.candidate_state()
+            candidate_count = int(candidate_state["candidate_count"])
+            supported_output_agent_ids = tuple(
+                agent_id
+                for agent_id in candidate_state.get(
+                    "supported_output_agent_ids", ()
+                )
+                if isinstance(agent_id, str)
             )
-            if finish_admitted and AgentActionType.FINISH.value in admitted:
-                # SET_OUTPUT is an explicit policy commitment.  Once its fresh
-                # artifact passes the formal FINISH gate, further graph edits
-                # would only discard or invalidate that commitment.
-                admitted = (AgentActionType.FINISH.value,)
-            else:
-                candidate_state = self.candidate_state()
-                candidate_count = int(candidate_state["candidate_count"])
-                has_conflict = bool(
-                    candidate_state.get(
-                        "unresolved_candidate_conflict",
-                        candidate_state["candidate_conflict"],
-                    )
+            has_conflict = bool(
+                candidate_state.get(
+                    "unresolved_candidate_conflict",
+                    candidate_state["candidate_conflict"],
                 )
-                strict_relations = self._terminal_progress_relation_candidates()
-                progress_output_agent_ids = (
-                    self._terminal_progress_output_agent_ids()
+            )
+            terminal_assessment_needed = any(
+                isinstance(item, Mapping)
+                and item.get("assessment_status") == "unassessed"
+                and (
+                    item.get("dependency_assessment_required") is True
+                    or item.get("execution_recovery_observed") is True
                 )
+                for item in candidate_state.get("candidate_artifacts", ())
+            )
+            assessment_ingress_agent_ids = (
+                self._artifact_assessment_ingress_agent_ids(candidate_state)
+            )
+            progress_output_agent_ids = (
+                self._terminal_progress_output_agent_ids()
+            )
+            progress_next_action_types = tuple(
+                action
+                for action in self.terminal_progress().get(
+                    "next_progress_action_types", ()
+                )
+                if isinstance(action, str)
+            )
+            if (
+                candidate_count > 0
+                and not has_conflict
+                and AgentActionType.FINISH.value in admitted
+            ):
+                output_agent_id = self._graph.output_agent_id
                 if (
-                    candidate_count == 0
-                    or has_conflict
-                    or (
-                        not strict_relations
-                        and not progress_output_agent_ids
+                    self.artifact_assessment_extractor is None
+                    or output_agent_id in supported_output_agent_ids
+                ):
+                    admitted = (AgentActionType.FINISH.value,)
+                elif (
+                    supported_output_agent_ids
+                    and AgentActionType.SET_OUTPUT.value in admitted
+                    and bool(
+                        set(progress_output_agent_ids).intersection(
+                            supported_output_agent_ids
+                        )
                     )
                 ):
-                    # A pointer edit cannot repair an unparsable artifact or
-                    # decide between conflicting unverified candidates.
+                    # The current Output remains unassessed while another
+                    # fresh artifact is positively supported. Consume that
+                    # public evidence through an explicit pointer edit before
+                    # termination instead of finishing the weaker artifact.
                     admitted = tuple(
                         action
                         for action in admitted
-                        if action != AgentActionType.SET_OUTPUT.value
+                        if action == AgentActionType.SET_OUTPUT.value
                     )
-                assessment_required = bool(
-                    candidate_state.get(
-                        "artifact_assessment_required", False
-                    )
-                )
-                unassessed_artifacts = candidate_state.get(
-                    "unassessed_artifacts", ()
+                else:
+                    # ``reject_negative`` makes a complete unassessed Output
+                    # terminal-admissible, but not positively supported. Keep
+                    # FINISH and ordinary legal Canvas edits visible so the
+                    # Director can terminate sufficient work or continue a
+                    # role-neutral collaboration. Do not force either choice.
+                    pass
+            elif (
+                candidate_count == 0
+                or has_conflict
+                or not progress_output_agent_ids
+            ):
+                # SET_OUTPUT cannot consume an absent, conflicting, or
+                # parameter-inadmissible candidate. A fresh parseable artifact
+                # is otherwise observation/priority state only: it must not
+                # suppress legal graph growth or repair while budget remains.
+                admitted = tuple(
+                    action
+                    for action in admitted
+                    if action != AgentActionType.SET_OUTPUT.value
                 )
                 if (
-                    assessment_required
-                    and candidate_count >= 1
-                    and not strict_relations
-                    and not progress_output_agent_ids
-                    and isinstance(unassessed_artifacts, (list, tuple))
-                    and unassessed_artifacts
+                    candidate_count > 0
+                    and not has_conflict
+                    and terminal_assessment_needed
+                    and assessment_ingress_agent_ids
                 ):
-                    add_actions = tuple(
+                    additive_actions = tuple(
                         action
                         for action in admitted
-                        if action
-                        in {
-                            AgentActionType.ADD_AGENT.value,
-                            AgentActionType.ADD_SUBGRAPH.value,
-                        }
+                        if action == AgentActionType.ADD_SUBGRAPH.value
                     )
-                    if add_actions:
-                        admitted = add_actions
-                if (
-                    candidate_count >= 1
-                    and strict_relations
-                    and AgentActionType.SET_RELATION.value in admitted
-                ):
-                    # Consume already-materialized independent/fan-in artifacts
-                    # before spending another ADD.  The Director still chooses
-                    # the exact legal direction/topology from the live domain.
-                    admitted = (AgentActionType.SET_RELATION.value,)
-                elif (
-                    candidate_count >= 1
-                    and not has_conflict
-                    and progress_output_agent_ids
-                    and AgentActionType.SET_OUTPUT.value in admitted
-                ):
-                    admitted = (AgentActionType.SET_OUTPUT.value,)
+                    if additive_actions:
+                        # A fresh candidate that requires target-blind public
+                        # assessment must remain immutable while assessment is
+                        # added.  Mutating an existing Agent or relation would
+                        # invalidate the candidate's input identity; an
+                        # additive free-contract subgraph can consume it
+                        # without selecting a role, topology, or answer.
+                        admitted = additive_actions
+                    else:
+                        # No atomic assessment-consumer unit fits the remaining
+                        # graph capacity.  Fail closed rather than expose an
+                        # edit that is guaranteed to invalidate the only fresh
+                        # candidate before it can be assessed.
+                        admitted = ()
+            elif (
+                self.artifact_assessment_extractor is None
+                or supported_output_agent_ids
+            ):
+                # PROJECT_ALGORITHM_ADDITION: consume a fresh, complete,
+                # non-conflicting terminal artifact before augmentation once
+                # its configured assessment boundary is satisfied. Profiles
+                # without an assessment extractor retain the historical
+                # parseable-artifact behavior. This is a state-conditioned
+                # action ordering rule, not a topology or role prior. A
+                # measured runtime/artifact failure, candidate conflict, or
+                # unreachable terminal artifact falls through to the normal
+                # PRESERVE -> DIAGNOSE -> REPAIR -> AUGMENT domain.
+                progress_ordered = tuple(
+                    action
+                    for action in admitted
+                    if action in progress_next_action_types
+                )
+                admitted = (
+                    progress_ordered
+                    if progress_ordered
+                    else admitted
+                )
+            else:
+                # A complete parseable artifact that is still ``unassessed``
+                # is terminal-admissible under ``reject_negative`` but is not
+                # positively supported. Keep SET_OUTPUT available while also
+                # preserving the ordinary legal Canvas edits. The Director can
+                # consume sufficient work immediately or add a role-neutral
+                # functional subgraph when the public derivation/provenance is
+                # insufficient. No Agent count, role, relation, topology, or
+                # mathematical method is selected by this projection.
+                pass
 
         if self.termination_lookahead and remaining_rounds is not None:
             progress = self.terminal_progress()
@@ -1078,6 +2507,13 @@ class AgentWorkflowEnv:
                 )
                 if required:
                     admitted = required
+                else:
+                    # A finite structural lower bound is not sufficient when
+                    # no parameter-feasible edit realizes its next step. Do
+                    # not fall back to the full action domain at the horizon:
+                    # that is exactly how a final no-op/relation edit consumed
+                    # the SET_OUTPUT -> FINISH budget in the AIME v10 traces.
+                    return ()
         return admitted
 
     def _base_model_admissible_action_types(self) -> Tuple[str, ...]:
@@ -1102,6 +2538,159 @@ class AgentWorkflowEnv:
             # Director to emit the explicit terminal action; it does not finish
             # automatically.
             return (AgentActionType.FINISH.value,)
+
+        provider_repair_agent_ids = self._provider_repair_agent_ids()
+        if (
+            provider_repair_agent_ids
+            and AgentActionType.MODIFY_AGENT.value
+            in self._allowed_action_type_set
+        ):
+            # A measured provider failure can coexist with an unresolved
+            # artifact-assessment branch.  Materialize that already accepted
+            # consumer before applying the artifact protocol: otherwise the
+            # protocol mask can hide the only parameter-feasible Runtime
+            # repair and leave an empty Canvas domain.  This changes only the
+            # failed Agent's catalog-backed model/profile coordinate and does
+            # not prescribe a graph topology or mathematical responsibility.
+            return (AgentActionType.MODIFY_AGENT.value,)
+
+        artifact_protocol_failures = set(
+            self._artifact_assessment_protocol_failure_agent_ids()
+        )
+        if artifact_protocol_failures:
+            protocol_recovery_sources = (
+                self._artifact_assessment_protocol_recovery_ingress_agent_ids()
+            )
+            dependency_closed_output_ids = tuple(
+                agent_id
+                for agent_id in self._dependency_closed_artifact_output_agent_ids()
+                if agent_id != self._graph.output_agent_id
+            )
+            dependency_progress_actions: set[str] = set()
+            if (
+                protocol_recovery_sources
+                and dependency_closed_output_ids
+                and AgentActionType.SET_OUTPUT.value
+                in self._allowed_action_type_set
+            ):
+                # The protocol failure is outside every dependency of this
+                # already materialized artifact.  Select its pointer first;
+                # subsequent observations route the unresolved branch into
+                # that consumer before full-graph FINISH is admitted.
+                dependency_progress_actions.add(
+                    AgentActionType.SET_OUTPUT.value
+                )
+            existing_output_relation_candidates = (
+                self._artifact_assessment_existing_output_relation_candidates()
+            )
+            if (
+                existing_output_relation_candidates
+                and AgentActionType.SET_RELATION.value
+                in self._allowed_action_type_set
+            ):
+                dependency_progress_actions.add(
+                    AgentActionType.SET_RELATION.value
+                )
+            if dependency_progress_actions:
+                return tuple(
+                    action_type
+                    for action_type in self.allowed_action_types
+                    if action_type in dependency_progress_actions
+                )
+            if protocol_recovery_sources:
+                non_candidate_protocol_ids = set(
+                    self._artifact_assessment_non_candidate_failure_agent_ids()
+                )
+                unrecoverable_non_candidate_ids = (
+                    non_candidate_protocol_ids
+                    & self._repair_exhausted_agent_ids
+                    - set(self._detachable_repair_exhausted_agent_ids())
+                )
+                if unrecoverable_non_candidate_ids:
+                    return ()
+                if (
+                    AgentActionType.ADD_SUBGRAPH.value
+                    in self._allowed_action_type_set
+                    and (
+                        self.max_agents is None
+                        or len(self._graph.nodes) < self.max_agents
+                    )
+                ):
+                    # A complete candidate artifact is immutable. Consume it
+                    # once through an exact provenance fan-in instead of
+                    # modifying and resampling its owner. The new Agent
+                    # declaration remains a Director choice.
+                    return (AgentActionType.ADD_SUBGRAPH.value,)
+                detachable_capacity_ids = (
+                    self._detachable_repair_exhausted_agent_ids()
+                )
+                if (
+                    detachable_capacity_ids
+                    and AgentActionType.DELETE_AGENT.value
+                    in self._allowed_action_type_set
+                ):
+                    return (AgentActionType.DELETE_AGENT.value,)
+                return ()
+            repairable = (
+                set(
+                    self._artifact_assessment_non_candidate_failure_agent_ids()
+                )
+                | set(
+                    self._artifact_assessment_candidate_consumer_repair_agent_ids()
+                )
+                | set(
+                    self._artifact_assessment_failed_consumer_repair_agent_ids()
+                )
+            ) - self._repair_exhausted_agent_ids
+            if (
+                repairable
+                and AgentActionType.MODIFY_AGENT.value
+                in self._allowed_action_type_set
+                and repairable.intersection(
+                    self._model_admissible_modify_agent_ids()
+                )
+            ):
+                # A successful Runtime call can still fail its required public
+                # artifact protocol.  Repair that exact consumer once while
+                # preserving its upstream candidate artifact and ingress.
+                return (AgentActionType.MODIFY_AGENT.value,)
+            detachable_protocol_leaves = set(
+                self._detachable_repair_exhausted_agent_ids()
+            ).intersection(artifact_protocol_failures)
+            if (
+                detachable_protocol_leaves
+                and AgentActionType.DELETE_AGENT.value
+                in self._allowed_action_type_set
+            ):
+                # A bounded protocol repair may leave a complete textual
+                # diagnostic that contains no parseable candidate and is not
+                # consumed by any retained artifact.  Removing that proven
+                # dead leaf is a preservation-safe Canvas edit, not another
+                # assessment attempt or a hidden answer selection.
+                return (AgentActionType.DELETE_AGENT.value,)
+            # The same consumer reproduced the protocol failure after one
+            # bounded repair.  Persist a typed empty Canvas domain rather than
+            # adding an unbounded sequence of equivalent consumers.
+            return ()
+
+        assessment_ingress_agent_ids = (
+            self._artifact_assessment_ingress_agent_ids()
+        )
+        if (
+            assessment_ingress_agent_ids
+            and AgentActionType.ADD_SUBGRAPH.value
+            in self._allowed_action_type_set
+            and (
+                self.max_agents is None
+                or len(self._graph.nodes) < self.max_agents
+            )
+        ):
+            # Keep the ingress-first ordering published by
+            # ``terminal_progress`` authoritative in the base projection as
+            # well. A terminal-reachability relation must not narrow away the
+            # assessment unit that consumes the immutable candidate artifact
+            # and its public provenance.
+            return (AgentActionType.ADD_SUBGRAPH.value,)
 
         mandatory_repair_ids = self._mandatory_repair_agent_ids()
         if (
@@ -1330,6 +2919,22 @@ class AgentWorkflowEnv:
             # A Formatter is exposed only after the prospective Canvas passes
             # the same Format-lineage checks used by authoritative admission.
             return (AgentActionType.SET_OUTPUT.value,)
+        progress_output_target_ids = (
+            self._terminal_progress_output_agent_ids()
+        )
+        if (
+            not self._uses_semantic_lineage_protocol()
+            and self.artifact_consumption_ordering
+            and progress_output_target_ids
+            and AgentActionType.SET_OUTPUT.value
+            in self._allowed_action_type_set
+        ):
+            # SET_OUTPUT is pointer-only and preserves every materialized
+            # artifact. Consume the fresh supported sink before choosing a
+            # reachability edge; the following observation can then project
+            # a relation directly toward the new Output with the smallest
+            # invalidation closure.
+            return (AgentActionType.SET_OUTPUT.value,)
         artifact_output_reachability_candidates = (
             self._artifact_output_reachability_relation_candidates()
         )
@@ -1360,6 +2965,21 @@ class AgentWorkflowEnv:
             # through to the generic relation domain here permits unrelated
             # rewrites while an orphan recovery branch remains unresolved.
             return (AgentActionType.SET_RELATION.value,)
+
+        detachable_dead_branch_ids = (
+            self._detachable_repair_exhausted_agent_ids()
+        )
+        if (
+            detachable_dead_branch_ids
+            and AgentActionType.DELETE_AGENT.value
+            in self._allowed_action_type_set
+        ):
+            # Every strict-progress relation projection above is empty.  The
+            # remaining failed leaf has no artifact or downstream identity and
+            # its transactional deletion preserves all retained inputs.  Make
+            # that one FlowSteer Canvas edit authoritative before generic ADD,
+            # MODIFY or relation fallbacks can replay the exhausted request.
+            return (AgentActionType.DELETE_AGENT.value,)
 
         if exhausted_reasoner_ids:
             if (
@@ -1447,6 +3067,12 @@ class AgentWorkflowEnv:
                 (*zip(active_lineage, active_lineage[1:]), *declared_edges)
             )
         )
+        protocol_recovery_source_ids = set(
+            self._artifact_assessment_protocol_recovery_ingress_agent_ids()
+        )
+        dependency_closed_output_ids = set(
+            self._dependency_closed_artifact_output_agent_ids()
+        )
         candidates: list[dict[str, object]] = []
         for source_index, source_id in enumerate(node_ids):
             for target_id in node_ids[source_index + 1 :]:
@@ -1478,6 +3104,26 @@ class AgentWorkflowEnv:
                     if self._semantic_edit_issue_for(candidate) is not None:
                         continue
                     if self._preserved_input_change_issue_for(candidate) is not None:
+                        continue
+                    relation_item = {
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "source_to_target": source_to_target,
+                        "target_to_source": target_to_source,
+                    }
+                    exact_existing_consumer_ingress = any(
+                        edge_source_id in protocol_recovery_source_ids
+                        and edge_target_id in dependency_closed_output_ids
+                        for edge_source_id, edge_target_id in (
+                            self._relation_added_edges(relation_item)
+                        )
+                    )
+                    if (
+                        not exact_existing_consumer_ingress
+                        and self._relation_adds_unusable_source_to_fresh_artifact(
+                            relation_item
+                        )
+                    ):
                         continue
                     if (
                         candidate.output_agent_id is not None
@@ -1551,6 +3197,13 @@ class AgentWorkflowEnv:
             # state instead of drifting through arbitrary reciprocal edges.
             return []
         all_candidates = self._all_model_admissible_relation_candidates()
+        existing_output_recovery_candidates = (
+            self._artifact_assessment_existing_output_relation_candidates(
+                all_candidates
+            )
+        )
+        if existing_output_recovery_candidates:
+            return existing_output_recovery_candidates
         failed_ingress_candidates = (
             self._failed_auxiliary_ingress_relation_candidates(all_candidates)
         )
@@ -1586,6 +3239,19 @@ class AgentWorkflowEnv:
         )
         if terminal_reachability_candidates:
             return terminal_reachability_candidates
+        if (
+            not self._uses_semantic_lineage_protocol()
+            and self._failed_agent_ids
+            & self._repair_exhausted_agent_ids
+            & set(self._terminal_unreachable_agent_ids())
+        ):
+            # All parameter-feasible relation edits which make strict recovery
+            # progress have already been projected above.  Do not fall through
+            # to generic peer-edge toggles for a bounded failed dead branch:
+            # changing its inbox merely replays the same exhausted request.
+            # A preservation-safe DELETE boundary, when one exists, is exposed
+            # by ``_base_model_admissible_action_types`` instead.
+            return []
         if any(
             auxiliary_id in self._failed_agent_ids
             and auxiliary_id in self._repair_exhausted_agent_ids
@@ -1995,7 +3661,91 @@ class AgentWorkflowEnv:
             }
             if candidate_unreachable < current_unreachable:
                 result.append(dict(item))
-        return result
+        protocol_preserving = [
+            item
+            for item in result
+            if self._relation_preserves_fresh_candidate_protocol(item)
+        ]
+        # Prefer a strict-progress edge that routes the unresolved branch into
+        # a consumer which has already demonstrated complete provenance-bound
+        # assessment. If no such edge exists, retain FlowSteer's original live
+        # relation domain rather than inventing a fixed recovery topology.
+        prioritized = protocol_preserving or result
+        if not prioritized:
+            return []
+        dirty_sizes = {
+            index: len(self._relation_candidate_dirty_closure(item))
+            for index, item in enumerate(prioritized)
+        }
+        minimum_dirty_size = min(dirty_sizes.values())
+        return [
+            item
+            for index, item in enumerate(prioritized)
+            if dirty_sizes[index] == minimum_dirty_size
+        ]
+
+    def _relation_preserves_fresh_candidate_protocol(
+        self,
+        item: Mapping[str, object],
+    ) -> bool:
+        """Avoid dirtying a candidate owner that cannot assess new ingress."""
+
+        if self.artifact_assessment_extractor is None:
+            return True
+        protected_agent_ids = {
+            str(receipt["agent_id"])
+            for receipt in self.current_artifact_receipts()
+            if isinstance(receipt.get("agent_id"), str)
+            and receipt.get("artifact_fresh") is True
+            and receipt.get("artifact_complete") is True
+            and isinstance(receipt.get("candidate"), str)
+            and receipt.get("artifact_assessment_coverage_complete") is not True
+        }
+        if not protected_agent_ids:
+            return True
+        candidate = self._graph.fork()
+        candidate.set_relation(
+            str(item["source_id"]),
+            str(item["target_id"]),
+            bool(item["source_to_target"]),
+            bool(item["target_to_source"]),
+        )
+        return all(
+            self._graph.directed_predecessors(agent_id)
+            == candidate.directed_predecessors(agent_id)
+            for agent_id in protected_agent_ids
+        )
+
+    def _relation_candidate_dirty_closure(
+        self,
+        item: Mapping[str, object],
+    ) -> set[str]:
+        """Project FlowSteer's exact invalidation closure for one relation."""
+
+        source_id = str(item["source_id"])
+        target_id = str(item["target_id"])
+        source_to_target = bool(item["source_to_target"])
+        target_to_source = bool(item["target_to_source"])
+        candidate = self._graph.fork()
+        previous = candidate.relation_bits(source_id, target_id)
+        previous_targets: set[str] = set()
+        if previous.source_to_target:
+            previous_targets.add(target_id)
+        if previous.target_to_source:
+            previous_targets.add(source_id)
+        dirty = candidate.dirty_closure(previous_targets)
+        candidate.set_relation(
+            source_id,
+            target_id,
+            source_to_target,
+            target_to_source,
+        )
+        current_targets: set[str] = set()
+        if source_to_target:
+            current_targets.add(target_id)
+        if target_to_source:
+            current_targets.add(source_id)
+        return dirty | candidate.dirty_closure(current_targets)
 
     def _failed_auxiliary_ingress_relation_candidates(
         self,
@@ -2172,6 +3922,38 @@ class AgentWorkflowEnv:
         return any(
             source_id in unavailable_sources
             for source_id, _ in self._relation_added_edges(item)
+        )
+
+    def _relation_adds_unusable_source_to_fresh_artifact(
+        self,
+        item: Mapping[str, object],
+    ) -> bool:
+        """Protect a fresh artifact from a newly added unusable ingress.
+
+        This runtime validity rule is role- and topology-neutral. It blocks
+        only newly introduced directions whose source is already measured as
+        failed, repair-exhausted, unresolved dirty, or diagnosed unusable and
+        whose target currently owns a fresh successful artifact. Removing an
+        edge, routing a fresh artifact into a dirty node, and fresh-to-fresh
+        collaboration remain admissible.
+        """
+
+        if (
+            not self.artifact_consumption_ordering
+            or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+        ):
+            return False
+        unusable_sources = (
+            self._failed_agent_ids
+            | self._repair_exhausted_agent_ids
+            | self._unresolved_dirty_agents
+            | self._diagnosed_unusable_agent_ids
+        )
+        return any(
+            source_id in unusable_sources
+            and target_id not in unusable_sources
+            and self._has_successful_artifact(target_id)
+            for source_id, target_id in self._relation_added_edges(item)
         )
 
     def _successful_auxiliary_replacement_agent_ids(self) -> Tuple[str, ...]:
@@ -2364,12 +4146,33 @@ class AgentWorkflowEnv:
         """Exclude an already verified semantic lineage from repair targets."""
 
         node_ids = tuple(node.id for node in self._graph.nodes)
+        provider_repair_agent_ids = self._provider_repair_agent_ids()
+        if provider_repair_agent_ids:
+            return provider_repair_agent_ids
+        artifact_protocol_failures = {
+            agent_id
+            for agent_id in node_ids
+            if self._artifact_assessment_protocol_repair_mutable_fields(
+                agent_id
+            )
+        }
+        if artifact_protocol_failures:
+            return tuple(
+                agent_id
+                for agent_id in node_ids
+                if agent_id in artifact_protocol_failures
+            )
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return node_ids
 
         def has_non_noop_repair(agent_id: str) -> bool:
             if self._provider_repair_required(agent_id):
-                return bool(self._provider_repair_model_ids(agent_id))
+                return bool(
+                    self._provider_repair_compatible_model_ids(agent_id)
+                    or self._provider_repair_bridge_execution_profiles(
+                        agent_id
+                    )
+                )
             if agent_id not in self._react_exhausted_agent_ids:
                 return True
             recovery_values = self._triviaqa_react_recovery_field_values(
@@ -2581,34 +4384,33 @@ class AgentWorkflowEnv:
             or action.agent_id is None
         ):
             return None
-        admitted_model_ids = self._provider_repair_model_ids(action.agent_id)
         if not self._provider_repair_required(action.agent_id):
             return None
-        if not admitted_model_ids:
-            return (
-                "provider failure repair has no catalog-backed alternative "
-                "model_id; modify_agent is outside the live action domain"
-            )
-        mutable_fields = tuple(
-            field_name
-            for field_name in (
-                "model_id",
-                "contract",
-                "role_family",
-                "allowed_tools",
-                "execution_mode",
-                "artifact_type",
-                "completion_condition",
-            )
-            if getattr(action, field_name) is not None
+        admitted_model_ids = self._provider_repair_compatible_model_ids(
+            action.agent_id
         )
-        if mutable_fields != ("model_id",):
+        bridge_profiles = self._provider_repair_bridge_execution_profiles(
+            action.agent_id
+        )
+        if not admitted_model_ids and not bridge_profiles:
+            if not self._provider_repair_model_ids(action.agent_id):
+                return (
+                    "provider failure repair has no catalog-backed alternative; "
+                    "modify_agent is outside the live action domain"
+                )
+            return (
+                "provider failure repair has no profile-compatible model_id "
+                "or common bridge execution profile; modify_agent is outside "
+                "the live action domain"
+            )
+        mutable_fields = self._modify_action_fields(action)
+        if admitted_model_ids and mutable_fields != ("model_id",):
             return (
                 "a provider failure repair must modify only model_id while "
                 "preserving the Agent contract, role, tools, execution mode, "
                 "artifact type, completion condition, and relations"
             )
-        if action.model_id not in admitted_model_ids:
+        if admitted_model_ids and action.model_id not in admitted_model_ids:
             failed_provider_id = self._provider_repair_avoid_provider_id(
                 action.agent_id
             )
@@ -2617,6 +4419,93 @@ class AgentWorkflowEnv:
                 "domain; "
                 f"avoid_provider_id={failed_provider_id!r}, "
                 f"admitted_model_ids={list(admitted_model_ids)!r}"
+            )
+        if bridge_profiles and not admitted_model_ids:
+            observed_profile = (
+                getattr(action.execution_mode, "value", action.execution_mode),
+                tuple(action.allowed_tools or ()),
+            )
+            if (
+                mutable_fields != ("execution_profile",)
+                or observed_profile not in set(bridge_profiles)
+            ):
+                return (
+                    "provider failure repair requires one exact atomic bridge "
+                    "execution profile before model_id takeover; "
+                    f"admitted_bridge_profiles={[(mode, list(tools)) for mode, tools in bridge_profiles]!r}"
+                )
+        return None
+
+    def _execution_profile_modify_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Keep raw MODIFY edits inside the model/profile live domain.
+
+        ``execution_profile`` is a hierarchical field-selector identity, not
+        an Agent field.  Its final Canvas payload carries the existing
+        ``execution_mode`` and ``allowed_tools`` fields together.  Legacy
+        single-field MODIFY payloads remain admissible when the resulting
+        complete profile is registered for the unchanged model.
+        """
+
+        if (
+            action.action_type is not AgentActionType.MODIFY_AGENT
+            or action.agent_id is None
+            or not self._graph.has_node(action.agent_id)
+        ):
+            return None
+        node = self._graph.get_node(action.agent_id)
+        mutable_fields = self._modify_action_fields(action)
+        if action.model_id is not None:
+            if mutable_fields != ("model_id",):
+                return (
+                    "model_id must be modified as one atomic field while "
+                    "preserving the current execution profile"
+                )
+            if not self._model_execution_profile_is_registered(
+                action.model_id,
+                node.execution_mode,
+                node.allowed_tools,
+            ):
+                return (
+                    "modify_agent model_id does not admit the current "
+                    "execution profile"
+                )
+            return None
+        if action.execution_mode is None and action.allowed_tools is None:
+            return None
+        if "execution_profile" in mutable_fields and mutable_fields != (
+            "execution_profile",
+        ):
+            return (
+                "execution_mode and allowed_tools must form one atomic "
+                "execution-profile patch without unrelated Agent fields"
+            )
+        proposed_mode = (
+            node.execution_mode
+            if action.execution_mode is None
+            else action.execution_mode
+        )
+        proposed_tools = (
+            node.allowed_tools
+            if action.allowed_tools is None
+            else action.allowed_tools
+        )
+        if self._is_provider_repair_bridge_action(action):
+            # The unavailable current model is deliberately absent from the
+            # ordinary availability-filtered profile predicate. The exact
+            # bridge domain above validates this declaration against Runtime
+            # capabilities without making that model callable again.
+            return None
+        if not self._model_execution_profile_is_registered(
+            node.model_id,
+            proposed_mode,
+            proposed_tools,
+        ):
+            return (
+                "modify_agent execution profile is not registered for the "
+                f"current model_id={node.model_id!r}"
             )
         return None
 
@@ -2789,10 +4678,24 @@ class AgentWorkflowEnv:
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return ()
         node_ids = tuple(node.id for node in self._graph.nodes)
+
+        def has_current_complete_artifact(agent_id: str) -> bool:
+            artifact = self._progressive_outputs.get(agent_id)
+            metadata = self._progressive_output_metadata.get(agent_id, {})
+            return (
+                isinstance(artifact, str)
+                and bool(artifact.strip())
+                and agent_id not in self._unresolved_dirty_agents
+                and agent_id not in self._failed_agent_ids
+                and isinstance(metadata, Mapping)
+                and self._artifact_complete_from_metadata(metadata)
+            )
+
         unavailable_model_agents = {
             node.id
             for node in self._graph.nodes
             if node.model_id in self._unavailable_model_ids
+            and not has_current_complete_artifact(node.id)
         }
         if unavailable_model_agents:
             return tuple(
@@ -3140,6 +5043,173 @@ class AgentWorkflowEnv:
             and self._delete_admission_issue(node.id) is None
         )
 
+    def _detachable_repair_exhausted_agent_ids(self) -> Tuple[str, ...]:
+        """Return dead failed leaves removable without invalidating artifacts.
+
+        FlowSteer's incremental edit boundary may remove a failed leaf without
+        recomputing unrelated cached nodes.  This task-agnostic projection is
+        deliberately narrower than ordinary recovery deletion: the Agent must
+        have exhausted its bounded repair, own no terminal candidate, own no
+        Output identity or downstream responsibility, and its removal must
+        strictly reduce terminal-unreachable state while preserving every
+        retained fresh artifact's directed input identity.  A protocol-failed
+        diagnostic artifact may therefore be removed only when deterministic
+        task parsing finds no candidate and no retained artifact consumed it.
+        Evaluator state is never consulted.
+        """
+
+        if (
+            self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
+            or self._uses_semantic_lineage_protocol()
+        ):
+            # Semantic QA protocols already own stricter replacement-takeover
+            # deletion rules.  This role-neutral boundary is for the unified
+            # free AgentGraph path and must not bypass those lineage checks.
+            return ()
+        terminal_unreachable_ids = set(
+            self._terminal_unreachable_agent_ids()
+        )
+        dead_ids = (
+            self._failed_agent_ids
+            & self._repair_exhausted_agent_ids
+            & terminal_unreachable_ids
+        )
+        if not dead_ids:
+            return ()
+
+        output_agent_id = self._graph.output_agent_id
+        output_metadata = self._progressive_output_metadata.get(
+            output_agent_id or "",
+            {},
+        )
+        if (
+            output_agent_id is None
+            or not self._has_successful_artifact(output_agent_id)
+            or not isinstance(output_metadata, Mapping)
+            or not self._artifact_complete_from_metadata(output_metadata)
+        ):
+            return ()
+
+        retained_fresh_ids = tuple(
+            node.id
+            for node in self._graph.nodes
+            if node.id not in dead_ids
+            and self._has_successful_artifact(node.id)
+        )
+        protocol_failure_ids = set(
+            self._artifact_assessment_protocol_failure_agent_ids()
+        )
+        result: list[str] = []
+        for node in self._graph.nodes:
+            agent_id = node.id
+            materialized_artifacts = tuple(
+                artifact
+                for store in (
+                    self._progressive_outputs,
+                    self._previous_revision_outputs,
+                )
+                if isinstance((artifact := store.get(agent_id)), str)
+                and bool(artifact.strip())
+            )
+            artifact_metadata = tuple(
+                metadata
+                for store in (
+                    self._progressive_output_metadata,
+                    self._previous_revision_output_metadata,
+                )
+                if isinstance((metadata := store.get(agent_id)), Mapping)
+            )
+            provenance_bound_diagnostic = bool(
+                self.artifact_assessment_extractor is not None
+                and any(
+                    metadata.get("input_artifact_provenance")
+                    or metadata.get("input_artifact_versions")
+                    for metadata in artifact_metadata
+                )
+            )
+            if (
+                agent_id not in dead_ids
+                or self._graph.output_agent_id == agent_id
+                or self._directed_successors(self._graph, agent_id)
+                or self._graph.dirty_closure({agent_id}) - {agent_id}
+                or (
+                    materialized_artifacts
+                    and agent_id not in protocol_failure_ids
+                    and not provenance_bound_diagnostic
+                )
+                or any(
+                    self._public_artifact_candidate(artifact) is not None
+                    for artifact in materialized_artifacts
+                )
+            ):
+                continue
+            candidate = self._graph.fork()
+            candidate.delete_agent(agent_id)
+            if candidate.output_agent_id != output_agent_id:
+                continue
+            if not candidate.validate(
+                self.model_registry,
+                require_complete=False,
+            ).valid:
+                continue
+            if (
+                self._uses_format_agent_protocol(candidate)
+                and self._format_agent_issue_for(candidate) is not None
+            ):
+                continue
+            if self._preserved_input_change_issue_for(candidate) is not None:
+                continue
+            candidate_unreachable_ids = {
+                unreachable_id
+                for issue in candidate.validate(
+                    self.model_registry,
+                    require_complete=True,
+                ).issues
+                if issue.code == "cannot_reach_output"
+                for unreachable_id in issue.agent_ids
+            }
+            if not candidate_unreachable_ids < terminal_unreachable_ids:
+                continue
+            if any(
+                self._graph.directed_predecessors(retained_id)
+                != candidate.directed_predecessors(retained_id)
+                for retained_id in retained_fresh_ids
+                if candidate.has_node(retained_id)
+            ):
+                continue
+            input_versions_valid = True
+            for retained_id in retained_fresh_ids:
+                metadata = self._progressive_output_metadata.get(
+                    retained_id,
+                    {},
+                )
+                raw_versions = (
+                    metadata.get("input_artifact_versions")
+                    if isinstance(metadata, Mapping)
+                    else None
+                )
+                if not isinstance(raw_versions, Mapping):
+                    continue
+                for source_id, artifact_id in raw_versions.items():
+                    source_metadata = self._progressive_output_metadata.get(
+                        str(source_id),
+                        {},
+                    )
+                    if (
+                        str(source_id)
+                        not in candidate.directed_predecessors(retained_id)
+                        or not isinstance(source_metadata, Mapping)
+                        or source_metadata.get("artifact_id") != artifact_id
+                    ):
+                        input_versions_valid = False
+                        break
+                if not input_versions_valid:
+                    break
+            if not input_versions_valid:
+                continue
+            result.append(agent_id)
+        return tuple(result)
+
     def _admissible_augmentation_role_families(self) -> Tuple[str, ...]:
         """Return semantic QA roles that may be added at this recovery boundary."""
 
@@ -3480,6 +5550,37 @@ class AgentWorkflowEnv:
             revision=graph.revision,
         )
 
+    @staticmethod
+    def _induced_execution_graph(
+        graph: AgentGraph,
+        agent_ids: Collection[str],
+    ) -> AgentGraph:
+        """Return the revision-identical subgraph induced by ``agent_ids``.
+
+        The helper is intentionally private to the Canvas execution boundary:
+        it neither mutates nor replaces the persisted AgentGraph.  Relation
+        provenance and the unique Output pointer are copied exactly when both
+        endpoints belong to the selected dependency closure.
+        """
+
+        selected = set(agent_ids)
+        output_agent_id = graph.output_agent_id
+        return AgentGraph(
+            nodes=(node for node in graph.nodes if node.id in selected),
+            relations=(
+                relation
+                for relation in graph.relations
+                if relation.source_id in selected
+                and relation.target_id in selected
+            ),
+            output_agent_id=(
+                output_agent_id
+                if output_agent_id in selected
+                else None
+            ),
+            revision=graph.revision,
+        )
+
     def _provider_repair_catalog_domain(
         self,
         current_model_id: str,
@@ -3525,6 +5626,125 @@ class AgentWorkflowEnv:
             and retryability
             in {"transient_provider", "permanent_configuration"}
         )
+
+    def _provider_repair_agent_ids(self) -> Tuple[str, ...]:
+        """Return failed Agents with one parameter-feasible provider repair.
+
+        Runtime/provider recovery precedes artifact-protocol recovery because
+        a failed consumer has not produced an artifact that the latter can
+        inspect.  Existing successful artifacts are never selected here.
+        """
+
+        failed_ids = self._failed_agent_ids - self._repair_exhausted_agent_ids
+        return tuple(
+            node.id
+            for node in self._graph.nodes
+            if node.id in failed_ids
+            and self._provider_repair_required(node.id)
+            and bool(
+                self._provider_repair_compatible_model_ids(node.id)
+                or self._provider_repair_bridge_execution_profiles(node.id)
+            )
+        )
+
+    def _incomplete_artifact_repair_domain(
+        self,
+        agent_id: str,
+    ) -> Tuple[
+        Tuple[str, ...],
+        Tuple[str, ...],
+        Tuple[Tuple[object, Tuple[str, ...]], ...],
+    ]:
+        """Return causal discrete repairs after bounded completion exhaustion.
+
+        AgentRuntime has already retried the same request through its bounded
+        continuation protocol before publishing ``IncompleteAgentArtifact``.
+        If the frozen catalog provides another compatible model or execution
+        profile, expose only those discrete coordinates to the next FlowSteer
+        MODIFY action.  This prevents unrelated free-text fields from causing
+        the same failed request to be sampled repeatedly.  When no discrete
+        alternative exists, return an empty domain so the ordinary free-text
+        repair boundary remains available instead of making the Canvas dead.
+        """
+
+        if not self._graph.has_node(agent_id):
+            return (), (), ()
+        record = self._latest_failure_record_by_agent.get(agent_id)
+        if record is None or record.error_type != "IncompleteAgentArtifact":
+            return (), (), ()
+        node = self._graph.get_node(agent_id)
+        model_ids = tuple(
+            model_id
+            for model_id in self._available_model_ids()
+            if model_id != node.model_id
+            and self._model_execution_profile_is_registered(
+                model_id,
+                node.execution_mode,
+                node.allowed_tools,
+            )
+        )
+        current_profile = (node.execution_mode, tuple(node.allowed_tools))
+        execution_profiles = tuple(
+            (mode, tuple(tool_ids))
+            for mode, tool_ids in (
+                self.runtime.registered_execution_profiles_for_model(
+                    node.model_id
+                )
+            )
+            if (mode, tuple(tool_ids)) != current_profile
+        )
+        fields = tuple(
+            field_name
+            for field_name, values in (
+                ("model_id", model_ids),
+                ("execution_profile", execution_profiles),
+            )
+            if values
+        )
+        return fields, model_ids, execution_profiles
+
+    def _incomplete_artifact_repair_admission_issue(
+        self,
+        action: AgentAction,
+    ) -> Optional[str]:
+        """Keep raw MODIFY actions inside the incomplete-artifact domain."""
+
+        if (
+            action.action_type is not AgentActionType.MODIFY_AGENT
+            or action.agent_id is None
+        ):
+            return None
+        fields, model_ids, execution_profiles = (
+            self._incomplete_artifact_repair_domain(action.agent_id)
+        )
+        if not fields:
+            return None
+        mutable_fields = self._modify_action_fields(action)
+        if len(mutable_fields) != 1 or mutable_fields[0] not in fields:
+            return (
+                "IncompleteAgentArtifact repair must modify exactly one "
+                "causal discrete coordinate from the live domain; "
+                f"admitted_mutable_fields={list(fields)!r}"
+            )
+        field_name = mutable_fields[0]
+        if field_name == "model_id" and action.model_id not in model_ids:
+            return (
+                "IncompleteAgentArtifact model_id repair must use the live "
+                f"admitted domain {list(model_ids)!r}"
+            )
+        if field_name == "execution_profile":
+            assert action.execution_mode is not None
+            assert action.allowed_tools is not None
+            observed_profile = (
+                action.execution_mode,
+                tuple(action.allowed_tools),
+            )
+            if observed_profile not in set(execution_profiles):
+                return (
+                    "IncompleteAgentArtifact execution_profile repair must "
+                    "use one live registered profile"
+                )
+        return None
 
     def _available_model_ids(self) -> Tuple[str, ...]:
         return tuple(
@@ -3625,6 +5845,94 @@ class AgentWorkflowEnv:
             return ()
         return self._provider_repair_catalog_domain(current_model_id)
 
+    def _provider_repair_compatible_model_ids(
+        self,
+        agent_id: str,
+    ) -> Tuple[str, ...]:
+        """Return repair models admitting the Agent's current profile."""
+
+        if not self._graph.has_node(agent_id):
+            return ()
+        node = self._graph.get_node(agent_id)
+        return tuple(
+            model_id
+            for model_id in self._provider_repair_model_ids(agent_id)
+            if self._model_execution_profile_is_registered(
+                model_id,
+                node.execution_mode,
+                node.allowed_tools,
+            )
+        )
+
+    def _provider_repair_bridge_execution_profiles(
+        self,
+        agent_id: str,
+    ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+        """Return common profiles enabling a later provider takeover.
+
+        The bridge is available only when no repair model admits the current
+        profile. It changes no model identity and is limited to role-neutral
+        runtime tasks; semantic-lineage protocols retain their stricter
+        role-conditioned execution contracts and fail closed instead.
+        """
+
+        if (
+            not self._graph.has_node(agent_id)
+            or self._uses_semantic_lineage_protocol()
+            or self._provider_repair_compatible_model_ids(agent_id)
+        ):
+            return ()
+        node = self._graph.get_node(agent_id)
+        repair_model_ids = self._provider_repair_model_ids(agent_id)
+        if not repair_model_ids:
+            return ()
+        current_profile = (
+            node.execution_mode.value,
+            tuple(node.allowed_tools),
+        )
+        repair_profiles = {
+            profile
+            for model_id in repair_model_ids
+            for profile in (
+                self.runtime.registered_execution_profiles_for_model(model_id)
+            )
+        }
+        return tuple(
+            profile
+            for profile in self.runtime.registered_execution_profiles_for_model(
+                node.model_id
+            )
+            if profile != current_profile and profile in repair_profiles
+        )
+
+    def _is_provider_repair_bridge_action(
+        self,
+        action: AgentAction,
+    ) -> bool:
+        """Return whether one exact atomic profile patch is a live bridge."""
+
+        if (
+            action.action_type is not AgentActionType.MODIFY_AGENT
+            or action.agent_id is None
+            or action.execution_mode is None
+            or action.allowed_tools is None
+            or self._modify_action_fields(action) != ("execution_profile",)
+        ):
+            return False
+        profile = (
+            str(
+                getattr(
+                    action.execution_mode,
+                    "value",
+                    action.execution_mode,
+                )
+            ),
+            tuple(action.allowed_tools),
+        )
+        return profile in set(
+            self._provider_repair_bridge_execution_profiles(action.agent_id)
+        )
+
     def _provider_repair_avoid_provider_id(
         self,
         agent_id: str,
@@ -3705,9 +6013,24 @@ class AgentWorkflowEnv:
                     }
                     for execution_mode, allowed_tools in registered_profiles
                 ],
+                "registered_model_execution_profiles": (
+                    self._registered_model_execution_profiles()
+                ),
                 "contract_semantics": "free_text",
+                **(
+                    {"role_family_admitted": True}
+                    if self._free_contract_domain_admits_role_family()
+                    else {}
+                ),
             }
         if AgentActionType.ADD_SUBGRAPH.value in admitted:
+            protocol_recovery_ingress_agent_ids = (
+                self._artifact_assessment_protocol_recovery_ingress_agent_ids()
+            )
+            assessment_ingress_agent_ids = (
+                protocol_recovery_ingress_agent_ids
+                or self._artifact_assessment_ingress_agent_ids()
+            )
             remaining = (
                 self.max_agents_per_subgraph
                 if self.max_agents is None
@@ -3720,6 +6043,11 @@ class AgentWorkflowEnv:
                 # One same-role/same-artifact auxiliary replacement is one
                 # executable Canvas unit. Keep constrained decoding equal to
                 # the authoritative admission boundary below.
+                remaining = min(remaining, 1)
+            if assessment_ingress_agent_ids:
+                # One new free-contract consumer plus one immutable ingress is
+                # the smallest executable assessment unit.  Additional nodes
+                # would be unrelated under the one-relation Canvas boundary.
                 remaining = min(remaining, 1)
             missing_role_families = self._missing_semantic_role_families()
             if (
@@ -3735,6 +6063,9 @@ class AgentWorkflowEnv:
                 "min_new_agents": 1,
                 "max_new_agents": remaining,
                 "existing_agent_ids": node_ids,
+                "registered_model_execution_profiles": (
+                    self._registered_model_execution_profiles()
+                ),
                 **(
                     {
                         "semantic_protocol": self.semantic_protocol,
@@ -3944,7 +6275,83 @@ class AgentWorkflowEnv:
                         ),
                     }
                     if self._uses_semantic_lineage_protocol()
-                    else {}
+                    else {
+                        # Thin role-neutral counterpart of the existing live
+                        # ADD_AGENT domain. FlowSteer's Canvas supplies neutral
+                        # node IDs; SkillFlow's runtime registry supplies only
+                        # executable mode/Tool combinations. Agent count,
+                        # model, contract, relation, Output and topology remain
+                        # Director choices.
+                        "model_ids": list(self._available_model_ids()),
+                        "required_agent_fields": [
+                            "agent_id",
+                            "model_id",
+                            "contract",
+                            "execution_mode",
+                            "allowed_tools",
+                        ],
+                        "registered_execution_profiles": [
+                            {
+                                "execution_mode": execution_mode,
+                                "allowed_tools": list(allowed_tools),
+                            }
+                            for execution_mode, allowed_tools in (
+                                self.runtime.registered_execution_profiles()
+                            )
+                        ],
+                        "contract_semantics": "free_text",
+                        **(
+                            {"role_family_admitted": True}
+                            if self._free_contract_domain_admits_role_family()
+                            else {}
+                        ),
+                        **(
+                            {
+                                "required_existing_ingress_agent_ids": list(
+                                    assessment_ingress_agent_ids
+                                ),
+                                "required_existing_ingress_artifacts": [
+                                    {
+                                        "agent_id": str(
+                                            receipt["agent_id"]
+                                        ),
+                                        "artifact_id": str(
+                                            receipt["artifact_id"]
+                                        ),
+                                    }
+                                    for receipt in (
+                                        self.current_artifact_receipts()
+                                    )
+                                    if receipt.get("agent_id")
+                                    in set(assessment_ingress_agent_ids)
+                                    and isinstance(
+                                        receipt.get("artifact_id"), str
+                                    )
+                                ],
+                                "required_relation_count": (
+                                    len(assessment_ingress_agent_ids)
+                                    if protocol_recovery_ingress_agent_ids
+                                    else 1
+                                ),
+                                "require_all_existing_ingress": bool(
+                                    protocol_recovery_ingress_agent_ids
+                                ),
+                                "preserve_current_output": True,
+                            }
+                            if assessment_ingress_agent_ids
+                            else {}
+                        ),
+                        "endpoint_scope": {
+                            "relation_endpoint_sources": [
+                                "existing_agent_ids",
+                                "same_action_agent_ids",
+                            ],
+                            "output_agent_id_sources": [
+                                "existing_agent_ids",
+                                "same_action_agent_ids",
+                            ],
+                        },
+                    }
                 ),
             }
         if AgentActionType.MODIFY_AGENT.value in admitted:
@@ -3957,10 +6364,14 @@ class AgentWorkflowEnv:
             ]
             if not self._uses_semantic_lineage_protocol():
                 generic_runtime_fields = [
+                    "execution_profile",
                     "allowed_tools",
                     "execution_mode",
                 ]
-                if self.runtime.artifact_assessment_protocol == "none":
+                if (
+                    self.runtime.artifact_assessment_protocol == "none"
+                    and self._allows_role_family_actions()
+                ):
                     generic_runtime_fields.insert(0, "role_family")
                 base_mutable_fields[2:2] = generic_runtime_fields
             measured_failed_ids = self._failed_agent_ids.intersection(node_ids)
@@ -3969,9 +6380,21 @@ class AgentWorkflowEnv:
                 for agent_id in modifiable_node_ids
                 if self._provider_repair_required(agent_id)
             }
+            incomplete_artifact_repair_domains = {
+                agent_id: self._incomplete_artifact_repair_domain(agent_id)
+                for agent_id in modifiable_node_ids
+            }
             dirty_replacement_ids = set(
                 self._dirty_auxiliary_replacement_agent_ids()
             )
+            artifact_protocol_repair_fields = {
+                agent_id: list(
+                    self._artifact_assessment_protocol_repair_mutable_fields(
+                        agent_id
+                    )
+                )
+                for agent_id in modifiable_node_ids
+            }
             responsible_ids = set(measured_failed_ids)
             if not measured_failed_ids:
                 responsible_ids.update(self._unresolved_dirty_agents)
@@ -3996,18 +6419,40 @@ class AgentWorkflowEnv:
             # upstream Agent.  Keep the target domain and attribution domain
             # consistent for hierarchical constrained decoding.
             responsible_ids.update(modifiable_node_ids)
-            per_agent_model_domains = {
-                agent_id: list(
-                    self._provider_repair_model_ids(agent_id)
-                    if agent_id in provider_failure_agent_ids
-                    else tuple(
+            per_agent_model_domains: dict[str, list[str]] = {}
+            per_agent_bridge_profile_domains: dict[
+                str, list[Tuple[str, Tuple[str, ...]]]
+            ] = {}
+            for agent_id in modifiable_node_ids:
+                node = self._graph.get_node(agent_id)
+                if agent_id in provider_failure_agent_ids:
+                    model_domain = (
+                        self._provider_repair_compatible_model_ids(agent_id)
+                    )
+                    bridge_domain = (
+                        self._provider_repair_bridge_execution_profiles(
+                            agent_id
+                        )
+                    )
+                else:
+                    model_domain = tuple(
                         model_id
                         for model_id in self._available_model_ids()
-                        if model_id != self._graph.get_node(agent_id).model_id
+                        if model_id != node.model_id
                     )
+                    bridge_domain = ()
+                per_agent_model_domains[agent_id] = [
+                    model_id
+                    for model_id in model_domain
+                    if self._model_execution_profile_is_registered(
+                        model_id,
+                        node.execution_mode,
+                        node.allowed_tools,
+                    )
+                ]
+                per_agent_bridge_profile_domains[agent_id] = list(
+                    bridge_domain
                 )
-                for agent_id in modifiable_node_ids
-            }
             per_agent_recovery_field_values = {
                 agent_id: (
                     self._triviaqa_react_recovery_field_values(agent_id)
@@ -4022,11 +6467,21 @@ class AgentWorkflowEnv:
                     for field in (
                         ["model_id"]
                         if agent_id in provider_failure_agent_ids
+                        and per_agent_model_domains[agent_id]
+                        else ["execution_profile"]
+                        if agent_id in provider_failure_agent_ids
+                        and per_agent_bridge_profile_domains[agent_id]
+                        else artifact_protocol_repair_fields[agent_id]
+                        if artifact_protocol_repair_fields[agent_id]
                         else list(
                             per_agent_recovery_field_values[agent_id]
                         )
                         if per_agent_recovery_field_values[agent_id]
                         is not None
+                        else list(
+                            incomplete_artifact_repair_domains[agent_id][0]
+                        )
+                        if incomplete_artifact_repair_domains[agent_id][0]
                         else ["contract", "completion_condition"]
                         if agent_id in dirty_replacement_ids
                         else ["contract", "completion_condition"]
@@ -4051,12 +6506,79 @@ class AgentWorkflowEnv:
                 ]
                 for agent_id in modifiable_node_ids
             }
+            # MODIFY retains its one-edit boundary. For the generic runtime,
+            # execution_profile is one parameter branch whose final payload
+            # changes execution_mode and allowed_tools together. Legacy
+            # single-field branches remain available only when the unchanged
+            # companion field still forms a registered model profile.
+            per_agent_execution_mode_domains: dict[str, list[object]] = {}
+            per_agent_allowed_tools_domains: dict[str, list[object]] = {}
+            per_agent_execution_profile_domains: dict[
+                str, list[object]
+            ] = {}
+            for agent_id, fields in per_agent_mutable_fields.items():
+                node = self._graph.get_node(agent_id)
+                generic_registered_profiles = (
+                    self.runtime.registered_execution_profiles_for_model(
+                        node.model_id
+                    )
+                    if not self._uses_semantic_lineage_protocol()
+                    else ()
+                )
+                current_tools = tuple(node.allowed_tools)
+                mode_values = [
+                    mode
+                    for mode, tool_ids in generic_registered_profiles
+                    if tool_ids == current_tools and mode != node.execution_mode
+                ]
+                tool_values = [
+                    list(tool_ids)
+                    for mode, tool_ids in generic_registered_profiles
+                    if mode == node.execution_mode and tool_ids != current_tools
+                ]
+                profile_values = (
+                    [
+                        {
+                            "execution_mode": mode,
+                            "allowed_tools": list(tool_ids),
+                        }
+                        for mode, tool_ids in (
+                            per_agent_bridge_profile_domains[agent_id]
+                        )
+                    ]
+                    if agent_id in provider_failure_agent_ids
+                    else [
+                        {
+                            "execution_mode": mode,
+                            "allowed_tools": list(tool_ids),
+                        }
+                        for mode, tool_ids in generic_registered_profiles
+                        if (mode, tool_ids)
+                        != (node.execution_mode, current_tools)
+                    ]
+                )
+                if "execution_mode" in fields and not mode_values:
+                    fields.remove("execution_mode")
+                if "allowed_tools" in fields and not tool_values:
+                    fields.remove("allowed_tools")
+                if "execution_profile" in fields and not profile_values:
+                    fields.remove("execution_profile")
+                per_agent_execution_mode_domains[agent_id] = mode_values
+                per_agent_allowed_tools_domains[agent_id] = tool_values
+                per_agent_execution_profile_domains[agent_id] = profile_values
             per_agent_current_values: dict[str, dict[str, object]] = {}
             for agent_id, fields in per_agent_mutable_fields.items():
                 node = self._graph.get_node(agent_id)
                 current_values: dict[str, object] = {}
                 for field in fields:
-                    value = getattr(node, field)
+                    value = (
+                        {
+                            "execution_mode": node.execution_mode,
+                            "allowed_tools": list(node.allowed_tools),
+                        }
+                        if field == "execution_profile"
+                        else getattr(node, field)
+                    )
                     current_values[field] = (
                         list(value) if isinstance(value, tuple) else value
                     )
@@ -4070,6 +6592,18 @@ class AgentWorkflowEnv:
                 if "model_id" in fields:
                     discrete_domains["model_id"] = list(
                         per_agent_model_domains[agent_id]
+                    )
+                if "execution_mode" in fields:
+                    discrete_domains["execution_mode"] = list(
+                        per_agent_execution_mode_domains[agent_id]
+                    )
+                if "allowed_tools" in fields:
+                    discrete_domains["allowed_tools"] = list(
+                        per_agent_allowed_tools_domains[agent_id]
+                    )
+                if "execution_profile" in fields:
+                    discrete_domains["execution_profile"] = list(
+                        per_agent_execution_profile_domains[agent_id]
                     )
                 recovery_field_values = per_agent_recovery_field_values[
                     agent_id
@@ -4100,8 +6634,17 @@ class AgentWorkflowEnv:
                     {
                         "agent_id": agent_id,
                         "mutable_fields": per_agent_mutable_fields[agent_id],
-                        "role_family": (
-                            self._graph.get_node(agent_id).role_family or ""
+                        **(
+                            {
+                                "role_family": (
+                                    self._graph.get_node(
+                                        agent_id
+                                    ).role_family
+                                    or ""
+                                )
+                            }
+                            if self._allows_role_family_actions()
+                            else {}
                         ),
                         **(
                             {
@@ -4139,6 +6682,8 @@ class AgentWorkflowEnv:
                             {"avoid_provider_id": avoid_provider_id}
                             if (
                                 agent_id in provider_failure_agent_ids
+                                and "model_id"
+                                in per_agent_mutable_fields[agent_id]
                                 and (
                                     avoid_provider_id
                                     := self._provider_repair_avoid_provider_id(
@@ -4154,29 +6699,65 @@ class AgentWorkflowEnv:
                 ],
             }
         if AgentActionType.DELETE_AGENT.value in admitted:
+            delete_agent_ids = [
+                node_id
+                for node_id in node_ids
+                if self._delete_admission_issue(node_id) is None
+            ]
+            protocol_failure_ids = set(
+                self._artifact_assessment_protocol_failure_agent_ids()
+            )
+            if protocol_failure_ids:
+                protocol_recovery_sources = (
+                    self._artifact_assessment_protocol_recovery_ingress_agent_ids()
+                )
+                detachable_ids = set(
+                    self._detachable_repair_exhausted_agent_ids()
+                )
+                if (
+                    protocol_recovery_sources
+                    and self.max_agents is not None
+                    and len(self._graph.nodes) >= self.max_agents
+                ):
+                    delete_agent_ids = [
+                        node_id
+                        for node_id in node_ids
+                        if node_id in detachable_ids
+                    ]
+                else:
+                    delete_agent_ids = [
+                        node_id
+                        for node_id in node_ids
+                        if node_id
+                        in detachable_ids.intersection(
+                            protocol_failure_ids
+                        )
+                    ]
             targets[AgentActionType.DELETE_AGENT.value] = {
-                "agent_ids": [
-                    node_id
-                    for node_id in node_ids
-                    if self._delete_admission_issue(node_id) is None
-                ]
+                "agent_ids": delete_agent_ids
             }
         if AgentActionType.SET_RELATION.value in admitted:
             relation_candidates = self._model_admissible_relation_candidates()
             progress_candidates = self._terminal_progress_relation_candidates()
-            if (
-                progress_candidates
-                and (
-                    self.artifact_consumption_ordering
-                    or (
-                        self.termination_lookahead
-                        and remaining_rounds is not None
-                        and remaining_rounds
-                        <= int(self.terminal_progress()["minimum_remaining_actions"])
-                    )
+            progress_state = self.terminal_progress()
+            progress_minimum = progress_state.get(
+                "minimum_remaining_actions"
+            )
+            horizon_tight = bool(
+                self.termination_lookahead
+                and remaining_rounds is not None
+                and type(progress_minimum) is int
+                and remaining_rounds <= progress_minimum
+            )
+            if horizon_tight:
+                dependency_recovery_candidates = (
+                    self._artifact_assessment_existing_output_relation_candidates()
                 )
-            ):
-                relation_candidates = progress_candidates
+                relation_candidates = (
+                    dependency_recovery_candidates
+                    if dependency_recovery_candidates
+                    else progress_candidates
+                )
             targets[AgentActionType.SET_RELATION.value] = {
                 "source_agent_ids": node_ids,
                 "target_agent_ids": node_ids,
@@ -4185,16 +6766,50 @@ class AgentWorkflowEnv:
             }
         if AgentActionType.SET_OUTPUT.value in admitted:
             output_agent_ids = self._model_admissible_output_agent_ids()
+            dependency_closed_output_agent_ids = (
+                self._dependency_closed_artifact_output_agent_ids()
+            )
             progress_output_agent_ids = (
                 self._terminal_progress_output_agent_ids()
             )
-            if self.artifact_consumption_ordering:
-                output_agent_ids = progress_output_agent_ids
-            elif progress_output_agent_ids and (
+            progress_state = self.terminal_progress()
+            progress_minimum = progress_state.get(
+                "minimum_remaining_actions"
+            )
+            horizon_tight = bool(
                 self.termination_lookahead
                 and remaining_rounds is not None
-                and remaining_rounds
-                <= int(self.terminal_progress()["minimum_remaining_actions"])
+                and type(progress_minimum) is int
+                and remaining_rounds <= progress_minimum
+            )
+            if (
+                self._artifact_assessment_protocol_failure_agent_ids()
+                and dependency_closed_output_agent_ids
+            ):
+                dependency_target_costs = (
+                    self._dependency_closed_output_termination_costs()
+                )
+                minimum_dependency_cost = (
+                    min(cost for _, cost in dependency_target_costs)
+                    if dependency_target_costs
+                    else None
+                )
+                output_agent_ids = tuple(
+                    agent_id
+                    for agent_id, cost in dependency_target_costs
+                    if agent_id != self._graph.output_agent_id
+                    and (
+                        not horizon_tight
+                        or cost == minimum_dependency_cost
+                    )
+                )
+            elif (
+                self.artifact_consumption_ordering
+                and progress_output_agent_ids
+            ):
+                output_agent_ids = progress_output_agent_ids
+            elif (
+                horizon_tight
             ):
                 output_agent_ids = progress_output_agent_ids
             targets[AgentActionType.SET_OUTPUT.value] = {
@@ -4318,6 +6933,21 @@ class AgentWorkflowEnv:
             return declared
         return True
 
+    @staticmethod
+    def _execution_diagnostic_codes_from_metadata(
+        metadata: Mapping[str, object],
+    ) -> list[str]:
+        raw_codes = metadata.get("execution_diagnostic_codes", ())
+        if not isinstance(raw_codes, (list, tuple)):
+            return []
+        return list(
+            dict.fromkeys(
+                str(item).strip()
+                for item in raw_codes
+                if isinstance(item, str) and item.strip()
+            )
+        )
+
     def current_artifact_receipts(self) -> list[dict[str, object]]:
         """Project revision-live artifacts and direct fan-in provenance.
 
@@ -4351,6 +6981,7 @@ class AgentWorkflowEnv:
                 else ()
             )
             upstream_artifacts: list[dict[str, object]] = []
+            upstream_raw_outputs: list[str] = []
             upstream_candidates: set[str] = set()
             for item in provenance_items:
                 source_agent_id = item.get("source_agent_id")
@@ -4370,6 +7001,7 @@ class AgentWorkflowEnv:
                 )
                 if source_candidate is not None:
                     upstream_candidates.add(source_candidate)
+                upstream_raw_outputs.append(source_raw_output)
                 source_metadata = (
                     self._progressive_output_metadata.get(
                         str(source_agent_id), {}
@@ -4407,6 +7039,16 @@ class AgentWorkflowEnv:
                         "artifact_status": (
                             "complete" if source_complete else "incomplete"
                         ),
+                        "execution_diagnostic_codes": (
+                            self._execution_diagnostic_codes_from_metadata(
+                                source_metadata
+                            )
+                        ),
+                        "execution_recovery_observed": bool(
+                            self._execution_diagnostic_codes_from_metadata(
+                                source_metadata
+                            )
+                        ),
                         "candidate": source_candidate,
                         "candidate_parsing_status": (
                             "parsed"
@@ -4432,6 +7074,18 @@ class AgentWorkflowEnv:
             candidate, parsing_failure = (
                 self._public_artifact_candidate_result(raw_output)
             )
+            for upstream, upstream_raw_output in zip(
+                upstream_artifacts,
+                upstream_raw_outputs,
+            ):
+                upstream["lexical_candidate_provenance_match"] = bool(
+                    candidate is not None
+                    and upstream.get("candidate_parsing_status") == "failed"
+                    and _raw_artifact_contains_integer_candidate(
+                        upstream_raw_output,
+                        candidate,
+                    )
+                )
             if (
                 self.artifact_assessment_extractor is None
                 or not upstream_artifacts
@@ -4539,6 +7193,12 @@ class AgentWorkflowEnv:
                     "artifact_status": (
                         "complete" if artifact_complete else "incomplete"
                     ),
+                    "execution_diagnostic_codes": (
+                        self._execution_diagnostic_codes_from_metadata(metadata)
+                    ),
+                    "execution_recovery_observed": bool(
+                        self._execution_diagnostic_codes_from_metadata(metadata)
+                    ),
                     "candidate": candidate,
                     "candidate_parsing_status": (
                         "parsed" if candidate is not None else "failed"
@@ -4603,6 +7263,40 @@ class AgentWorkflowEnv:
             if isinstance(receipt.get("artifact_id"), str)
             and bool(str(receipt["artifact_id"]).strip())
         }
+
+        def upstream_matches_candidate(
+            upstream: Mapping[str, object],
+            candidate: str,
+        ) -> bool:
+            """Resolve one parsed or exact-token immutable provenance edge."""
+
+            if upstream.get("candidate") == candidate:
+                return True
+            if upstream.get("lexical_candidate_provenance_match") is True:
+                return True
+            artifact_id = upstream.get("artifact_id")
+            if not isinstance(artifact_id, str):
+                return False
+            source_receipt = fresh_by_artifact_id.get(artifact_id)
+            if (
+                source_receipt is None
+                or source_receipt.get("candidate") is not None
+            ):
+                return False
+            source_agent_id = source_receipt.get("agent_id")
+            raw_output = (
+                self._progressive_outputs.get(source_agent_id)
+                if isinstance(source_agent_id, str)
+                else None
+            )
+            return bool(
+                isinstance(raw_output, str)
+                and _raw_artifact_contains_integer_candidate(
+                    raw_output,
+                    candidate,
+                )
+            )
+
         assessments: list[dict[str, object]] = []
         assessments_by_target: dict[
             str, list[dict[str, object]]
@@ -4653,6 +7347,20 @@ class AgentWorkflowEnv:
                 if isinstance(artifact_id, str)
                 else []
             )
+            matching_candidate_upstream_artifact_ids = sorted(
+                str(upstream["artifact_id"])
+                for upstream in receipt.get("upstream_artifacts", ())
+                if isinstance(upstream, Mapping)
+                and upstream_matches_candidate(upstream, candidate)
+                and isinstance(upstream.get("artifact_id"), str)
+            )
+            lexical_candidate_upstream_artifact_ids = sorted(
+                str(upstream["artifact_id"])
+                for upstream in receipt.get("upstream_artifacts", ())
+                if isinstance(upstream, Mapping)
+                and upstream.get("lexical_candidate_provenance_match") is True
+                and isinstance(upstream.get("artifact_id"), str)
+            )
             relevant = [*own_assessments, *incoming_assessments]
             statuses = {
                 str(item["assessment"])
@@ -4679,37 +7387,106 @@ class AgentWorkflowEnv:
                 "candidate": candidate,
                 "assessment_status": assessment_status,
                 "assessment_receipts": relevant,
+                "dependency_assessment_required": bool(
+                    matching_candidate_upstream_artifact_ids
+                ),
+                "matching_candidate_upstream_artifact_ids": (
+                    matching_candidate_upstream_artifact_ids
+                ),
+                "lexical_candidate_upstream_artifact_ids": (
+                    lexical_candidate_upstream_artifact_ids
+                ),
+                "execution_diagnostic_codes": list(
+                    receipt.get("execution_diagnostic_codes", ())
+                ),
+                "execution_recovery_observed": (
+                    receipt.get("execution_recovery_observed") is True
+                ),
+                "upstream_artifact_ids": sorted(
+                    str(upstream["artifact_id"])
+                    for upstream in receipt.get("upstream_artifacts", ())
+                    if isinstance(upstream, Mapping)
+                    and isinstance(upstream.get("artifact_id"), str)
+                ),
+                "unparsed_upstream_artifact_ids": sorted(
+                    str(upstream["artifact_id"])
+                    for upstream in receipt.get("upstream_artifacts", ())
+                    if isinstance(upstream, Mapping)
+                    and isinstance(upstream.get("artifact_id"), str)
+                    and upstream.get("candidate_parsing_status") == "failed"
+                ),
             }
             candidate_artifacts.append(item)
             groups.setdefault(candidate, []).append(receipt)
+
+        root_memo: dict[
+            tuple[str, str], tuple[frozenset[str], frozenset[str]]
+        ] = {}
+
+        def root_lineage(
+            artifact_id: str,
+            candidate: str,
+            visiting: frozenset[str] = frozenset(),
+        ) -> tuple[frozenset[str], frozenset[str]]:
+            """Resolve copied candidates to their transitive artifact roots."""
+
+            key = (artifact_id, candidate)
+            cached = root_memo.get(key)
+            if cached is not None:
+                return cached
+            receipt = fresh_by_artifact_id.get(artifact_id)
+            if receipt is None or artifact_id in visiting:
+                return frozenset({artifact_id}), frozenset()
+            matching_upstream = [
+                upstream
+                for upstream in receipt.get("upstream_artifacts", ())
+                if isinstance(upstream, Mapping)
+                and upstream_matches_candidate(upstream, candidate)
+                and isinstance(upstream.get("artifact_id"), str)
+            ]
+            if not matching_upstream:
+                result = (
+                    frozenset({artifact_id}),
+                    frozenset({str(receipt["agent_id"])}),
+                )
+                root_memo[key] = result
+                return result
+            root_artifacts: set[str] = set()
+            root_agents: set[str] = set()
+            next_visiting = visiting.union({artifact_id})
+            for upstream in matching_upstream:
+                upstream_id = str(upstream["artifact_id"])
+                if upstream_id in fresh_by_artifact_id:
+                    upstream_artifacts, upstream_agents = root_lineage(
+                        upstream_id,
+                        candidate,
+                        next_visiting,
+                    )
+                    root_artifacts.update(upstream_artifacts)
+                    root_agents.update(upstream_agents)
+                else:
+                    root_artifacts.add(upstream_id)
+                    source_agent_id = upstream.get("source_agent_id")
+                    if isinstance(source_agent_id, str):
+                        root_agents.add(source_agent_id)
+            result = frozenset(root_artifacts), frozenset(root_agents)
+            root_memo[key] = result
+            return result
 
         agreement = []
         for candidate, items in sorted(groups.items()):
             root_artifact_ids: set[str] = set()
             root_agent_ids: set[str] = set()
             for item in items:
-                matching_upstream = [
-                    upstream
-                    for upstream in item.get("upstream_artifacts", ())
-                    if isinstance(upstream, Mapping)
-                    and upstream.get("candidate") == candidate
-                    and isinstance(upstream.get("artifact_id"), str)
-                ]
-                if matching_upstream:
-                    root_artifact_ids.update(
-                        str(upstream["artifact_id"])
-                        for upstream in matching_upstream
-                    )
-                    root_agent_ids.update(
-                        str(upstream["source_agent_id"])
-                        for upstream in matching_upstream
-                        if isinstance(
-                            upstream.get("source_agent_id"), str
-                        )
-                    )
-                elif isinstance(item.get("artifact_id"), str):
-                    root_artifact_ids.add(str(item["artifact_id"]))
-                    root_agent_ids.add(str(item["agent_id"]))
+                artifact_id = item.get("artifact_id")
+                if not isinstance(artifact_id, str):
+                    continue
+                item_roots, item_root_agents = root_lineage(
+                    artifact_id,
+                    candidate,
+                )
+                root_artifact_ids.update(item_roots)
+                root_agent_ids.update(item_root_agents)
             agreement.append(
                 {
                     "candidate": candidate,
@@ -4758,6 +7535,27 @@ class AgentWorkflowEnv:
             "artifact_assessment_required": (
                 self.artifact_assessment_extractor is not None
             ),
+            "artifact_assessment_protocol_failure_agent_ids": list(
+                self._artifact_assessment_protocol_failure_agent_ids()
+            ),
+            "artifact_assessment_candidate_failure_agent_ids": list(
+                self._artifact_assessment_candidate_failure_agent_ids()
+            ),
+            "artifact_assessment_non_candidate_failure_agent_ids": list(
+                self._artifact_assessment_non_candidate_failure_agent_ids()
+            ),
+            "artifact_assessment_recovery_ingress_agent_ids": list(
+                self._artifact_assessment_protocol_recovery_ingress_agent_ids()
+            ),
+            "artifact_assessment_consumer_attempted_artifact_ids": sorted(
+                self._artifact_assessment_consumer_attempted_artifact_ids
+            ),
+            "artifact_assessment_recovery_consumer_sources": {
+                agent_id: list(source_artifact_ids)
+                for agent_id, source_artifact_ids in (
+                    self._artifact_assessment_recovery_consumer_sources.items()
+                )
+            },
             "artifact_assessments": assessments,
             "candidate_artifacts": candidate_artifacts,
             "candidate_assessment_conflict": assessment_conflict,
@@ -4781,6 +7579,18 @@ class AgentWorkflowEnv:
                 for item in candidate_artifacts
                 if item["assessment_status"] == "unassessed"
             ],
+            "dependency_assessment_required_artifacts": [
+                item
+                for item in candidate_artifacts
+                if item["assessment_status"] == "unassessed"
+                and item.get("dependency_assessment_required") is True
+            ],
+            "recovery_observed_unassessed_artifacts": [
+                item
+                for item in candidate_artifacts
+                if item["assessment_status"] == "unassessed"
+                and item.get("execution_recovery_observed") is True
+            ],
             "artifact_freshness": [
                 {
                     "agent_id": receipt["agent_id"],
@@ -4788,6 +7598,9 @@ class AgentWorkflowEnv:
                     "fresh": receipt.get("artifact_fresh") is True,
                     "complete": (
                         receipt.get("artifact_complete") is True
+                    ),
+                    "execution_diagnostic_codes": list(
+                        receipt.get("execution_diagnostic_codes", ())
                     ),
                 }
                 for receipt in receipts
@@ -4834,6 +7647,13 @@ class AgentWorkflowEnv:
             if isinstance(item, Mapping)
             and item.get("assessment_status")
             in {"supported", "unassessed"}
+            and not (
+                item.get("assessment_status") == "unassessed"
+                and (
+                    item.get("dependency_assessment_required") is True
+                    or item.get("execution_recovery_observed") is True
+                )
+            )
         )
 
     def _artifact_assessment_repair_agent_ids(self) -> Tuple[str, ...]:
@@ -4910,7 +7730,7 @@ class AgentWorkflowEnv:
     def _artifact_assessment_terminal_issue(
         self,
     ) -> Optional[dict[str, object]]:
-        """Return a target-blind FINISH blocker for the selected artifact."""
+        """Return the configured target-blind FINISH blocker for the artifact."""
 
         if self.artifact_assessment_extractor is None:
             return None
@@ -4939,6 +7759,13 @@ class AgentWorkflowEnv:
         if output_item is None:
             return None
         status = output_item.get("assessment_status")
+        unassessed_target_blind_risk = bool(
+            status == "unassessed"
+            and (
+                output_item.get("dependency_assessment_required") is True
+                or output_item.get("execution_recovery_observed") is True
+            )
+        )
         if (
             (
                 status == "supported"
@@ -4946,6 +7773,7 @@ class AgentWorkflowEnv:
                     self.artifact_assessment_terminal_policy
                     == "reject_negative"
                     and status == "unassessed"
+                    and not unassessed_target_blind_risk
                 )
             )
             and state.get("candidate_assessment_conflict") is not True
@@ -4980,6 +7808,20 @@ class AgentWorkflowEnv:
                 "provenance-bound assessment terminal policy"
             ),
             "assessment_status": status,
+            "dependency_assessment_required": (
+                output_item.get("dependency_assessment_required") is True
+            ),
+            "matching_candidate_upstream_artifact_ids": list(
+                output_item.get(
+                    "matching_candidate_upstream_artifact_ids", ()
+                )
+            ),
+            "execution_recovery_observed": (
+                output_item.get("execution_recovery_observed") is True
+            ),
+            "execution_diagnostic_codes": list(
+                output_item.get("execution_diagnostic_codes", ())
+            ),
             "output_agent_id": output_agent_id,
             "output_artifact_id": output_item.get("artifact_id"),
             "responsible_agent_ids": responsible_agent_ids,
@@ -5004,21 +7846,261 @@ class AgentWorkflowEnv:
         artifact_output_reachability_candidates = (
             self._artifact_output_reachability_relation_candidates()
         )
+        detachable_dead_branch_ids = (
+            self._detachable_repair_exhausted_agent_ids()
+        )
+        protocol_failure_ids = set(
+            self._artifact_assessment_protocol_failure_agent_ids()
+        )
+        detachable_protocol_failure_ids = (
+            set(detachable_dead_branch_ids) & protocol_failure_ids
+        )
+        detachable_dead_branch_delete_pending = bool(
+            detachable_dead_branch_ids
+            and (
+                detachable_protocol_failure_ids
+                or not self._model_admissible_relation_candidates()
+            )
+            and AgentActionType.DELETE_AGENT.value
+            in self._allowed_action_type_set
+        )
+        provider_repair_action_costs: dict[str, int] = {}
+        provider_repair_unreachable_agent_ids: list[str] = []
+        for agent_id in self._mandatory_repair_agent_ids():
+            if not self._provider_repair_required(agent_id):
+                continue
+            if self._provider_repair_compatible_model_ids(agent_id):
+                provider_repair_action_costs[agent_id] = 1
+            elif self._provider_repair_bridge_execution_profiles(agent_id):
+                # One atomic execution-profile bridge followed by one atomic
+                # model takeover.  Neither edit may be hidden from the
+                # Director's finite-horizon accounting.
+                provider_repair_action_costs[agent_id] = 2
+            else:
+                provider_repair_unreachable_agent_ids.append(agent_id)
 
         finish_admissible = (
             self.finish_admissibility().get("admissible") is True
         )
         assessment_minimum_remaining_actions: Optional[int] = None
         assessment_next_actions: list[str] = []
+        assessment_path_unreachable = False
+        assessment_minimum_deferred = False
+        assessment_ingress_blocked_by_capacity = False
         if (
             candidate_state.get("artifact_assessment_required") is True
             and int(candidate_state["candidate_count"]) > 0
         ):
+            repairable_protocol_failure_ids = (
+                set(
+                    self._artifact_assessment_non_candidate_failure_agent_ids()
+                )
+                | set(
+                    self._artifact_assessment_candidate_consumer_repair_agent_ids()
+                )
+            ) - self._repair_exhausted_agent_ids
+            failed_consumer_repair_ids = set(
+                self._artifact_assessment_failed_consumer_repair_agent_ids()
+            )
+            exhausted_detachable_protocol_failure_ids = (
+                set(
+                    self._artifact_assessment_non_candidate_failure_agent_ids()
+                )
+                & self._repair_exhausted_agent_ids
+                & set(detachable_dead_branch_ids)
+            )
+            unrecoverable_non_candidate_protocol_failure_ids = (
+                set(
+                    self._artifact_assessment_non_candidate_failure_agent_ids()
+                )
+                & self._repair_exhausted_agent_ids
+                - set(detachable_dead_branch_ids)
+            )
+            protocol_recovery_ingress_agent_ids = (
+                self._artifact_assessment_protocol_recovery_ingress_agent_ids()
+            )
+            protocol_recovery_capacity_blocked = bool(
+                protocol_recovery_ingress_agent_ids
+                and AgentActionType.ADD_SUBGRAPH.value
+                in self._allowed_action_type_set
+                and self.max_agents is not None
+                and len(self._graph.nodes) >= self.max_agents
+            )
+            if (
+                protocol_recovery_capacity_blocked
+                and detachable_dead_branch_ids
+                and AgentActionType.DELETE_AGENT.value
+                in self._allowed_action_type_set
+            ):
+                detachable_dead_branch_delete_pending = True
+            assessment_ingress_agent_ids = (
+                self._artifact_assessment_ingress_agent_ids(candidate_state)
+            )
+            if (
+                not assessment_ingress_agent_ids
+                and detachable_dead_branch_delete_pending
+            ):
+                # Project only the state after the already-proven dead leaves
+                # are detached. Their removal changes no candidate artifact;
+                # it merely clears the measured execution failure which
+                # currently suppresses assessment ingress and may free one
+                # Agent slot.
+                assessment_ingress_agent_ids = (
+                    self._artifact_assessment_ingress_agent_ids(
+                        candidate_state,
+                        ignored_execution_agent_ids=(
+                            detachable_dead_branch_ids
+                        ),
+                    )
+                )
             admissible_ids = (
                 self._artifact_admissible_output_agent_ids()
             )
             repair_ids = self._artifact_assessment_repair_agent_ids()
-            if repair_ids:
+            if protocol_failure_ids:
+                dependency_target_costs = (
+                    self._dependency_closed_output_termination_costs()
+                )
+                if (
+                    failed_consumer_repair_ids
+                    and AgentActionType.MODIFY_AGENT.value
+                    in self._allowed_action_type_set
+                ):
+                    # The exact fan-in has already been materialized and its
+                    # consumer failed before publishing an artifact.  Repair
+                    # that measured execution boundary before advertising a
+                    # structural relation edit; otherwise terminal_progress
+                    # disagrees with the parameter-feasible action mask and
+                    # can spend another round around an unusable consumer.
+                    structural_minimum = progress.get(
+                        "minimum_remaining_actions"
+                    )
+                    if type(structural_minimum) is int:
+                        assessment_minimum_remaining_actions = (
+                            len(failed_consumer_repair_ids)
+                            + structural_minimum
+                        )
+                    else:
+                        assessment_minimum_deferred = True
+                    assessment_next_actions.append(
+                        AgentActionType.MODIFY_AGENT.value
+                    )
+                elif dependency_target_costs:
+                    assessment_minimum_remaining_actions = min(
+                        cost for _, cost in dependency_target_costs
+                    )
+                    minimum_target_ids = {
+                        agent_id
+                        for agent_id, cost in dependency_target_costs
+                        if cost == assessment_minimum_remaining_actions
+                    }
+                    if any(
+                        agent_id != self._graph.output_agent_id
+                        for agent_id in minimum_target_ids
+                    ):
+                        assessment_next_actions.append(
+                            AgentActionType.SET_OUTPUT.value
+                        )
+                    if self._graph.output_agent_id in minimum_target_ids:
+                        assessment_next_actions.append(
+                            AgentActionType.SET_RELATION.value
+                        )
+                elif (
+                    protocol_recovery_ingress_agent_ids
+                    and not unrecoverable_non_candidate_protocol_failure_ids
+                    and AgentActionType.ADD_SUBGRAPH.value
+                    in self._allowed_action_type_set
+                    and (
+                        self.max_agents is None
+                        or len(self._graph.nodes) < self.max_agents
+                    )
+                ):
+                    # The immutable candidate owner and every required public
+                    # provenance source are consumed in one ADD transaction;
+                    # the pointer then moves to the fresh sink before explicit
+                    # FINISH.
+                    if (
+                        repairable_protocol_failure_ids
+                        and self._terminal_unreachable_agent_ids()
+                    ):
+                        # The exact fan-in preserves every current branch.
+                        # A parallel non-candidate protocol failure can still
+                        # require both a declaration repair and a later
+                        # structural edit, so ``3 + repair_count`` is not an
+                        # admissible lower bound. Keep the legal next action
+                        # visible and recompute after the measured protocol
+                        # repair instead of publishing a falsely small
+                        # horizon.
+                        assessment_minimum_deferred = True
+                    else:
+                        assessment_minimum_remaining_actions = (
+                            3
+                            + len(repairable_protocol_failure_ids)
+                            + len(
+                                exhausted_detachable_protocol_failure_ids
+                            )
+                        )
+                    assessment_next_actions.append(
+                        AgentActionType.ADD_SUBGRAPH.value
+                    )
+                elif (
+                    protocol_recovery_capacity_blocked
+                    and not unrecoverable_non_candidate_protocol_failure_ids
+                ):
+                    assessment_path_unreachable = True
+                    assessment_ingress_blocked_by_capacity = True
+                elif (
+                    repairable_protocol_failure_ids
+                    and AgentActionType.MODIFY_AGENT.value
+                    in self._allowed_action_type_set
+                ):
+                    # Each bounded consumer repair is one declaration edit and
+                    # does not change topology. Add those edits to the graph's
+                    # existing structural lower bound instead of assuming that
+                    # SET_OUTPUT alone will make every retained branch reach
+                    # the Output Agent.
+                    structural_minimum = progress.get(
+                        "minimum_remaining_actions"
+                    )
+                    if type(structural_minimum) is int:
+                        assessment_minimum_remaining_actions = (
+                            len(repairable_protocol_failure_ids)
+                            + structural_minimum
+                        )
+                    else:
+                        assessment_minimum_deferred = True
+                    assessment_next_actions.append(
+                        AgentActionType.MODIFY_AGENT.value
+                    )
+                else:
+                    assessment_path_unreachable = True
+            elif assessment_ingress_agent_ids:
+                can_add_subgraph = bool(
+                    AgentActionType.ADD_SUBGRAPH.value
+                    in self._allowed_action_type_set
+                    and (
+                        self.max_agents is None
+                        or len(self._graph.nodes) < self.max_agents
+                    )
+                )
+                if can_add_subgraph:
+                    # The required candidate-owner -> new-consumer ingress is
+                    # part of one ADD_SUBGRAPH transaction. The pointer is
+                    # deliberately preserved during execution, so the minimum
+                    # continuation is ADD_SUBGRAPH -> SET_OUTPUT -> FINISH.
+                    assessment_minimum_remaining_actions = 3
+                    assessment_next_actions.append(
+                        AgentActionType.ADD_SUBGRAPH.value
+                    )
+                else:
+                    assessment_path_unreachable = True
+                    assessment_ingress_blocked_by_capacity = bool(
+                        AgentActionType.ADD_SUBGRAPH.value
+                        in self._allowed_action_type_set
+                        and self.max_agents is not None
+                        and len(self._graph.nodes) >= self.max_agents
+                    )
+            elif repair_ids:
                 assessment_minimum_remaining_actions = 3
                 if (
                     AgentActionType.MODIFY_AGENT.value
@@ -5027,6 +8109,25 @@ class AgentWorkflowEnv:
                     assessment_next_actions.append(
                         AgentActionType.MODIFY_AGENT.value
                     )
+            elif (
+                admissible_ids
+                and progress_output_agent_ids
+                and AgentActionType.SET_OUTPUT.value
+                in self._allowed_action_type_set
+            ):
+                # SET_OUTPUT consumes an already materialized supported
+                # artifact without invalidating any Agent input. Make that
+                # pointer-only edit before selecting a reachability relation;
+                # the next revision can then route unresolved branches toward
+                # the actual Output with a smaller dirty closure.
+                structural_minimum = progress.get(
+                    "minimum_remaining_actions"
+                )
+                if type(structural_minimum) is int:
+                    assessment_minimum_remaining_actions = structural_minimum
+                assessment_next_actions.append(
+                    AgentActionType.SET_OUTPUT.value
+                )
             elif (
                 admissible_ids
                 and artifact_output_reachability_candidates
@@ -5062,19 +8163,99 @@ class AgentWorkflowEnv:
                 if can_add and add_action in self._allowed_action_type_set:
                     assessment_minimum_remaining_actions = 4
                     assessment_next_actions.append(add_action)
-            structural_minimum = progress.get(
-                "minimum_remaining_actions"
-            )
-            if (
-                type(structural_minimum) is int
-                and assessment_minimum_remaining_actions is not None
-            ):
-                progress["minimum_remaining_actions"] = max(
-                    structural_minimum,
-                    assessment_minimum_remaining_actions,
+            if assessment_path_unreachable or assessment_minimum_deferred:
+                progress["minimum_remaining_actions"] = None
+            else:
+                structural_minimum = progress.get(
+                    "minimum_remaining_actions"
                 )
+                if (
+                    type(structural_minimum) is int
+                    and assessment_minimum_remaining_actions is not None
+                ):
+                    progress["minimum_remaining_actions"] = max(
+                        structural_minimum,
+                        assessment_minimum_remaining_actions,
+                    )
+        if (
+            detachable_dead_branch_delete_pending
+            and (
+                not assessment_path_unreachable
+                or assessment_ingress_blocked_by_capacity
+                or bool(detachable_protocol_failure_ids)
+            )
+        ):
+            # DELETE is one atomic edit.  After it, the retained complete graph
+            # needs at least FINISH, plus any unchanged candidate-assessment
+            # lower bound.  The next action is nevertheless DELETE because the
+            # dead branch makes the current graph nonterminal and the helper
+            # proves that removing it preserves every fresh artifact input.
+            if assessment_ingress_blocked_by_capacity:
+                # The dead leaf itself occupies the only missing consumer
+                # slot.  Deleting it makes the otherwise unchanged assessment
+                # path reachable: ADD_SUBGRAPH -> SET_OUTPUT -> FINISH.
+                assessment_path_unreachable = False
+                if (
+                    repairable_protocol_failure_ids
+                    and self._terminal_unreachable_agent_ids()
+                ):
+                    assessment_minimum_deferred = True
+                    assessment_minimum_remaining_actions = None
+                else:
+                    assessment_minimum_remaining_actions = (
+                        3
+                        + len(repairable_protocol_failure_ids)
+                        + max(
+                            0,
+                            len(exhausted_detachable_protocol_failure_ids)
+                            - 1,
+                        )
+                    )
+            elif detachable_protocol_failure_ids:
+                # Removing an exhausted non-candidate protocol leaf restores
+                # the ordinary retained-artifact decision boundary.  The
+                # exact post-delete assessment path is recomputed on the next
+                # Canvas observation; one additional explicit action is the
+                # conservative structural lower bound at this revision.
+                assessment_path_unreachable = False
+            progress["minimum_remaining_actions"] = (
+                None
+                if assessment_minimum_deferred
+                else 1
+                + max(
+                    1,
+                    assessment_minimum_remaining_actions or 0,
+                )
+            )
+            assessment_next_actions = [
+                AgentActionType.DELETE_AGENT.value
+            ]
+        if provider_repair_unreachable_agent_ids:
+            progress["minimum_remaining_actions"] = None
+            assessment_next_actions = []
+        elif provider_repair_action_costs:
+            current_minimum = progress.get("minimum_remaining_actions")
+            if type(current_minimum) is int:
+                progress["minimum_remaining_actions"] = (
+                    current_minimum
+                    + sum(provider_repair_action_costs.values())
+                )
+                assessment_next_actions = [
+                    AgentActionType.MODIFY_AGENT.value
+                ]
+            else:
+                # The recovery action remains parameter-feasible even when a
+                # separate assessment path has deferred its own exact bound.
+                assessment_next_actions = [
+                    AgentActionType.MODIFY_AGENT.value
+                ]
         next_actions: list[str] = list(assessment_next_actions)
-        if not next_actions and isinstance(breakdown, Mapping):
+        if (
+            not next_actions
+            and not assessment_path_unreachable
+            and not provider_repair_unreachable_agent_ids
+            and isinstance(breakdown, Mapping)
+        ):
             add_count = breakdown.get("add_agent")
             relation_count = breakdown.get("set_relation")
             output_count = breakdown.get("set_output")
@@ -5144,15 +8325,40 @@ class AgentWorkflowEnv:
                 "assessment_minimum_remaining_actions": (
                     assessment_minimum_remaining_actions
                 ),
+                "assessment_terminal_path_reachable": (
+                    not assessment_path_unreachable
+                ),
+                "assessment_minimum_deferred": assessment_minimum_deferred,
+                "detachable_repair_exhausted_agent_ids": list(
+                    detachable_dead_branch_ids
+                ),
                 "active_failure_agent_ids": sorted(self._failed_agent_ids),
                 "unresolved_dirty_agent_ids": sorted(
                     self._unresolved_dirty_agents
                 ),
+                "provider_repair_action_costs": dict(
+                    provider_repair_action_costs
+                ),
+                "provider_repair_path_reachable": (
+                    not provider_repair_unreachable_agent_ids
+                ),
+                "provider_repair_unreachable_agent_ids": list(
+                    provider_repair_unreachable_agent_ids
+                ),
                 "terminal_semantics": "explicit_finish",
                 "minimum_remaining_actions_scope": (
-                    "structural_and_artifact_assessment_lower_bound"
-                    if candidate_state.get("artifact_assessment_required") is True
-                    else "structural_lower_bound"
+                    "structural_artifact_assessment_and_recovery_lower_bound"
+                    if (
+                        detachable_dead_branch_delete_pending
+                        or provider_repair_action_costs
+                        or provider_repair_unreachable_agent_ids
+                    )
+                    else (
+                        "structural_and_artifact_assessment_lower_bound"
+                        if candidate_state.get("artifact_assessment_required")
+                        is True
+                        else "structural_lower_bound"
+                    )
                 ),
             }
         )
@@ -5273,6 +8479,15 @@ class AgentWorkflowEnv:
             "repair_exhausted_agent_ids": sorted(
                 self._repair_exhausted_agent_ids
             ),
+            "artifact_assessment_consumer_attempted_artifact_ids": sorted(
+                self._artifact_assessment_consumer_attempted_artifact_ids
+            ),
+            "artifact_assessment_recovery_consumer_sources": {
+                agent_id: list(source_artifact_ids)
+                for agent_id, source_artifact_ids in (
+                    self._artifact_assessment_recovery_consumer_sources.items()
+                )
+            },
             "latest_failure_records": {
                 agent_id: record.to_dict()
                 for agent_id, record in (
@@ -5412,6 +8627,39 @@ class AgentWorkflowEnv:
         diagnosed = id_set("diagnosed_unusable_agent_ids")
         react_exhausted = id_set("react_exhausted_agent_ids")
         repair_exhausted = id_set("repair_exhausted_agent_ids")
+        artifact_assessment_consumer_attempted = id_set(
+            "artifact_assessment_consumer_attempted_artifact_ids"
+        )
+        raw_recovery_consumers = value.get(
+            "artifact_assessment_recovery_consumer_sources", {}
+        )
+        if not isinstance(raw_recovery_consumers, Mapping):
+            raise AgentWorkflowStateError(
+                "artifact assessment recovery consumers must be a mapping"
+            )
+        artifact_assessment_recovery_consumers: dict[
+            str, Tuple[str, ...]
+        ] = {}
+        for agent_id, raw_source_ids in raw_recovery_consumers.items():
+            if (
+                not isinstance(agent_id, str)
+                or agent_id not in current_agent_ids
+                or isinstance(raw_source_ids, (str, bytes))
+                or not isinstance(raw_source_ids, Sequence)
+                or any(
+                    not isinstance(source_id, str) or not source_id
+                    for source_id in raw_source_ids
+                )
+            ):
+                raise AgentWorkflowStateError(
+                    "artifact assessment recovery consumer receipt is invalid"
+                )
+            source_ids = tuple(sorted(set(raw_source_ids)))
+            if not source_ids:
+                raise AgentWorkflowStateError(
+                    "artifact assessment recovery consumer has no sources"
+                )
+            artifact_assessment_recovery_consumers[agent_id] = source_ids
         for field_name, ids in (
             ("unresolved_dirty_agent_ids", unresolved),
             ("failed_agent_ids", failed),
@@ -5516,6 +8764,12 @@ class AgentWorkflowEnv:
         self._diagnosed_unusable_agent_ids = diagnosed
         self._react_exhausted_agent_ids = react_exhausted
         self._repair_exhausted_agent_ids = repair_exhausted
+        self._artifact_assessment_consumer_attempted_artifact_ids = (
+            artifact_assessment_consumer_attempted
+        )
+        self._artifact_assessment_recovery_consumer_sources = (
+            artifact_assessment_recovery_consumers
+        )
         self._latest_failure_record_by_agent = failure_records
         self._pending_repair_receipt_count_by_agent = pending
         self._unavailable_model_ids = unavailable_models
@@ -5568,6 +8822,12 @@ class AgentWorkflowEnv:
         self._last_feedback = snapshot.last_feedback
         self._history = list(snapshot.history)
         self._last_valid_evidence_lineage = None
+        # A plain Canvas snapshot carries no trajectory-local provider
+        # availability receipts.  Clear the overlay exactly as reset does;
+        # restore_runtime_checkpoint immediately repopulates it from the
+        # completed-turn checkpoint below.
+        self._unavailable_model_ids.clear()
+        self._model_availability_receipts.clear()
         # Runtime results are deliberately not serialized in Canvas snapshots.
         # A restored environment must therefore execute its current graph once
         # before it can establish a revision-local progressive result again.
@@ -5596,6 +8856,13 @@ class AgentWorkflowEnv:
             ),
             artifact_consumption_ordering=self.artifact_consumption_ordering,
             termination_lookahead=self.termination_lookahead,
+            task_specification_contract_guard=(
+                self.task_specification_contract_guard
+            ),
+            artifact_completeness_gate=self.artifact_completeness_gate,
+            artifact_assessment_terminal_policy=(
+                self.artifact_assessment_terminal_policy
+            ),
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
@@ -5603,14 +8870,22 @@ class AgentWorkflowEnv:
         result._history = list(state.history)
         return result
 
-    async def step(self, action_or_response: Union[AgentAction, str]) -> AgentWorkflowStepResult:
+    async def step(
+        self,
+        action_or_response: Union[AgentAction, str],
+        *,
+        reasoning_end_token: Optional[str] = None,
+    ) -> AgentWorkflowStepResult:
         if self._finished:
             return self._reject(None, "workflow already finished")
         if not self._problem:
             return self._reject(None, "environment has no active problem")
         try:
             action = (
-                self.parser.parse(action_or_response)
+                self.parser.parse(
+                    action_or_response,
+                    reasoning_end_token=reasoning_end_token,
+                )
                 if isinstance(action_or_response, str)
                 else action_or_response
             )
@@ -5633,6 +8908,13 @@ class AgentWorkflowEnv:
                 "action rejected: action type is outside the configured Canvas "
                 f"action set {list(self.allowed_action_types)!r}",
             )
+        role_family_issue = self._role_family_action_issue(action)
+        if role_family_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + role_family_issue,
+                feedback_code="role_family_forbidden",
+            )
         # Provider/model availability is a Runtime boundary shared by generic
         # FlowSteer Canvas tasks and semantic QA tasks.  Apply its exact live
         # MODIFY domain before any mutation so a raw/manual action cannot bypass
@@ -5643,11 +8925,37 @@ class AgentWorkflowEnv:
                 action,
                 "edit rejected: " + provider_repair_issue,
             )
+        incomplete_artifact_repair_issue = (
+            self._incomplete_artifact_repair_admission_issue(action)
+        )
+        if incomplete_artifact_repair_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + incomplete_artifact_repair_issue,
+                feedback_code="incomplete_agent_artifact_repair",
+            )
+        assessment_consumer_issue = (
+            self._artifact_assessment_consumer_admission_issue(action)
+        )
+        if assessment_consumer_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + assessment_consumer_issue,
+                feedback_code="candidate_assessment_ingress_required",
+            )
         preservation_issue = self._preservation_admission_issue(action)
         if preservation_issue is not None:
             return self._reject_after_count(
                 action,
                 "edit rejected: " + preservation_issue,
+            )
+        execution_profile_issue = (
+            self._execution_profile_modify_admission_issue(action)
+        )
+        if execution_profile_issue is not None:
+            return self._reject_after_count(
+                action,
+                "edit rejected: " + execution_profile_issue,
             )
         if action.action_type is AgentActionType.DELETE_AGENT:
             delete_issue = self._delete_admission_issue(action.agent_id)
@@ -5893,6 +9201,37 @@ class AgentWorkflowEnv:
                 execution_reused=execution_reused,
             )
 
+        artifact_protocol_repair_target = (
+            action.agent_id
+            if (
+                action.action_type is AgentActionType.MODIFY_AGENT
+                and action.agent_id
+                in set(
+                    self._artifact_assessment_protocol_failure_agent_ids()
+                )
+                | set(
+                    self._artifact_assessment_failed_consumer_repair_agent_ids()
+                )
+            )
+            else None
+        )
+        artifact_protocol_consumer_source_artifact_ids: Tuple[str, ...] = ()
+        artifact_protocol_consumer_agent_id: Optional[str] = None
+        if action.action_type is AgentActionType.ADD_SUBGRAPH:
+            protocol_source_ids = set(
+                self._artifact_assessment_protocol_recovery_ingress_agent_ids()
+            )
+            if protocol_source_ids:
+                if len(action.agents) == 1:
+                    artifact_protocol_consumer_agent_id = (
+                        action.agents[0].agent_id
+                    )
+                artifact_protocol_consumer_source_artifact_ids = tuple(
+                    str(receipt["artifact_id"])
+                    for receipt in self.current_artifact_receipts()
+                    if receipt.get("agent_id") in protocol_source_ids
+                    and isinstance(receipt.get("artifact_id"), str)
+                )
         semantic_repair_baseline = (
             self._semantic_failure_progress_state(action.agent_id)
             if (
@@ -5900,6 +9239,11 @@ class AgentWorkflowEnv:
                 and action.agent_id is not None
                 and self._uses_semantic_lineage_protocol()
             )
+            else None
+        )
+        provider_repair_bridge_target = (
+            action.agent_id
+            if self._is_provider_repair_bridge_action(action)
             else None
         )
         previous_revision = self._graph.revision
@@ -5990,7 +9334,36 @@ class AgentWorkflowEnv:
             candidate,
             action,
         )
+        artifact_consumer_execution_scope = (
+            ()
+            if isolated_execution_scope
+            else self._artifact_assessment_consumer_repair_execution_scope(
+                candidate,
+                action,
+            )
+        )
+        output_dependency_execution_scope = (
+            ()
+            if isolated_execution_scope or artifact_consumer_execution_scope
+            else self._output_dependency_execution_scope(
+                candidate,
+                action,
+                dirty_agents,
+            )
+        )
         self._graph = candidate
+        self._artifact_assessment_consumer_attempted_artifact_ids.update(
+            artifact_protocol_consumer_source_artifact_ids
+        )
+        if (
+            artifact_protocol_consumer_agent_id is not None
+            and artifact_protocol_consumer_source_artifact_ids
+        ):
+            self._artifact_assessment_recovery_consumer_sources[
+                artifact_protocol_consumer_agent_id
+            ] = tuple(
+                sorted(artifact_protocol_consumer_source_artifact_ids)
+            )
         current_agent_ids = {node.id for node in self._graph.nodes}
         self._retain_current_failure_state(current_agent_ids)
         # One accepted edit is one FlowSteer execute-and-feedback boundary.
@@ -5999,6 +9372,7 @@ class AgentWorkflowEnv:
         if (
             action.action_type is AgentActionType.MODIFY_AGENT
             and action.agent_id is not None
+            and action.agent_id != provider_repair_bridge_target
         ):
             # The typed failure belongs to the pre-edit Agent declaration.
             # Clear that diagnosis once its admitted repair is committed, but
@@ -6026,24 +9400,36 @@ class AgentWorkflowEnv:
         partial_execution = None
         execution_reused = False
         execution_error: Optional[AgentRuntimeError] = None
-        if self.execute_on_edit:
+        if self.execute_on_edit and provider_repair_bridge_target is None:
             if self._graph.nodes:
-                execution_graph = (
-                    self._single_agent_execution_graph(
+                execution_scope = (
+                    isolated_execution_scope
+                    or artifact_consumer_execution_scope
+                    or output_dependency_execution_scope
+                )
+                execution_scope_set = set(execution_scope)
+                if isolated_execution_scope:
+                    execution_graph = self._single_agent_execution_graph(
                         self._graph,
                         isolated_execution_scope[0],
                     )
-                    if isolated_execution_scope
-                    else self._graph
-                )
-                execution_scope_set = set(isolated_execution_scope)
+                elif (
+                    artifact_consumer_execution_scope
+                    or output_dependency_execution_scope
+                ):
+                    execution_graph = self._induced_execution_graph(
+                        self._graph,
+                        execution_scope,
+                    )
+                else:
+                    execution_graph = self._graph
                 prior_outputs = (
                     {
                         agent_id: output
                         for agent_id, output in self._progressive_outputs.items()
                         if agent_id in execution_scope_set
                     }
-                    if isolated_execution_scope
+                    if execution_scope
                     else self._progressive_outputs
                 )
                 prior_output_metadata = (
@@ -6054,7 +9440,7 @@ class AgentWorkflowEnv:
                         )
                         if agent_id in execution_scope_set
                     }
-                    if isolated_execution_scope
+                    if execution_scope
                     else self._progressive_output_metadata
                 )
                 try:
@@ -6063,6 +9449,19 @@ class AgentWorkflowEnv:
                     execution_dirty_agents = (
                         execution_scope_set
                         if isolated_execution_scope
+                        else (
+                            (
+                                set(self._unresolved_dirty_agents)
+                                | self._triviaqa_retrievers_requiring_validation(
+                                    execution_graph
+                                )
+                            )
+                            & execution_scope_set
+                        )
+                        if (
+                            artifact_consumer_execution_scope
+                            or output_dependency_execution_scope
+                        )
                         else (
                             set(self._unresolved_dirty_agents)
                             | self._triviaqa_retrievers_requiring_validation(
@@ -6082,7 +9481,9 @@ class AgentWorkflowEnv:
                         format_output_agent=(
                             False
                             if isolated_execution_scope
-                            else self._uses_format_agent_protocol()
+                            else self._uses_format_agent_protocol(
+                                execution_graph
+                            )
                         ),
                     )
                 except AgentRuntimeError as exc:
@@ -6099,7 +9500,7 @@ class AgentWorkflowEnv:
                                 partial_execution.output_metadata.items()
                             )
                         }
-                        if isolated_execution_scope:
+                        if execution_scope:
                             self._progressive_outputs.update(partial_outputs)
                             self._progressive_output_metadata.update(
                                 partial_metadata
@@ -6118,7 +9519,7 @@ class AgentWorkflowEnv:
                         for agent_id in exc.pending_agent_ids
                         if agent_id in current_agent_ids
                         and (
-                            not isolated_execution_scope
+                            not execution_scope
                             or agent_id in execution_scope_set
                         )
                     )
@@ -6147,7 +9548,7 @@ class AgentWorkflowEnv:
                         agent_id: dict(metadata)
                         for agent_id, metadata in execution.output_metadata.items()
                     }
-                    if isolated_execution_scope:
+                    if execution_scope:
                         self._progressive_outputs.update(execution_outputs)
                         self._progressive_output_metadata.update(
                             execution_metadata
@@ -6167,7 +9568,7 @@ class AgentWorkflowEnv:
                     # while its semantic input is not yet routable.  Runtime
                     # deferral is successful progressive execution, not Agent
                     # failure; keep only those unmaterialized nodes unresolved.
-                    if not isolated_execution_scope:
+                    if not execution_scope:
                         self._unresolved_dirty_agents = (
                             current_agent_ids - set(execution.outputs)
                         )
@@ -6190,23 +9591,38 @@ class AgentWorkflowEnv:
                         # routed into it).  Full-graph execution retains the
                         # existing clear-on-complete behavior.
                         if (
-                            not isolated_execution_scope
+                            not execution_scope
                             and not self._unresolved_dirty_agents
                         ):
                             self._clear_failure_state()
                     else:
                         self._clear_failure_state()
-                    if not isolated_execution_scope:
+                    if not execution_scope:
                         self._capture_last_valid_evidence_lineage(execution)
             else:
                 self._clear_progressive_execution()
+        artifact_protocol_failures = set(
+            self._artifact_assessment_protocol_failure_agent_ids()
+        )
+        self._failed_agent_ids.update(artifact_protocol_failures)
+        if (
+            artifact_protocol_repair_target is not None
+            and artifact_protocol_repair_target
+            in artifact_protocol_failures
+        ):
+            self._repair_exhausted_agent_ids.add(
+                artifact_protocol_repair_target
+            )
         if (
             semantic_repair_baseline is not None
             and action.action_type is AgentActionType.MODIFY_AGENT
             and action.agent_id is not None
             and execution is not None
             and execution_error is None
-            and not isolated_execution_scope
+            and not (
+                isolated_execution_scope
+                or output_dependency_execution_scope
+            )
             and self._semantic_failure_progress_state(action.agent_id)
             == semantic_repair_baseline
         ):
@@ -6389,14 +9805,34 @@ class AgentWorkflowEnv:
                             "artifact_preview": _artifact_head_tail_preview(
                                 message.content
                             ),
+                            "artifact_complete": message.artifact_complete,
+                            "artifact_status": (
+                                None
+                                if message.artifact_complete is None
+                                else "complete"
+                                if message.artifact_complete
+                                else "incomplete"
+                            ),
+                            "execution_diagnostic_codes": list(
+                                message.execution_diagnostic_codes
+                            ),
                             "provenance_status": "unverified_work_product",
                         }
                     )
+            artifact_metadata = execution.output_metadata.get(agent_id, {})
             agent_artifacts.append(
                 {
                     "agent_id": agent_id,
                     "model_id": None if call is None else call.request.model.model_id,
-                    "role_family": self._graph.get_node(agent_id).role_family,
+                    **(
+                        {
+                            "role_family": self._graph.get_node(
+                                agent_id
+                            ).role_family
+                        }
+                        if self._allows_role_family_actions()
+                        else {}
+                    ),
                     "execution_mode": self._graph.get_node(
                         agent_id
                     ).execution_mode.value,
@@ -6409,8 +9845,16 @@ class AgentWorkflowEnv:
                     "completion_condition": self._graph.get_node(
                         agent_id
                     ).completion_condition,
-                    "execution_role": (
-                        "format" if agent_id == execution.output_agent_id else "worker"
+                    **(
+                        {
+                            "execution_role": (
+                                "format"
+                                if agent_id == execution.output_agent_id
+                                else "worker"
+                            )
+                        }
+                        if self._allows_role_family_actions()
+                        else {}
                     ),
                     "is_output_agent": agent_id == execution.output_agent_id,
                     "upstream_source_ids": (
@@ -6426,6 +9870,21 @@ class AgentWorkflowEnv:
                         execution.output_metadata.get(agent_id, {}).get(
                             "artifact_version"
                         ),
+                    ),
+                    "artifact_complete": self._artifact_complete_from_metadata(
+                        artifact_metadata
+                    ),
+                    "artifact_status": (
+                        "complete"
+                        if self._artifact_complete_from_metadata(
+                            artifact_metadata
+                        )
+                        else "incomplete"
+                    ),
+                    "execution_diagnostic_codes": (
+                        self._execution_diagnostic_codes_from_metadata(
+                            artifact_metadata
+                        )
                     ),
                     "candidate": artifact_candidate,
                     "artifact_character_count": len(artifact),
@@ -6484,12 +9943,9 @@ class AgentWorkflowEnv:
         )
 
     def _candidate_terminal_issue(self, answer: str) -> Optional[str]:
-        """Return a target-blind terminal parsing failure for ordered artifacts."""
+        """Return the configured target-blind terminal parsing failure."""
 
-        if (
-            not self.artifact_consumption_ordering
-            or self.artifact_candidate_extractor is None
-        ):
+        if self.artifact_candidate_extractor is None:
             return None
         candidate, failure_reason = self._public_artifact_candidate_result(
             answer
@@ -6935,6 +10391,8 @@ class AgentWorkflowEnv:
         self._previous_revision_outputs.clear()
         self._previous_revision_output_metadata.clear()
         self._unresolved_dirty_agents.clear()
+        self._artifact_assessment_consumer_attempted_artifact_ids.clear()
+        self._artifact_assessment_recovery_consumer_sources.clear()
         self._clear_failure_state()
 
     def _retain_current_failure_state(self, current_agent_ids: set[str]) -> None:
@@ -6944,6 +10402,13 @@ class AgentWorkflowEnv:
         self._diagnosed_unusable_agent_ids.intersection_update(current_agent_ids)
         self._react_exhausted_agent_ids.intersection_update(current_agent_ids)
         self._repair_exhausted_agent_ids.intersection_update(current_agent_ids)
+        self._artifact_assessment_recovery_consumer_sources = {
+            agent_id: source_artifact_ids
+            for agent_id, source_artifact_ids in (
+                self._artifact_assessment_recovery_consumer_sources.items()
+            )
+            if agent_id in current_agent_ids
+        }
         self._latest_failure_record_by_agent = {
             agent_id: record
             for agent_id, record in self._latest_failure_record_by_agent.items()
@@ -8849,51 +12314,43 @@ class AgentWorkflowEnv:
                 problem_statement,
             )
         )
-        numeric_assertion_templates = (
-            r"(?i:\b(?:answer|candidate|result|return|output|emit|"
-            r"conclude|conclusion|therefore|hence)\b)[^.!?\n]{0,96}"
-            r"{NUMBER}",
-            r"{NUMBER}[^.!?\n]{0,64}(?i:\b(?:as\s+)?(?:the\s+)?"
-            r"(?:answer|candidate|result|output)\b)",
-            r"(?i:(?:\\?[A-Za-z]+|[Α-Ωα-ω]+)[A-Za-z0-9_'′]*\s*"
-            r"(?:=|==|<=|>=|<|>|≤|≥|equals?|is)\s*){NUMBER}",
-            r"(?i:(?:\\?pi|π|\\?[A-Za-z][A-Za-z0-9_'′]*|\))"
-            r"\s*(?:\^|\*\*)\s*){NUMBER}",
-            r"(?i:(?:angle|theta|\\theta|θ|deg(?:ree)?s?|radians?)\b)"
-            r"[^.!?\n]{0,48}{NUMBER}",
-            r"{NUMBER}\s*(?i:(?:°|deg(?:ree)?s?|radians?)\b)",
-            r"(?i:\b(?:verify|check|assess|validate|forward|reject)\b)"
-            r"[^.!?\n]{0,96}{NUMBER}",
-        )
         protocol_range = re.compile(
             r"(?i:(?:integer[- ]?)?0{1,3}\s*(?:-|to|through)\s*999)"
         )
+        public_benchmark_label = re.compile(
+            r"(?i)(?<![A-Za-z0-9])AIME(?:[\s_-]+)2026(?![A-Za-z0-9])"
+        )
         for obligation in obligations:
             normalized = unicodedata.normalize("NFKC", obligation)
+            public_benchmark_label_spans = tuple(
+                match.span()
+                for match in public_benchmark_label.finditer(normalized)
+            )
             for number, start, end in self._contract_numeric_occurrences(
                 normalized
             ):
                 if number in problem_numbers:
                     continue
-                window = normalized[max(0, start - 112) : end + 112]
-                if protocol_range.search(window) is not None:
-                    continue
-                escaped_number = re.escape(normalized[start:end])
-                if any(
-                    re.search(
-                        template.replace("{NUMBER}", escaped_number),
-                        normalized,
-                    )
-                    is not None
-                    for template in numeric_assertion_templates
+                if number == "2026" and any(
+                    span_start <= start and end <= span_end
+                    for span_start, span_end in public_benchmark_label_spans
                 ):
-                    return (
-                        "AIME Agent contract/completion_condition changes the "
-                        "immutable task specification with a question-external "
-                        f"numeric assertion {normalized[start:end]!r}; describe "
-                        "only responsibility, method, required inputs, and output "
-                        "protocol, and derive task values during execution"
-                    )
+                    # Public benchmark metadata is not a question-specific
+                    # premise. Bind the exemption to this exact numeric span
+                    # so another 2026 in the same contract is still rejected.
+                    continue
+                if any(
+                    match.start() <= start and end <= match.end()
+                    for match in protocol_range.finditer(normalized)
+                ):
+                    continue
+                return (
+                    "AIME Agent contract/completion_condition changes the "
+                    "immutable task specification with a question-external "
+                    f"numeric assertion {normalized[start:end]!r}; describe "
+                    "only responsibility, method, required inputs, and output "
+                    "protocol, and derive task values during execution"
+                )
 
             terminal_claim = re.search(
                 r"(?i:\b(?:prove|show|demonstrate|establish|conclude)\b)"
@@ -10937,6 +14394,9 @@ class AgentWorkflowEnv:
         capacity_recovery_delete_ids = (
             self._capacity_blocking_failed_auxiliary_delete_ids()
         )
+        detachable_repair_exhausted_ids = (
+            self._detachable_repair_exhausted_agent_ids()
+        )
         required_evidence_ingress_candidates = (
             self._required_evidence_ingress_relation_candidates()
         )
@@ -10944,6 +14404,19 @@ class AgentWorkflowEnv:
             self._required_semantic_relation_candidates()
         )
         output_target_ids = self._model_admissible_output_agent_ids()
+        artifact_assessment_recovery_ingress_ids = (
+            self._artifact_assessment_protocol_recovery_ingress_agent_ids()
+            or self._artifact_assessment_ingress_agent_ids()
+        )
+        dependency_closed_output_ids = tuple(
+            agent_id
+            for agent_id in self._dependency_closed_artifact_output_agent_ids()
+            if artifact_assessment_recovery_ingress_ids
+            and agent_id != self._graph.output_agent_id
+        )
+        existing_output_recovery_candidates = (
+            self._artifact_assessment_existing_output_relation_candidates()
+        )
         protected: dict[str, list[str]] = {}
         for node in self._graph.nodes:
             if node.id in deletable_set:
@@ -10984,6 +14457,34 @@ class AgentWorkflowEnv:
                 self._previous_revision_outputs
             ),
             "failed_agent_ids": list(failed),
+            "artifact_assessment_protocol_failure_agent_ids": list(
+                self._artifact_assessment_protocol_failure_agent_ids()
+            ),
+            "artifact_assessment_candidate_failure_agent_ids": list(
+                self._artifact_assessment_candidate_failure_agent_ids()
+            ),
+            "artifact_assessment_non_candidate_failure_agent_ids": list(
+                self._artifact_assessment_non_candidate_failure_agent_ids()
+            ),
+            "artifact_assessment_recovery_ingress_agent_ids": list(
+                artifact_assessment_recovery_ingress_ids
+            ),
+            "dependency_closed_output_agent_ids": list(
+                dependency_closed_output_ids
+            ),
+            "artifact_assessment_existing_output_relation_candidates": [
+                dict(item)
+                for item in existing_output_recovery_candidates
+            ],
+            "artifact_assessment_consumer_attempted_artifact_ids": sorted(
+                self._artifact_assessment_consumer_attempted_artifact_ids
+            ),
+            "artifact_assessment_recovery_consumer_sources": {
+                agent_id: list(source_artifact_ids)
+                for agent_id, source_artifact_ids in (
+                    self._artifact_assessment_recovery_consumer_sources.items()
+                )
+            },
             "react_turn_exhausted_agent_ids": list(react_exhausted),
             "repair_exhausted_agent_ids": list(repair_exhausted),
             "mandatory_repair_agent_ids": list(mandatory_repair),
@@ -11004,9 +14505,18 @@ class AgentWorkflowEnv:
             "capacity_recovery_delete_agent_ids": list(
                 capacity_recovery_delete_ids
             ),
+            "detachable_repair_exhausted_agent_ids": list(
+                detachable_repair_exhausted_ids
+            ),
             "deletion_protected": protected,
             "preferred_actions": (
-                ["modify_agent"]
+                ["set_output"]
+                if dependency_closed_output_ids
+                else ["set_relation"]
+                if existing_output_recovery_candidates
+                else ["add_subgraph"]
+                if artifact_assessment_recovery_ingress_ids
+                else ["modify_agent"]
                 if mandatory_repair or active_auxiliary_replacements
                 else ["add_subgraph"]
                 if (
@@ -11032,6 +14542,8 @@ class AgentWorkflowEnv:
                 if self._uses_semantic_lineage_protocol() and output_target_ids
                 else ["set_relation"]
                 if terminal_reachability_relation_candidates
+                else ["delete_agent"]
+                if detachable_repair_exhausted_ids
                 else ["add_subgraph"]
                 if (
                     repair_exhausted
@@ -11311,6 +14823,8 @@ class AgentWorkflowEnv:
             return None
         if agent_id in self._capacity_blocking_failed_auxiliary_delete_ids():
             return None
+        if agent_id in self._detachable_repair_exhausted_agent_ids():
+            return None
         node = self._graph.get_node(agent_id)
         terminal_unreachable_ids = set(self._terminal_unreachable_agent_ids())
         # Topological disconnection is a relation fault, not evidence that the
@@ -11383,6 +14897,92 @@ class AgentWorkflowEnv:
     ) -> Optional[str]:
         """Protect a verified semantic lineage while recovery remains active."""
 
+        existing_output_recovery_relation = bool(
+            action.action_type is AgentActionType.SET_RELATION
+            and any(
+                self._relation_action_matches_candidate(action, candidate)
+                for candidate in (
+                    self._artifact_assessment_existing_output_relation_candidates()
+                )
+            )
+        )
+        if action.action_type is AgentActionType.SET_RELATION:
+            relation_item = {
+                "source_id": action.source_id,
+                "target_id": action.target_id,
+                "source_to_target": bool(action.source_to_target),
+                "target_to_source": bool(action.target_to_source),
+            }
+            if (
+                not existing_output_recovery_relation
+                and self._relation_adds_unusable_source_to_fresh_artifact(
+                    relation_item
+                )
+            ):
+                return (
+                    "failed_or_dirty_source_to_fresh_artifact: preserve the "
+                    "fresh target artifact; repair the measured source or "
+                    "route an existing fresh artifact instead"
+                )
+        if (
+            not self._uses_semantic_lineage_protocol()
+            and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
+        ):
+            if self._artifact_assessment_protocol_failure_agent_ids():
+                # The preceding authoritative assessment gate owns the same
+                # MODIFY/empty domain exposed by the outer action mask.  Do
+                # not let dead-branch recovery override that higher-priority
+                # bounded protocol repair.
+                return None
+            dead_recovery_ids = (
+                self._failed_agent_ids
+                & self._repair_exhausted_agent_ids
+                & set(self._terminal_unreachable_agent_ids())
+            )
+            if dead_recovery_ids:
+                strict_relation_candidates = (
+                    self._model_admissible_relation_candidates()
+                )
+                if strict_relation_candidates:
+                    if (
+                        action.action_type is AgentActionType.SET_RELATION
+                        and any(
+                            self._relation_action_matches_candidate(
+                                action,
+                                candidate,
+                            )
+                            for candidate in strict_relation_candidates
+                        )
+                    ):
+                        return None
+                    return (
+                        "repair-exhausted recovery admits only an exact "
+                        "strict-progress set_relation candidate before other "
+                        "Canvas edits; admissible_relation_candidates="
+                        f"{strict_relation_candidates!r}"
+                    )
+                detachable_ids = (
+                    self._detachable_repair_exhausted_agent_ids()
+                )
+                if detachable_ids:
+                    if (
+                        action.action_type is AgentActionType.DELETE_AGENT
+                        and action.agent_id in detachable_ids
+                    ):
+                        return None
+                    return (
+                        "repair-exhausted dead-branch recovery admits only "
+                        "deletion of an artifact-free leaf whose removal "
+                        "preserves every retained artifact input; "
+                        "admissible_delete_agent_ids="
+                        f"{list(detachable_ids)!r}"
+                    )
+                if action.action_type is AgentActionType.SET_RELATION:
+                    return (
+                        "no strict-progress relation remains for the "
+                        "repair-exhausted branch; generic relation rewrites "
+                        "cannot replay or reconnect the failed Agent"
+                    )
         if (
             not self._uses_semantic_lineage_protocol()
             or self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
@@ -11982,6 +15582,22 @@ class AgentWorkflowEnv:
                 "preserve_public_continuation",
                 status_code,
             )
+        typed_failure_category = record.metadata.get("failure_category")
+        if typed_failure_category == "structured_action_serialization_failure":
+            return (
+                typed_failure_category,
+                "repair_execution_contract_or_tool_plan",
+                status_code,
+            )
+        if (
+            "incompleteagentartifact" in normalized
+            or "bounded continuation exhausted" in normalized
+        ):
+            return (
+                "incomplete_agent_artifact",
+                "switch_model_or_execution_profile",
+                status_code,
+            )
         if "timeouterror" in normalized or "timed out" in normalized:
             return (
                 "provider_request_failure",
@@ -12122,10 +15738,23 @@ class AgentWorkflowEnv:
             if isinstance(raw_receipts, (list, tuple))
             else ()
         )
+
+        def _successful_tool_receipt(receipt: Mapping[str, object]) -> bool:
+            if receipt.get("error_type") is not None:
+                return False
+            result = receipt.get("result")
+            if not isinstance(result, Mapping) or result.get("ok") is False:
+                return False
+            nested_result = result.get("value")
+            if (
+                isinstance(nested_result, Mapping)
+                and nested_result.get("ok") is False
+            ):
+                return False
+            return True
+
         successful_tool_count = sum(
-            receipt.get("error_type") is None
-            and isinstance(receipt.get("result"), Mapping)
-            for receipt in receipts
+            _successful_tool_receipt(receipt) for receipt in receipts
         )
         successful_evidence_read_count = 0
         if self.required_evidence_tool_id is not None:
@@ -12159,6 +15788,17 @@ class AgentWorkflowEnv:
         message = " ".join(str(exc).split())
         if len(message) > 240:
             message = message[:237] + "..."
+
+        def public_preserve_fields(*field_names: str) -> list[str]:
+            """Project declaration fields that exist in this task protocol."""
+
+            return [
+                field_name
+                for field_name in field_names
+                if field_name != "role_family"
+                or self._allows_role_family_actions()
+            ]
+
         live_action_types = set(self.model_admissible_action_types())
         live_modify_agent_ids = (
             set(self._model_admissible_modify_agent_ids())
@@ -12258,9 +15898,39 @@ class AgentWorkflowEnv:
                         ],
                     }
             elif category == "provider_request_failure" and model_id is not None:
-                admitted_model_ids = self._provider_repair_catalog_domain(
-                    model_id
+                admitted_model_ids = (
+                    self._provider_repair_compatible_model_ids(
+                        record.agent_id
+                    )
                 )
+                bridge_profiles = (
+                    self._provider_repair_bridge_execution_profiles(
+                        record.agent_id
+                    )
+                )
+                if (
+                    not admitted_model_ids
+                    and not bridge_profiles
+                    and not self._provider_repair_required(record.agent_id)
+                    and node is not None
+                ):
+                    # ``_execution_error_feedback`` is also a public typed
+                    # renderer for a freshly supplied AgentRuntimeError.  The
+                    # normal Runtime path records that error before rendering,
+                    # but callers/tests may render it independently.  Preserve
+                    # the historical best-effort repair attribution without
+                    # mutating trajectory availability state.
+                    admitted_model_ids = tuple(
+                        candidate_model_id
+                        for candidate_model_id in (
+                            self._provider_repair_catalog_domain(model_id)
+                        )
+                        if self._model_execution_profile_is_registered(
+                            candidate_model_id,
+                            node.execution_mode,
+                            node.allowed_tools,
+                        )
+                    )
                 avoid_provider_id = (
                     provider_id
                     if any(
@@ -12281,7 +15951,7 @@ class AgentWorkflowEnv:
                             if avoid_provider_id is not None
                             else {"fallback_provider_id": provider_id}
                         ),
-                        "preserve_fields": [
+                        "preserve_fields": public_preserve_fields(
                             "contract",
                             "role_family",
                             "allowed_tools",
@@ -12289,7 +15959,29 @@ class AgentWorkflowEnv:
                             "artifact_type",
                             "completion_condition",
                             "relations",
+                        ),
+                    }
+                elif bridge_profiles:
+                    item["preferred_repair"] = {
+                        "action": "modify_agent",
+                        "agent_id": record.agent_id,
+                        "field": "execution_profile",
+                        "admitted_execution_profiles": [
+                            {
+                                "execution_mode": execution_mode,
+                                "allowed_tools": list(allowed_tools),
+                            }
+                            for execution_mode, allowed_tools in bridge_profiles
                         ],
+                        "next_field_after_bridge": "model_id",
+                        "preserve_fields": public_preserve_fields(
+                            "model_id",
+                            "contract",
+                            "role_family",
+                            "artifact_type",
+                            "completion_condition",
+                            "relations",
+                        ),
                     }
                 else:
                     # Do not advertise an impossible MODIFY action.  The next
@@ -12348,14 +16040,14 @@ class AgentWorkflowEnv:
                         "agent_id": record.agent_id,
                         "field": "contract",
                         "optional_field": "completion_condition",
-                        "preserve_fields": [
+                        "preserve_fields": public_preserve_fields(
                             "model_id",
                             "role_family",
                             "allowed_tools",
                             "execution_mode",
                             "artifact_type",
                             "relations",
-                        ],
+                        ),
                     }
             failed_agents.append(item)
         payload = json.dumps(

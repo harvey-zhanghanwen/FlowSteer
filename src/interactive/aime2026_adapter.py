@@ -21,7 +21,7 @@ from typing import Mapping, Sequence
 
 AIME2026_DATASET_KEY = "aime_2026"
 AIME2026_TASK_FAMILY = "aime-2026/integer-answer"
-AIME2026_EVALUATOR_VERSION = "skillev.integer.target-blind-extraction.v2.1"
+AIME2026_EVALUATOR_VERSION = "skillev.integer.target-blind-extraction.v2.2"
 AIME2026_ANSWER_FORMAT = "integer-000-to-999"
 
 _ANSWER_TAG = re.compile(
@@ -33,6 +33,11 @@ _BOXED_INTEGER = re.compile(r"\\boxed\s*\{\s*([+]?\d+)\s*\}")
 _FINAL_INTEGER = re.compile(
     r"(?im)^\s*(?:final\s+answer|answer)\s*[:=]\s*"
     r"\$?\s*([+]?\d+)\s*\$?\s*[.!]?\s*$"
+)
+_LATEX_TEXT_FINAL_INTEGER = re.compile(
+    r"\\text\s*\{\s*(?:final\s+answer|answer)\s*[:=]?\s*\}\s*"
+    r"\$?\s*([+]?\d+)\s*\$?",
+    flags=re.IGNORECASE,
 )
 _ANSWER_IS_INTEGER = re.compile(
     r"(?im)^\s*(?:the\s+)?answer\s+is\s*[:=]?\s*"
@@ -206,10 +211,6 @@ def extract_aime2026_artifact_assessments(
             "refuted",
         }:
             return (), "artifact_assessment_status_invalid"
-        try:
-            candidate = canonical_aime_integer(raw_item.get("candidate"))
-        except ValueError:
-            return (), "artifact_assessment_candidate_invalid"
         raw_counterexample = raw_item.get("counterexample")
         if raw_counterexample is not None and not isinstance(
             raw_counterexample, str
@@ -221,6 +222,25 @@ def extract_aime2026_artifact_assessments(
             and raw_counterexample.strip()
             else None
         )
+        raw_candidate = raw_item.get("candidate")
+        if raw_candidate is None:
+            # PROJECT_NECESSARY_ADAPTATION: a fan-in envelope can contain a
+            # source whose target-blind AIME extractor found no candidate.
+            # Some otherwise protocol-correct model outputs preserve that
+            # source as an explicit insufficient-evidence diagnostic.  It is
+            # not a candidate assessment and therefore cannot participate in
+            # agreement, conflict, support, or terminal admission.  Ignore
+            # only this exact, non-judgmental shape while keeping all malformed
+            # or answer-bearing items fail closed.  No evaluator target is
+            # consulted and no candidate is inferred from raw text.
+            if status != "insufficient_evidence" or counterexample is not None:
+                return (), "artifact_assessment_candidate_invalid"
+            seen_artifact_ids.add(artifact_id)
+            continue
+        try:
+            candidate = canonical_aime_integer(raw_candidate)
+        except ValueError:
+            return (), "artifact_assessment_candidate_invalid"
         if status == "refuted" and counterexample is None:
             return (), "refuted_assessment_requires_counterexample"
         if status == "supported" and counterexample is not None:
@@ -235,6 +255,8 @@ def extract_aime2026_artifact_assessments(
             )
         )
         seen_artifact_ids.add(artifact_id)
+    if not assessments:
+        return (), "artifact_assessment_no_candidate_items"
     return tuple(item.to_dict() for item in assessments), None
 
 
@@ -320,6 +342,7 @@ def extract_aime2026_candidate(
     marked = [
         *(_BOXED_INTEGER.findall(marker_visible)),
         *(_FINAL_INTEGER.findall(marker_visible)),
+        *(_LATEX_TEXT_FINAL_INTEGER.findall(marker_visible)),
         *(_ANSWER_IS_INTEGER.findall(marker_visible)),
     ]
     if marked:

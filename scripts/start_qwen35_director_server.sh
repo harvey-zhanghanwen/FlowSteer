@@ -10,7 +10,7 @@ model_path="${QWEN35_9B_MODEL_PATH:-$default_model_path}"
 tokenizer_path="${QWEN35_9B_TOKENIZER_PATH:-$default_tokenizer_path}"
 python_bin="${FLOWSTEER_PYTHON_BIN:-python3}"
 port="${FLOWSTEER_SUPERVISOR_PORT:-8015}"
-context_length="${FLOWSTEER_SUPERVISOR_CONTEXT_LENGTH:-32768}"
+context_length="${FLOWSTEER_SUPERVISOR_CONTEXT_LENGTH:-65536}"
 mem_fraction="${FLOWSTEER_SUPERVISOR_MEM_FRACTION:-0.82}"
 api_key="${SGLANG_API_KEY:-EMPTY}"
 
@@ -37,6 +37,7 @@ default). The local Qwen3.5 model and tokenizer can be overridden separately:
   FLOWSTEER_PYTHON_BIN       default: python3
   FLOWSTEER_ROLLOUT_GPU      default: 0
   FLOWSTEER_SUPERVISOR_PORT  default: 8015
+  FLOWSTEER_SUPERVISOR_CONTEXT_LENGTH default: 65536
 
 All remaining arguments are passed to sglang.launch_server.
 
@@ -65,6 +66,7 @@ exec "$project_root/scripts/run_on_gpu_role.sh" rollout \
   --max-loaded-loras 2 \
   --lora-target-modules q_proj k_proj v_proj o_proj \
   --reasoning-parser qwen3 \
+  --enable-strict-thinking \
   --tool-call-parser qwen3_coder \
   --constrained-json-disable-any-whitespace \
   --schedule-policy lpm \

@@ -6,7 +6,12 @@ import json
 import unittest
 
 from src.interactive.agent_graph import AgentNode
-from src.interactive.agent_runtime import AgentRequest, AgentResponse, ExecutionPhase
+from src.interactive.agent_runtime import (
+    AgentRequest,
+    AgentResponse,
+    ExecutionPhase,
+    UpstreamMessage,
+)
 from src.interactive.model_registry import ModelSpec, ProviderSpec
 from src.interactive.react_execution import (
     ReactExecutionError,
@@ -101,6 +106,51 @@ def request() -> AgentRequest:
     )
 
 
+def provenance_assessment_request(
+    *,
+    execution_mode: str = "react",
+) -> AgentRequest:
+    item = request()
+    return replace(
+        item,
+        problem=(
+            "benchmark_id=aime-2026\n"
+            "Find the requested integer from the stated mathematical problem."
+        ),
+        agent=replace(
+            item.agent,
+            execution_mode=execution_mode,
+            contract=(
+                "Assess every routed work product from its public derivation "
+                "and return the declared artifact."
+            ),
+        ),
+        upstream=(
+            UpstreamMessage(
+                source_agent_id="source_solver",
+                target_agent_id="r",
+                content=(
+                    "The public recurrence leaves 65 admissible cases.\n"
+                    "Final Answer: 65"
+                ),
+                graph_revision=1,
+                artifact_version="artifact:source_solver:1",
+                artifact_complete=True,
+                tool_receipts=(
+                    {
+                        "tool_id": "python.compute",
+                        "request": {"action": "run"},
+                        "status": "completed",
+                    },
+                ),
+            ),
+        ),
+        artifact_assessment_protocol=(
+            "provenance_bound_candidate_assessment_v2"
+        ),
+    )
+
+
 class SequenceGateway:
     def __init__(self, outputs: list[str]) -> None:
         self.outputs = list(outputs)
@@ -111,7 +161,290 @@ class SequenceGateway:
         return AgentResponse(self.outputs.pop(0), {"provider_request_id": len(self.requests)})
 
 
+class ResponseSequenceGateway:
+    def __init__(self, responses: list[AgentResponse]) -> None:
+        self.responses = list(responses)
+        self.requests: list[AgentRequest] = []
+
+    async def generate(self, request: AgentRequest) -> AgentResponse:
+        self.requests.append(request)
+        return self.responses.pop(0)
+
+
 class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_generic_tool_or_complete_domain_uses_strict_one_of_schema(self) -> None:
+        adapter = ToolReactExecutionAdapter(
+            gateway=SequenceGateway([]),
+            tool_registry=registry(),
+            max_turns=2,
+            max_tool_calls=1,
+        )
+
+        schema = adapter._state_conditioned_response_schema(request(), [])
+
+        self.assertIsNotNone(schema)
+        branches = schema["oneOf"]
+        self.assertEqual(2, len(branches))
+        self.assertEqual(
+            {"complete", "tool"},
+            {branch["properties"]["kind"]["const"] for branch in branches},
+        )
+        for branch in branches:
+            self.assertEqual(
+                ["arguments", "kind", "name", "resource_id", "skill_id"],
+                branch["required"],
+            )
+            self.assertFalse(branch["additionalProperties"])
+
+    async def test_provenance_bound_complete_rejects_scalar_then_preserves_receipt(
+        self,
+    ) -> None:
+        valid_artifact = (
+            "The routed recurrence enumerates the admissible cases and its "
+            "public calculation gives 65.\n"
+            "Final Answer: 65\n"
+            "<artifact_assessments>"
+            '[{"assessed_artifact_id":"artifact:source_solver:1",'
+            '"candidate":"65","assessment":"supported",'
+            '"basis":"The public recurrence explicitly derives the count.",'
+            '"counterexample":null}]'
+            "</artifact_assessments>"
+        )
+        gateway = SequenceGateway(
+            [
+                action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "public calculation receipt"},
+                    resource_id="wiki.search",
+                ),
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "65"},
+                    resource_id=None,
+                ),
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": valid_artifact},
+                    resource_id=None,
+                ),
+            ]
+        )
+
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=3,
+            max_tool_calls=1,
+        ).execute(provenance_assessment_request())
+
+        self.assertEqual(valid_artifact, response.text)
+        scalar_rejection = response.metadata["react_trace"][1]
+        self.assertEqual("schema_invalid", scalar_rejection["observation_status"])
+        self.assertEqual(
+            "provenance_completion_public_derivation_missing",
+            scalar_rejection["public_error_code"],
+        )
+        self.assertIn(
+            "A bare scalar candidate is not a complete assessment artifact",
+            scalar_rejection["repair_instruction"],
+        )
+        receipt = response.metadata["artifact_assessment_completion_receipt"]
+        self.assertEqual("admitted", receipt["admission_status"])
+        self.assertTrue(receipt["public_derivation_preserved"])
+        self.assertEqual("65", receipt["output_candidate"])
+        self.assertEqual(1, receipt["local_tool_receipt_count"])
+        self.assertEqual(
+            {
+                "source_agent": "source_solver",
+                "artifact_id": "artifact:source_solver:1",
+                "candidate": "65",
+            },
+            {
+                key: receipt["candidate_sources"][0][key]
+                for key in ("source_agent", "artifact_id", "candidate")
+            },
+        )
+        self.assertEqual(
+            "source_solver",
+            receipt["assessment_bindings"][0]["source_agent"],
+        )
+        self.assertEqual(
+            "artifact:source_solver:1",
+            receipt["assessment_bindings"][0]["artifact_id"],
+        )
+        self.assertEqual(1, len(response.metadata["tool_receipts"]))
+        self.assertEqual(
+            receipt,
+            response.metadata["react_trace"][-1][
+                "artifact_assessment_completion_receipt"
+            ],
+        )
+
+        first_schema = json.loads(
+            gateway.requests[0].model.metadata["response_json_schema"]
+        )
+        complete_branch = next(
+            branch
+            for branch in first_schema["oneOf"]
+            if branch["properties"]["kind"]["const"] == "complete"
+        )
+        value_schema = complete_branch["properties"]["arguments"][
+            "properties"
+        ]["value"]
+        self.assertEqual("string", value_schema["type"])
+        self.assertEqual(1, value_schema["minLength"])
+        self.assertIn("bare candidate", value_schema["description"])
+        self.assertIn(
+            '"source_agent":"source_solver"',
+            gateway.requests[0].agent.contract,
+        )
+        self.assertIn(
+            '"artifact_id":"artifact:source_solver:1"',
+            gateway.requests[0].agent.contract,
+        )
+        self.assertIn(
+            "escape every literal backslash",
+            gateway.requests[0].agent.contract,
+        )
+
+    async def test_provenance_bound_complete_rejects_wrong_candidate_binding(
+        self,
+    ) -> None:
+        wrong_binding = (
+            "A public derivation is present.\n"
+            "<artifact_assessments>"
+            '[{"assessed_artifact_id":"artifact:source_solver:1",'
+            '"candidate":"64","assessment":"supported",'
+            '"basis":"A stated public derivation.","counterexample":null}]'
+            "</artifact_assessments>"
+        )
+        valid_artifact = (
+            "The public recurrence derives 65 cases.\n"
+            "Final Answer: 65\n"
+            "<artifact_assessments>"
+            '[{"assessed_artifact_id":"artifact:source_solver:1",'
+            '"candidate":"65","assessment":"supported",'
+            '"basis":"The recurrence derives the stated count.",'
+            '"counterexample":null}]'
+            "</artifact_assessments>"
+        )
+        gateway = SequenceGateway(
+            [
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": wrong_binding},
+                    resource_id=None,
+                ),
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": valid_artifact},
+                    resource_id=None,
+                ),
+            ]
+        )
+
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=2,
+            max_tool_calls=0,
+        ).execute(provenance_assessment_request())
+
+        self.assertEqual(valid_artifact, response.text)
+        self.assertEqual(
+            "provenance_completion_candidate_binding_mismatch",
+            response.metadata["react_trace"][0]["public_error_code"],
+        )
+        self.assertIn(
+            '"candidate":"65"',
+            gateway.requests[1].agent.contract,
+        )
+
+    async def test_provenance_bound_coding_uses_same_complete_admission(
+        self,
+    ) -> None:
+        valid_artifact = (
+            "The public computation derives the count 65.\n"
+            "Final Answer: 65\n"
+            "<artifact_assessments>"
+            '[{"assessed_artifact_id":"artifact:source_solver:1",'
+            '"candidate":"65","assessment":"supported",'
+            '"basis":"The public computation derives the count.",'
+            '"counterexample":null}]'
+            "</artifact_assessments>"
+        )
+        gateway = SequenceGateway(
+            [
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "65"},
+                    resource_id=None,
+                ),
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": valid_artifact},
+                    resource_id=None,
+                ),
+            ]
+        )
+
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=2,
+            max_tool_calls=0,
+            execution_mode="coding",
+        ).execute(provenance_assessment_request(execution_mode="coding"))
+
+        self.assertEqual(valid_artifact, response.text)
+        self.assertEqual(
+            "provenance_completion_public_derivation_missing",
+            response.metadata["react_trace"][0]["public_error_code"],
+        )
+        self.assertEqual(
+            "provenance_bound_candidate_assessment_v2",
+            response.metadata["artifact_assessment_completion_receipt"][
+                "protocol"
+            ],
+        )
+
+    async def test_ordinary_coding_complete_still_accepts_scalar_artifact(
+        self,
+    ) -> None:
+        item = replace(
+            request(),
+            agent=replace(request().agent, execution_mode="coding"),
+        )
+        response = await ToolReactExecutionAdapter(
+            gateway=SequenceGateway(
+                [
+                    action(
+                        "complete",
+                        name="complete",
+                        arguments={"value": "65"},
+                        resource_id=None,
+                    )
+                ]
+            ),
+            tool_registry=registry(),
+            max_turns=1,
+            max_tool_calls=0,
+            execution_mode="coding",
+        ).execute(item)
+
+        self.assertEqual("65", response.text)
+        self.assertNotIn(
+            "artifact_assessment_completion_receipt",
+            response.metadata,
+        )
+
     async def test_empty_action_domain_fails_before_any_model_call(self) -> None:
         class ExhaustedAdapter(ToolReactExecutionAdapter):
             def _state_conditioned_action_domain(
@@ -210,9 +543,147 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
                 "top_k": None,
                 "max_tokens": 512,
                 "seed": expected_seed,
+                "thinking_budget": None,
             },
             response.metadata["model_calls"][0]["requested_sampling"],
         )
+
+    async def test_independent_action_and_thinking_budgets_are_injected_per_turn(
+        self,
+    ) -> None:
+        gateway = SequenceGateway(
+            [
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "answer"},
+                    resource_id=None,
+                )
+            ]
+        )
+        item = request()
+        item = replace(
+            item,
+            model=replace(
+                item.model,
+                metadata={
+                    **dict(item.model.metadata),
+                    "max_tokens": "256",
+                    "chat_template_enable_thinking": "true",
+                },
+            ),
+        )
+
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=1,
+            max_tool_calls=1,
+            max_action_tokens=8192,
+            thinking_budget_tokens=3072,
+        ).execute(item)
+
+        turn_metadata = gateway.requests[0].model.metadata
+        self.assertEqual("11264", turn_metadata["max_tokens"])
+        self.assertEqual("3072", turn_metadata["thinking_budget_tokens"])
+        self.assertEqual("true", turn_metadata["chat_template_enable_thinking"])
+        self.assertEqual(
+            {
+                "temperature": None,
+                "top_p": None,
+                "top_k": None,
+                "max_tokens": 11264,
+                "seed": None,
+                "thinking_budget": 3072,
+            },
+            response.metadata["model_calls"][0]["requested_sampling"],
+        )
+        self.assertEqual(
+            8192,
+            response.metadata["model_calls"][0]["max_action_tokens"],
+        )
+        self.assertEqual(
+            3072,
+            response.metadata["model_calls"][0]["max_reasoning_tokens"],
+        )
+
+    def test_thinking_budget_is_positive_and_independent_of_action_budget(
+        self,
+    ) -> None:
+        ToolReactExecutionAdapter(
+            gateway=SequenceGateway([]),
+            tool_registry=registry(),
+            max_turns=1,
+            max_tool_calls=1,
+            max_action_tokens=512,
+            thinking_budget_tokens=1024,
+        )
+        for budget in (0, True):
+            with self.subTest(budget=budget):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "positive integer or None",
+                ):
+                    ToolReactExecutionAdapter(
+                        gateway=SequenceGateway([]),
+                        tool_registry=registry(),
+                        max_turns=1,
+                        max_tool_calls=1,
+                        max_action_tokens=512,
+                        thinking_budget_tokens=budget,
+                    )
+
+    def test_coding_wire_contract_preserves_complete_source_in_json(self) -> None:
+        coding_registry = ToolRegistry(
+            (
+                ToolRegistration(
+                    "python.compute",
+                    FakeTool({"run": lambda arguments: {"stdout": "1"}}),
+                    ToolCapability(
+                        tool_id="python.compute",
+                        dataset_scope=("aime2026",),
+                        action_schemas={
+                            "run": {
+                                "type": "object",
+                                "required": ["code"],
+                                "properties": {"code": {"type": "string"}},
+                            }
+                        },
+                        input_schema={"type": "object"},
+                        output_schema={"type": "object"},
+                        side_effect="none",
+                        timeout_seconds=1.0,
+                        version="python-test-v1",
+                    ),
+                ),
+            )
+        )
+        item = request()
+        item = replace(
+            item,
+            agent=replace(
+                item.agent,
+                allowed_tools=("python.compute",),
+                execution_mode="coding",
+            ),
+        )
+        contract = ToolReactExecutionAdapter(
+            gateway=SequenceGateway([]),
+            tool_registry=coding_registry,
+            max_turns=1,
+            max_tool_calls=1,
+            execution_mode="coding",
+        )._contract(item, [])
+
+        self.assertIn(
+            "arguments.code must contain the complete executable source",
+            contract,
+        )
+        self.assertIn("JSON \\n escapes", contract)
+        self.assertIn("explicit print(...) statement", contract)
+        self.assertIn("Do not put natural-language reasoning", contract)
+        self.assertNotIn("Solver", contract)
+        self.assertNotIn("Verifier", contract)
 
     async def test_scientific_sampling_rejects_invalid_continuation_turns(self) -> None:
         coordinate = ScientificSamplingCoordinate(
@@ -548,6 +1019,183 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("executed_action", gateway.requests[2].agent.contract)
         self.assertEqual("256", gateway.requests[0].model.metadata["max_tokens"])
 
+    async def test_truncated_action_gets_one_short_same_model_regeneration(
+        self,
+    ) -> None:
+        gateway = ResponseSequenceGateway(
+            [
+                AgentResponse(
+                    '{"arguments":{"value":"unfinished"',
+                    {
+                        "finish_reason": "length",
+                        "provider_request_id": "first",
+                    },
+                ),
+                AgentResponse(
+                    action(
+                        "complete",
+                        name="complete",
+                        arguments={"value": "Ada Lovelace"},
+                        resource_id=None,
+                    ),
+                    {
+                        "finish_reason": "stop",
+                        "provider_request_id": "repair",
+                    },
+                ),
+            ]
+        )
+        active_request = replace(
+            request(),
+            model=ModelSpec(
+                "m",
+                "fake",
+                metadata={
+                    "chat_template_enable_thinking": "true",
+                    "require_reasoning_trace": "true",
+                },
+            ),
+        )
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=4,
+            max_tool_calls=0,
+            max_action_tokens=4096,
+            thinking_budget_tokens=1024,
+        ).execute(active_request)
+
+        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual(2, len(gateway.requests))
+        self.assertEqual(
+            gateway.requests[0].model.model_id,
+            gateway.requests[1].model.model_id,
+        )
+        self.assertEqual(
+            gateway.requests[0].provider.provider_id,
+            gateway.requests[1].provider.provider_id,
+        )
+        self.assertEqual("5120", gateway.requests[0].model.metadata["max_tokens"])
+        self.assertEqual(
+            "1024",
+            gateway.requests[0].model.metadata["thinking_budget_tokens"],
+        )
+        self.assertEqual("512", gateway.requests[1].model.metadata["max_tokens"])
+        self.assertEqual(
+            "false",
+            gateway.requests[1].model.metadata["chat_template_enable_thinking"],
+        )
+        self.assertEqual(
+            "false",
+            gateway.requests[1].model.metadata["require_reasoning_trace"],
+        )
+        self.assertNotIn(
+            "thinking_budget_tokens",
+            gateway.requests[1].model.metadata,
+        )
+        first_trace = response.metadata["react_trace"][0]
+        self.assertEqual("parse_error", first_trace["observation_status"])
+        self.assertEqual(
+            "structured_action_truncated",
+            first_trace["public_error_code"],
+        )
+        self.assertEqual(
+            '{"arguments":{"value":"unfinished"',
+            first_trace["action_text"],
+        )
+        self.assertEqual(
+            ["length", "stop"],
+            [
+                item["metadata"]["finish_reason"]
+                for item in response.metadata["model_calls"]
+            ],
+        )
+        self.assertEqual(
+            "structured_action_truncation_regeneration",
+            response.metadata["model_calls"][1]["generation_mode"],
+        )
+
+    async def test_truncated_action_regeneration_fails_fast_after_two_calls(
+        self,
+    ) -> None:
+        gateway = ResponseSequenceGateway(
+            [
+                AgentResponse("first invalid prefix", {"finish_reason": "length"}),
+                AgentResponse("second invalid response", {"finish_reason": "stop"}),
+            ]
+        )
+        active_request = replace(
+            request(),
+            model=ModelSpec(
+                "m",
+                "fake",
+                metadata={
+                    "chat_template_enable_thinking": "true",
+                    "require_reasoning_trace": "true",
+                },
+            ),
+        )
+        adapter = ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=8,
+            max_tool_calls=0,
+            max_action_tokens=4096,
+            thinking_budget_tokens=1024,
+        )
+
+        with self.assertRaises(ReactExecutionError) as raised:
+            await adapter.execute(active_request)
+
+        failure = raised.exception
+        self.assertEqual(2, len(gateway.requests))
+        self.assertEqual(
+            "structured_action_serialization_failure",
+            failure.failure_category,
+        )
+        self.assertEqual("output_truncation", failure.failure_reason)
+        self.assertEqual(1, failure.bounded_regeneration_attempt_count)
+        self.assertTrue(failure.regeneration_exhausted)
+        self.assertFalse(failure.tool_plan_exhausted)
+        self.assertEqual(2, len(failure.model_calls))
+        self.assertEqual(2, len(failure.react_trace))
+        self.assertEqual(
+            "structured_action_regeneration_failed",
+            failure.react_trace[-1]["public_error_code"],
+        )
+
+    async def test_length_reason_with_complete_structured_action_is_consumed(
+        self,
+    ) -> None:
+        gateway = ResponseSequenceGateway(
+            [
+                AgentResponse(
+                    action(
+                        "complete",
+                        name="complete",
+                        arguments={"value": "Ada Lovelace"},
+                        resource_id=None,
+                    ),
+                    {"finish_reason": "length"},
+                )
+            ]
+        )
+
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=registry(),
+            max_turns=2,
+            max_tool_calls=0,
+            max_action_tokens=4096,
+        ).execute(request())
+
+        self.assertEqual("Ada Lovelace", response.text)
+        self.assertEqual(1, len(gateway.requests))
+        self.assertEqual(
+            "completed",
+            response.metadata["react_trace"][0]["observation_status"],
+        )
+
     async def test_argument_schema_is_enforced_before_tool_dispatch(self) -> None:
         gateway = SequenceGateway(
             [
@@ -689,10 +1337,117 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ReactExecutionError, "exhausted") as raised:
             await adapter.execute(request())
         self.assertEqual(1, len(raised.exception.react_trace))
-        self.assertEqual(1, len(raised.exception.tool_receipts))
+        self.assertEqual(0, len(raised.exception.tool_receipts))
         self.assertEqual(1, len(raised.exception.model_calls))
         self.assertEqual(
-            "wiki.search", raised.exception.tool_receipts[0]["tool_id"]
+            "tool_action_not_admitted",
+            raised.exception.react_trace[0]["public_error_code"],
+        )
+        response_schema = json.loads(
+            gateway.requests[0].model.metadata["response_json_schema"]
+        )
+        self.assertEqual(
+            "complete", response_schema["properties"]["kind"]["const"]
+        )
+        self.assertIn(
+            "admits only the explicit complete StructuredAction",
+            gateway.requests[0].agent.contract,
+        )
+
+    async def test_payload_ok_false_is_not_reported_as_tool_success(self) -> None:
+        failed_registry = ToolRegistry(
+            (
+                ToolRegistration(
+                    "wiki.search",
+                    FakeTool(
+                        {
+                            "search": lambda arguments: {
+                                "ok": False,
+                                "error": "query rejected",
+                                "query": arguments["query"],
+                            }
+                        }
+                    ),
+                    registry().require_capability("wiki.search"),
+                ),
+            )
+        )
+        gateway = SequenceGateway(
+            [
+                action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Ada Lovelace"},
+                    resource_id="wiki.search",
+                ),
+                action(
+                    "complete",
+                    name="complete",
+                    arguments={"value": "insufficient evidence"},
+                    resource_id=None,
+                ),
+            ]
+        )
+
+        response = await ToolReactExecutionAdapter(
+            gateway=gateway,
+            tool_registry=failed_registry,
+            max_turns=2,
+            max_tool_calls=1,
+        ).execute(request())
+
+        self.assertEqual("insufficient evidence", response.text)
+        observation = response.metadata["react_trace"][0]["observation"]
+        self.assertEqual("tool_error", observation["observation_status"])
+        self.assertEqual("tool_result_not_ok", observation["public_error_code"])
+        self.assertEqual("completed", observation["tool_invocation_status"])
+        self.assertFalse(observation["result"]["ok"])
+        self.assertIsNone(response.metadata["tool_receipts"][0]["error_type"])
+
+    async def test_tool_stdout_never_becomes_completion_without_complete_action(self) -> None:
+        stdout_registry = ToolRegistry(
+            (
+                ToolRegistration(
+                    "wiki.search",
+                    FakeTool(
+                        {
+                            "search": lambda arguments: {
+                                "ok": True,
+                                "stdout": "Ada Lovelace",
+                                "query": arguments["query"],
+                            }
+                        }
+                    ),
+                    registry().require_capability("wiki.search"),
+                ),
+            )
+        )
+        gateway = SequenceGateway(
+            [
+                action(
+                    "tool",
+                    name="search",
+                    arguments={"query": "Ada Lovelace"},
+                    resource_id="wiki.search",
+                ),
+                "still not a StructuredAction",
+            ]
+        )
+
+        with self.assertRaisesRegex(ReactExecutionError, "without a valid completion"):
+            await ToolReactExecutionAdapter(
+                gateway=gateway,
+                tool_registry=stdout_registry,
+                max_turns=2,
+                max_tool_calls=1,
+            ).execute(request())
+
+        self.assertEqual(2, len(gateway.requests))
+        final_schema = json.loads(
+            gateway.requests[1].model.metadata["response_json_schema"]
+        )
+        self.assertEqual(
+            "complete", final_schema["properties"]["kind"]["const"]
         )
 
     async def test_identical_failed_tool_request_is_not_dispatched_twice(self) -> None:
@@ -746,6 +1501,16 @@ class ToolReactExecutionTests(unittest.IsolatedAsyncioTestCase):
             "duplicate_tool_request",
             response.metadata["react_trace"][1]["public_error_code"],
         )
+        self.assertEqual(
+            1, response.metadata["react_trace"][1]["repeat_count"]
+        )
+        self.assertEqual(
+            "tool_error",
+            response.metadata["react_trace"][1]["cached_observation"][
+                "observation_status"
+            ],
+        )
+        self.assertIn("cached observation", gateway.requests[2].agent.contract)
         self.assertIn("executed_action", gateway.requests[2].agent.contract)
 
 

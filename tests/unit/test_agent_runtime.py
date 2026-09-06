@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from src.interactive.agent_graph import AgentGraph, AgentGraphValidationError, AgentNode, AgentRelation
 from src.interactive.agent_runtime import (
@@ -53,6 +54,29 @@ class RecordingGateway:
 
 
 class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _stateless_tool_registry(*tool_ids: str) -> ToolRegistry:
+        registrations = []
+        for tool_id in tool_ids:
+            capability = ToolCapability(
+                tool_id=tool_id,
+                dataset_scope=("*",),
+                action_schemas={"run": {"type": "object"}},
+                input_schema={"type": "object"},
+                output_schema={"type": "object"},
+                side_effect="none",
+                timeout_seconds=1.0,
+                version="test-v1",
+            )
+            registrations.append(
+                ToolRegistration(
+                    tool_id,
+                    FakeTool({"run": lambda arguments: dict(arguments)}),
+                    capability,
+                )
+            )
+        return ToolRegistry(tuple(registrations))
+
     @staticmethod
     def _stateful_tool_registry() -> ToolRegistry:
         tool_id = "webshop.environment"
@@ -136,6 +160,14 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             prior_failure_metadata={
                 "reasoner": {
                     "execution_phase": "single",
+                    "continuation_declaration_identity": {
+                        "model_id": "m1",
+                        "contract": "repair the semantic artifact",
+                        "execution_profile": {
+                            "execution_mode": "react",
+                            "allowed_tools": [],
+                        },
+                    },
                     "react_trace": [
                         {
                             "turn": 1,
@@ -171,6 +203,14 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             prior_failure_metadata={
                 "reasoner": {
                     "execution_phase": "revision",
+                    "continuation_declaration_identity": {
+                        "model_id": "m1",
+                        "contract": "repair the semantic artifact",
+                        "execution_profile": {
+                            "execution_mode": "react",
+                            "allowed_tools": [],
+                        },
+                    },
                     "react_trace": [
                         {
                             "turn": 1,
@@ -189,6 +229,283 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((), adapter.requests[1].action_history)
         self.assertEqual((), adapter.requests[1].prior_tool_receipts)
         self.assertIsNone(adapter.requests[1].continuation_source_agent_id)
+
+    async def test_changed_execution_profile_clears_active_continuation_state(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class ContinuationAdapter:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def execute(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse("restarted")
+
+        adapter = ContinuationAdapter()
+        runtime = AgentRuntime(
+            catalog,
+            RecordingGateway(),
+            execution_adapters={"react": adapter},
+            tool_registry=self._stateless_tool_registry("tool.a", "tool.b"),
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "m1",
+                    "repair the artifact",
+                    execution_mode="react",
+                    allowed_tools=("tool.a",),
+                )
+            ],
+            output_agent_id="reasoner",
+        )
+        await runtime.execute(
+            graph,
+            "question",
+            prior_failure_metadata={
+                "reasoner": {
+                    "execution_phase": "single",
+                    "continuation_declaration_identity": {
+                        "model_id": "m1",
+                        "contract": "repair the artifact",
+                        "execution_profile": {
+                            "execution_mode": "react",
+                            "allowed_tools": ["tool.a", "tool.b"],
+                        },
+                    },
+                    "react_trace": [
+                        {
+                            "turn": 1,
+                            "observation_status": "success",
+                            "continuation_execution_profile": {
+                                "execution_mode": "react",
+                                "allowed_tools": ["tool.a", "tool.b"],
+                            },
+                        }
+                    ],
+                    "tool_receipts": [
+                        {
+                            "tool_id": "tool.a",
+                            "success": True,
+                            "continuation_execution_profile": {
+                                "execution_mode": "react",
+                                "allowed_tools": ["tool.a", "tool.b"],
+                            },
+                        }
+                    ],
+                    "continuation_source_agent_id": "failed_reasoner",
+                }
+            },
+        )
+
+        request = adapter.requests[0]
+        self.assertEqual((), request.action_history)
+        self.assertEqual((), request.prior_tool_receipts)
+        self.assertIsNone(request.continuation_source_agent_id)
+
+    async def test_canonical_tool_order_preserves_bound_continuation_state(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class ContinuationAdapter:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def execute(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse("continued")
+
+        adapter = ContinuationAdapter()
+        runtime = AgentRuntime(
+            catalog,
+            RecordingGateway(),
+            execution_adapters={"react": adapter},
+            tool_registry=self._stateless_tool_registry("tool.a", "tool.b"),
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "reasoner",
+                    "m1",
+                    "continue the artifact",
+                    execution_mode="react",
+                    allowed_tools=("tool.b", "tool.a"),
+                )
+            ],
+            output_agent_id="reasoner",
+        )
+        await runtime.execute(
+            graph,
+            "question",
+            prior_failure_metadata={
+                "reasoner": {
+                    "execution_phase": "single",
+                    "continuation_declaration_identity": {
+                        "model_id": "m1",
+                        "contract": "continue the artifact",
+                        "execution_profile": {
+                            "execution_mode": "react",
+                            "allowed_tools": ["tool.a", "tool.b"],
+                        },
+                    },
+                    "react_trace": [
+                        {
+                            "turn": 1,
+                            "observation_status": "success",
+                            "continuation_execution_profile": {
+                                "execution_mode": "react",
+                                "allowed_tools": ["tool.a", "tool.b"],
+                            },
+                        }
+                    ],
+                    "tool_receipts": [
+                        {"tool_id": "tool.a", "success": True}
+                    ],
+                    "continuation_source_agent_id": "failed_reasoner",
+                }
+            },
+        )
+
+        request = adapter.requests[0]
+        self.assertEqual(1, len(request.action_history))
+        self.assertEqual(1, len(request.prior_tool_receipts))
+        self.assertEqual(
+            "failed_reasoner",
+            request.continuation_source_agent_id,
+        )
+
+    async def test_model_or_contract_change_clears_active_continuation_state(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class ContinuationAdapter:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def execute(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse("restarted")
+
+        for prior_model_id, prior_contract in (
+            ("m2", "current contract"),
+            ("m1", "previous contract"),
+        ):
+            with self.subTest(
+                prior_model_id=prior_model_id,
+                prior_contract=prior_contract,
+            ):
+                adapter = ContinuationAdapter()
+                runtime = AgentRuntime(
+                    catalog,
+                    RecordingGateway(),
+                    execution_adapters={"react": adapter},
+                )
+                graph = AgentGraph(
+                    [
+                        AgentNode(
+                            "worker",
+                            "m1",
+                            "current contract",
+                            execution_mode="react",
+                        )
+                    ],
+                    output_agent_id="worker",
+                )
+                await runtime.execute(
+                    graph,
+                    "question",
+                    prior_failure_metadata={
+                        "worker": {
+                            "execution_phase": "single",
+                            "continuation_declaration_identity": {
+                                "model_id": prior_model_id,
+                                "contract": prior_contract,
+                                "execution_profile": {
+                                    "execution_mode": "react",
+                                    "allowed_tools": [],
+                                },
+                            },
+                            "react_trace": [
+                                {
+                                    "turn": 1,
+                                    "observation_status": "success",
+                                }
+                            ],
+                            "tool_receipts": [
+                                {"tool_id": "python", "success": True}
+                            ],
+                            "continuation_source_agent_id": "worker",
+                        }
+                    },
+                )
+
+                active_request = adapter.requests[0]
+                self.assertEqual((), active_request.action_history)
+                self.assertEqual((), active_request.prior_tool_receipts)
+                self.assertIsNone(
+                    active_request.continuation_source_agent_id
+                )
+
+    async def test_legacy_unbound_continuation_is_readable_but_not_matched(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class ContinuationAdapter:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def execute(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse("restarted")
+
+        adapter = ContinuationAdapter()
+        runtime = AgentRuntime(
+            catalog,
+            RecordingGateway(),
+            execution_adapters={"react": adapter},
+        )
+        graph = AgentGraph(
+            [
+                AgentNode(
+                    "worker",
+                    "m1",
+                    "current contract",
+                    execution_mode="react",
+                )
+            ],
+            output_agent_id="worker",
+        )
+        await runtime.execute(
+            graph,
+            "question",
+            prior_failure_metadata={
+                "worker": {
+                    "execution_phase": "single",
+                    "continuation_execution_profile": {
+                        "execution_mode": "react",
+                        "allowed_tools": [],
+                    },
+                    "react_trace": [
+                        {"turn": 1, "observation_status": "success"}
+                    ],
+                    "tool_receipts": [
+                        {"tool_id": "python", "success": True}
+                    ],
+                    "continuation_source_agent_id": "worker",
+                }
+            },
+        )
+
+        active_request = adapter.requests[0]
+        self.assertEqual((), active_request.action_history)
+        self.assertEqual((), active_request.prior_tool_receipts)
+        self.assertIsNone(active_request.continuation_source_agent_id)
 
     async def test_new_input_artifact_version_supersedes_active_continuation_state(
         self,
@@ -242,6 +559,14 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             prior_failure_metadata={
                 "reasoner": {
                     "execution_phase": "single",
+                    "continuation_declaration_identity": {
+                        "model_id": "m2",
+                        "contract": "repair the semantic artifact",
+                        "execution_profile": {
+                            "execution_mode": "react",
+                            "allowed_tools": [],
+                        },
+                    },
                     "react_trace": [
                         {
                             "turn": 1,
@@ -276,6 +601,92 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "qa-retrieval",
             repaired_request.upstream[0].tool_receipts[0]["tool_id"],
         )
+        self.assertIsNone(repaired_request.continuation_source_agent_id)
+
+    async def test_changed_upstream_content_clears_continuation_even_with_same_id(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class ContinuationAdapter:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def execute(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse("repaired")
+
+        adapter = ContinuationAdapter()
+        runtime = AgentRuntime(
+            catalog,
+            RecordingGateway(),
+            execution_adapters={"react": adapter},
+        )
+        graph = AgentGraph(
+            [
+                AgentNode("source", "m1", "produce an input"),
+                AgentNode(
+                    "worker",
+                    "m2",
+                    "consume the input",
+                    execution_mode="react",
+                ),
+            ],
+            [AgentRelation("source", "worker", True, False)],
+            output_agent_id="worker",
+        )
+        await runtime.execute(
+            graph,
+            "question",
+            prior_outputs={"source": "new public input"},
+            prior_output_metadata={
+                "source": {"artifact_id": "source:stable-id"}
+            },
+            prior_failure_metadata={
+                "worker": {
+                    "execution_phase": "single",
+                    "continuation_declaration_identity": {
+                        "model_id": "m2",
+                        "contract": "consume the input",
+                        "execution_profile": {
+                            "execution_mode": "react",
+                            "allowed_tools": [],
+                        },
+                    },
+                    "react_trace": [
+                        {"turn": 1, "observation_status": "success"}
+                    ],
+                    "tool_receipts": [
+                        {"tool_id": "python", "success": True}
+                    ],
+                    "input_artifact_versions": {
+                        "source": "source:stable-id"
+                    },
+                    "input_artifact_provenance": [
+                        {
+                            "source_agent_id": "source",
+                            "target_agent_id": "worker",
+                            "message_type": "artifact",
+                            "artifact_type": "text",
+                            "artifact_id": "source:stable-id",
+                            "raw_output": "old public input",
+                            "source_model_id": "m1",
+                            "source_contract": "produce an input",
+                            "artifact_complete": None,
+                            "execution_diagnostic_codes": [],
+                            "tool_receipts": [],
+                            "input_artifact_provenance": [],
+                        }
+                    ],
+                    "continuation_source_agent_id": "worker",
+                }
+            },
+            dirty_agents={"worker"},
+        )
+
+        repaired_request = adapter.requests[0]
+        self.assertEqual((), repaired_request.action_history)
+        self.assertEqual((), repaired_request.prior_tool_receipts)
         self.assertIsNone(repaired_request.continuation_source_agent_id)
 
     async def test_semantic_protocol_is_propagated_to_every_agent_request(self) -> None:
@@ -677,6 +1088,151 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             provenance_by_source["right"]["source_contract"],
         )
 
+    async def test_generic_multihop_preserves_nested_computation_provenance(
+        self,
+    ) -> None:
+        catalog = registry()
+        successful_receipt = {
+            "tool_id": "python_exec",
+            "error_type": None,
+            "request": {"action": "run", "arguments": {"code": "print(7)"}},
+            "result": {"value": {"ok": True, "stdout": "7\n"}},
+        }
+        failed_receipt = {
+            "tool_id": "python_exec",
+            "error_type": None,
+            "request": {"action": "run", "arguments": {"code": "1/0"}},
+            "result": {"value": {"ok": False, "stderr": "division by zero"}},
+        }
+        second_hop_receipt = {
+            "tool_id": "calculator",
+            "error_type": None,
+            "request": {"action": "evaluate", "arguments": {"expression": "7+1"}},
+            "result": {"value": {"ok": True, "value": 8}},
+        }
+
+        class ComputationGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                if request.agent.id == "first":
+                    return AgentResponse(
+                        "First computation: 7",
+                        {
+                            "tool_receipts": [
+                                successful_receipt,
+                                successful_receipt,
+                                failed_receipt,
+                            ]
+                        },
+                    )
+                if request.agent.id == "second":
+                    return AgentResponse(
+                        "Second computation: 8",
+                        {"tool_receipts": [second_hop_receipt]},
+                    )
+                return AgentResponse("Final Answer: 8")
+
+        gateway = ComputationGateway()
+        graph = AgentGraph(
+            [
+                AgentNode("first", "m1", "compute a public intermediate"),
+                AgentNode("second", "m2", "continue the public computation"),
+                AgentNode("third", "m1", "consume the public computation"),
+            ],
+            [
+                AgentRelation("first", "second", True, False),
+                AgentRelation("second", "third", True, False),
+            ],
+            output_agent_id="third",
+        )
+
+        result = await AgentRuntime(catalog, gateway).execute(
+            graph,
+            "question",
+            run_id="generic-transitive-computation",
+        )
+
+        third_request = next(
+            item for item in gateway.requests if item.agent.id == "third"
+        )
+        second_envelope = third_request.upstream[0]
+        self.assertEqual(
+            [second_hop_receipt],
+            [dict(item) for item in second_envelope.tool_receipts],
+        )
+        self.assertEqual(1, len(second_envelope.input_artifact_provenance))
+        first_provenance = dict(
+            second_envelope.input_artifact_provenance[0]
+        )
+        self.assertEqual("first", first_provenance["source_agent_id"])
+        self.assertEqual(
+            result.output_metadata["first"]["artifact_id"],
+            first_provenance["artifact_id"],
+        )
+        first_receipts = first_provenance["tool_receipts"]
+        self.assertEqual(2, len(first_receipts))
+        self.assertEqual(successful_receipt, first_receipts[0])
+        self.assertEqual(failed_receipt, first_receipts[1])
+        self.assertIs(False, first_receipts[1]["result"]["value"]["ok"])
+
+    async def test_reciprocal_peer_draft_uses_standard_typed_envelope(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class PeerGateway:
+            def __init__(self) -> None:
+                self.revisions: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                if request.phase is ExecutionPhase.DRAFT:
+                    return AgentResponse(
+                        f"Final Answer: {41 if request.agent.id == 'left' else 42}",
+                        {
+                            "artifact_complete": True,
+                            "react_trace": [
+                                {
+                                    "observation_status": "schema_invalid",
+                                    "public_error_code": "recovered_parse_error",
+                                }
+                            ],
+                        },
+                    )
+                self.revisions.append(request)
+                return AgentResponse(request.own_draft or "revision")
+
+        gateway = PeerGateway()
+        graph = AgentGraph(
+            [
+                AgentNode("left", "m1", "derive left"),
+                AgentNode("right", "m2", "derive right"),
+            ],
+            [AgentRelation("left", "right", True, True)],
+            output_agent_id="left",
+        )
+        await AgentRuntime(catalog, gateway).execute(
+            graph,
+            "question",
+            run_id="typed-peer",
+        )
+
+        self.assertEqual(2, len(gateway.revisions))
+        for revision in gateway.revisions:
+            peer = revision.peer_draft
+            self.assertIsNotNone(peer)
+            assert peer is not None
+            self.assertIsNotNone(peer.artifact_id)
+            self.assertIsNotNone(peer.source_model_id)
+            self.assertIsNotNone(peer.source_contract)
+            self.assertIs(True, peer.artifact_complete)
+            self.assertEqual(
+                ("recovered_parse_error",),
+                peer.execution_diagnostic_codes,
+            )
+
     async def test_partial_execution_reuses_clean_branch_and_recomputes_dirty_closure(self) -> None:
         catalog = registry()
         gateway = RecordingGateway()
@@ -834,6 +1390,206 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(partial.calls))
         self.assertEqual("", partial.calls[0].response.text)
         self.assertEqual("length", partial.calls[0].response.metadata["finish_reason"])
+
+    async def test_empty_stop_response_does_not_enter_length_recovery(self) -> None:
+        catalog = registry()
+
+        class EmptyStopGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(
+                    "",
+                    metadata={
+                        "finish_reason": "stop",
+                        "reasoning_content_present": True,
+                    },
+                )
+
+        gateway = EmptyStopGateway()
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "answer")],
+            output_agent_id="a",
+        )
+
+        with self.assertRaises(AgentRuntimeError) as raised:
+            await AgentRuntime(
+                catalog,
+                gateway,
+                max_length_continuations=1,
+                length_continuation_max_tokens=8192,
+            ).execute(graph, "question", require_complete=False)
+
+        self.assertEqual(1, len(gateway.requests))
+        self.assertEqual(
+            "EmptyAgentResponse",
+            raised.exception.failure_records[0].error_type,
+        )
+
+    async def test_reasoning_only_length_gets_same_model_public_recovery(
+        self,
+    ) -> None:
+        catalog = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [
+                ModelSpec(
+                    "m1",
+                    "fake",
+                    model_name="same-provider-model",
+                    metadata={
+                        "chat_template_enable_thinking": "true",
+                        "require_reasoning_trace": "true",
+                        "thinking_budget_tokens": "1024",
+                    },
+                )
+            ],
+        )
+
+        class ReasoningOnlyThenPublicGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    return AgentResponse(
+                        "",
+                        metadata={
+                            "finish_reason": "length",
+                            "provider_request_id": "private-only",
+                            "prompt_tokens": 493,
+                            "completion_tokens": 16384,
+                            "total_tokens": 16877,
+                            "chat_template_enable_thinking": True,
+                            "reasoning_content_present": True,
+                        },
+                    )
+                return AgentResponse(
+                    "Final Answer: 148",
+                    metadata={
+                        "finish_reason": "stop",
+                        "provider_request_id": "public-recovery",
+                        "prompt_tokens": 600,
+                        "completion_tokens": 20,
+                        "total_tokens": 620,
+                        "chat_template_enable_thinking": False,
+                        "reasoning_content_present": False,
+                    },
+                )
+
+        gateway = ReasoningOnlyThenPublicGateway()
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "produce a complete public derivation")],
+            output_agent_id="a",
+        )
+        result = await AgentRuntime(
+            catalog,
+            gateway,
+            max_length_continuations=1,
+            length_continuation_max_tokens=8192,
+        ).execute(graph, "question", run_id="reasoning-only-length")
+
+        self.assertEqual("Final Answer: 148", result.final_answer)
+        self.assertEqual(2, len(gateway.requests))
+        initial, continuation = gateway.requests
+        self.assertEqual(initial.agent, continuation.agent)
+        self.assertEqual(initial.model.model_id, continuation.model.model_id)
+        self.assertEqual(initial.model.model_name, continuation.model.model_name)
+        self.assertEqual(initial.provider, continuation.provider)
+        self.assertEqual(initial.problem, continuation.problem)
+        self.assertEqual(initial.upstream, continuation.upstream)
+        self.assertEqual(initial.agent.contract, continuation.agent.contract)
+        self.assertEqual("", continuation.partial_artifact)
+        self.assertEqual(1, continuation.continuation_segment_index)
+        self.assertEqual(8192, continuation.max_tokens_override)
+        self.assertEqual(
+            "false",
+            continuation.model.metadata["chat_template_enable_thinking"],
+        )
+        self.assertEqual(
+            "false",
+            continuation.model.metadata["require_reasoning_trace"],
+        )
+        self.assertNotIn(
+            "thinking_budget_tokens",
+            continuation.model.metadata,
+        )
+
+        metadata = result.output_metadata["a"]
+        self.assertIs(True, metadata["artifact_complete"])
+        self.assertIs(True, metadata["reasoning_only_length_recovery"])
+        self.assertEqual(1, metadata["length_continuation_count"])
+        self.assertEqual(2, len(metadata["generation_segments"]))
+        self.assertEqual(
+            ["", "Final Answer: 148"],
+            [item["raw_output"] for item in metadata["generation_segments"]],
+        )
+        self.assertEqual(
+            [True, False],
+            [
+                item["reasoning_content_present"]
+                for item in metadata["generation_segments"]
+            ],
+        )
+
+    async def test_reasoning_only_length_recovery_exhaustion_is_incomplete(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class EmptyLengthGateway:
+            def __init__(self) -> None:
+                self.requests: list[AgentRequest] = []
+
+            async def generate(self, request: AgentRequest) -> AgentResponse:
+                self.requests.append(request)
+                return AgentResponse(
+                    "",
+                    metadata={
+                        "finish_reason": "length",
+                        "provider_request_id": f"segment-{len(self.requests) - 1}",
+                        "reasoning_content_present": len(self.requests) == 1,
+                    },
+                )
+
+        gateway = EmptyLengthGateway()
+        graph = AgentGraph(
+            [AgentNode("a", "m1", "produce a complete public derivation")],
+            output_agent_id="a",
+        )
+        with self.assertRaises(AgentRuntimeError) as raised:
+            await AgentRuntime(
+                catalog,
+                gateway,
+                max_length_continuations=1,
+                length_continuation_max_tokens=8192,
+            ).execute(
+                graph,
+                "question",
+                run_id="reasoning-only-length-exhausted",
+                require_complete=False,
+            )
+
+        self.assertEqual(2, len(gateway.requests))
+        failure = raised.exception.failure_records[0]
+        self.assertEqual("IncompleteAgentArtifact", failure.error_type)
+        self.assertIs(True, failure.metadata["reasoning_only_length_recovery"])
+        self.assertEqual("", failure.metadata["partial_artifact"])
+        self.assertEqual(2, len(failure.metadata["generation_segments"]))
+        self.assertEqual(
+            ["", ""],
+            [
+                item["raw_output"]
+                for item in failure.metadata["generation_segments"]
+            ],
+        )
+        partial = raised.exception.partial_result
+        self.assertIsNotNone(partial)
+        assert partial is not None
+        self.assertEqual({}, dict(partial.outputs))
+        self.assertIsNone(partial.final_answer)
 
     async def test_length_finish_reason_overrides_declared_complete_metadata(
         self,
@@ -1147,6 +1903,35 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             failure.metadata["react_trace"][0]["observation_status"],
         )
         self.assertEqual("qa.search", failure.metadata["tool_receipts"][0]["tool_id"])
+        self.assertEqual(
+            {"execution_mode": "reasoning", "allowed_tools": []},
+            failure.metadata["continuation_execution_profile"],
+        )
+        self.assertEqual(
+            failure.metadata["continuation_execution_profile"],
+            failure.metadata["react_trace"][0][
+                "continuation_execution_profile"
+            ],
+        )
+        self.assertEqual("bound", failure.metadata["continuation_identity_status"])
+        expected_identity = {
+            "model_id": "m1",
+            "contract": "answer",
+            "execution_profile": {
+                "execution_mode": "reasoning",
+                "allowed_tools": [],
+            },
+        }
+        self.assertEqual(
+            expected_identity,
+            failure.metadata["continuation_declaration_identity"],
+        )
+        self.assertEqual(
+            expected_identity,
+            failure.metadata["react_trace"][0][
+                "continuation_declaration_identity"
+            ],
+        )
 
     async def test_format_execution_role_is_explicit_and_terminal(self) -> None:
         catalog = registry()
@@ -1218,6 +2003,117 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "Format Agent must use reasoning execution without tools",
         ):
             await runtime.execute(graph, "question", format_output_agent=True)
+
+    async def test_registered_execution_profiles_are_model_capability_aware(
+        self,
+    ) -> None:
+        catalog = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [
+                ModelSpec("legacy", "fake"),
+                ModelSpec(
+                    "reasoning-only",
+                    "fake",
+                    metadata={
+                        "tool_capable": "false",
+                        "coding_capable": "false",
+                    },
+                ),
+                ModelSpec(
+                    "tool-model",
+                    "fake",
+                    metadata={
+                        "tool_capable": "true",
+                        "coding_capable": "false",
+                    },
+                ),
+                ModelSpec(
+                    "coding-model",
+                    "fake",
+                    metadata={
+                        "tool_capable": "false",
+                        "coding_capable": "true",
+                    },
+                ),
+            ],
+        )
+        gateway = RecordingGateway()
+        adapter = ReasoningExecutionAdapter(gateway)
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            execution_adapters={"react": adapter, "coding": adapter},
+            tool_registry=self._stateless_tool_registry("tool.a"),
+        )
+
+        all_profiles = set(runtime.registered_execution_profiles())
+        self.assertEqual(
+            all_profiles,
+            set(runtime.registered_execution_profiles_for_model("legacy")),
+        )
+        self.assertEqual(
+            {("reasoning", ())},
+            set(
+                runtime.registered_execution_profiles_for_model(
+                    "reasoning-only"
+                )
+            ),
+        )
+        self.assertEqual(
+            {profile for profile in all_profiles if profile[0] != "coding"},
+            set(runtime.registered_execution_profiles_for_model("tool-model")),
+        )
+        self.assertEqual(
+            {profile for profile in all_profiles if profile[0] != "react"},
+            set(runtime.registered_execution_profiles_for_model("coding-model")),
+        )
+
+    async def test_runtime_rejects_model_execution_mode_capability_mismatch(
+        self,
+    ) -> None:
+        catalog = ModelRegistry(
+            [ProviderSpec("fake", kind="test")],
+            [
+                ModelSpec(
+                    "restricted",
+                    "fake",
+                    metadata={
+                        "tool_capable": "false",
+                        "coding_capable": "false",
+                    },
+                )
+            ],
+        )
+        gateway = RecordingGateway()
+        adapter = ReasoningExecutionAdapter(gateway)
+        runtime = AgentRuntime(
+            catalog,
+            gateway,
+            execution_adapters={"react": adapter, "coding": adapter},
+        )
+
+        for execution_mode, capability_field in (
+            ("react", "tool_capable"),
+            ("coding", "coding_capable"),
+        ):
+            with self.subTest(execution_mode=execution_mode):
+                graph = AgentGraph(
+                    [
+                        AgentNode(
+                            "worker",
+                            "restricted",
+                            "complete the task",
+                            execution_mode=execution_mode,
+                        )
+                    ],
+                    output_agent_id="worker",
+                )
+                with self.assertRaisesRegex(
+                    AgentRuntimeError,
+                    capability_field,
+                ):
+                    await runtime.execute(graph, "question")
+        self.assertEqual([], gateway.requests)
 
     async def test_stateful_tool_requires_one_graph_agent_owner(self) -> None:
         catalog = registry()
@@ -1900,6 +2796,143 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(gateway.b_cancelled.wait(), timeout=1.0)
         self.assertNotIn("c", gateway.called)
 
+    async def test_cancelled_root_marks_its_unstarted_descendant_blocked(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class FailingGateway:
+            def __init__(self) -> None:
+                self.slow_started = asyncio.Event()
+                self.slow_cancelled = asyncio.Event()
+                self.called: list[str] = []
+
+            async def generate(self, request: AgentRequest) -> str:
+                self.called.append(request.agent.id)
+                if request.agent.id == "independent_failure":
+                    await self.slow_started.wait()
+                    raise RuntimeError("boom")
+                if request.agent.id == "slow_root":
+                    self.slow_started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        self.slow_cancelled.set()
+                return request.agent.id
+
+        gateway = FailingGateway()
+        graph = AgentGraph(
+            [
+                AgentNode("independent_failure", "m1", "fail"),
+                AgentNode("slow_root", "m1", "work"),
+                AgentNode("downstream", "m1", "consume"),
+                AgentNode("output", "m1", "finish"),
+            ],
+            [
+                AgentRelation("slow_root", "downstream", True, False),
+                AgentRelation("downstream", "output", True, False),
+                AgentRelation(
+                    "independent_failure",
+                    "output",
+                    True,
+                    False,
+                ),
+            ],
+            output_agent_id="output",
+        )
+        with self.assertRaises(AgentRuntimeError) as caught:
+            await AgentRuntime(catalog, gateway).execute(graph, "question")
+
+        await asyncio.wait_for(gateway.slow_cancelled.wait(), timeout=1.0)
+        partial = caught.exception.partial_result
+        self.assertIsNotNone(partial)
+        assert partial is not None
+        self.assertEqual(
+            "FAILURE",
+            partial.agent_statuses["independent_failure"],
+        )
+        self.assertEqual("FAILURE", partial.agent_statuses["slow_root"])
+        self.assertEqual(
+            "BLOCKED_BY_UPSTREAM",
+            partial.agent_statuses["downstream"],
+        )
+        self.assertEqual(
+            "BLOCKED_BY_UPSTREAM",
+            partial.agent_statuses["output"],
+        )
+        self.assertEqual(
+            ("downstream", "output"),
+            caught.exception.blocked_agent_ids,
+        )
+        self.assertNotIn("downstream", gateway.called)
+        self.assertNotIn("output", gateway.called)
+        self.assertNotIn("slow_root", partial.outputs)
+        cancellation = next(
+            record
+            for record in caught.exception.failure_records
+            if record.agent_id == "slow_root"
+        )
+        self.assertEqual("CancelledError", cancellation.error_type)
+
+    async def test_fail_fast_preserves_sibling_done_outside_wait_snapshot(
+        self,
+    ) -> None:
+        catalog = registry()
+
+        class Gateway:
+            async def generate(self, request: AgentRequest) -> str:
+                if request.agent.id == "z_failure":
+                    raise RuntimeError("boom")
+                return "durable-success"
+
+        graph = AgentGraph(
+            [
+                AgentNode("a_success", "m1", "produce"),
+                AgentNode("z_failure", "m1", "fail"),
+                AgentNode("output", "m1", "finish"),
+            ],
+            [
+                AgentRelation("a_success", "output", True, False),
+                AgentRelation("z_failure", "output", True, False),
+            ],
+            output_agent_id="output",
+        )
+        real_wait = asyncio.wait
+
+        async def underreport_completed_sibling(tasks, *, return_when):  # type: ignore[no-untyped-def]
+            ordered = tuple(tasks)
+            await real_wait(ordered, return_when=asyncio.ALL_COMPLETED)
+            # Reproduce the cancellation race: FIRST_COMPLETED reports only
+            # the failed task although the sibling is already successful.
+            failed_task = next(
+                task
+                for task in ordered
+                if isinstance(task.exception(), AgentRuntimeError)
+            )
+            successful_task = next(task for task in ordered if task is not failed_task)
+            return {failed_task}, {successful_task}
+
+        with patch(
+            "src.interactive.agent_runtime.asyncio.wait",
+            side_effect=underreport_completed_sibling,
+        ):
+            with self.assertRaises(AgentRuntimeError) as caught:
+                await AgentRuntime(catalog, Gateway()).execute(
+                    graph,
+                    "question",
+                )
+
+        partial = caught.exception.partial_result
+        self.assertIsNotNone(partial)
+        assert partial is not None
+        self.assertEqual(
+            "durable-success",
+            partial.outputs["a_success"],
+        )
+        self.assertEqual("SUCCESS", partial.agent_statuses["a_success"])
+        self.assertEqual("FAILURE", partial.agent_statuses["z_failure"])
+        self.assertEqual(("a_success",), partial.executed_agent_ids)
+
     async def test_fail_fast_cancellation_preserves_environment_public_prefix(self) -> None:
         catalog = registry()
 
@@ -2091,6 +3124,41 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ("dependent", "unavailable"),
             result.deferred_agent_ids,
         )
+
+    async def test_unavailable_model_reuses_fresh_upstream_artifact_for_dirty_downstream(
+        self,
+    ) -> None:
+        catalog = registry()
+        gateway = RecordingGateway()
+        graph = AgentGraph(
+            [
+                AgentNode("upstream", "m1", "derive an artifact"),
+                AgentNode("downstream", "m2", "consume the artifact"),
+            ],
+            [AgentRelation("upstream", "downstream", True, False)],
+        )
+
+        result = await AgentRuntime(catalog, gateway).execute(
+            graph,
+            "question",
+            require_complete=False,
+            prior_outputs={"upstream": "durable upstream artifact"},
+            prior_output_metadata={
+                "upstream": {"artifact_id": "artifact-upstream"}
+            },
+            dirty_agents={"downstream"},
+            unavailable_model_ids={"m1"},
+        )
+
+        self.assertEqual(
+            ["downstream"],
+            [item.agent.id for item in gateway.requests],
+        )
+        self.assertEqual(
+            "durable upstream artifact", result.outputs["upstream"]
+        )
+        self.assertEqual(("upstream",), result.reused_agent_ids)
+        self.assertEqual((), result.deferred_agent_ids)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,12 @@ class AgentExecutionStatus(str, Enum):
     BLOCKED_BY_UPSTREAM = "BLOCKED_BY_UPSTREAM"
 
 
+_CONTINUATION_EXECUTION_PROFILE_KEY = "continuation_execution_profile"
+_CONTINUATION_DECLARATION_IDENTITY_KEY = (
+    "continuation_declaration_identity"
+)
+
+
 def _communication_condition(
     value: Union[CommunicationCondition, str],
 ) -> CommunicationCondition:
@@ -54,6 +60,151 @@ def _communication_condition(
         raise ValueError(
             "communication_condition must be normal or upstream_masked"
         ) from exc
+
+
+def _canonical_execution_profile(
+    agent: AgentNode,
+) -> Tuple[str, Tuple[str, ...]]:
+    """Return the execution semantics that delimit active continuation state."""
+
+    execution_mode = getattr(agent.execution_mode, "value", agent.execution_mode)
+    return str(execution_mode), tuple(sorted(agent.allowed_tools))
+
+
+def _serialized_execution_profile(agent: AgentNode) -> Dict[str, object]:
+    execution_mode, allowed_tools = _canonical_execution_profile(agent)
+    return {
+        "execution_mode": execution_mode,
+        "allowed_tools": list(allowed_tools),
+    }
+
+
+def _canonical_continuation_declaration_identity(
+    agent: AgentNode,
+) -> Tuple[str, str, Tuple[str, Tuple[str, ...]]]:
+    """Bind active continuation state to the exact Agent declaration."""
+
+    return agent.model_id, agent.contract, _canonical_execution_profile(agent)
+
+
+def _serialized_continuation_declaration_identity(
+    agent: AgentNode,
+) -> Dict[str, object]:
+    return {
+        "model_id": agent.model_id,
+        "contract": agent.contract,
+        "execution_profile": _serialized_execution_profile(agent),
+    }
+
+
+def _parse_execution_profile(
+    value: object,
+) -> Optional[Tuple[str, Tuple[str, ...]]]:
+    if not isinstance(value, Mapping):
+        return None
+    execution_mode = value.get("execution_mode")
+    allowed_tools = value.get("allowed_tools")
+    if not isinstance(execution_mode, str) or not execution_mode.strip():
+        return None
+    if (
+        isinstance(allowed_tools, (str, bytes))
+        or not isinstance(allowed_tools, (list, tuple))
+        or any(
+            not isinstance(tool_id, str) or not tool_id.strip()
+            for tool_id in allowed_tools
+        )
+    ):
+        return None
+    normalized_tools = tuple(sorted(tool_id.strip() for tool_id in allowed_tools))
+    if len(set(normalized_tools)) != len(normalized_tools):
+        return None
+    return execution_mode.strip(), normalized_tools
+
+
+def _parse_continuation_declaration_identity(
+    value: object,
+) -> Optional[Tuple[str, str, Tuple[str, Tuple[str, ...]]]]:
+    if not isinstance(value, Mapping):
+        return None
+    model_id = value.get("model_id")
+    contract = value.get("contract")
+    execution_profile = _parse_execution_profile(
+        value.get("execution_profile")
+    )
+    if (
+        not isinstance(model_id, str)
+        or not model_id.strip()
+        or not isinstance(contract, str)
+        or not contract.strip()
+        or execution_profile is None
+    ):
+        return None
+    # AgentNode preserves these declaration strings exactly.  Do not
+    # normalize either value: even a contract-only edit changes the active
+    # continuation context.
+    return model_id, contract, execution_profile
+
+
+def _continuation_declaration_identity(
+    metadata: Mapping[str, object],
+) -> Optional[Tuple[str, str, Tuple[str, Tuple[str, ...]]]]:
+    """Read declaration-bound receipts; missing fields identify legacy state."""
+
+    direct = _parse_continuation_declaration_identity(
+        metadata.get(_CONTINUATION_DECLARATION_IDENTITY_KEY)
+    )
+    if direct is not None:
+        return direct
+    # AgentWorkflowEnv projects public Action--Observation items.  Mirror the
+    # complete declaration identity into those items so repair remains bound
+    # after the projection, while old records without it remain readable as
+    # legacy (and are never treated as a declaration match).
+    for field_name in ("react_trace", "tool_receipts"):
+        raw_items = metadata.get(field_name, ())
+        if not isinstance(raw_items, (list, tuple)):
+            continue
+        for item in raw_items:
+            if not isinstance(item, Mapping):
+                continue
+            nested = _parse_continuation_declaration_identity(
+                item.get(_CONTINUATION_DECLARATION_IDENTITY_KEY)
+            )
+            if nested is not None:
+                return nested
+    return None
+
+
+def _bind_continuation_execution_profile(
+    metadata: Mapping[str, object],
+    agent: AgentNode,
+) -> Mapping[str, object]:
+    """Bind public receipts to an exact declaration and execution profile."""
+
+    result = dict(metadata)
+    serialized_profile = _serialized_execution_profile(agent)
+    serialized_identity = _serialized_continuation_declaration_identity(
+        agent
+    )
+    result[_CONTINUATION_EXECUTION_PROFILE_KEY] = serialized_profile
+    result[_CONTINUATION_DECLARATION_IDENTITY_KEY] = serialized_identity
+    result["continuation_identity_status"] = "bound"
+    for field_name in ("react_trace", "tool_receipts"):
+        raw_items = result.get(field_name)
+        if not isinstance(raw_items, (list, tuple)):
+            continue
+        result[field_name] = [
+            {
+                **dict(item),
+                _CONTINUATION_EXECUTION_PROFILE_KEY: dict(serialized_profile),
+                _CONTINUATION_DECLARATION_IDENTITY_KEY: dict(
+                    serialized_identity
+                ),
+            }
+            if isinstance(item, Mapping)
+            else item
+            for item in raw_items
+        ]
+    return MappingProxyType(result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +229,9 @@ class UpstreamMessage:
     artifact_version: Optional[str] = None
     source_model_id: Optional[str] = None
     source_contract: Optional[str] = None
+    artifact_complete: Optional[bool] = None
+    execution_diagnostic_codes: Tuple[str, ...] = ()
+    input_artifact_provenance: Tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -121,14 +275,40 @@ class UpstreamMessage:
                 not isinstance(value, str) or not value.strip()
             ):
                 raise ValueError(f"{name} must be non-empty when supplied")
+        if self.artifact_complete is not None and type(
+            self.artifact_complete
+        ) is not bool:
+            raise TypeError("artifact_complete must be bool or None")
+        if not isinstance(self.execution_diagnostic_codes, tuple) or any(
+            not isinstance(item, str) or not item.strip()
+            for item in self.execution_diagnostic_codes
+        ):
+            raise TypeError(
+                "execution_diagnostic_codes must be a tuple of non-empty strings"
+            )
         if not isinstance(self.tool_receipts, tuple) or any(
             not isinstance(item, Mapping) for item in self.tool_receipts
         ):
             raise TypeError("tool_receipts must be a tuple of mappings")
+        if not isinstance(self.input_artifact_provenance, tuple) or any(
+            not isinstance(item, Mapping)
+            for item in self.input_artifact_provenance
+        ):
+            raise TypeError(
+                "input_artifact_provenance must be a tuple of mappings"
+            )
         object.__setattr__(
             self,
             "tool_receipts",
             tuple(MappingProxyType(dict(item)) for item in self.tool_receipts),
+        )
+        object.__setattr__(
+            self,
+            "input_artifact_provenance",
+            tuple(
+                MappingProxyType(dict(item))
+                for item in self.input_artifact_provenance
+            ),
         )
 
     @property
@@ -165,9 +345,21 @@ class UpstreamMessage:
             "artifact_id": self.artifact_version,
             "source_model_id": self.source_model_id,
             "source_contract": self.source_contract,
+            "artifact_complete": self.artifact_complete,
+            "artifact_status": (
+                None
+                if self.artifact_complete is None
+                else "complete" if self.artifact_complete else "incomplete"
+            ),
+            "execution_diagnostic_codes": list(
+                self.execution_diagnostic_codes
+            ),
             "request_or_dependency": self.request_or_dependency,
             "dependency": self.request_or_dependency,
             "tool_receipts": [dict(item) for item in self.tool_receipts],
+            "input_artifact_provenance": [
+                dict(item) for item in self.input_artifact_provenance
+            ],
         }
 
 
@@ -242,12 +434,11 @@ class AgentRequest:
             raise ValueError(
                 "AgentRequest.continuation_source_agent_id must be non-empty text"
             )
-        if self.partial_artifact is not None and (
-            not isinstance(self.partial_artifact, str)
-            or not self.partial_artifact
+        if self.partial_artifact is not None and not isinstance(
+            self.partial_artifact, str
         ):
             raise ValueError(
-                "AgentRequest.partial_artifact must be non-empty text or None"
+                "AgentRequest.partial_artifact must be text or None"
             )
         if (
             type(self.continuation_segment_index) is not int
@@ -339,6 +530,21 @@ def _tool_receipts_from_metadata(
     )
 
 
+def _input_artifact_provenance_from_metadata(
+    metadata: Mapping[str, object],
+) -> Tuple[Mapping[str, object], ...]:
+    """Read nested, source-bound provenance without flattening its graph path."""
+
+    raw = metadata.get("input_artifact_provenance", ())
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(
+        MappingProxyType(dict(item))
+        for item in raw
+        if isinstance(item, Mapping)
+    )
+
+
 _CHECKPOINT_UNSAFE = object()
 
 
@@ -365,6 +571,61 @@ def _checkpoint_value(value: object) -> object:
             if safe_item is not _CHECKPOINT_UNSAFE:
                 converted_items.append(safe_item)
         return converted_items
+
+
+def _continuation_input_identity_item(
+    value: Mapping[str, object],
+) -> Dict[str, object]:
+    """Select the immutable, source-bound fields of one communication input."""
+
+    raw_content = value.get(
+        "raw_output",
+        value.get("artifact_body", value.get("artifact", value.get("content"))),
+    )
+    nested = value.get("input_artifact_provenance", ())
+    nested_identity = (
+        [
+            _continuation_input_identity_item(item)
+            for item in nested
+            if isinstance(item, Mapping)
+        ]
+        if isinstance(nested, (list, tuple))
+        else []
+    )
+    result: Dict[str, object] = {
+        "source_agent_id": value.get("source_agent_id"),
+        "target_agent_id": value.get("target_agent_id"),
+        "message_type": value.get("message_type"),
+        "artifact_type": value.get("artifact_type"),
+        "artifact_id": value.get(
+            "artifact_id", value.get("artifact_version")
+        ),
+        "raw_output": raw_content,
+        "source_model_id": value.get("source_model_id"),
+        "source_contract": value.get("source_contract"),
+        "artifact_complete": value.get("artifact_complete"),
+        "execution_diagnostic_codes": value.get(
+            "execution_diagnostic_codes", ()
+        ),
+        "tool_receipts": value.get("tool_receipts", ()),
+        "input_artifact_provenance": nested_identity,
+    }
+    normalized = _checkpoint_value(result)
+    return normalized if isinstance(normalized, dict) else {}
+
+
+def _continuation_input_identity(
+    value: object,
+) -> Optional[Tuple[Mapping[str, object], ...]]:
+    if not isinstance(value, (list, tuple)) or any(
+        not isinstance(item, Mapping) for item in value
+    ):
+        return None
+    return tuple(
+        MappingProxyType(_continuation_input_identity_item(item))
+        for item in value
+        if isinstance(item, Mapping)
+    )
 
 
 def _environment_revision_from_metadata(
@@ -646,6 +907,10 @@ def _public_failure_metadata(exc: BaseException) -> Mapping[str, object]:
         "environment_terminal",
         "cause_error_type",
         "tool_plan_exhausted",
+        "failure_category",
+        "failure_reason",
+        "bounded_regeneration_attempt_count",
+        "regeneration_exhausted",
         "provider_id",
         "model_id",
         "http_status",
@@ -664,6 +929,36 @@ def _public_failure_metadata(exc: BaseException) -> Mapping[str, object]:
     return MappingProxyType(result)
 
 
+def _execution_diagnostic_codes_from_metadata(
+    metadata: Mapping[str, object],
+) -> Tuple[str, ...]:
+    """Project public ReAct recovery events without judging artifact truth."""
+
+    raw_trace = metadata.get("react_trace", ())
+    if not isinstance(raw_trace, (list, tuple)):
+        return ()
+    codes: list[str] = []
+    for item in raw_trace:
+        if not isinstance(item, Mapping):
+            continue
+        public_error_code = item.get("public_error_code")
+        if isinstance(public_error_code, str) and public_error_code.strip():
+            code = public_error_code.strip()
+        else:
+            observation_status = item.get("observation_status")
+            if observation_status not in {
+                "parse_error",
+                "schema_invalid",
+                "budget_exhausted",
+                "tool_error",
+            }:
+                continue
+            code = str(observation_status)
+        if code not in codes:
+            codes.append(code)
+    return tuple(codes)
+
+
 @dataclass(frozen=True, slots=True)
 class _ExecutionPlan:
     components: Tuple[Tuple[str, ...], ...]
@@ -673,12 +968,15 @@ class _ExecutionPlan:
     relations: Tuple[AgentRelation, ...]
 
 
-async def _cancel_and_wait(tasks: List["asyncio.Task[object]"]) -> None:
+async def _cancel_and_wait(
+    tasks: List["asyncio.Task[object]"],
+) -> Tuple[object, ...]:
     for task in tasks:
         if not task.done():
             task.cancel()
     if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+        return tuple(await asyncio.gather(*tasks, return_exceptions=True))
+    return ()
 
 
 async def _gather_pair(
@@ -821,6 +1119,38 @@ class AgentRuntime:
                 profiles.append((mode_value, (tool_id,)))
         return tuple(profiles)
 
+    @staticmethod
+    def _model_supports_execution_mode(
+        model: ModelSpec,
+        execution_mode: str,
+    ) -> bool:
+        """Apply optional catalog capability receipts without breaking old catalogs."""
+
+        capability_field = {
+            "react": "tool_capable",
+            "coding": "coding_capable",
+        }.get(execution_mode)
+        if capability_field is None:
+            return execution_mode == "reasoning"
+        raw_value = model.metadata.get(capability_field)
+        # Older ModelSpec records predate these fields and retain their
+        # previous Runtime behavior.  Once a field is declared, only the
+        # canonical string value ``true`` admits that execution mode.
+        return raw_value is None or raw_value.strip().casefold() == "true"
+
+    def registered_execution_profiles_for_model(
+        self,
+        model_id: str,
+    ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+        """Return Runtime profiles admitted by one model's catalog metadata."""
+
+        model = self.model_registry.require_model(model_id)
+        return tuple(
+            profile
+            for profile in self.registered_execution_profiles()
+            if self._model_supports_execution_mode(model, profile[0])
+        )
+
     async def execute(
         self,
         graph: AgentGraph,
@@ -946,7 +1276,14 @@ class AgentRuntime:
         unavailable_components = {
             component
             for component in plan.components
-            if any(nodes[agent_id].model_id in unavailable_models for agent_id in component)
+            if (
+                component in dirty_components
+                or any(agent_id not in outputs for agent_id in component)
+            )
+            and any(
+                nodes[agent_id].model_id in unavailable_models
+                for agent_id in component
+            )
         }
         pending_unavailable_components = list(unavailable_components)
         while pending_unavailable_components:
@@ -1042,7 +1379,35 @@ class AgentRuntime:
                     else:
                         executed_agents.update(component)
                 if failures:
-                    await _cancel_and_wait(list(active))  # type: ignore[arg-type]
+                    # A sibling may have completed after FIRST_COMPLETED took
+                    # its snapshot but before this fail-fast boundary observed
+                    # it. Preserve that immutable result; only genuinely
+                    # cancelled components remain non-materialized.
+                    active_items = tuple(
+                        sorted(active.items(), key=lambda item: item[1])
+                    )
+                    sibling_outcomes = await _cancel_and_wait(  # type: ignore[arg-type]
+                        [task for task, _ in active_items]
+                    )
+                    active.clear()
+                    cancelled_component_ids: set[str] = set()
+                    for (_, component), outcome in zip(
+                        active_items,
+                        sibling_outcomes,
+                    ):
+                        if isinstance(outcome, asyncio.CancelledError):
+                            cancelled_component_ids.update(component)
+                            continue
+                        if isinstance(outcome, BaseException):
+                            failures.append((component, outcome))
+                            continue
+                        block_outputs, reused = outcome  # type: ignore[misc]
+                        outputs.update(block_outputs)
+                        completion_order.append(component)
+                        if reused:
+                            reused_agents.update(component)
+                        else:
+                            executed_agents.update(component)
                     failure_component, failure = failures[0]
                     if isinstance(failure, asyncio.CancelledError):
                         raise failure
@@ -1051,10 +1416,16 @@ class AgentRuntime:
                         for component, _ in failures
                         for agent_id in component
                     }
+                    nonmaterialized_component_ids = (
+                        failed_component_ids | cancelled_component_ids
+                    )
                     blocked_agent_ids = tuple(
                         sorted(
-                            execution_graph.dirty_closure(failed_component_ids)
-                            - failed_component_ids
+                            execution_graph.dirty_closure(
+                                nonmaterialized_component_ids
+                            )
+                            - nonmaterialized_component_ids
+                            - set(outputs)
                         )
                     )
                     blocked_status_ids = set(blocked_agent_ids) | set(
@@ -1306,6 +1677,18 @@ class AgentRuntime:
                     f"agent {node.id!r} requires unregistered execution adapter "
                     f"{mode_value!r}"
                 )
+            model = self.model_registry.require_model(node.model_id)
+            if not self._model_supports_execution_mode(model, str(mode_value)):
+                capability_field = (
+                    "tool_capable"
+                    if mode_value == "react"
+                    else "coding_capable"
+                )
+                raise AgentRuntimeError(
+                    f"agent {node.id!r} model {node.model_id!r} does not admit "
+                    f"execution_mode={mode_value!r}; model metadata "
+                    f"{capability_field!r} must be 'true'"
+                )
             if not node.allowed_tools:
                 continue
             if mode_value == "reasoning":
@@ -1548,23 +1931,15 @@ class AgentRuntime:
                 retriever_draft_request,
                 retriever_draft,
             )
-            retriever_draft_message = UpstreamMessage(
-                retriever_id,
-                reasoner_id,
-                retriever_draft.text,
+            retriever_draft_message = self._artifact_envelope(
+                source_agent_id=retriever_id,
+                target_agent_id=reasoner_id,
+                content=retriever_draft.text,
+                nodes=nodes,
                 message_type="evidence",
                 graph_revision=graph_revision,
-                request_or_dependency=nodes[reasoner_id].contract,
-                artifact_type=getattr(
-                    nodes[retriever_id], "artifact_type", "text"
-                ),
-                environment_revision=_environment_revision_from_metadata(
-                    retriever_draft_metadata
-                ),
-                tool_receipts=_tool_receipts_from_metadata(
-                    retriever_draft_metadata
-                ),
-                artifact_version=retriever_draft_request.request_id,
+                metadata=retriever_draft_metadata,
+                artifact_id=retriever_draft_request.request_id,
             )
             reasoner_draft_request = self._request(
                 agent=nodes[reasoner_id],
@@ -1606,23 +1981,15 @@ class AgentRuntime:
                 phase=ExecutionPhase.REVISION,
                 upstream=upstream_by_id[retriever_id],
                 own_draft=retriever_draft.text,
-                peer_draft=UpstreamMessage(
-                    reasoner_id,
-                    retriever_id,
-                    reasoner_draft.text,
+                peer_draft=self._artifact_envelope(
+                    source_agent_id=reasoner_id,
+                    target_agent_id=retriever_id,
+                    content=reasoner_draft.text,
+                    nodes=nodes,
                     message_type="candidate",
                     graph_revision=graph_revision,
-                    request_or_dependency=nodes[retriever_id].contract,
-                    artifact_type=getattr(
-                        nodes[reasoner_id], "artifact_type", "text"
-                    ),
-                    environment_revision=_environment_revision_from_metadata(
-                        reasoner_draft_metadata
-                    ),
-                    tool_receipts=_tool_receipts_from_metadata(
-                        reasoner_draft_metadata
-                    ),
-                    artifact_version=reasoner_draft_request.request_id,
+                    metadata=reasoner_draft_metadata,
+                    artifact_id=reasoner_draft_request.request_id,
                 ),
                 problem=problem,
                 run_id=run_id,
@@ -1649,23 +2016,15 @@ class AgentRuntime:
                 phase=ExecutionPhase.REVISION,
                 upstream=upstream_by_id[reasoner_id],
                 own_draft=reasoner_draft.text,
-                peer_draft=UpstreamMessage(
-                    retriever_id,
-                    reasoner_id,
-                    retriever_revision.text,
+                peer_draft=self._artifact_envelope(
+                    source_agent_id=retriever_id,
+                    target_agent_id=reasoner_id,
+                    content=retriever_revision.text,
+                    nodes=nodes,
                     message_type="evidence",
                     graph_revision=graph_revision,
-                    request_or_dependency=nodes[reasoner_id].contract,
-                    artifact_type=getattr(
-                        nodes[retriever_id], "artifact_type", "text"
-                    ),
-                    environment_revision=_environment_revision_from_metadata(
-                        retriever_revision_metadata
-                    ),
-                    tool_receipts=_tool_receipts_from_metadata(
-                        retriever_revision_metadata
-                    ),
-                    artifact_version=retriever_revision_request.request_id,
+                    metadata=retriever_revision_metadata,
+                    artifact_id=retriever_revision_request.request_id,
                 ),
                 problem=problem,
                 run_id=run_id,
@@ -1744,23 +2103,15 @@ class AgentRuntime:
                 reasoner_draft_request,
                 reasoner_draft,
             )
-            reasoner_draft_message = UpstreamMessage(
-                reasoner_id,
-                verifier_id,
-                reasoner_draft.text,
+            reasoner_draft_message = self._artifact_envelope(
+                source_agent_id=reasoner_id,
+                target_agent_id=verifier_id,
+                content=reasoner_draft.text,
+                nodes=nodes,
                 message_type="candidate",
                 graph_revision=graph_revision,
-                request_or_dependency=nodes[verifier_id].contract,
-                artifact_type=getattr(
-                    nodes[reasoner_id], "artifact_type", "text"
-                ),
-                environment_revision=_environment_revision_from_metadata(
-                    reasoner_draft_metadata
-                ),
-                tool_receipts=_tool_receipts_from_metadata(
-                    reasoner_draft_metadata
-                ),
-                artifact_version=reasoner_draft_request.request_id,
+                metadata=reasoner_draft_metadata,
+                artifact_id=reasoner_draft_request.request_id,
             )
             verifier_initial_request = self._request(
                 agent=nodes[verifier_id],
@@ -1802,23 +2153,15 @@ class AgentRuntime:
                 phase=ExecutionPhase.REVISION,
                 upstream=upstream_by_id[reasoner_id],
                 own_draft=reasoner_draft.text,
-                peer_draft=UpstreamMessage(
-                    verifier_id,
-                    reasoner_id,
-                    verifier_initial.text,
+                peer_draft=self._artifact_envelope(
+                    source_agent_id=verifier_id,
+                    target_agent_id=reasoner_id,
+                    content=verifier_initial.text,
+                    nodes=nodes,
                     message_type="candidate",
                     graph_revision=graph_revision,
-                    request_or_dependency=nodes[reasoner_id].contract,
-                    artifact_type=getattr(
-                        nodes[verifier_id], "artifact_type", "text"
-                    ),
-                    environment_revision=_environment_revision_from_metadata(
-                        verifier_initial_metadata
-                    ),
-                    tool_receipts=_tool_receipts_from_metadata(
-                        verifier_initial_metadata
-                    ),
-                    artifact_version=verifier_initial_request.request_id,
+                    metadata=verifier_initial_metadata,
+                    artifact_id=verifier_initial_request.request_id,
                 ),
                 problem=problem,
                 run_id=run_id,
@@ -1845,23 +2188,15 @@ class AgentRuntime:
                 phase=ExecutionPhase.REVISION,
                 upstream=upstream_by_id[verifier_id],
                 own_draft=verifier_initial.text,
-                peer_draft=UpstreamMessage(
-                    reasoner_id,
-                    verifier_id,
-                    reasoner_revision.text,
+                peer_draft=self._artifact_envelope(
+                    source_agent_id=reasoner_id,
+                    target_agent_id=verifier_id,
+                    content=reasoner_revision.text,
+                    nodes=nodes,
                     message_type="candidate",
                     graph_revision=graph_revision,
-                    request_or_dependency=nodes[verifier_id].contract,
-                    artifact_type=getattr(
-                        nodes[reasoner_id], "artifact_type", "text"
-                    ),
-                    environment_revision=_environment_revision_from_metadata(
-                        reasoner_revision_metadata
-                    ),
-                    tool_receipts=_tool_receipts_from_metadata(
-                        reasoner_revision_metadata
-                    ),
-                    artifact_version=reasoner_revision_request.request_id,
+                    metadata=reasoner_revision_metadata,
+                    artifact_id=reasoner_revision_request.request_id,
                 ),
                 problem=problem,
                 run_id=run_id,
@@ -1919,25 +2254,29 @@ class AgentRuntime:
             self._invoke(left_draft_request, calls, cancelled_failure_records),
             self._invoke(right_draft_request, calls, cancelled_failure_records),
         )
+        left_draft_metadata = self._response_output_metadata(
+            left_draft_request,
+            left_draft,
+        )
+        right_draft_metadata = self._response_output_metadata(
+            right_draft_request,
+            right_draft,
+        )
 
         left_revision_request = self._request(
             agent=nodes[left_id],
             phase=ExecutionPhase.REVISION,
             upstream=left_upstream,
             own_draft=left_draft.text,
-            peer_draft=UpstreamMessage(
-                right_id,
-                left_id,
-                right_draft.text,
+            peer_draft=self._artifact_envelope(
+                source_agent_id=right_id,
+                target_agent_id=left_id,
+                content=right_draft.text,
+                nodes=nodes,
                 message_type="candidate",
                 graph_revision=graph_revision,
-                request_or_dependency=nodes[left_id].contract,
-                artifact_type=getattr(nodes[right_id], "artifact_type", "text"),
-                environment_revision=_environment_revision_from_metadata(
-                    right_draft.metadata
-                ),
-                tool_receipts=_tool_receipts_from_metadata(right_draft.metadata),
-                artifact_version=right_draft_request.request_id,
+                metadata=right_draft_metadata,
+                artifact_id=right_draft_request.request_id,
             ),
             problem=problem,
             run_id=run_id,
@@ -1953,19 +2292,15 @@ class AgentRuntime:
             phase=ExecutionPhase.REVISION,
             upstream=right_upstream,
             own_draft=right_draft.text,
-            peer_draft=UpstreamMessage(
-                left_id,
-                right_id,
-                left_draft.text,
+            peer_draft=self._artifact_envelope(
+                source_agent_id=left_id,
+                target_agent_id=right_id,
+                content=left_draft.text,
+                nodes=nodes,
                 message_type="candidate",
                 graph_revision=graph_revision,
-                request_or_dependency=nodes[right_id].contract,
-                artifact_type=getattr(nodes[left_id], "artifact_type", "text"),
-                environment_revision=_environment_revision_from_metadata(
-                    left_draft.metadata
-                ),
-                tool_receipts=_tool_receipts_from_metadata(left_draft.metadata),
-                artifact_version=left_draft_request.request_id,
+                metadata=left_draft_metadata,
+                artifact_id=left_draft_request.request_id,
             ),
             problem=problem,
             run_id=run_id,
@@ -1989,6 +2324,70 @@ class AgentRuntime:
             right_revision,
         )
         return {left_id: left_revision.text, right_id: right_revision.text}
+
+    def _artifact_envelope(
+        self,
+        *,
+        source_agent_id: str,
+        target_agent_id: str,
+        content: str,
+        nodes: Mapping[str, AgentNode],
+        graph_revision: int,
+        metadata: Mapping[str, object],
+        message_type: str = "artifact",
+        artifact_id: Optional[str] = None,
+    ) -> UpstreamMessage:
+        """Create one standard typed, provenance-bound communication envelope."""
+
+        raw_artifact_id: object = artifact_id
+        if raw_artifact_id is None:
+            raw_artifact_id = metadata.get(
+                "artifact_id",
+                metadata.get("artifact_version"),
+            )
+        raw_diagnostic_codes = metadata.get(
+            "execution_diagnostic_codes", ()
+        )
+        return UpstreamMessage(
+            source_agent_id,
+            target_agent_id,
+            content,
+            message_type=message_type,
+            graph_revision=graph_revision,
+            request_or_dependency=nodes[target_agent_id].contract,
+            artifact_type=getattr(
+                nodes[source_agent_id], "artifact_type", "text"
+            ),
+            environment_revision=_environment_revision_from_metadata(
+                metadata
+            ),
+            tool_receipts=_tool_receipts_from_metadata(metadata),
+            artifact_version=(
+                raw_artifact_id.strip()
+                if isinstance(raw_artifact_id, str)
+                and raw_artifact_id.strip()
+                else None
+            ),
+            source_model_id=nodes[source_agent_id].model_id,
+            source_contract=nodes[source_agent_id].contract,
+            artifact_complete=(
+                bool(metadata.get("artifact_complete"))
+                if type(metadata.get("artifact_complete")) is bool
+                else None
+            ),
+            execution_diagnostic_codes=tuple(
+                str(item)
+                for item in (
+                    raw_diagnostic_codes
+                    if isinstance(raw_diagnostic_codes, (list, tuple))
+                    else ()
+                )
+                if isinstance(item, str) and item.strip()
+            ),
+            input_artifact_provenance=(
+                _input_artifact_provenance_from_metadata(metadata)
+            ),
+        )
 
     def _upstream(
         self,
@@ -2015,36 +2414,14 @@ class AgentRuntime:
                 # Keep the canonical routed message intact. Diagnostic masking is
                 # applied only when the provider prompt is rendered so receipts
                 # retain both the true upstream and what the model actually saw.
-                source_metadata = output_metadata.get(source_id, {})
-                raw_artifact_id = source_metadata.get(
-                    "artifact_id",
-                    source_metadata.get("artifact_version"),
-                )
                 messages.append(
-                    UpstreamMessage(
-                        source_id,
-                        target_id,
-                        outputs[source_id],
-                        message_type="artifact",
+                    self._artifact_envelope(
+                        source_agent_id=source_id,
+                        target_agent_id=target_id,
+                        content=outputs[source_id],
+                        nodes=nodes,
                         graph_revision=graph_revision,
-                        request_or_dependency=nodes[target_id].contract,
-                        artifact_type=getattr(
-                            nodes[source_id], "artifact_type", "text"
-                        ),
-                        environment_revision=_environment_revision_from_metadata(
-                            source_metadata
-                        ),
-                        tool_receipts=_tool_receipts_from_metadata(
-                            source_metadata
-                        ),
-                        artifact_version=(
-                            raw_artifact_id.strip()
-                            if isinstance(raw_artifact_id, str)
-                            and raw_artifact_id.strip()
-                            else None
-                        ),
-                        source_model_id=nodes[source_id].model_id,
-                        source_contract=nodes[source_id].contract,
+                        metadata=output_metadata.get(source_id, {}),
                     )
                 )
         return tuple(
@@ -2081,45 +2458,88 @@ class AgentRuntime:
             # phases.  Public ReAct state belongs to the phase that failed and
             # must not be replayed into a different communication contract.
             continuation = {}
+        current_input_messages = (
+            *upstream,
+            *((peer_draft,) if peer_draft is not None else ()),
+        )
         current_input_artifact_versions = {
             message.source_agent_id: message.artifact_version
-            for message in (
-                *upstream,
-                *((peer_draft,) if peer_draft is not None else ()),
-            )
+            for message in current_input_messages
             if message.artifact_version is not None
         }
+        current_input_identity = _continuation_input_identity(
+            [message.to_dict() for message in current_input_messages]
+        )
+        prior_input_identity = _continuation_input_identity(
+            continuation.get("input_artifact_provenance")
+        )
         raw_continuation_input_versions = continuation.get(
             "input_artifact_versions"
         )
         continuation_input_changed = (
-            isinstance(raw_continuation_input_versions, Mapping)
-            and {
-                str(agent_id): str(version)
-                for agent_id, version in raw_continuation_input_versions.items()
-                if isinstance(agent_id, str) and isinstance(version, str)
-            }
-            != current_input_artifact_versions
+            (
+                prior_input_identity != current_input_identity
+                if prior_input_identity is not None
+                else (
+                    isinstance(raw_continuation_input_versions, Mapping)
+                    and {
+                        str(agent_id): str(version)
+                        for agent_id, version
+                        in raw_continuation_input_versions.items()
+                        if isinstance(agent_id, str)
+                        and isinstance(version, str)
+                    }
+                    != current_input_artifact_versions
+                )
+            )
         )
         raw_action_history = continuation.get("react_trace", ())
         raw_tool_receipts = continuation.get("tool_receipts", ())
         raw_continuation_source_agent_id = continuation.get(
             "continuation_source_agent_id"
         )
+        prior_declaration_identity = _continuation_declaration_identity(
+            continuation
+        )
+        has_active_continuation_state = bool(
+            (
+                isinstance(raw_action_history, (list, tuple))
+                and raw_action_history
+            )
+            or (
+                isinstance(raw_tool_receipts, (list, tuple))
+                and raw_tool_receipts
+            )
+            or (
+                isinstance(raw_continuation_source_agent_id, str)
+                and raw_continuation_source_agent_id.strip()
+            )
+        )
+        continuation_declaration_changed = (
+            has_active_continuation_state
+            and (
+                prior_declaration_identity is None
+                or prior_declaration_identity
+                != _canonical_continuation_declaration_identity(agent)
+            )
+        )
         # PROJECT_NECESSARY_ADAPTATION: SkillFlow resumes a bounded Agent from
         # its public Action--Observation history. A FlowSteer relation edit can
-        # give that Agent a new upstream artifact, so the prior rejection state
-        # is no longer conditioned on the current input. Preserve all Tool
-        # receipts for provenance, but restart action selection on the new
-        # artifact versions instead of replaying a stale terminal diagnosis.
-        # Tool receipts are part of the same bounded execution state because
-        # the ReAct adapter counts them against its Tool budget.  They remain
-        # persisted in the earlier trajectory receipt, but cannot remain active
-        # after the dependency-version key changes.  Fresh predecessor receipts
-        # are still delivered through ``upstream`` with their artifact version.
+        # give that Agent a new upstream artifact, and a repair can change its
+        # execution-mode/Tool profile. In either case the prior rejection state
+        # is no longer conditioned on the current execution. Tool receipts stay
+        # persisted in the earlier trajectory receipt for provenance, but they
+        # cannot remain active or count against the new profile's Tool budget.
+        # Fresh predecessor receipts are still delivered through ``upstream``
+        # with their artifact version.  A legacy record without the complete
+        # declaration identity remains readable, but is not a provable match:
+        # its active continuation state is cleared before this invocation.
+        continuation_state_changed = (
+            continuation_input_changed or continuation_declaration_changed
+        )
         action_history = (
             ()
-            if continuation_input_changed
+            if continuation_state_changed
             else (
                 tuple(
                     item
@@ -2132,7 +2552,7 @@ class AgentRuntime:
         )
         prior_tool_receipts = (
             ()
-            if continuation_input_changed
+            if continuation_state_changed
             else (
                 tuple(
                     item
@@ -2145,7 +2565,7 @@ class AgentRuntime:
         )
         continuation_source_agent_id = (
             None
-            if continuation_input_changed
+            if continuation_state_changed
             else (
                 raw_continuation_source_agent_id.strip()
                 if isinstance(raw_continuation_source_agent_id, str)
@@ -2199,6 +2619,9 @@ class AgentRuntime:
         metadata["artifact_status"] = (
             "complete" if artifact_complete else "incomplete"
         )
+        diagnostic_codes = _execution_diagnostic_codes_from_metadata(metadata)
+        metadata["execution_diagnostic_codes"] = diagnostic_codes
+        metadata["execution_recovery_observed"] = bool(diagnostic_codes)
 
         # Keep the existing request identity as the immutable artifact identity
         # so old trajectories remain readable.  A provider retry is another
@@ -2221,11 +2644,25 @@ class AgentRuntime:
             "allowed_tools": list(request.agent.allowed_tools),
         }
         metadata["raw_output"] = response.text
+        raw_tool_receipts = metadata.get("tool_receipts")
+        if isinstance(raw_tool_receipts, (list, tuple)):
+            # Receipts retain their original error/result fields.  Runtime
+            # only removes exact duplicates; it never upgrades a failed
+            # computation into a successful one.
+            distinct_tool_receipts: list[dict[str, object]] = []
+            for receipt in raw_tool_receipts:
+                if not isinstance(receipt, Mapping):
+                    continue
+                serialized_receipt = dict(receipt)
+                if serialized_receipt not in distinct_tool_receipts:
+                    distinct_tool_receipts.append(serialized_receipt)
+            metadata["tool_receipts"] = distinct_tool_receipts
         inputs = list(request.upstream)
         if request.peer_draft is not None:
             inputs.append(request.peer_draft)
         input_artifact_versions: dict[str, str] = {}
         input_artifact_provenance: list[dict[str, object]] = []
+        distinct_inputs: list[UpstreamMessage] = []
         for message in inputs:
             if message.artifact_version is not None:
                 previous = input_artifact_versions.get(message.source_agent_id)
@@ -2240,7 +2677,11 @@ class AgentRuntime:
                 input_artifact_versions[message.source_agent_id] = (
                     message.artifact_version
                 )
-            input_artifact_provenance.append(message.to_dict())
+            serialized_message = message.to_dict()
+            if serialized_message in input_artifact_provenance:
+                continue
+            input_artifact_provenance.append(serialized_message)
+            distinct_inputs.append(message)
         metadata["input_artifact_versions"] = input_artifact_versions
         metadata["input_artifact_provenance"] = input_artifact_provenance
         metadata["upstream_dependencies"] = tuple(
@@ -2251,7 +2692,7 @@ class AgentRuntime:
                     "raw_output": message.content,
                 }
             )
-            for message in inputs
+            for message in distinct_inputs
         )
         if self.semantic_protocol in {
             "hotpotqa_verified_answer_slot_v1",
@@ -2267,7 +2708,7 @@ class AgentRuntime:
             # SkillFlow's public Tool receipts; it does not add a workflow or
             # retrieval policy to the Director prompt.
             lineage_tool_receipts: list[dict[str, object]] = []
-            for message in inputs:
+            for message in distinct_inputs:
                 for receipt in message.tool_receipts:
                     serialized = dict(receipt)
                     if serialized not in lineage_tool_receipts:
@@ -2300,6 +2741,19 @@ class AgentRuntime:
                         message.to_dict() for message in inputs
                     ],
                 }
+            )
+
+        def bind_failure_record(
+            record: AgentFailureRecord,
+        ) -> AgentFailureRecord:
+            if record.agent_id != request.agent.id:
+                return record
+            return replace(
+                record,
+                metadata=_bind_continuation_execution_profile(
+                    record.metadata,
+                    request.agent,
+                ),
             )
 
         def cancelled_adapter_metadata() -> Mapping[str, object]:
@@ -2365,7 +2819,7 @@ class AgentRuntime:
         try:
             raw_response = await invoke_gateway(request)
         except asyncio.CancelledError as exc:
-            metadata = MappingProxyType(
+            metadata = _bind_continuation_execution_profile(
                 {
                     **dict(cancelled_adapter_metadata()),
                     **dict(_public_failure_metadata(exc)),
@@ -2379,7 +2833,8 @@ class AgentRuntime:
                         if request.continuation_source_agent_id is not None
                         else {}
                     ),
-                }
+                },
+                request.agent,
             )
             if metadata:
                 cancelled_failure_records.append(
@@ -2413,7 +2868,7 @@ class AgentRuntime:
                 ),
             }
             nested_records = (
-                exc.failure_records
+                tuple(bind_failure_record(record) for record in exc.failure_records)
                 if isinstance(exc, AgentRuntimeError) and exc.failure_records
                 else (
                     AgentFailureRecord(
@@ -2423,7 +2878,7 @@ class AgentRuntime:
                         graph_revision=request.graph_revision,
                         error_type=type(exc).__name__,
                         message=" ".join(str(exc).split()),
-                        metadata=MappingProxyType(
+                        metadata=_bind_continuation_execution_profile(
                             {
                                 **dict(adapter_cancellation_metadata),
                                 **dict(_public_failure_metadata(exc)),
@@ -2439,7 +2894,8 @@ class AgentRuntime:
                                     is not None
                                     else {}
                                 ),
-                            }
+                            },
+                            request.agent,
                         ),
                     ),
                 )
@@ -2456,12 +2912,25 @@ class AgentRuntime:
             else AgentResponse(raw_response)
         )
         calls.append(AgentCallRecord(request=request, response=response))
-        if not response.text.strip():
-            failure_metadata = MappingProxyType(
+        execution_mode = getattr(
+            request.agent.execution_mode,
+            "value",
+            request.agent.execution_mode,
+        )
+        reasoning_only_length_recovery = bool(
+            not response.text.strip()
+            and response.metadata.get("finish_reason") == "length"
+            and response.metadata.get("reasoning_content_present") is True
+            and execution_mode == "reasoning"
+            and self.max_length_continuations > 0
+        )
+        if not response.text.strip() and not reasoning_only_length_recovery:
+            failure_metadata = _bind_continuation_execution_profile(
                 {
                     **dict(response.metadata),
                     **dict(input_artifact_metadata()),
-                }
+                },
+                request.agent,
             )
             raise AgentRuntimeError(
                 f"gateway returned an empty artifact for agent "
@@ -2482,17 +2951,19 @@ class AgentRuntime:
                 ),
                 pending_agent_ids=(request.agent.id,),
             )
-        execution_mode = getattr(
-            request.agent.execution_mode,
-            "value",
-            request.agent.execution_mode,
-        )
         if (
             response.metadata.get("finish_reason") == "length"
             and execution_mode == "reasoning"
             and self.max_length_continuations > 0
         ):
-            combined_text = response.text
+            # SkillFlow's Supervisor gives one bounded same-model recovery to
+            # a length-truncated response.  A thinking model can exhaust its
+            # entire allowance in private ``reasoning_content`` and leave no
+            # public prefix at all.  Keep that private trace unavailable and
+            # regenerate only the missing public artifact with thinking off.
+            combined_text = (
+                "" if reasoning_only_length_recovery else response.text
+            )
             segment_receipts: list[dict[str, object]] = []
 
             def append_segment_receipt(
@@ -2524,12 +2995,38 @@ class AgentRuntime:
                         "retry_receipts": active_response.metadata.get(
                             "retry_receipts", ()
                         ),
+                        "chat_template_enable_thinking": (
+                            active_response.metadata.get(
+                                "chat_template_enable_thinking"
+                            )
+                        ),
+                        "reasoning_content_present": (
+                            active_response.metadata.get(
+                                "reasoning_content_present"
+                            )
+                        ),
                         "raw_output": active_response.text,
                     }
                 )
 
             append_segment_receipt(0, request, response)
             for segment_index in range(1, self.max_length_continuations + 1):
+                continuation_model = request.model
+                if reasoning_only_length_recovery:
+                    continuation_model_metadata = dict(request.model.metadata)
+                    continuation_model_metadata.update(
+                        {
+                            "chat_template_enable_thinking": "false",
+                            "require_reasoning_trace": "false",
+                        }
+                    )
+                    continuation_model_metadata.pop(
+                        "thinking_budget_tokens", None
+                    )
+                    continuation_model = replace(
+                        request.model,
+                        metadata=continuation_model_metadata,
+                    )
                 continuation_request = replace(
                     request,
                     request_id=(
@@ -2539,13 +3036,14 @@ class AgentRuntime:
                     partial_artifact=combined_text,
                     continuation_segment_index=segment_index,
                     max_tokens_override=self.length_continuation_max_tokens,
+                    model=continuation_model,
                 )
                 try:
                     raw_continuation = await invoke_gateway(
                         continuation_request
                     )
                 except Exception as exc:
-                    failure_metadata = MappingProxyType(
+                    failure_metadata = _bind_continuation_execution_profile(
                         {
                             **dict(input_artifact_metadata()),
                             **dict(_public_failure_metadata(exc)),
@@ -2554,8 +3052,12 @@ class AgentRuntime:
                             "finish_reason": "length",
                             "partial_artifact": combined_text,
                             "generation_segments": tuple(segment_receipts),
+                            "reasoning_only_length_recovery": (
+                                reasoning_only_length_recovery
+                            ),
                             "continuation_failure_type": type(exc).__name__,
-                        }
+                        },
+                        request.agent,
                     )
                     raise AgentRuntimeError(
                         "bounded continuation failed for truncated Agent "
@@ -2617,11 +3119,14 @@ class AgentRuntime:
                             "artifact_status": "complete",
                             "length_continuation_count": segment_index,
                             "generation_segments": tuple(segment_receipts),
+                            "reasoning_only_length_recovery": (
+                                reasoning_only_length_recovery
+                            ),
                         }
                     )
                     return AgentResponse(combined_text, merged_metadata)
 
-            failure_metadata = MappingProxyType(
+            failure_metadata = _bind_continuation_execution_profile(
                 {
                     **dict(input_artifact_metadata()),
                     "artifact_complete": False,
@@ -2629,7 +3134,11 @@ class AgentRuntime:
                     "finish_reason": "length",
                     "partial_artifact": combined_text,
                     "generation_segments": tuple(segment_receipts),
-                }
+                    "reasoning_only_length_recovery": (
+                        reasoning_only_length_recovery
+                    ),
+                },
+                request.agent,
             )
             raise AgentRuntimeError(
                 f"bounded continuation exhausted for agent {request.agent.id!r}",

@@ -231,10 +231,19 @@ def create_aime_computation_registry(
     }
     calculator_input_schema = {
         "type": "object",
+        "description": (
+            "Evaluate one deterministic mathematical expression after the "
+            "problem has already been formalized; this capability computes "
+            "but does not search for benchmark answers."
+        ),
         "additionalProperties": False,
         "required": ["expression"],
         "properties": {
-            "expression": {"type": "string", "minLength": 1},
+            "expression": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The exact expression to evaluate.",
+            },
         },
     }
     calculator_capability = ToolCapability(
@@ -249,10 +258,22 @@ def create_aime_computation_registry(
     )
     python_input_schema = {
         "type": "object",
+        "description": (
+            "Execute bounded Python for a finite, explicitly formalized "
+            "calculation or candidate check; this capability computes but "
+            "does not search for benchmark answers."
+        ),
         "additionalProperties": False,
         "required": ["code"],
         "properties": {
-            "code": {"type": "string", "minLength": 1},
+            "code": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "Python source that prints the measured calculation or "
+                    "verification result."
+                ),
+            },
         },
     }
     python_capability = ToolCapability(

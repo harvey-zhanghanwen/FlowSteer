@@ -258,7 +258,15 @@ def _check_keys(data: Mapping[str, Any], required: Set[str], optional: Set[str] 
 
 
 class AgentActionParser:
-    """Parse exactly the earliest JSON object; never salvage a later object."""
+    """Parse exactly the earliest admitted JSON object.
+
+    Native SGLang reasoning responses keep the reasoning prefix in the raw
+    text and apply the structured-output grammar only after the configured
+    reasoner boundary. Callers that enabled that mode must pass its exact end
+    token; parsing then starts strictly after that boundary and fails closed
+    when the boundary is absent. Offsets always refer to the original,
+    unmodified response text.
+    """
 
     def __init__(self) -> None:
         self._decoder = json.JSONDecoder(
@@ -266,10 +274,30 @@ class AgentActionParser:
             parse_constant=_reject_constant,
         )
 
-    def parse(self, text: str) -> AgentAction:
+    def parse(
+        self,
+        text: str,
+        *,
+        reasoning_end_token: Optional[str] = None,
+    ) -> AgentAction:
         if not isinstance(text, str) or not text:
             raise AgentActionParseError("response must be a non-empty string")
-        stripped_start = len(text) - len(text.lstrip())
+        scan_start = 0
+        if reasoning_end_token is not None:
+            if not isinstance(reasoning_end_token, str) or not reasoning_end_token:
+                raise AgentActionParseError(
+                    "reasoning_end_token must be a non-empty string"
+                )
+            boundary_start = text.find(reasoning_end_token)
+            if boundary_start < 0:
+                raise AgentActionParseError(
+                    "response is missing the required reasoning boundary "
+                    f"{reasoning_end_token!r}"
+                )
+            scan_start = boundary_start + len(reasoning_end_token)
+        stripped_start = scan_start + (
+            len(text[scan_start:]) - len(text[scan_start:].lstrip())
+        )
         start = stripped_start
         try:
             leading_value, leading_end = self._decoder.raw_decode(text[start:])

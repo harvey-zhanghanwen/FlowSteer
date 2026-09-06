@@ -12,9 +12,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import json
+import re
 from types import MappingProxyType
 from typing import Mapping, Optional
 
+from .aime2026_adapter import (
+    extract_aime2026_artifact_assessments,
+    extract_aime2026_candidate,
+)
 from .agent_runtime import (
     AgentGateway,
     AgentRequest,
@@ -48,6 +53,10 @@ class ReactExecutionError(RuntimeError):
         tool_receipts: tuple[Mapping[str, object], ...] = (),
         model_calls: tuple[Mapping[str, object], ...] = (),
         tool_plan_exhausted: bool = False,
+        failure_category: str | None = None,
+        failure_reason: str | None = None,
+        bounded_regeneration_attempt_count: int | None = None,
+        regeneration_exhausted: bool | None = None,
     ) -> None:
         super().__init__(message)
         if type(tool_plan_exhausted) is not bool:
@@ -60,6 +69,29 @@ class ReactExecutionError(RuntimeError):
         self.tool_receipts = tuple(dict(item) for item in tool_receipts)
         self.model_calls = tuple(dict(item) for item in model_calls)
         self.tool_plan_exhausted = tool_plan_exhausted
+        if failure_category is not None:
+            if not isinstance(failure_category, str) or not failure_category.strip():
+                raise ValueError("failure_category must be non-empty text")
+            self.failure_category = failure_category.strip()
+        if failure_reason is not None:
+            if not isinstance(failure_reason, str) or not failure_reason.strip():
+                raise ValueError("failure_reason must be non-empty text")
+            self.failure_reason = failure_reason.strip()
+        if bounded_regeneration_attempt_count is not None:
+            if (
+                type(bounded_regeneration_attempt_count) is not int
+                or bounded_regeneration_attempt_count < 0
+            ):
+                raise ValueError(
+                    "bounded_regeneration_attempt_count must be a non-negative integer"
+                )
+            self.bounded_regeneration_attempt_count = (
+                bounded_regeneration_attempt_count
+            )
+        if regeneration_exhausted is not None:
+            if type(regeneration_exhausted) is not bool:
+                raise TypeError("regeneration_exhausted must be bool")
+            self.regeneration_exhausted = regeneration_exhausted
 
 
 class ReactGenerationError(RuntimeError):
@@ -129,6 +161,109 @@ def _completion_text(value: object) -> str:
     )
 
 
+_PROVENANCE_BOUND_ASSESSMENT_PROTOCOLS = frozenset(
+    {
+        "provenance_bound_candidate_assessment_v1",
+        "provenance_bound_candidate_assessment_v2",
+    }
+)
+_ARTIFACT_ASSESSMENT_BLOCK = re.compile(
+    r"<artifact_assessments>\s*.*?\s*</artifact_assessments>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def _provenance_bound_candidate_sources(
+    request: AgentRequest,
+) -> tuple[dict[str, object], ...]:
+    """Project model-visible candidate sources without consulting a target."""
+
+    if (
+        request.artifact_assessment_protocol
+        not in _PROVENANCE_BOUND_ASSESSMENT_PROTOCOLS
+        or getattr(
+            request.communication_condition,
+            "value",
+            request.communication_condition,
+        )
+        != "normal"
+    ):
+        return ()
+    messages = [*request.upstream]
+    if request.peer_draft is not None:
+        messages.append(request.peer_draft)
+    result: list[dict[str, object]] = []
+    for message in messages:
+        candidate, _, parsing_failure = extract_aime2026_candidate(
+            message.artifact
+        )
+        if candidate is None:
+            continue
+        result.append(
+            {
+                "source_agent": message.source_agent_id,
+                "artifact_id": message.artifact_id,
+                "candidate": candidate,
+                "artifact_complete": message.artifact_complete,
+                "execution_diagnostic_codes": list(
+                    message.execution_diagnostic_codes
+                ),
+                "upstream_tool_receipt_count": len(message.tool_receipts),
+                "candidate_parsing_failure_reason": parsing_failure,
+            }
+        )
+    return tuple(result)
+
+
+def _has_public_derivation(
+    artifact: str,
+    *,
+    candidates: frozenset[str],
+) -> bool:
+    """Reject only an assessment completion collapsed to answer markers.
+
+    This is a structural completeness check, not a correctness judgment.  It
+    deliberately does not inspect the benchmark target or recompute a result.
+    """
+
+    without_assessments = _ARTIFACT_ASSESSMENT_BLOCK.sub("", artifact)
+    retained_lines: list[str] = []
+    for raw_line in without_assessments.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        compact = (
+            re.sub(r"\s+", "", line)
+            .replace("$", "")
+            .casefold()
+            .rstrip(".!")
+        )
+        marker_forms = {
+            candidate.casefold()
+            for candidate in candidates
+        }
+        marker_forms.update(
+            form
+            for candidate in candidates
+            for form in {
+                f"finalanswer:{candidate}".casefold(),
+                f"answer:{candidate}".casefold(),
+                f"answer={candidate}".casefold(),
+                f"theansweris{candidate}".casefold(),
+                f"theansweris:{candidate}".casefold(),
+                f"answeris{candidate}".casefold(),
+                f"answeris:{candidate}".casefold(),
+                f"\\boxed{{{candidate}}}".casefold(),
+            }
+        )
+        if compact in marker_forms:
+            continue
+        if compact in {"artifactassessment", "artifactassessments"}:
+            continue
+        retained_lines.append(line)
+    return bool(" ".join(retained_lines).strip())
+
+
 class ToolReactExecutionAdapter:
     """Execute an Agent-selected bounded sequence of registered Tool calls."""
 
@@ -140,6 +275,7 @@ class ToolReactExecutionAdapter:
         max_turns: int,
         max_tool_calls: int,
         max_action_tokens: int = 512,
+        thinking_budget_tokens: int | None = None,
         execution_mode: str = "react",
         sampling_base_seed: int | None = None,
         sampling_coordinate: ScientificSamplingCoordinate | None = None,
@@ -154,6 +290,13 @@ class ToolReactExecutionAdapter:
             raise ValueError("max_tool_calls must be a non-negative integer")
         if type(max_action_tokens) is not int or max_action_tokens < 1:
             raise ValueError("max_action_tokens must be a positive integer")
+        if thinking_budget_tokens is not None and (
+            type(thinking_budget_tokens) is not int
+            or thinking_budget_tokens < 1
+        ):
+            raise ValueError(
+                "thinking_budget_tokens must be a positive integer or None"
+            )
         if execution_mode not in {"react", "coding"}:
             raise ValueError("execution_mode must be react or coding")
         if (sampling_base_seed is None) != (sampling_coordinate is None):
@@ -190,6 +333,7 @@ class ToolReactExecutionAdapter:
         # budget.  ReAct observations grow over turns, so reusing the generic
         # 4096-token completion allowance can exceed an 8K context window.
         self._max_action_tokens = max_action_tokens
+        self._thinking_budget_tokens = thinking_budget_tokens
         self._execution_mode = execution_mode
         self._sampling_base_seed = sampling_base_seed
         self._sampling_coordinate = sampling_coordinate
@@ -228,58 +372,171 @@ class ToolReactExecutionAdapter:
     ) -> Mapping[str, object]:
         """Return the JSON Schema for an admitted completion's arguments."""
 
-        del request
+        candidate_sources = _provenance_bound_candidate_sources(request)
+        value_schema: dict[str, object] = {
+            "description": (
+                "The completed artifact required by the Agent contract"
+            )
+        }
+        if candidate_sources:
+            # PROJECT_NECESSARY_ADAPTATION: SkillFlow keeps completion in the
+            # five-field StructuredAction ``arguments.value``.  For this
+            # project's provenance-bound AIME protocol, constrain that same
+            # field to the complete textual artifact so a scalar candidate is
+            # not structurally interchangeable with a downstream assessment.
+            # Runtime admission below remains authoritative for exact source
+            # bindings and never consults the evaluator target.
+            value_schema.update(
+                {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "The complete public derivation followed by the exact "
+                        "provenance-bound <artifact_assessments> JSON block; "
+                        "a bare candidate is not a complete artifact"
+                    ),
+                }
+            )
         return {
             "type": "object",
             "required": ["value"],
             "properties": {
-                "value": {
-                    "description": (
-                        "The completed artifact required by the Agent contract"
-                    )
-                }
+                "value": value_schema,
             },
             "additionalProperties": False,
         }
+
+    @staticmethod
+    def _provenance_bound_completion_guidance(
+        request: AgentRequest,
+    ) -> str:
+        """Expose exact source identities without prescribing a workflow."""
+
+        candidate_sources = _provenance_bound_candidate_sources(request)
+        if not candidate_sources:
+            return ""
+        public_bindings = [
+            {
+                "source_agent": source["source_agent"],
+                "artifact_id": source["artifact_id"],
+                "candidate": source["candidate"],
+                "artifact_complete": source["artifact_complete"],
+                "execution_diagnostic_codes": source[
+                    "execution_diagnostic_codes"
+                ],
+            }
+            for source in candidate_sources
+        ]
+        return (
+            "\nProvenance-bound COMPLETE wire contract: arguments.value must "
+            "preserve the contract-relevant public derivation and any public "
+            "Tool observation used; a bare scalar candidate is incomplete. "
+            "Append exactly one <artifact_assessments> JSON-array block and "
+            "assess every candidate-bearing source below. Copy each "
+            "artifact_id and candidate exactly. source_agent identifies the "
+            "binding but is not an extra assessment-object field. The block "
+            "must be strict JSON: use plain-text mathematical basis or escape "
+            "every literal backslash inside JSON strings. Do not "
+            "consult or infer a benchmark target. Required source bindings: "
+            + json.dumps(
+                public_bindings,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
 
     def _state_conditioned_response_schema(
         self,
         request: AgentRequest,
         observations: list[Mapping[str, object]],
     ) -> Optional[dict[str, object]]:
-        """Build SkillFlow's strict schema when exactly one action is legal.
+        """Build SkillFlow's strict five-field StructuredAction schema.
 
         SkillFlow's OpenAI provider sends ``ModelRequest.response_schema`` as
-        ``response_format.json_schema``.  Generic Tool domains may contain
-        several mutually exclusive actions, so this thin adapter constrains
-        only a measured state with exactly one legal Tool action or completion.
-        The strict parser remains authoritative after generation.
+        ``response_format.json_schema``.  A generic ReAct state admits every
+        declared Tool action plus explicit completion, so represent that
+        choice as ``oneOf`` rather than dropping structured decoding exactly
+        when Tool use is enabled.  Dataset adapters with their own multi-branch
+        conditioning keep their existing override; this base method still
+        supplies their singleton schemas.  The strict parser remains
+        authoritative after generation.
         """
 
         admitted_tool_actions, completion_admitted = (
             self._state_conditioned_action_domain(request, observations)
         )
-        arguments_schema: Optional[Mapping[str, object]] = None
-        kind: Optional[str] = None
-        name: Optional[str] = None
-        resource_id: Optional[str] = None
-        if admitted_tool_actions is not None and len(admitted_tool_actions) == 1:
-            if completion_admitted:
-                return None
-            resource_id, name = next(iter(admitted_tool_actions))
+        if admitted_tool_actions is None:
+            admitted_tool_actions = frozenset(
+                (capability.tool_id, action_name)
+                for tool_id in request.agent.allowed_tools
+                for capability in (self._tool_registry.require_capability(tool_id),)
+                for action_name in capability.action_names
+            )
+        elif (
+            type(self)._state_conditioned_response_schema
+            is not ToolReactExecutionAdapter._state_conditioned_response_schema
+            and (
+                len(admitted_tool_actions) > 1
+                or (admitted_tool_actions and completion_admitted)
+            )
+        ):
+            # Preserve existing dataset-specific multi-branch schema builders.
+            return None
+        return self._response_schema_for_domain(
+            request=request,
+            admitted_tool_actions=admitted_tool_actions,
+            completion_admitted=completion_admitted,
+        )
+
+    def _response_schema_for_domain(
+        self,
+        *,
+        request: AgentRequest,
+        admitted_tool_actions: frozenset[tuple[str, str]],
+        completion_admitted: bool,
+    ) -> Optional[dict[str, object]]:
+        """Serialize one measured action domain without changing its choices."""
+
+        branches: list[dict[str, object]] = []
+        for resource_id, name in sorted(admitted_tool_actions):
             capability = self._tool_registry.require_capability(resource_id)
             arguments_schema = capability.action_schemas.get(name)
-            kind = "tool"
-        elif (
-            admitted_tool_actions is not None
-            and not admitted_tool_actions
-            and completion_admitted
-        ):
-            arguments_schema = self._completion_arguments_schema(request)
-            kind = "complete"
-            name = "complete"
-        if arguments_schema is None or kind is None or name is None:
+            if not isinstance(arguments_schema, Mapping):
+                continue
+            branches.append(
+                self._structured_action_response_branch(
+                    arguments_schema=arguments_schema,
+                    kind="tool",
+                    name=name,
+                    resource_id=resource_id,
+                )
+            )
+        if completion_admitted:
+            branches.append(
+                self._structured_action_response_branch(
+                    arguments_schema=self._completion_arguments_schema(request),
+                    kind="complete",
+                    name="complete",
+                    resource_id=None,
+                )
+            )
+        if not branches:
             return None
+        if len(branches) == 1:
+            return branches[0]
+        return {"oneOf": branches}
+
+    @staticmethod
+    def _structured_action_response_branch(
+        *,
+        arguments_schema: Mapping[str, object],
+        kind: str,
+        name: str,
+        resource_id: Optional[str],
+    ) -> dict[str, object]:
+        """Return SkillFlow's exact five-field StructuredAction branch."""
+
         return {
             "type": "object",
             "required": [
@@ -322,6 +579,8 @@ class ToolReactExecutionAdapter:
             "expected_top_level_fields",
             "forbidden_wrapper_fields",
             "repair_instruction",
+            "repeat_count",
+            "cached_observation",
         )
         for observation in observations:
             if observation.get("observation_status") in {
@@ -372,6 +631,8 @@ class ToolReactExecutionAdapter:
                     "expected_top_level_fields",
                     "forbidden_wrapper_fields",
                     "repair_instruction",
+                    "repeat_count",
+                    "cached_observation",
                     "executed_action",
                     "error_type",
                 )
@@ -428,6 +689,28 @@ class ToolReactExecutionAdapter:
             )
             for tool_id, action_name, argument_schema in action_contracts
         )
+        coding_wire_guidance = ""
+        if self._execution_mode == "coding" and any(
+            isinstance(argument_schema.get("properties"), Mapping)
+            and "code" in argument_schema["properties"]
+            for _, _, argument_schema in action_contracts
+        ):
+            # NECESSARY_ADAPTATION: the StructuredAction boundary is reused
+            # directly from SkillFlow, while a coding Tool additionally needs
+            # its source program to survive JSON transport intact.  These are
+            # neutral wire constraints only; they do not prescribe a task
+            # method, Agent role, topology, or mathematical workflow.
+            coding_wire_guidance = (
+                "\nCoding Tool wire contract: arguments.code must contain the "
+                "complete executable source program. Encode source line breaks "
+                "as JSON \\n escapes so the decoded arguments.code contains real "
+                "newlines. Include an explicit print(...) statement for the Tool "
+                "observation. Do not put natural-language reasoning, prose, "
+                "Markdown fences, or an unfinished source prefix in arguments.code."
+            )
+        provenance_completion_guidance = (
+            self._provenance_bound_completion_guidance(request)
+        )
         # DIRECT_REUSE: SkillFlow rollout/context.py::_ACTION_GUIDANCE uses
         # ``arguments={"value": ...}`` for completion.  Do not place a
         # concrete placeholder such as ``"final artifact"`` in the public
@@ -483,6 +766,8 @@ class ToolReactExecutionAdapter:
             "instance of the stated JSON Schema; never return the schema itself. "
             "Never emit action_envelope or argument_json_schema fields.\n"
             + (action_contract_text or "- none")
+            + coding_wire_guidance
+            + provenance_completion_guidance
             + (
                 "\nCurrently admissible completion schema: "
                 + json.dumps(
@@ -538,6 +823,7 @@ class ToolReactExecutionAdapter:
         model_calls: list[dict[str, object]] = []
         tool_calls = len(tool_receipts)
         continuation_turn_count = len(trace)
+        truncation_regeneration_pending = False
         try:
             continuation_step_offset = _continuation_step_offset(
                 request.action_history
@@ -549,6 +835,7 @@ class ToolReactExecutionAdapter:
                 tool_receipts=tuple(tool_receipts),
             ) from exc
         last_dispatched_tool_action_key: Optional[str] = None
+        duplicate_tool_request_count = 0
         for observation in reversed(observations):
             executed_action = observation.get("executed_action")
             if (
@@ -567,9 +854,25 @@ class ToolReactExecutionAdapter:
             admitted_tool_actions, completion_admitted = (
                 self._state_conditioned_action_domain(request, observations)
             )
+            effective_tool_actions = admitted_tool_actions
+            action_domain_narrowed = False
+            remaining_turns = self._max_turns - turn + 1
+            if completion_admitted and (
+                remaining_turns == 1 or tool_calls >= self._max_tool_calls
+            ):
+                # NECESSARY_ADAPTATION: the Tool call and COMPLETE are separate
+                # SkillFlow StructuredActions.  Do not spend the last available
+                # Action turn, or a post-Tool-budget repair turn, on another
+                # Tool request and then fail without giving the policy its
+                # explicit completion transition.
+                effective_tool_actions = frozenset()
+                action_domain_narrowed = True
+            elif not completion_admitted and remaining_turns == 1:
+                effective_tool_actions = frozenset()
+                action_domain_narrowed = True
             if (
-                admitted_tool_actions is not None
-                and not admitted_tool_actions
+                effective_tool_actions is not None
+                and not effective_tool_actions
                 and not completion_admitted
             ):
                 # NECESSARY_ADAPTATION: SkillFlow bounds one Agent rollout but
@@ -585,22 +888,62 @@ class ToolReactExecutionAdapter:
                     model_calls=tuple(model_calls),
                     tool_plan_exhausted=True,
                 )
-            response_schema = self._state_conditioned_response_schema(
-                request,
-                observations,
+            if action_domain_narrowed:
+                response_schema = self._response_schema_for_domain(
+                    request=request,
+                    admitted_tool_actions=effective_tool_actions,
+                    completion_admitted=completion_admitted,
+                )
+            else:
+                response_schema = self._state_conditioned_response_schema(
+                    request,
+                    observations,
+                )
+            truncation_regeneration = truncation_regeneration_pending
+            turn_max_action_tokens = (
+                min(self._max_action_tokens, 512)
+                if truncation_regeneration
+                else self._max_action_tokens
+            )
+            turn_thinking_budget_tokens = (
+                None if truncation_regeneration else self._thinking_budget_tokens
+            )
+            # DIRECT_REUSE: SkillFlow keeps max_reasoning_tokens and
+            # max_action_tokens as independent decoding limits.  Its
+            # thinking-enabled OpenAI path adds the reasoning allowance to the
+            # provider max_tokens value, so reasoning cannot consume the
+            # StructuredAction serialization budget.
+            turn_provider_max_tokens = turn_max_action_tokens + (
+                turn_thinking_budget_tokens or 0
             )
             model_metadata = {
                 **dict(request.model.metadata),
-                "max_tokens": str(self._max_action_tokens),
+                "max_tokens": str(turn_provider_max_tokens),
             }
+            if truncation_regeneration:
+                # DIRECT_REUSE: SkillFlow
+                # training/batch_inference.py::supervisor_call performs one
+                # short same-model retry after an otherwise unparseable
+                # finish_reason=length response. Its recovery request uses a
+                # 512-token bound and disables thinking. The malformed Action
+                # remains in the public receipt but is not replayed as an
+                # imitation target.
+                model_metadata["chat_template_enable_thinking"] = "false"
+                model_metadata["require_reasoning_trace"] = "false"
+                model_metadata.pop("thinking_budget_tokens", None)
+            elif turn_thinking_budget_tokens is not None:
+                model_metadata["thinking_budget_tokens"] = str(
+                    turn_thinking_budget_tokens
+                )
             absolute_step_index = continuation_step_offset + turn
             scientific_sampling_receipt: dict[str, object] | None = None
             requested_sampling: dict[str, object] = {
                 "temperature": None,
                 "top_p": None,
                 "top_k": None,
-                "max_tokens": self._max_action_tokens,
+                "max_tokens": turn_provider_max_tokens,
                 "seed": None,
+                "thinking_budget": turn_thinking_budget_tokens,
             }
             if (
                 self._sampling_base_seed is not None
@@ -628,8 +971,9 @@ class ToolReactExecutionAdapter:
                     "temperature": 1.0,
                     "top_p": 1.0,
                     "top_k": top_k,
-                    "max_tokens": self._max_action_tokens,
+                    "max_tokens": turn_provider_max_tokens,
                     "seed": generation_seed,
+                    "thinking_budget": turn_thinking_budget_tokens,
                 }
                 scientific_sampling_receipt = {
                     "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
@@ -647,9 +991,22 @@ class ToolReactExecutionAdapter:
                     sort_keys=True,
                     separators=(",", ":"),
                 )
+            contract = self._contract(request, observations)
+            if truncation_regeneration:
+                contract += (
+                    "\nYour previous response was too long and got truncated. "
+                    "Return exactly one short StructuredAction immediately. "
+                    "If the final artifact is ready, return the complete "
+                    "StructuredAction."
+                )
+            if action_domain_narrowed and completion_admitted:
+                contract += (
+                    "\nThe remaining Action budget now admits only the explicit "
+                    "complete StructuredAction. Do not issue another Tool action."
+                )
             agent = replace(
                 request.agent,
-                contract=self._contract(request, observations),
+                contract=contract,
             )
             turn_request = replace(
                 request,
@@ -664,7 +1021,14 @@ class ToolReactExecutionAdapter:
                 "turn": absolute_step_index,
                 "request_id": turn_request.request_id,
                 "requested_sampling": dict(requested_sampling),
+                "max_action_tokens": turn_max_action_tokens,
+                "max_reasoning_tokens": turn_thinking_budget_tokens,
                 "request_status": "requested",
+                "generation_mode": (
+                    "structured_action_truncation_regeneration"
+                    if truncation_regeneration
+                    else "action"
+                ),
                 **(
                     {
                         "algorithm": SCIENTIFIC_SAMPLING_ALGORITHM,
@@ -743,6 +1107,63 @@ class ToolReactExecutionAdapter:
             try:
                 action = _parse_structured_action(response.text)
             except (TypeError, ValueError) as exc:
+                finish_reason = response.metadata.get("finish_reason")
+                if finish_reason == "length" or truncation_regeneration:
+                    public_error_code = (
+                        "structured_action_regeneration_failed"
+                        if truncation_regeneration
+                        else "structured_action_truncated"
+                    )
+                    observation = MappingProxyType(
+                        {
+                            "observation_status": "parse_error",
+                            "public_error_code": public_error_code,
+                            "finish_reason": finish_reason,
+                            "expected_top_level_fields": [
+                                "arguments",
+                                "kind",
+                                "name",
+                                "resource_id",
+                                "skill_id",
+                            ],
+                            "forbidden_wrapper_fields": [
+                                "action_envelope",
+                                "argument_json_schema",
+                            ],
+                            "repair_instruction": (
+                                "Your response was too long and got truncated. "
+                                "Return exactly one short StructuredAction "
+                                "immediately. If the final artifact is ready, "
+                                "return the complete StructuredAction."
+                            ),
+                            "bounded_regeneration_attempted": (
+                                truncation_regeneration
+                            ),
+                            "action_text": response.text,
+                        }
+                    )
+                    entry.update(observation)
+                    trace.append(entry)
+                    observations.append(observation)
+                    if truncation_regeneration or turn >= self._max_turns:
+                        raise ReactExecutionError(
+                            "StructuredAction serialization remained invalid "
+                            "after one bounded same-model regeneration",
+                            react_trace=tuple(trace),
+                            tool_receipts=tuple(tool_receipts),
+                            model_calls=tuple(model_calls),
+                            tool_plan_exhausted=False,
+                            failure_category=(
+                                "structured_action_serialization_failure"
+                            ),
+                            failure_reason="output_truncation",
+                            bounded_regeneration_attempt_count=(
+                                1 if truncation_regeneration else 0
+                            ),
+                            regeneration_exhausted=True,
+                        ) from exc
+                    truncation_regeneration_pending = True
+                    continue
                 observation = MappingProxyType(
                     {
                         "observation_status": "parse_error",
@@ -775,8 +1196,21 @@ class ToolReactExecutionAdapter:
                 observations.append(observation)
                 continue
 
+            truncation_regeneration_pending = False
             entry["structured_action"] = action.to_value()
             if action.kind is ActionKind.COMPLETE:
+                if not completion_admitted:
+                    observation = MappingProxyType(
+                        {
+                            "observation_status": "schema_invalid",
+                            "public_error_code": "completion_action_not_admitted",
+                            "executed_action": action.to_value(),
+                        }
+                    )
+                    entry.update(observation)
+                    trace.append(entry)
+                    observations.append(observation)
+                    continue
                 if not isinstance(action.arguments, dict) or "value" not in action.arguments:
                     observation = MappingProxyType(
                         {
@@ -836,6 +1270,37 @@ class ToolReactExecutionAdapter:
                     trace.append(entry)
                     observations.append(observation)
                     continue
+                (
+                    provenance_completion_error,
+                    provenance_completion_receipt,
+                ) = self._provenance_bound_completion_admission(
+                    request=request,
+                    artifact=artifact,
+                    tool_receipts=tool_receipts,
+                )
+                if provenance_completion_error is not None:
+                    observation = MappingProxyType(
+                        {
+                            "observation_status": "schema_invalid",
+                            "public_error_code": (
+                                provenance_completion_error
+                            ),
+                            "repair_instruction": (
+                                self._provenance_bound_completion_repair_instruction(
+                                    request
+                                )
+                            ),
+                            "executed_action": action.to_value(),
+                        }
+                    )
+                    entry.update(observation)
+                    trace.append(entry)
+                    observations.append(observation)
+                    continue
+                if provenance_completion_receipt is not None:
+                    entry["artifact_assessment_completion_receipt"] = dict(
+                        provenance_completion_receipt
+                    )
                 entry["observation_status"] = "completed"
                 trace.append(entry)
                 return AgentResponse(
@@ -853,6 +1318,15 @@ class ToolReactExecutionAdapter:
                         "tool_receipts": tool_receipts,
                         "react_trace": trace,
                         "model_calls": model_calls,
+                        **(
+                            {
+                                "artifact_assessment_completion_receipt": dict(
+                                    provenance_completion_receipt
+                                )
+                            }
+                            if provenance_completion_receipt is not None
+                            else {}
+                        ),
                     },
                 )
 
@@ -861,6 +1335,21 @@ class ToolReactExecutionAdapter:
                     {
                         "observation_status": "schema_invalid",
                         "public_error_code": "skill_action_not_admitted",
+                        "executed_action": action.to_value(),
+                    }
+                )
+                entry.update(observation)
+                trace.append(entry)
+                observations.append(observation)
+                continue
+            if (
+                effective_tool_actions is not None
+                and (action.resource_id, action.name) not in effective_tool_actions
+            ):
+                observation = MappingProxyType(
+                    {
+                        "observation_status": "schema_invalid",
+                        "public_error_code": "tool_action_not_admitted",
                         "executed_action": action.to_value(),
                     }
                 )
@@ -976,10 +1465,28 @@ class ToolReactExecutionAdapter:
                 # action may change that state (for example, an edit before
                 # rerunning the same test command), so the earlier request must
                 # then be admissible again.
+                duplicate_tool_request_count += 1
+                cached_observation = next(
+                    (
+                        dict(previous)
+                        for previous in reversed(observations)
+                        if previous.get("observation_status")
+                        in {"success", "tool_error"}
+                    ),
+                    {},
+                )
                 observation = MappingProxyType(
                     {
                         "observation_status": "schema_invalid",
                         "public_error_code": "duplicate_tool_request",
+                        "repeat_count": duplicate_tool_request_count,
+                        "cached_observation": cached_observation,
+                        "repair_instruction": (
+                            "The identical Tool action was already dispatched. "
+                            "Use its cached observation and COMPLETE when the "
+                            "declared artifact is ready, or choose a different "
+                            "admissible Tool action that can add new evidence."
+                        ),
                         "executed_action": action.to_value(),
                     }
                 )
@@ -989,6 +1496,7 @@ class ToolReactExecutionAdapter:
                 continue
 
             last_dispatched_tool_action_key = action_key
+            duplicate_tool_request_count = 0
             tool_calls += 1
             result, receipt = await self._tool_registry.ainvoke_with_receipt(
                 action.resource_id,
@@ -1007,6 +1515,23 @@ class ToolReactExecutionAdapter:
                         # policy can distinguish a retry from the next step.
                         "executed_action": action.to_value(),
                         "error_type": receipt.error_type,
+                    }
+                )
+            elif isinstance(result.value, Mapping) and result.value.get("ok") is False:
+                # The backend invocation completed and therefore has a normal
+                # receipt, but computation/coding Tools use payload ``ok=false``
+                # for an operation-level failure.  Expose both facts instead of
+                # mislabelling the observation as a successful Tool result.
+                observation = MappingProxyType(
+                    {
+                        "observation_status": "tool_error",
+                        "public_error_code": "tool_result_not_ok",
+                        "tool_id": action.resource_id,
+                        "executed_action": action.to_value(),
+                        "tool_version": receipt.tool_version,
+                        "result": result.value,
+                        "completed": result.completed,
+                        "tool_invocation_status": "completed",
                     }
                 )
             else:
@@ -1031,6 +1556,125 @@ class ToolReactExecutionAdapter:
             react_trace=tuple(trace),
             tool_receipts=tuple(tool_receipts),
             model_calls=tuple(model_calls),
+        )
+
+    @staticmethod
+    def _provenance_bound_completion_repair_instruction(
+        request: AgentRequest,
+    ) -> str:
+        sources = _provenance_bound_candidate_sources(request)
+        exact_bindings = [
+            {
+                "source_agent": source["source_agent"],
+                "assessed_artifact_id": source["artifact_id"],
+                "candidate": source["candidate"],
+            }
+            for source in sources
+        ]
+        return (
+            "Return one complete StructuredAction whose arguments.value "
+            "preserves the public derivation and ends with exactly one "
+            "<artifact_assessments> JSON-array block. Include one assessment "
+            "for every exact source binding below; copy assessed_artifact_id "
+            "and candidate without alteration. A bare scalar candidate is "
+            "not a complete assessment artifact. Use strict JSON and escape "
+            "every literal backslash inside JSON strings. Required bindings: "
+            + json.dumps(
+                exact_bindings,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+
+    @staticmethod
+    def _provenance_bound_completion_admission(
+        *,
+        request: AgentRequest,
+        artifact: str,
+        tool_receipts: list[dict[str, object]],
+    ) -> tuple[Optional[str], Optional[dict[str, object]]]:
+        """Validate one public assessment artifact against routed provenance.
+
+        This keeps SkillFlow's COMPLETE action unchanged and adds only the
+        project protocol admission needed by a downstream AgentGraph node. It
+        compares public artifact identities and candidates, never correctness
+        and never the hidden benchmark target.
+        """
+
+        candidate_sources = _provenance_bound_candidate_sources(request)
+        if not candidate_sources:
+            return None, None
+        if any(
+            not isinstance(source.get("artifact_id"), str)
+            or not str(source["artifact_id"]).strip()
+            for source in candidate_sources
+        ):
+            return "provenance_completion_source_artifact_id_missing", None
+        expected_by_artifact_id: dict[str, dict[str, object]] = {}
+        for source in candidate_sources:
+            artifact_id = str(source["artifact_id"])
+            if artifact_id in expected_by_artifact_id:
+                return "provenance_completion_duplicate_source_artifact_id", None
+            expected_by_artifact_id[artifact_id] = source
+        source_candidates = frozenset(
+            str(source["candidate"])
+            for source in candidate_sources
+        )
+        if not _has_public_derivation(
+            artifact,
+            candidates=source_candidates,
+        ):
+            return "provenance_completion_public_derivation_missing", None
+        assessments, parsing_failure = (
+            extract_aime2026_artifact_assessments(artifact)
+        )
+        if parsing_failure is not None:
+            return (
+                "provenance_completion_assessment_invalid:"
+                + parsing_failure,
+                None,
+            )
+        assessment_by_artifact_id = {
+            str(assessment["assessed_artifact_id"]): dict(assessment)
+            for assessment in assessments
+        }
+        if set(assessment_by_artifact_id) != set(expected_by_artifact_id):
+            return "provenance_completion_assessed_artifacts_mismatch", None
+        assessment_bindings: list[dict[str, object]] = []
+        for artifact_id, source in expected_by_artifact_id.items():
+            assessment = assessment_by_artifact_id[artifact_id]
+            if str(assessment.get("candidate")) != str(source["candidate"]):
+                return "provenance_completion_candidate_binding_mismatch", None
+            assessment_bindings.append(
+                {
+                    "source_agent": source["source_agent"],
+                    "artifact_id": artifact_id,
+                    **assessment,
+                }
+            )
+        output_candidate, _, output_parsing_failure = (
+            extract_aime2026_candidate(artifact)
+        )
+        return (
+            None,
+            {
+                "protocol": request.artifact_assessment_protocol,
+                "admission_status": "admitted",
+                "public_derivation_preserved": True,
+                "candidate_sources": [
+                    dict(source) for source in candidate_sources
+                ],
+                "assessment_bindings": assessment_bindings,
+                "output_candidate": output_candidate,
+                "output_candidate_parsing_failure_reason": (
+                    output_parsing_failure
+                ),
+                # Full Tool receipts remain in the adjacent canonical
+                # ``tool_receipts`` metadata field; count them here to bind
+                # this completion admission to that same public execution.
+                "local_tool_receipt_count": len(tool_receipts),
+            },
         )
 
     def _completion_error(

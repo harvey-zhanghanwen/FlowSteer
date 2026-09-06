@@ -27,6 +27,7 @@ from src.interactive.director import (
     DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
     DIRECTOR_SYSTEM_PROMPT,
+    DirectorError,
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     director_actions_from_admissible_schema_branch,
     director_action_json_schema_text,
@@ -63,7 +64,9 @@ from src.interactive.rollout_collector import (
     SGLangReceiptDirectorClient,
     _ADD_ACTION_CONTINUATION,
     _ADD_DECLARATION_CONTINUATION,
+    _action_parameter_serialization_failed,
     _hierarchical_continuation_prompt,
+    _hierarchical_selector_serialization_failed,
     _validate_v3_hierarchical_action_receipt,
     select_balanced_tasks,
 )
@@ -351,6 +354,7 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     }
     assert client.generate_url == "http://127.0.0.1:8015/generate"
     assert payload["input_ids"] == [101, 102, 103]
+    assert payload["require_reasoning"] is False
     assert payload["return_logprob"] is True
     assert payload["lora_path"] == "theta_live"
     assert payload["sampling_params"]["sampling_seed"] == 23
@@ -364,17 +368,231 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     assert response.metadata["attempt_count"] == 1
     assert response.metadata["generation_seed"] == 23
     assert response.metadata["backend_sampling_seed"] == 23
+    assert response.metadata["chat_template_enable_thinking"] is False
+    assert response.metadata["require_reasoning"] is False
     assert response.metadata["action_json_schema_version"] == (
         "agentgraph.canvas-action-json-schema.v1"
     )
     assert len(response.metadata["output_token_ids"]) == len(
         response.metadata["behavior_log_probs"]
     )
-
     action = AgentActionParser().parse(text)
     consumed = client.executed_prefix_tokens(response, action)
     assert consumed == action.consumed_end
     assert consumed < len(response.metadata["output_token_ids"])
+
+
+def test_native_sglang_receipt_records_thinking_chat_template_mode():
+    client = ScriptedSGLangClient(
+        ['{"action":"finish"}'],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        enable_thinking=True,
+        action_json_schema=DIRECTOR_ACTION_JSON_SCHEMA_TEXT,
+        action_json_schema_version="agentgraph.canvas-action-json-schema.v1",
+    )
+
+    response = asyncio.run(client.propose("ordinary prompt", seed=23))
+
+    _, template_kwargs = client.tokenizer.chat_calls[0]
+    assert template_kwargs["enable_thinking"] is True
+    assert client.payloads[0]["require_reasoning"] is True
+    assert json.loads(client.payloads[0]["sampling_params"]["json_schema"]) == (
+        DIRECTOR_ACTION_JSON_SCHEMA
+    )
+    assert response.metadata["chat_template_enable_thinking"] is True
+    assert response.metadata["require_reasoning"] is True
+    phase_receipt = client._hierarchical_phase_receipt(response)
+    assert phase_receipt["require_reasoning"] is True
+
+
+def test_native_sglang_thinking_budget_is_enforced_in_sampling_custom_params():
+    client = ScriptedSGLangClient(
+        ['{"action":"finish"}'],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        enable_thinking=True,
+        thinking_budget_tokens=1024,
+        max_tokens=4096,
+        action_json_schema=DIRECTOR_ACTION_JSON_SCHEMA_TEXT,
+        action_json_schema_version="agentgraph.canvas-action-json-schema.v1",
+    )
+
+    response = asyncio.run(client.propose("ordinary prompt", seed=23))
+    payload = client.payloads[0]
+
+    assert payload["require_reasoning"] is True
+    assert payload["sampling_params"]["max_new_tokens"] == 4096
+    assert payload["sampling_params"]["custom_params"] == {
+        "thinking_budget": 1024
+    }
+    assert response.metadata["thinking_budget_tokens"] == 1024
+
+
+def test_native_sglang_rejects_context_overflow_before_dispatch():
+    client = ScriptedSGLangClient(
+        ['{"action":"finish"}'],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        max_tokens=3,
+        max_context_tokens=5,
+    )
+
+    with pytest.raises(
+        DirectorError,
+        match=(
+            r"context limit exceeded before SGLang dispatch: "
+            r"prompt_tokens=3, max_new_tokens=3, max_context_tokens=5"
+        ),
+    ):
+        client.request_payload("ordinary prompt")
+
+    assert client.payloads == []
+
+
+@pytest.mark.parametrize(
+    ("enable_thinking", "thinking_budget_tokens", "max_tokens", "message"),
+    (
+        (False, 1024, 4096, "requires enable_thinking=true"),
+        (True, 0, 4096, "positive integer smaller than max_tokens"),
+        (True, 4096, 4096, "positive integer smaller than max_tokens"),
+        (True, True, 4096, "positive integer smaller than max_tokens"),
+    ),
+)
+def test_native_sglang_thinking_budget_validation(
+    enable_thinking,
+    thinking_budget_tokens,
+    max_tokens,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        ScriptedSGLangClient(
+            ['{"action":"finish"}'],
+            policy_version=POLICY_VERSION,
+            enable_thinking=enable_thinking,
+            thinking_budget_tokens=thinking_budget_tokens,
+            max_tokens=max_tokens,
+        )
+
+
+def test_hierarchical_selectors_accept_reasoning_prefix_without_repair():
+    choice_text = (
+        "<think>Compare the live action domain; {this is reasoning only}."
+        "</think>\n{\"action\":\"finish\"}"
+    )
+    index_text = (
+        "<think>Compare the two admitted relation candidates.</think>\n"
+        "{\"action\":\"set_relation\",\"candidate_index\":1}"
+    )
+
+    assert SGLangReceiptDirectorClient._hierarchical_choice(
+        choice_text,
+        field_name="action",
+        admitted=("finish", "set_output"),
+        reasoning_end_token="</think>",
+    ) == "finish"
+    assert SGLangReceiptDirectorClient._hierarchical_index_choice(
+        index_text,
+        admitted=(0, 1),
+        required_action="set_relation",
+        reasoning_end_token="</think>",
+    ) == 1
+    assert (
+        _hierarchical_selector_serialization_failed(
+            choice_text,
+            reasoning_end_token="</think>",
+        )
+        is False
+    )
+
+
+def test_hierarchical_thinking_selector_requires_reasoning_boundary():
+    text = '{"action":"finish"}'
+
+    assert (
+        _hierarchical_selector_serialization_failed(
+            text,
+            reasoning_end_token="</think>",
+        )
+        is True
+    )
+    with pytest.raises(ReceiptValidationError, match="missing the required"):
+        SGLangReceiptDirectorClient._hierarchical_choice(
+            text,
+            field_name="action",
+            admitted=("finish", "set_output"),
+            reasoning_end_token="</think>",
+        )
+
+
+def test_hierarchical_thinking_selector_does_not_salvage_reasoning_json():
+    text = '<think>{"action":"finish"} no boundary was emitted'
+
+    with pytest.raises(ReceiptValidationError, match="missing the required"):
+        SGLangReceiptDirectorClient._hierarchical_choice(
+            text,
+            field_name="action",
+            admitted=("finish", "set_output"),
+            reasoning_end_token="</think>",
+        )
+
+
+def test_thinking_parameter_boundary_rejects_unknown_fields_without_regeneration():
+    text = (
+        'reasoning {"action":"finish"}</think>'
+        '{"action":"finish","reason":"done"}<|endoftext|>'
+    )
+
+    assert (
+        _action_parameter_serialization_failed(
+            text,
+            reasoning_end_token="</think>",
+        )
+        is False
+    )
+    with pytest.raises(AgentActionParseError, match="unknown action fields"):
+        AgentActionParser().parse(
+            text,
+            reasoning_end_token="</think>",
+        )
+
+    assert (
+        _action_parameter_serialization_failed(
+            '{"action":"finish"}',
+            reasoning_end_token="</think>",
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "<think>done</think>[1] {\"action\":\"finish\"}",
+        "<think>done</think>{\"action\":oops} {\"action\":\"finish\"}",
+        "<think>done</think>{\"action\":\"finish\",\"action\":\"set_output\"}",
+    ),
+)
+def test_hierarchical_selector_rejects_invalid_first_value(text):
+    assert _hierarchical_selector_serialization_failed(text) is True
+    with pytest.raises(ReceiptValidationError):
+        SGLangReceiptDirectorClient._hierarchical_choice(
+            text,
+            field_name="action",
+            admitted=("finish", "set_output"),
+        )
+
+
+def test_hierarchical_selector_does_not_repair_inadmissible_value():
+    text = "<think>done</think>{\"action\":\"add_agent\"}"
+
+    assert _hierarchical_selector_serialization_failed(text) is False
+    with pytest.raises(ReceiptValidationError):
+        SGLangReceiptDirectorClient._hierarchical_choice(
+            text,
+            field_name="action",
+            admitted=("finish", "set_output"),
+        )
 
 
 def test_native_sglang_projects_uint64_seed_to_signed_backend_receipt():
@@ -810,6 +1028,205 @@ def test_native_sglang_v3_regenerates_malformed_relation_candidate_selector_once
     }
 
 
+def test_native_sglang_v3_regenerates_missing_think_action_selector_once():
+    actions = ("set_output", "finish")
+    domains = {
+        "set_output": {"agent_ids": ["node_1"]},
+        "finish": {"admissible": True},
+    }
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    selector_schema = director_model_admissible_sampling_json_schema_text_v3(
+        actions
+    )
+    malformed = '<think>finish is admissible {"action":"finish"}'
+    repaired_selector = (
+        '<think>Use the existing terminal artifact.</think>'
+        '{"action":"finish"}'
+    )
+    final_text = '<think>Emit the selected action.</think>{"action":"finish"}'
+    client = ScriptedSGLangClient(
+        [malformed, repaired_selector, final_text],
+        policy_version=POLICY_VERSION,
+        adapter_name="theta_live",
+        expected_server_weight_version="default",
+        enable_thinking=True,
+        thinking_budget_tokens=1024,
+        max_tokens=4096,
+    )
+
+    response = asyncio.run(
+        client.propose(
+            "current Canvas",
+            seed=17,
+            action_json_schema=selector_schema,
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(
+                actions
+            ),
+            action_target_domains_json=domains_json,
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+
+    assert len(client.payloads) == 3
+    assert client.payloads[0]["sampling_params"]["json_schema"] == (
+        selector_schema
+    )
+    assert client.payloads[1]["sampling_params"]["json_schema"] == (
+        selector_schema
+    )
+    assert [
+        payload["sampling_params"]["sampling_seed"]
+        for payload in client.payloads
+    ] == [17, 17, 17]
+    assert [payload["lora_path"] for payload in client.payloads] == [
+        "theta_live",
+        "theta_live",
+        "theta_live",
+    ]
+    assert response.text == final_text
+    assert response.metadata["selected_action"] == "finish"
+    assert response.metadata["action_selection_regeneration_attempted"] is True
+    assert response.metadata["action_selection_regeneration_succeeded"] is True
+    assert response.metadata["request_count"] == 3
+    assert response.metadata["attempt_count"] == 3
+    phases = response.metadata["hierarchical_phase_receipts"]
+    assert set(phases) == {
+        "action_selection_serialization_failure",
+        "action_selection",
+    }
+    assert phases["action_selection_serialization_failure"]["text"] == malformed
+    assert phases["action_selection"]["text"] == repaired_selector
+    assert phases["action_selection_serialization_failure"]["request_id"] == (
+        "request-1"
+    )
+    assert phases["action_selection"]["request_id"] == "request-2"
+    regeneration_messages = decode_director_transcript(
+        phases["action_selection"]["prompt_text"]
+    )
+    assert regeneration_messages is not None
+    assert regeneration_messages[-2] == {
+        "role": "assistant",
+        "content": malformed,
+    }
+    assert regeneration_messages[-1] == {
+        "role": "user",
+        "content": (
+            "Return one complete JSON object that conforms to the current schema."
+        ),
+    }
+    schema_request = {
+        "action_json_schema": selector_schema,
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(
+            actions
+        ),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    parsed = AgentActionParser().parse(
+        final_text,
+        reasoning_end_token="</think>",
+    )
+    assert _validate_v3_hierarchical_action_receipt(
+        parsed,
+        response.metadata,
+        schema_request,
+    ) == {
+        "action_selection_serialization_failure",
+        "action_selection",
+    }
+
+
+def test_native_sglang_v3_action_selector_double_failure_has_no_canvas_action():
+    actions = ("set_output", "finish")
+    domains = {
+        "set_output": {"agent_ids": ["node_1"]},
+        "finish": {"admissible": True},
+    }
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    selector_schema = director_model_admissible_sampling_json_schema_text_v3(
+        actions
+    )
+    first_malformed = '<think>unfinished {"action":"finish"}'
+    second_malformed = '<think>still unfinished {"action":"finish"}'
+    client = ScriptedSGLangClient(
+        [first_malformed, second_malformed],
+        policy_version=POLICY_VERSION,
+        adapter_name="theta_live",
+        expected_server_weight_version="default",
+        enable_thinking=True,
+        thinking_budget_tokens=1024,
+        max_tokens=4096,
+    )
+
+    with pytest.raises(ReceiptValidationError) as raised:
+        asyncio.run(
+            client.propose(
+                "current Canvas",
+                seed=17,
+                action_json_schema=selector_schema,
+                action_json_schema_version=(
+                    DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+                ),
+                action_schema_branch=director_model_admissible_schema_branch_v3(
+                    actions
+                ),
+                action_target_domains_json=domains_json,
+                action_target_domain_version=(
+                    DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+                ),
+            )
+        )
+
+    assert len(client.payloads) == 2
+    assert client.actions == []
+    assert all(
+        payload["sampling_params"]["json_schema"] == selector_schema
+        for payload in client.payloads
+    )
+    assert [
+        payload["sampling_params"]["sampling_seed"]
+        for payload in client.payloads
+    ] == [17, 17]
+    assert [payload["lora_path"] for payload in client.payloads] == [
+        "theta_live",
+        "theta_live",
+    ]
+    assert raised.value.failure_phase == "action_selection"
+    phases = raised.value.hierarchical_phase_receipts
+    assert set(phases) == {
+        "action_selection_serialization_failure",
+        "action_selection_regeneration_failure",
+    }
+    assert phases["action_selection_serialization_failure"]["text"] == (
+        first_malformed
+    )
+    assert phases["action_selection_regeneration_failure"]["text"] == (
+        second_malformed
+    )
+    assert phases["action_selection_serialization_failure"]["request_id"] == (
+        "request-1"
+    )
+    assert phases["action_selection_regeneration_failure"]["request_id"] == (
+        "request-2"
+    )
+    for sampled in (first_malformed, second_malformed):
+        with pytest.raises(AgentActionParseError):
+            AgentActionParser().parse(
+                sampled,
+                reasoning_end_token="</think>",
+            )
+
+
 def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
     domains = {
         "add_subgraph": {
@@ -1024,6 +1441,399 @@ def test_native_sglang_v3_samples_add_declarations_then_complete_exact_action():
         "role": "user",
         "content": _ADD_DECLARATION_CONTINUATION,
     }
+
+
+def test_native_sglang_v3_role_neutral_add_skips_role_selection():
+    domains = {
+        "add_subgraph": {
+            "min_new_agents": 1,
+            "max_new_agents": 2,
+            "existing_agent_ids": ["node_1"],
+            "required_agent_fields": [
+                "agent_id",
+                "model_id",
+                "contract",
+                "execution_mode",
+                "allowed_tools",
+            ],
+            "model_ids": ["cheap-model", "other-model"],
+            "registered_execution_profiles": [
+                {"execution_mode": "reasoning", "allowed_tools": []},
+                {"execution_mode": "react", "allowed_tools": ["python"]},
+            ],
+            "contract_semantics": "free_text",
+            "endpoint_scope": {
+                "relation_endpoint_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+                "output_agent_id_sources": [
+                    "existing_agent_ids",
+                    "same_action_agent_ids",
+                ],
+            },
+        }
+    }
+    declarations = {
+        "action": "add_subgraph",
+        "agents": [
+            {
+                "agent_id": "node_2",
+                "model_id": "cheap-model",
+                "contract": "Use the problem and return one complete artifact.",
+                "execution_mode": "reasoning",
+                "allowed_tools": [],
+            }
+        ],
+    }
+    final_action = {
+        **declarations,
+        "relations": [
+            {
+                "source_id": "node_1",
+                "target_id": "node_2",
+                "source_to_target": True,
+                "target_to_source": False,
+            }
+        ],
+        "output_agent_id": "node_2",
+    }
+    actions = ("add_subgraph",)
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    client = ScriptedSGLangClient(
+        [
+            json.dumps(declarations, separators=(",", ":")),
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    response = asyncio.run(
+        client.propose(
+            "current Canvas",
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text_v3(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(
+                actions
+            ),
+            action_target_domains_json=domains_json,
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+
+    assert len(client.payloads) == 2
+    assert client.payloads[0]["sampling_params"]["json_schema"] == (
+        director_live_add_subgraph_agent_declarations_json_schema_text(domains)
+    )
+    assert client.payloads[1]["sampling_params"]["json_schema"] == (
+        director_live_action_parameter_json_schema_text(
+            "add_subgraph",
+            domains,
+            add_agents=declarations["agents"],
+        )
+    )
+    assert response.metadata["action_decoding_strategy"] == (
+        HIERARCHICAL_JSON_SCHEMA_STRATEGY
+    )
+    assert response.metadata["selected_add_agent_roles"] is None
+    assert response.metadata["selected_add_agent_ids"] == ["node_2"]
+    assert response.metadata["request_count"] == 2
+    assert set(response.metadata["hierarchical_phase_receipts"]) == {
+        "add_agent_declarations"
+    }
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(
+            actions
+        ),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    assert _validate_v3_hierarchical_action_receipt(
+        AgentActionParser().parse(response.text),
+        response.metadata,
+        schema_request,
+    ) == {"add_agent_declarations"}
+
+
+def _v32_free_text_add_domain(*, exact_multi_source: bool):
+    domain = {
+        "min_new_agents": 1,
+        "max_new_agents": 1,
+        "existing_agent_ids": ["source_a", "source_b", "source_extra"],
+        "required_agent_fields": [
+            "agent_id",
+            "model_id",
+            "contract",
+            "execution_mode",
+            "allowed_tools",
+        ],
+        "model_ids": ["cheap-model"],
+        "registered_execution_profiles": [
+            {"execution_mode": "reasoning", "allowed_tools": []},
+        ],
+        "contract_semantics": "free_text",
+        "endpoint_scope": {
+            "relation_endpoint_sources": [
+                "existing_agent_ids",
+                "same_action_agent_ids",
+            ],
+            "output_agent_id_sources": [
+                "existing_agent_ids",
+                "same_action_agent_ids",
+            ],
+        },
+        "preserve_current_output": True,
+    }
+    if exact_multi_source:
+        domain.update(
+            {
+                "require_all_existing_ingress": True,
+                "required_existing_ingress_agent_ids": [
+                    "source_a",
+                    "source_b",
+                ],
+                "required_relation_count": 2,
+            }
+        )
+    return {"add_subgraph": domain}
+
+
+def _v32_free_text_add_receipt(domains, relations):
+    actions = ("add_subgraph",)
+    declarations = {
+        "action": "add_subgraph",
+        "agents": [
+            {
+                "agent_id": "node_1",
+                "model_id": "cheap-model",
+                "contract": (
+                    "Consume the supplied artifacts and return one complete "
+                    "assessment artifact."
+                ),
+                "execution_mode": "reasoning",
+                "allowed_tools": [],
+            }
+        ],
+    }
+    final_action = {
+        **declarations,
+        "relations": relations,
+        "output_agent_id": None,
+    }
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    client = ScriptedSGLangClient(
+        [
+            json.dumps(declarations, separators=(",", ":")),
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    response = asyncio.run(
+        client.propose(
+            "candidate-preserving recovery Canvas",
+            action_json_schema=(
+                director_model_admissible_sampling_json_schema_text_v3(actions)
+            ),
+            action_json_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+            action_schema_branch=director_model_admissible_schema_branch_v3(
+                actions
+            ),
+            action_target_domains_json=domains_json,
+            action_target_domain_version=(
+                DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+            ),
+        )
+    )
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(
+            actions
+        ),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+    return (
+        client,
+        response,
+        AgentActionParser().parse(response.text),
+        schema_request,
+        final_action,
+    )
+
+
+def _v32_ingress_relation(
+    source_id,
+    *,
+    target_id="node_1",
+    source_to_target=True,
+    target_to_source=False,
+):
+    return {
+        "source_id": source_id,
+        "target_id": target_id,
+        "source_to_target": source_to_target,
+        "target_to_source": target_to_source,
+    }
+
+
+def test_v32_exact_multi_source_free_text_receipt_schema_and_validator_agree():
+    domains = _v32_free_text_add_domain(exact_multi_source=True)
+    relations = [
+        _v32_ingress_relation("source_a"),
+        _v32_ingress_relation("source_b"),
+    ]
+    client, response, action, schema_request, final_action = (
+        _v32_free_text_add_receipt(domains, relations)
+    )
+
+    assert len(client.payloads) == 2
+    parameter_schema = json.loads(
+        client.payloads[1]["sampling_params"]["json_schema"]
+    )
+    relation_schema = parameter_schema["properties"]["relations"]
+    assert relation_schema["minItems"] == 2
+    assert relation_schema["maxItems"] == 2
+    assert relation_schema["uniqueItems"] is True
+    assert relation_schema["items"] is False
+    assert [
+        branch["properties"]["source_id"]["const"]
+        for branch in relation_schema["prefixItems"]
+    ] == ["source_a", "source_b"]
+    assert not list(
+        Draft202012Validator(parameter_schema).iter_errors(final_action)
+    )
+    assert _validate_v3_hierarchical_action_receipt(
+        action,
+        response.metadata,
+        schema_request,
+    ) == {"add_agent_declarations"}
+
+
+def test_v32_ordinary_free_text_receipt_keeps_one_relation_boundary():
+    domains = _v32_free_text_add_domain(exact_multi_source=False)
+    relations = [
+        _v32_ingress_relation("source_a"),
+        _v32_ingress_relation("source_b"),
+    ]
+    client, response, action, schema_request, final_action = (
+        _v32_free_text_add_receipt(domains, relations)
+    )
+
+    parameter_schema = json.loads(
+        client.payloads[1]["sampling_params"]["json_schema"]
+    )
+    assert parameter_schema["properties"]["relations"]["maxItems"] == 1
+    assert list(Draft202012Validator(parameter_schema).iter_errors(final_action))
+    with pytest.raises(
+        ReceiptValidationError,
+        match="one-relation edit boundary",
+    ):
+        _validate_v3_hierarchical_action_receipt(
+            action,
+            response.metadata,
+            schema_request,
+        )
+
+
+@pytest.mark.parametrize(
+    ("case_name", "relations"),
+    (
+        (
+            "too_few_relations",
+            [_v32_ingress_relation("source_a")],
+        ),
+        (
+            "too_many_relations",
+            [
+                _v32_ingress_relation("source_a"),
+                _v32_ingress_relation("source_b"),
+                _v32_ingress_relation("source_extra"),
+            ],
+        ),
+        (
+            "missing_required_source",
+            [
+                _v32_ingress_relation("source_a"),
+                _v32_ingress_relation("source_a", target_id="source_b"),
+            ],
+        ),
+        (
+            "extra_source",
+            [
+                _v32_ingress_relation("source_a"),
+                _v32_ingress_relation("source_extra"),
+            ],
+        ),
+        (
+            "unknown_endpoint",
+            [
+                _v32_ingress_relation("source_a"),
+                _v32_ingress_relation("unknown_source"),
+            ],
+        ),
+        (
+            "bidirectional_relation",
+            [
+                _v32_ingress_relation("source_a", target_to_source=True),
+                _v32_ingress_relation("source_b"),
+            ],
+        ),
+    ),
+)
+def test_v32_exact_multi_source_free_text_receipt_rejects_nonexact_relations(
+    case_name,
+    relations,
+):
+    domains = _v32_free_text_add_domain(exact_multi_source=True)
+    _, response, action, schema_request, _ = _v32_free_text_add_receipt(
+        domains,
+        relations,
+    )
+
+    with pytest.raises(ReceiptValidationError):
+        _validate_v3_hierarchical_action_receipt(
+            action,
+            response.metadata,
+            schema_request,
+        )
+
+
+def test_v32_exact_multi_source_duplicate_unordered_pair_is_parser_rejected():
+    domains = _v32_free_text_add_domain(exact_multi_source=True)
+    relations = [
+        _v32_ingress_relation("source_a"),
+        _v32_ingress_relation("node_1", target_id="source_a"),
+    ]
+
+    with pytest.raises(
+        AgentActionParseError,
+        match="at most one relation per endpoint pair",
+    ):
+        _v32_free_text_add_receipt(domains, relations)
 
 
 def test_native_sglang_v3_regenerates_malformed_add_role_selection_once():
@@ -1503,6 +2313,114 @@ def test_native_sglang_v3_binds_modify_agent_and_discrete_value():
         "modify_field_selection",
         "modify_agent_selection",
     }
+
+
+def test_native_sglang_v3_binds_atomic_execution_profile_receipt():
+    actions = ("modify_agent",)
+    domains = {
+        "modify_agent": {
+            "mutable_fields": ["execution_profile", "execution_mode"],
+            "per_agent_candidates": [
+                {
+                    "agent_id": "worker",
+                    "mutable_fields": [
+                        "execution_profile",
+                        "execution_mode",
+                    ],
+                    "current_values": {
+                        "execution_profile": {
+                            "execution_mode": "reasoning",
+                            "allowed_tools": [],
+                        },
+                        "execution_mode": "reasoning",
+                    },
+                    "discrete_value_domains": {
+                        "execution_profile": [
+                            {
+                                "execution_mode": "react",
+                                "allowed_tools": ["python"],
+                            },
+                            {
+                                "execution_mode": "coding",
+                                "allowed_tools": ["python"],
+                            },
+                        ],
+                        "execution_mode": ["react"],
+                    },
+                }
+            ],
+        }
+    }
+    domains_json = director_live_action_target_domains_json(actions, domains)
+    final_action = {
+        "action": "modify_agent",
+        "agent_id": "worker",
+        "execution_mode": "coding",
+        "allowed_tools": ["python"],
+    }
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"modify_agent","field":"execution_profile"}',
+            json.dumps(final_action, separators=(",", ":")),
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    schema_request = {
+        "action_json_schema": (
+            director_model_admissible_sampling_json_schema_text_v3(actions)
+        ),
+        "action_json_schema_version": (
+            DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+        ),
+        "action_schema_branch": director_model_admissible_schema_branch_v3(
+            actions
+        ),
+        "action_target_domains_json": domains_json,
+        "action_target_domain_version": (
+            DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
+        ),
+    }
+
+    response = asyncio.run(
+        client.propose(
+            "repair Canvas",
+            **schema_request,
+        )
+    )
+
+    assert len(client.payloads) == 2
+    assert client.payloads[1]["sampling_params"]["json_schema"] == (
+        director_live_action_parameter_json_schema_text(
+            "modify_agent",
+            domains,
+            modify_field="execution_profile",
+            modify_agent_id="worker",
+        )
+    )
+    assert response.metadata["selected_modify_field"] == "execution_profile"
+    assert response.metadata["selected_modify_agent_id"] == "worker"
+    assert response.metadata["parameter_schema_branch"] == (
+        "modify_agent:execution_profile"
+    )
+    assert _validate_v3_hierarchical_action_receipt(
+        AgentActionParser().parse(response.text),
+        response.metadata,
+        schema_request,
+    ) == {"modify_field_selection"}
+
+    with pytest.raises(
+        ReceiptValidationError,
+        match="outside its exact live domain",
+    ):
+        _validate_v3_hierarchical_action_receipt(
+            AgentActionParser().parse(
+                '{"action":"modify_agent","agent_id":"worker",'
+                '"execution_mode":"reasoning","allowed_tools":["python"]}'
+            ),
+            response.metadata,
+            schema_request,
+        )
 
 
 def test_native_sglang_v3_regenerates_one_truncated_parameter_with_exact_receipts():
@@ -3103,22 +4021,15 @@ def test_collector_preserves_turns_at_verified_qa_empty_canvas_domain(
     assert "recovery_state" in diagnosis
     assert "evaluator" not in json.dumps(diagnosis)
     assert "ground_truth" not in json.dumps(diagnosis)
-    assert trajectory.valid_lineage_fallback_used is retain_valid_lineage
-    if retain_valid_lineage:
-        assert trajectory.final_answer == "final answer"
-        assert observed["runtime"] is not None
-        assert trajectory.valid_lineage_fallback_receipt["runtime_run_id"] == (
-            observed["runtime"].run_id
-        )
-        assert trajectory.valid_lineage_fallback_receipt["graph_snapshot"] == (
-            trajectory.turns[0].graph_snapshot
-        )
-    else:
-        assert trajectory.final_answer is None
-        assert observed["runtime"] is None
+    assert trajectory.valid_lineage_fallback_used is False
+    assert trajectory.valid_lineage_fallback_receipt == {}
+    assert trajectory.final_answer is None
+    assert observed["final_answer"] is None
+    assert observed["runtime"] is None
+    assert trajectory.turns[0].executions[0].output == "final answer"
 
 
-def test_collector_uses_only_env_valid_lineage_at_max_rounds():
+def test_collector_never_promotes_env_valid_lineage_at_max_rounds():
     registry = _registry()
     client = ScriptedSGLangClient(
         [
@@ -3172,9 +4083,10 @@ def test_collector_uses_only_env_valid_lineage_at_max_rounds():
         )
         return {
             "evaluator_version": EVALUATOR_VERSION,
-            "valid": True,
-            "reward": 1.0,
-            "metrics": {"f1": 1.0},
+            "valid": False,
+            "reward": None,
+            "metrics": {},
+            "reason": "not_evaluated_without_explicit_finish",
         }
 
     trajectory = asyncio.run(collector.collect(_task(), 0, evaluator))
@@ -3182,16 +4094,15 @@ def test_collector_uses_only_env_valid_lineage_at_max_rounds():
     assert trajectory.explicit_finish is False
     assert trajectory.termination_reason == "max_rounds"
     assert trajectory.terminal_failure is True
-    assert trajectory.final_answer == "final answer"
-    assert trajectory.valid_lineage_fallback_used is True
-    assert trajectory.valid_lineage_fallback_receipt["graph_revision"] == (
-        observed["final_graph"]["revision"]
-    )
-    assert trajectory.valid_lineage_fallback_receipt["runtime_run_id"] == (
-        observed["runtime"].run_id
-    )
+    assert trajectory.final_answer is None
+    assert trajectory.valid_lineage_fallback_used is False
+    assert trajectory.valid_lineage_fallback_receipt == {}
     assert observed["final_graph"]["revision"] > 0
-    assert observed["final_answer"] == "final answer"
+    assert observed["final_answer"] is None
+    assert observed["runtime"] is None
+    assert trajectory.evaluation.valid is False
+    assert trajectory.evaluation.reason == "not_evaluated_without_explicit_finish"
+    assert trajectory.turns[0].executions[0].output == "final answer"
     assert trajectory.grpo_eligible is False
 
 

@@ -157,6 +157,105 @@ def _mapping(value: Any, name: str) -> Mapping[str, Any]:
     return value
 
 
+def _validate_sglang_thinking_runtime(
+    config: Mapping[str, Any],
+    server_runtime: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Validate the deployed runtime for schema-bound native Qwen thinking.
+
+    The config describes launch intent; ``GET /server_info`` describes the
+    process that will actually serve the benchmark.  Only the conjunction of
+    native thinking and JSON Schema action decoding needs this stricter
+    runtime contract.  Other evaluation conditions retain their previous
+    compatibility boundary.
+    """
+
+    director = _mapping(config.get("director"), "director")
+    enable_thinking = director.get("enable_thinking") is True
+    action_decoding = str(
+        director.get("action_decoding", "unconstrained")
+    ).strip()
+    required = enable_thinking and action_decoding == "json_schema"
+    receipt: dict[str, Any] = {
+        "schema_version": "flowsteer.sglang.thinking-runtime-preflight.v2",
+        "required": required,
+        "passed": True,
+        "enable_thinking": enable_thinking,
+        "action_decoding": action_decoding,
+    }
+    if not required:
+        receipt["status"] = "not_required"
+        return receipt
+
+    required_context = director.get("max_context_tokens")
+    if (
+        isinstance(required_context, bool)
+        or not isinstance(required_context, int)
+        or required_context <= 0
+    ):
+        raise ConfigurationError(
+            "director.max_context_tokens must be a positive integer for "
+            "thinking JSON Schema evaluation"
+        )
+    actual_context = server_runtime.get("context_length")
+    reasoning_parser = server_runtime.get("reasoning_parser")
+    grammar_backend = server_runtime.get("grammar_backend")
+    enable_strict_thinking = server_runtime.get("enable_strict_thinking")
+    receipt.update(
+        {
+            "status": "validated",
+            "required_reasoning_parser": "qwen3",
+            "actual_reasoning_parser": reasoning_parser,
+            "required_grammar_backend": "xgrammar",
+            "actual_grammar_backend": grammar_backend,
+            "required_strict_thinking": True,
+            "actual_strict_thinking": enable_strict_thinking,
+            "required_context_length": required_context,
+            "actual_context_length": actual_context,
+        }
+    )
+
+    failures: list[str] = []
+    # Qwen3.5 is a hybrid-thinking model, but the deployed SGLang runtime used
+    # by this project names its supported parser exactly ``qwen3``.  Do not
+    # silently admit unverified aliases such as ``qwen3-thinking``.
+    if reasoning_parser != "qwen3":
+        failures.append(
+            "server_info.reasoning_parser must equal 'qwen3' "
+            f"(received {reasoning_parser!r})"
+        )
+    # The project launch path uses SGLang's XGrammar-backed
+    # ReasonerGrammarBackend. A live canary on SGLang 0.5.15 showed that the
+    # non-strict deployment could emit fields outside a singleton action
+    # schema after </think>; fail closed instead of weakening AgentActionParser.
+    if grammar_backend != "xgrammar":
+        failures.append(
+            "server_info.grammar_backend must equal 'xgrammar' "
+            f"(received {grammar_backend!r})"
+        )
+    if enable_strict_thinking is not True:
+        failures.append(
+            "server_info.enable_strict_thinking must be true "
+            f"(received {enable_strict_thinking!r})"
+        )
+    if (
+        isinstance(actual_context, bool)
+        or not isinstance(actual_context, int)
+        or actual_context < required_context
+    ):
+        failures.append(
+            "server_info.context_length must be at least "
+            f"director.max_context_tokens={required_context} "
+            f"(received {actual_context!r})"
+        )
+    if failures:
+        raise CompletionBenchmarkRoundError(
+            "thinking JSON Schema runtime preflight failed: "
+            + "; ".join(failures)
+        )
+    return receipt
+
+
 def _resolve(root: Path, value: str) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else root / path
@@ -3068,6 +3167,17 @@ async def run_completion_benchmark_round(
 
     try:
         backend = LiveSmokeBackend.from_config(config, root, evaluation_only=True)
+        sglang_server_runtime = await asyncio.to_thread(
+            backend.publisher.server_runtime_receipt
+        )
+        manifest["runtime_resource"]["sglang_server_runtime"] = (
+            sglang_server_runtime
+        )
+        _write_json(paths["manifest"], manifest)
+        thinking_runtime_preflight = _validate_sglang_thinking_runtime(
+            config,
+            sglang_server_runtime,
+        )
         judge_receipt = None
         swebench_harness_receipt = None
         if dataset_key == "healthbench_professional":
@@ -3108,9 +3218,6 @@ async def run_completion_benchmark_round(
                 "training_performed": False,
                 "policy_published": False,
             }
-        sglang_server_runtime = await asyncio.to_thread(
-            backend.publisher.server_runtime_receipt
-        )
         evaluator_preflight = await _run_evaluator_preflight(
             backend,
             config,
@@ -3120,6 +3227,7 @@ async def run_completion_benchmark_round(
         preflight = {
             **dict(adapter_preflight),
             "sglang_server_runtime": sglang_server_runtime,
+            "thinking_runtime_preflight": thinking_runtime_preflight,
             "evaluator_preflight": evaluator_preflight,
             "healthbench_judge_model": (
                 backend.judge_model
@@ -3129,9 +3237,6 @@ async def run_completion_benchmark_round(
             "healthbench_judge_receipt": judge_receipt,
             "swebench_harness_receipt": swebench_harness_receipt,
         }
-        manifest["runtime_resource"]["sglang_server_runtime"] = (
-            sglang_server_runtime
-        )
         _write_json(paths["manifest"], manifest)
         _write_json(paths["preflight"], preflight)
     except Exception as exc:

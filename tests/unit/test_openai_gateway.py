@@ -117,7 +117,9 @@ class MessageTests(unittest.TestCase):
         visible = "\n".join(item["content"] for item in messages)
 
         self.assertIn("one <artifact_assessments>", system)
-        self.assertIn("every upstream artifact", system)
+        self.assertIn("escape every literal backslash", system)
+        self.assertIn(r"write `\\cos` rather than `\cos`", system)
+        self.assertIn("every routed input artifact", system)
         self.assertIn("all copied candidate values are identical", system)
         self.assertIn("Final Answer: <candidate>", system)
         self.assertIn("do not emit a Final Answer line", system)
@@ -129,8 +131,36 @@ class MessageTests(unittest.TestCase):
             "rather than testing the candidate token itself", system
         )
         self.assertIn("typed envelope has a non-null candidate", system)
+        self.assertIn("artifact_complete and execution_diagnostic_codes", system)
         self.assertIn("candidate: \"62\"", visible)
         self.assertIn("candidate_parsing_status: parsed", visible)
+
+    def test_upstream_envelope_exposes_public_execution_diagnostics(self) -> None:
+        agent_request = replace(
+            request(is_output_agent=False),
+            upstream=(
+                replace(
+                    request(is_output_agent=False).upstream[0],
+                    artifact_complete=True,
+                    execution_diagnostic_codes=(
+                        "structured_action_truncated",
+                        "duplicate_tool_request",
+                    ),
+                ),
+            ),
+        )
+
+        visible = "\n".join(
+            item["content"] for item in build_agent_messages(agent_request)
+        )
+
+        self.assertIn("artifact_complete: true", visible)
+        self.assertIn("artifact_status: complete", visible)
+        self.assertIn(
+            'execution_diagnostic_codes: ["structured_action_truncated",'
+            '"duplicate_tool_request"]',
+            visible,
+        )
 
     def test_aime_assessment_does_not_infer_candidate_from_raw_artifact(
         self,
@@ -256,6 +286,55 @@ class MessageTests(unittest.TestCase):
         self.assertIn("unverified work product", messages[0]["content"])
         self.assertIn("does not change this execution contract", messages[0]["content"])
         self.assertNotIn("<answer>", messages[0]["content"])
+
+    def test_revision_peer_uses_standard_provenance_assessment_envelope(
+        self,
+    ) -> None:
+        agent_request = replace(
+            request(ExecutionPhase.REVISION, is_output_agent=False),
+            upstream=(),
+            artifact_assessment_protocol=(
+                "provenance_bound_candidate_assessment_v2"
+            ),
+            peer_draft=UpstreamMessage(
+                "peer",
+                "agent",
+                "Public derivation.\nFinal Answer: 441",
+                message_type="candidate",
+                graph_revision=1,
+                request_or_dependency="verify carefully",
+                artifact_version="peer:artifact:1",
+                source_model_id="peer-model",
+                source_contract="derive a public candidate",
+                artifact_complete=True,
+                execution_diagnostic_codes=("recovered_parse_error",),
+                input_artifact_provenance=(
+                    {
+                        "source_agent_id": "root",
+                        "artifact_id": "root:artifact:1",
+                        "raw_output": "public intermediate",
+                    },
+                ),
+            ),
+        )
+
+        messages = build_agent_messages(agent_request)
+        system = messages[0]["content"]
+        visible = messages[1]["content"]
+
+        self.assertIn("ordinary upstream artifacts and the peer draft", system)
+        self.assertIn("every routed input artifact", system)
+        self.assertIn("source_model_id: peer-model", visible)
+        self.assertIn("source_contract: derive a public candidate", visible)
+        self.assertIn("artifact_complete: true", visible)
+        self.assertIn(
+            'execution_diagnostic_codes: ["recovered_parse_error"]',
+            visible,
+        )
+        self.assertIn('candidate: "441"', visible)
+        self.assertIn("candidate_parsing_status: parsed", visible)
+        self.assertIn("input_artifact_provenance:", visible)
+        self.assertIn('"artifact_id":"root:artifact:1"', visible)
 
     def test_generic_fanin_renders_separate_complete_artifact_envelopes(
         self,
@@ -718,6 +797,48 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("remote-model-id", payload["model"])
         self.assertEqual(512, payload["max_tokens"])
 
+    def test_reasoning_only_length_recovery_has_no_private_reasoning_input(
+        self,
+    ) -> None:
+        initial = request(
+            problem="Compute the requested value from the original problem.",
+            upstream_artifact="public upstream derivation",
+        )
+        recovery = replace(
+            initial,
+            request_id=f"{initial.request_id}:length-continuation:1",
+            partial_artifact="",
+            continuation_segment_index=1,
+            max_tokens_override=8192,
+            model=replace(
+                initial.model,
+                metadata={
+                    **dict(initial.model.metadata),
+                    "chat_template_enable_thinking": "false",
+                    "require_reasoning_trace": "false",
+                },
+            ),
+        )
+
+        payload = OpenAICompatibleGateway().request_payload(recovery)
+        messages = payload["messages"]
+
+        self.assertEqual(build_agent_messages(initial), messages[:2])
+        self.assertEqual("user", messages[2]["role"])
+        self.assertNotIn("assistant", [item["role"] for item in messages[2:]])
+        self.assertIn("exhausted its token allowance", messages[2]["content"])
+        self.assertIn("complete same artifact", messages[2]["content"])
+        self.assertIn("unavailable private reasoning", messages[2]["content"])
+        self.assertIn(initial.problem, messages[1]["content"])
+        self.assertIn(initial.agent.contract, messages[0]["content"])
+        self.assertIn("public upstream derivation", messages[1]["content"])
+        self.assertEqual(initial.model.model_name, payload["model"])
+        self.assertEqual(8192, payload["max_tokens"])
+        self.assertEqual(
+            {"enable_thinking": False},
+            payload["chat_template_kwargs"],
+        )
+
     def test_request_generation_seed_overrides_gateway_default(self) -> None:
         item = request()
         item = replace(
@@ -869,6 +990,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 "top_k": None,
                 "max_tokens": 512,
                 "seed": 17,
+                "thinking_budget": None,
             },
         )
         self.assertEqual(1, len(response.metadata["retry_receipts"]))
@@ -945,6 +1067,211 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             payload["chat_template_kwargs"],
             {"enable_thinking": False},
         )
+
+    def test_thinking_budget_uses_native_custom_params_only_for_declared_local_sglang(
+        self,
+    ) -> None:
+        item = request()
+        thinking_model = replace(
+            item.model,
+            metadata={
+                "max_tokens": "4096",
+                "chat_template_enable_thinking": "true",
+                "thinking_budget_tokens": "1024",
+                "supports_thinking_budget": "true",
+            },
+        )
+        local_provider = replace(
+            item.provider,
+            metadata={
+                "sampling_backend": "sglang",
+                "deployment_locality": "local",
+            },
+        )
+
+        local_payload = OpenAICompatibleGateway().request_payload(
+            replace(item, model=thinking_model, provider=local_provider)
+        )
+        self.assertEqual(
+            {"enable_thinking": True, "thinking_budget": 1024},
+            local_payload["chat_template_kwargs"],
+        )
+        self.assertEqual(
+            {"thinking_budget": 1024},
+            local_payload["custom_params"],
+        )
+
+        undeclared_local_model = replace(
+            thinking_model,
+            metadata={
+                key: value
+                for key, value in thinking_model.metadata.items()
+                if key != "supports_thinking_budget"
+            },
+        )
+        undeclared_local_payload = OpenAICompatibleGateway().request_payload(
+            replace(
+                item,
+                model=undeclared_local_model,
+                provider=local_provider,
+            )
+        )
+        self.assertEqual(
+            {"enable_thinking": True, "thinking_budget": 1024},
+            undeclared_local_payload["chat_template_kwargs"],
+        )
+        self.assertNotIn("custom_params", undeclared_local_payload)
+
+        remote_payload = OpenAICompatibleGateway().request_payload(
+            replace(item, model=thinking_model)
+        )
+        self.assertEqual(
+            {"enable_thinking": True, "thinking_budget": 1024},
+            remote_payload["chat_template_kwargs"],
+        )
+        self.assertNotIn("custom_params", remote_payload)
+
+    def test_thinking_budget_requires_thinking_and_fits_visible_token_budget(
+        self,
+    ) -> None:
+        item = request()
+        for metadata, message in (
+            (
+                {
+                    "max_tokens": "4096",
+                    "chat_template_enable_thinking": "false",
+                    "thinking_budget_tokens": "1024",
+                },
+                "requires chat_template_enable_thinking=true",
+            ),
+            (
+                {
+                    "max_tokens": "4096",
+                    "chat_template_enable_thinking": "true",
+                    "thinking_budget_tokens": "4096",
+                },
+                "smaller than max_tokens",
+            ),
+        ):
+            with self.subTest(metadata=metadata):
+                with self.assertRaisesRegex(
+                    OpenAICompatibleGatewayError,
+                    message,
+                ):
+                    OpenAICompatibleGateway().request_payload(
+                        replace(
+                            item,
+                            model=replace(item.model, metadata=metadata),
+                        )
+                    )
+
+    async def test_qwen_thinking_mode_is_persisted_without_reasoning_text(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="supervisor_theta",
+                metadata={"chat_template_enable_thinking": "true"},
+            ),
+        )
+        gateway = OpenAICompatibleGateway(max_retries=0)
+        gateway._post_json = lambda *_: {  # type: ignore[method-assign]
+            "id": "thinking-request",
+            "model": "supervisor_theta",
+            "choices": [
+                {
+                    "message": {
+                        "reasoning_content": "private reasoning",
+                        "content": "Final Answer: 7",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"completion_tokens": 9},
+        }
+
+        response = await gateway.generate(item)
+
+        self.assertEqual(response.text, "Final Answer: 7")
+        self.assertIs(response.metadata["chat_template_enable_thinking"], True)
+        self.assertIs(response.metadata["reasoning_content_present"], True)
+        self.assertIs(response.metadata["inline_reasoning_present"], False)
+        self.assertIs(response.metadata["reasoning_trace_present"], True)
+        self.assertNotIn("reasoning_content", response.metadata)
+
+    async def test_required_inline_thinking_trace_is_accepted(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="remote-thinking-model",
+                metadata={
+                    "chat_template_enable_thinking": "true",
+                    "require_reasoning_trace": "true",
+                },
+            ),
+        )
+        gateway = OpenAICompatibleGateway(max_retries=0)
+        gateway._post_json = lambda *_: {  # type: ignore[method-assign]
+            "id": "inline-thinking-request",
+            "model": "remote-thinking-model",
+            "choices": [
+                {
+                    "message": {
+                        "content": "<think>private reasoning</think>Final Answer: 7",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"completion_tokens": 9},
+        }
+
+        response = await gateway.generate(item)
+
+        self.assertIs(response.metadata["reasoning_content_present"], False)
+        self.assertIs(response.metadata["inline_reasoning_present"], True)
+        self.assertIs(response.metadata["reasoning_trace_present"], True)
+        self.assertIs(response.metadata["reasoning_trace_required"], True)
+
+    async def test_required_thinking_trace_rejects_silent_provider(self) -> None:
+        item = request()
+        object.__setattr__(
+            item,
+            "model",
+            ModelSpec(
+                "model",
+                "provider",
+                model_name="silent-model",
+                metadata={
+                    "chat_template_enable_thinking": "true",
+                    "require_reasoning_trace": "true",
+                },
+            ),
+        )
+        gateway = OpenAICompatibleGateway(max_retries=0)
+        gateway._post_json = lambda *_: {  # type: ignore[method-assign]
+            "id": "silent-request",
+            "model": "silent-model",
+            "choices": [
+                {
+                    "message": {"content": "Final Answer: 7"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"completion_tokens": 4},
+        }
+
+        with self.assertRaisesRegex(
+            OpenAICompatibleGatewayError,
+            "missing the required reasoning trace",
+        ):
+            await gateway.generate(item)
 
     def test_skillflow_response_schema_is_forwarded(self) -> None:
         item = request()

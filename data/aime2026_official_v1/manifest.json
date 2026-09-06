@@ -1,0 +1,28 @@
+{
+  "catalog": "/ssd1/iclr/1/FlowSteer/config/datasets_aime2026_official_v1.yaml",
+  "counts_by_split": {
+    "test": 30,
+    "train": 0,
+    "validation": 0
+  },
+  "created_at": "2026-08-25T03:11:06.205055+00:00",
+  "dataset_mode": "official_evaluation_only",
+  "dataset_revision": "d2de22f3c656b4f56cf8981212186377d1e23bc3",
+  "dataset_source": "MathArena/aime_2026",
+  "evaluator_version": "skillev.private-static.integer.v1",
+  "files": {
+    "test": "test.jsonl",
+    "train": "train.jsonl",
+    "validation": "validation.jsonl"
+  },
+  "schema_version": "flowsteer.agentgraph.aime2026.dataset.v1",
+  "source_split": "train",
+  "split_policy": {
+    "test": "complete official AIME 2026 final-evaluation population",
+    "train": "empty: official AIME 2026 is evaluation-only",
+    "validation": "empty: official AIME 2026 is evaluation-only"
+  },
+  "task_family": "aime-2026/integer-answer",
+  "task_schema_version": "flowsteer.agentgraph.task.v1",
+  "training_started": false
+}

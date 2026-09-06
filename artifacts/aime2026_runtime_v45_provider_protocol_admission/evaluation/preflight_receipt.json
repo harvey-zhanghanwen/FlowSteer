@@ -1,0 +1,53 @@
+{
+  "adapter_name": null,
+  "checkpoint_path": null,
+  "evaluator_preflight": {
+    "evaluator_version": "skillev.integer.target-blind-extraction.v2.2",
+    "passed": true
+  },
+  "healthbench_judge_model": null,
+  "healthbench_judge_receipt": null,
+  "loaded_now": false,
+  "mode": "base_model",
+  "policy_published": false,
+  "sglang_server_runtime": {
+    "attention_backend": "fa3",
+    "configured_max_running_requests": 8,
+    "context_length": 32768,
+    "cuda_graph_backend_decode": null,
+    "enable_deterministic_inference": false,
+    "enable_strict_thinking": true,
+    "grammar_backend": "xgrammar",
+    "max_running_requests": 8,
+    "max_running_requests_source": "max_running_requests",
+    "max_total_num_tokens": 717868,
+    "reasoning_parser": "qwen3",
+    "recorded_at": "2026-09-02T09:50:02.580023+00:00",
+    "request_attempts": {
+      "server_info": 1
+    },
+    "sampling_backend": "flashinfer",
+    "schema_version": "flowsteer.sglang.server-runtime-receipt.v1",
+    "weight_version": "default"
+  },
+  "status": "base_model_ready",
+  "success": true,
+  "swebench_harness_receipt": null,
+  "thinking_runtime_preflight": {
+    "action_decoding": "json_schema",
+    "actual_context_length": 32768,
+    "actual_grammar_backend": "xgrammar",
+    "actual_reasoning_parser": "qwen3",
+    "actual_strict_thinking": true,
+    "enable_thinking": true,
+    "passed": true,
+    "required": true,
+    "required_context_length": 32768,
+    "required_grammar_backend": "xgrammar",
+    "required_reasoning_parser": "qwen3",
+    "required_strict_thinking": true,
+    "schema_version": "flowsteer.sglang.thinking-runtime-preflight.v2",
+    "status": "validated"
+  },
+  "training_performed": false
+}

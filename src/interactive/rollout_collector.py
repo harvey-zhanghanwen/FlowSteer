@@ -103,11 +103,15 @@ _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE = "add_agent_role_selection"
 _ADD_ROLE_SELECTION_SERIALIZATION_FAILURE_PHASE = (
     "add_agent_role_selection_serialization_failure"
 )
+_ACTION_SELECTION_SERIALIZATION_FAILURE_PHASE = (
+    "action_selection_serialization_failure"
+)
 _PARAMETER_SERIALIZATION_FAILURE_PHASE = "parameter_serialization_failure"
 _RELATION_CANDIDATE_SERIALIZATION_FAILURE_PHASE = (
     "relation_candidate_serialization_failure"
 )
 _SGLANG_DETERMINISTIC_SEED_MASK = (1 << 63) - 1
+_QWEN_REASONING_END_TOKEN = "</think>"
 
 _ADD_DECLARATION_CONTINUATION = (
     "Complete the Agent declarations for the selected positions and "
@@ -181,7 +185,11 @@ def _hierarchical_continuation_prompt(
     return encode_director_transcript(messages)
 
 
-def _action_parameter_serialization_failed(text: str) -> bool:
+def _action_parameter_serialization_failed(
+    text: str,
+    *,
+    reasoning_end_token: Optional[str] = None,
+) -> bool:
     """Return whether the first action object is syntactically incomplete.
 
     A complete JSON object that violates the action contract remains a Canvas
@@ -191,11 +199,24 @@ def _action_parameter_serialization_failed(text: str) -> bool:
     """
 
     try:
-        AgentActionParser().parse(text)
+        AgentActionParser().parse(
+            text,
+            reasoning_end_token=reasoning_end_token,
+        )
     except AgentActionParseError:
         if not isinstance(text, str):
             return True
-        stripped_start = len(text) - len(text.lstrip())
+        scan_start = 0
+        if reasoning_end_token is not None:
+            if not isinstance(reasoning_end_token, str) or not reasoning_end_token:
+                return True
+            boundary_start = text.find(reasoning_end_token)
+            if boundary_start < 0:
+                return True
+            scan_start = boundary_start + len(reasoning_end_token)
+        stripped_start = scan_start + (
+            len(text[scan_start:]) - len(text[scan_start:].lstrip())
+        )
         object_start = text.find("{", stripped_start)
         array_start = text.find("[", stripped_start)
         candidates = [
@@ -212,7 +233,11 @@ def _action_parameter_serialization_failed(text: str) -> bool:
     return False
 
 
-def _hierarchical_selector_serialization_failed(text: str) -> bool:
+def _hierarchical_selector_serialization_failed(
+    text: str,
+    *,
+    reasoning_end_token: Optional[str] = None,
+) -> bool:
     """Return whether one schema-bound selector is not a JSON value.
 
     This only classifies serialization.  Selector fields and admitted values
@@ -221,17 +246,123 @@ def _hierarchical_selector_serialization_failed(text: str) -> bool:
     malformed text.
     """
 
-    if not isinstance(text, str):
-        return True
     try:
-        json.JSONDecoder().raw_decode(text.lstrip())
-    except (TypeError, ValueError):
+        _strict_hierarchical_selector_object(
+            text,
+            reasoning_end_token=reasoning_end_token,
+        )
+    except ReceiptValidationError:
         return True
     return False
 
 
+def _strict_hierarchical_selector_object(
+    text: str,
+    *,
+    reasoning_end_token: Optional[str] = None,
+) -> Mapping[str, Any]:
+    """Decode the first strict selector object after its reasoning boundary.
+
+    SGLang's ``ReasonerGrammarBackend`` applies the selector grammar after
+    ``</think>`` while preserving the reasoning prefix in the exact response
+    text.  Mirror :class:`AgentActionParser`'s earliest-JSON-value boundary on
+    that post-reasoning suffix: never skip a malformed/non-object first value,
+    never salvage a later object, and use the same strict decoder so duplicate
+    keys and non-finite constants remain invalid.
+    """
+
+    if not isinstance(text, str) or not text:
+        raise ReceiptValidationError(
+            "hierarchical Director selector must be non-empty text"
+        )
+    scan_start = 0
+    if reasoning_end_token is not None:
+        if not isinstance(reasoning_end_token, str) or not reasoning_end_token:
+            raise ReceiptValidationError(
+                "reasoning_end_token must be a non-empty string"
+            )
+        reasoning_end = text.find(reasoning_end_token)
+        if reasoning_end < 0:
+            raise ReceiptValidationError(
+                "hierarchical Director selector is missing the required "
+                f"reasoning boundary {reasoning_end_token!r}"
+            )
+        scan_start = reasoning_end + len(reasoning_end_token)
+    scan_start += len(text[scan_start:]) - len(text[scan_start:].lstrip())
+    # AgentActionParser owns the strict duplicate-key/non-finite JSON decoder.
+    # Reuse it here because selector receipts are JSON objects but are not full
+    # Canvas actions and therefore cannot pass AgentActionParser.parse().
+    decoder = AgentActionParser()._decoder
+    try:
+        leading_value, _ = decoder.raw_decode(text[scan_start:])
+    except (AgentActionParseError, json.JSONDecodeError, TypeError, ValueError):
+        object_start = text.find("{", scan_start)
+        array_start = text.find("[", scan_start)
+        candidates = [
+            position
+            for position in (object_start, array_start)
+            if position >= 0
+        ]
+        if not candidates:
+            raise ReceiptValidationError(
+                "hierarchical Director selector contains no JSON object"
+            )
+        value_start = min(candidates)
+    else:
+        if not isinstance(leading_value, dict):
+            raise ReceiptValidationError(
+                "hierarchical Director selector's first JSON value is not an object"
+            )
+        return leading_value
+    try:
+        value, _ = decoder.raw_decode(text[value_start:])
+    except (AgentActionParseError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ReceiptValidationError(
+            "hierarchical Director selector's first JSON object is malformed"
+        ) from exc
+    if not isinstance(value, dict):
+        raise ReceiptValidationError(
+            "hierarchical Director selector's first JSON value is not an object"
+        )
+    return value
+
+
+def _hierarchical_schema_text(
+    text: str,
+    *,
+    reasoning_end_token: Optional[str] = None,
+) -> str:
+    """Expose only the strict post-reasoning object to legacy phase parsers."""
+
+    if reasoning_end_token is None:
+        return text
+    value = _strict_hierarchical_selector_object(
+        text,
+        reasoning_end_token=reasoning_end_token,
+    )
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 class ReceiptValidationError(DirectorError):
     """Raised when SGLang cannot prove an exact on-policy token receipt."""
+
+
+def _director_reasoning_end_token(metadata: Mapping[str, Any]) -> Optional[str]:
+    """Resolve the strict response boundary from the exact Director receipt."""
+
+    enable_thinking = metadata.get("chat_template_enable_thinking")
+    if enable_thinking is None:
+        return None
+    if type(enable_thinking) is not bool:
+        raise ReceiptValidationError(
+            "Director thinking-mode receipt must be boolean"
+        )
+    return _QWEN_REASONING_END_TOKEN if enable_thinking else None
 
 
 class RolloutGate:
@@ -403,9 +534,10 @@ class SGLangReceiptDirectorClient:
     """Qwen3.5 Director client using SGLang's exact native token receipt.
 
     ``tokenizer`` must be loaded from the same Qwen3.5 checkpoint as the SGLang
-    behavior server.  The client intentionally requires
-    ``apply_chat_template(..., enable_thinking=False)`` and never falls back to
-    an approximately reconstructed prompt.
+    behavior server.  The client requires an explicit Qwen chat-template
+    thinking mode and never falls back to an approximately reconstructed
+    prompt.  ``False`` remains the compatibility default; experiments that
+    enable it record the exact mode in every generation receipt.
     """
 
     def __init__(
@@ -422,6 +554,9 @@ class SGLangReceiptDirectorClient:
         top_p: float = 0.95,
         top_k: int = 20,
         max_tokens: int = 768,
+        max_context_tokens: int | None = None,
+        enable_thinking: bool = False,
+        thinking_budget_tokens: int | None = None,
         timeout_seconds: float = 180.0,
         max_retries: int = 2,
         action_json_schema: Optional[str] = None,
@@ -442,6 +577,29 @@ class SGLangReceiptDirectorClient:
             raise ValueError("top_k must be -1 or a positive integer")
         if max_tokens <= 0 or timeout_seconds <= 0 or max_retries < 0:
             raise ValueError("Director token, timeout, and retry limits are invalid")
+        if max_context_tokens is not None and (
+            type(max_context_tokens) is not int
+            or max_context_tokens <= max_tokens
+        ):
+            raise ValueError(
+                "Director max_context_tokens must be an integer larger than "
+                "max_tokens"
+            )
+        if type(enable_thinking) is not bool:
+            raise ValueError("Director enable_thinking must be boolean")
+        if thinking_budget_tokens is not None and (
+            type(thinking_budget_tokens) is not int
+            or thinking_budget_tokens < 1
+            or thinking_budget_tokens >= max_tokens
+        ):
+            raise ValueError(
+                "Director thinking_budget_tokens must be a positive integer "
+                "smaller than max_tokens"
+            )
+        if thinking_budget_tokens is not None and not enable_thinking:
+            raise ValueError(
+                "Director thinking_budget_tokens requires enable_thinking=true"
+            )
         if not isinstance(policy_version, str) or not policy_version.strip():
             raise ValueError("policy_version must be non-empty")
         if action_json_schema is not None and (
@@ -487,6 +645,9 @@ class SGLangReceiptDirectorClient:
         self.top_p = float(top_p)
         self.top_k = int(top_k)
         self.max_tokens = int(max_tokens)
+        self.max_context_tokens = max_context_tokens
+        self.enable_thinking = enable_thinking
+        self.thinking_budget_tokens = thinking_budget_tokens
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
         self.action_json_schema = action_json_schema
@@ -566,11 +727,11 @@ class SGLangReceiptDirectorClient:
                 messages,
                 tokenize=True,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                enable_thinking=self.enable_thinking,
             )
         except TypeError as exc:
             raise ReceiptValidationError(
-                "Qwen3.5 tokenizer must support enable_thinking=False"
+                "Qwen3.5 tokenizer must support the configured enable_thinking mode"
             ) from exc
         return _token_ids(encoded, "prompt_token_ids")
 
@@ -589,8 +750,24 @@ class SGLangReceiptDirectorClient:
         if seed is not None:
             _sglang_backend_sampling_seed(seed)
         prompt_ids = self.prompt_token_ids(prompt)
+        if (
+            self.max_context_tokens is not None
+            and len(prompt_ids) + self.max_tokens > self.max_context_tokens
+        ):
+            raise DirectorError(
+                "Director context limit exceeded before SGLang dispatch: "
+                f"prompt_tokens={len(prompt_ids)}, "
+                f"max_new_tokens={self.max_tokens}, "
+                f"max_context_tokens={self.max_context_tokens}"
+            )
         payload: dict[str, Any] = {
             "input_ids": list(prompt_ids),
+            # SGLang 0.5.15's ReasonerGrammarBackend needs this native
+            # GenerateReqInput flag to defer JSON grammar enforcement until
+            # after the model's reasoning boundary. Keep it identical to the
+            # Qwen chat-template thinking mode so the exact request receipt
+            # proves which decoding path was used.
+            "require_reasoning": self.enable_thinking,
             "sampling_params": {
                 "temperature": self.temperature,
                 "top_p": self.top_p,
@@ -614,6 +791,15 @@ class SGLangReceiptDirectorClient:
             payload["sampling_params"]["sampling_seed"] = (
                 _sglang_backend_sampling_seed(seed)
             )
+        if self.thinking_budget_tokens is not None:
+            # DIRECT_REUSE: SkillFlow bounds Supervisor reasoning separately
+            # from its visible action allowance. NECESSARY_ADAPTATION: native
+            # SGLang 0.5.15 reads this value from SamplingParams custom_params
+            # so ReasonerGrammar can force the </think> boundary before the
+            # live JSON grammar consumes the remaining action-token budget.
+            payload["sampling_params"]["custom_params"] = {
+                "thinking_budget": self.thinking_budget_tokens
+            }
         (
             resolved_action_schema,
             _,
@@ -947,16 +1133,14 @@ class SGLangReceiptDirectorClient:
         field_name: str,
         admitted: Sequence[str],
         required_action: str | None = None,
+        reasoning_end_token: Optional[str] = None,
     ) -> str:
         """Parse one constrained discriminator without repairing sampled text."""
 
-        try:
-            value, _ = json.JSONDecoder().raw_decode(text.lstrip())
-        except (TypeError, ValueError) as exc:
-            raise ReceiptValidationError(
-                "hierarchical Director discriminator is not JSON: "
-                f"{text[:80]!r}"
-            ) from exc
+        value = _strict_hierarchical_selector_object(
+            text,
+            reasoning_end_token=reasoning_end_token,
+        )
         expected_fields = {field_name}
         if required_action is not None:
             expected_fields.add("action")
@@ -981,16 +1165,14 @@ class SGLangReceiptDirectorClient:
         *,
         admitted: Sequence[int],
         required_action: str,
+        reasoning_end_token: Optional[str] = None,
     ) -> int:
         """Parse one integer candidate selector without rewriting its text."""
 
-        try:
-            value, _ = json.JSONDecoder().raw_decode(text.lstrip())
-        except (TypeError, ValueError) as exc:
-            raise ReceiptValidationError(
-                "hierarchical Director candidate selector is not JSON: "
-                f"{text[:80]!r}"
-            ) from exc
+        value = _strict_hierarchical_selector_object(
+            text,
+            reasoning_end_token=reasoning_end_token,
+        )
         if not isinstance(value, Mapping) or set(value) != {
             "action",
             "candidate_index",
@@ -1026,6 +1208,10 @@ class SGLangReceiptDirectorClient:
             "attempt_count": metadata.get("attempt_count"),
             "generation_seed": metadata.get("generation_seed"),
             "backend_sampling_seed": metadata.get("backend_sampling_seed"),
+            "chat_template_enable_thinking": metadata.get(
+                "chat_template_enable_thinking"
+            ),
+            "require_reasoning": metadata.get("require_reasoning"),
             "server_weight_version": metadata.get("server_weight_version"),
             "receipt_verified": metadata.get("receipt_verified"),
         }
@@ -1062,9 +1248,14 @@ class SGLangReceiptDirectorClient:
     ) -> DirectorResponse:
         """Sample action type, optional MODIFY field, then exact parameters."""
 
+        reasoning_end_token = (
+            _QWEN_REASONING_END_TOKEN if self.enable_thinking else None
+        )
         total_latency_ms = 0.0
         total_attempt_count = 0
         phase_receipts: dict[str, Mapping[str, Any]] = {}
+        action_selection_regeneration_attempted = False
+        action_selection_regeneration_succeeded = False
         role_selection_regeneration_attempted = False
         role_selection_regeneration_succeeded = False
         relation_candidate_regeneration_attempted = False
@@ -1093,11 +1284,82 @@ class SGLangReceiptDirectorClient:
                 attempt_count=attempt_count,
                 generation_seed=seed,
             )
-            selected_action = self._hierarchical_choice(
-                selector_response.text,
-                field_name="action",
-                admitted=actions,
-            )
+            try:
+                selected_action = self._hierarchical_choice(
+                    selector_response.text,
+                    field_name="action",
+                    admitted=actions,
+                    reasoning_end_token=reasoning_end_token,
+                )
+            except ReceiptValidationError as exc:
+                if not _hierarchical_selector_serialization_failed(
+                    selector_response.text,
+                    reasoning_end_token=reasoning_end_token,
+                ):
+                    raise
+                # Reuse the bounded serialization regeneration already used
+                # by the relation and parameter selectors. The first exact
+                # sample remains in the receipt; no action is inferred from
+                # reasoning text and no Canvas mutation occurs before a valid
+                # live-schema selector is returned.
+                action_selection_regeneration_attempted = True
+                phase_receipts[
+                    _ACTION_SELECTION_SERIALIZATION_FAILURE_PHASE
+                ] = self._hierarchical_phase_receipt(selector_response)
+                regeneration_prompt = _hierarchical_continuation_prompt(
+                    prompt,
+                    committed_json=selector_response.text,
+                    instruction=_PARAMETER_REGENERATION_CONTINUATION,
+                )
+                regeneration_payload = dict(
+                    self._request_payload(regeneration_prompt, adapter_name, seed)
+                )
+                regeneration_sampling = dict(
+                    regeneration_payload["sampling_params"]
+                )
+                regeneration_sampling["json_schema"] = selector_payload[
+                    "sampling_params"
+                ]["json_schema"]
+                regeneration_payload["sampling_params"] = regeneration_sampling
+                value, latency_ms, attempt_count = await self._post_with_retries(
+                    regeneration_payload
+                )
+                total_latency_ms += latency_ms
+                total_attempt_count += attempt_count
+                selector_response = self._parse_response(
+                    regeneration_prompt,
+                    regeneration_payload,
+                    value,
+                    policy_version=policy_version,
+                    adapter_name=adapter_name,
+                    expected_server_weight_version=(
+                        expected_server_weight_version
+                    ),
+                    action_json_schema_version=action_schema_version,
+                    action_schema_branch=action_schema_branch,
+                    action_target_domains_json=action_target_domains_json,
+                    action_target_domain_version=action_target_domain_version,
+                    latency_ms=latency_ms,
+                    attempt_count=attempt_count,
+                    generation_seed=seed,
+                )
+                try:
+                    selected_action = self._hierarchical_choice(
+                        selector_response.text,
+                        field_name="action",
+                        admitted=actions,
+                        reasoning_end_token=reasoning_end_token,
+                    )
+                except ReceiptValidationError as regeneration_exc:
+                    regeneration_exc.hierarchical_phase_receipts = {
+                        **phase_receipts,
+                        "action_selection_regeneration_failure": (
+                            self._hierarchical_phase_receipt(selector_response)
+                        ),
+                    }
+                    regeneration_exc.failure_phase = "action_selection"
+                    raise regeneration_exc from exc
+                action_selection_regeneration_succeeded = True
             phase_receipts["action_selection"] = self._hierarchical_phase_receipt(
                 selector_response
             )
@@ -1108,7 +1370,18 @@ class SGLangReceiptDirectorClient:
         selected_modify_agent_id: str | None = None
         selected_relation_candidate: int | None = None
         parameter_prompt = prompt
+        role_neutral_add_subgraph = False
         if selected_action == "add_subgraph" and action_target_domains is not None:
+            add_subgraph_domain = action_target_domains.get("add_subgraph")
+            role_neutral_add_subgraph = (
+                isinstance(add_subgraph_domain, Mapping)
+                and add_subgraph_domain.get("contract_semantics") == "free_text"
+            )
+        if (
+            selected_action == "add_subgraph"
+            and action_target_domains is not None
+            and not role_neutral_add_subgraph
+        ):
             role_selection_schema = (
                 director_live_add_subgraph_role_selection_json_schema_text(
                     action_target_domains
@@ -1145,13 +1418,17 @@ class SGLangReceiptDirectorClient:
             try:
                 selected_add_agent_roles = (
                     director_live_add_subgraph_role_selection_from_text(
-                        role_selection_response.text,
+                        _hierarchical_schema_text(
+                            role_selection_response.text,
+                            reasoning_end_token=reasoning_end_token,
+                        ),
                         action_target_domains,
                     )
                 )
-            except ValueError as exc:
+            except (ValueError, ReceiptValidationError) as exc:
                 if not _hierarchical_selector_serialization_failed(
-                    role_selection_response.text
+                    role_selection_response.text,
+                    reasoning_end_token=reasoning_end_token,
                 ):
                     raise ReceiptValidationError(
                         "v3 add_subgraph Agent role-selection phase is invalid: "
@@ -1206,11 +1483,14 @@ class SGLangReceiptDirectorClient:
                 try:
                     selected_add_agent_roles = (
                         director_live_add_subgraph_role_selection_from_text(
-                            role_selection_response.text,
+                            _hierarchical_schema_text(
+                                role_selection_response.text,
+                                reasoning_end_token=reasoning_end_token,
+                            ),
                             action_target_domains,
                         )
                     )
-                except ValueError:
+                except (ValueError, ReceiptValidationError):
                     # Match FlowSteer's existing malformed declaration/final
                     # parameter boundary: preserve both exact samples and
                     # publish the second strict-parser failure as a rejected
@@ -1305,12 +1585,15 @@ class SGLangReceiptDirectorClient:
             try:
                 selected_add_agents = (
                     director_live_add_subgraph_agent_declarations_from_text(
-                        declaration_response.text,
+                        _hierarchical_schema_text(
+                            declaration_response.text,
+                            reasoning_end_token=reasoning_end_token,
+                        ),
                         action_target_domains,
                         selected_agent_roles=selected_add_agent_roles,
                     )
                 )
-            except ValueError:
+            except (ValueError, ReceiptValidationError):
                 # Match the existing malformed final-parameter boundary: keep
                 # the exact sampled text/token/log-prob receipt and let the
                 # Canvas publish its parse rejection on the next continuation.
@@ -1330,6 +1613,109 @@ class SGLangReceiptDirectorClient:
                         "selected_add_agent_roles": [
                             dict(value) for value in selected_add_agent_roles
                         ],
+                        "parameter_schema_branch": None,
+                        "parse_failure_phase": (
+                            _ADD_DECLARATION_PARSE_FAILURE_PHASE
+                        ),
+                        "hierarchical_phase_receipts": phase_receipts,
+                        "request_count": len(phase_receipts),
+                        "latency_ms": total_latency_ms,
+                        "attempt_count": total_attempt_count,
+                    }
+                )
+                return DirectorResponse(
+                    text=declaration_response.text,
+                    metadata=metadata,
+                )
+            selected_declarations_json = json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [dict(value) for value in selected_add_agents],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            parameter_prompt = _hierarchical_continuation_prompt(
+                declaration_prompt,
+                committed_json=selected_declarations_json,
+                instruction=_ADD_ACTION_CONTINUATION,
+            )
+            parameter_schema = director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                action_target_domains,
+                add_agents=selected_add_agents,
+            )
+        elif (
+            selected_action == "add_subgraph"
+            and action_target_domains is not None
+        ):
+            # Role-neutral tasks use the same FlowSteer progressive
+            # declaration -> complete-action boundary, but there is no
+            # task-authored role inventory to sample first.  Agent count,
+            # model, free-text contract, execution profile, relation and
+            # Output Agent therefore remain Director decisions constrained by
+            # the current Canvas domain.
+            declaration_prompt = prompt
+            declaration_schema = (
+                director_live_add_subgraph_agent_declarations_json_schema_text(
+                    action_target_domains,
+                )
+            )
+            declaration_payload = dict(
+                self._request_payload(declaration_prompt, adapter_name, seed)
+            )
+            declaration_sampling = dict(
+                declaration_payload["sampling_params"]
+            )
+            declaration_sampling["json_schema"] = declaration_schema
+            declaration_payload["sampling_params"] = declaration_sampling
+            value, latency_ms, attempt_count = await self._post_with_retries(
+                declaration_payload
+            )
+            total_latency_ms += latency_ms
+            total_attempt_count += attempt_count
+            declaration_response = self._parse_response(
+                declaration_prompt,
+                declaration_payload,
+                value,
+                policy_version=policy_version,
+                adapter_name=adapter_name,
+                expected_server_weight_version=expected_server_weight_version,
+                action_json_schema_version=action_schema_version,
+                action_schema_branch=action_schema_branch,
+                action_target_domains_json=action_target_domains_json,
+                action_target_domain_version=action_target_domain_version,
+                latency_ms=latency_ms,
+                attempt_count=attempt_count,
+                generation_seed=seed,
+            )
+            phase_receipts["add_agent_declarations"] = (
+                self._hierarchical_phase_receipt(declaration_response)
+            )
+            try:
+                selected_add_agents = (
+                    director_live_add_subgraph_agent_declarations_from_text(
+                        _hierarchical_schema_text(
+                            declaration_response.text,
+                            reasoning_end_token=reasoning_end_token,
+                        ),
+                        action_target_domains,
+                    )
+                )
+            except (ValueError, ReceiptValidationError):
+                metadata = dict(declaration_response.metadata)
+                metadata.update(
+                    {
+                        "base_prompt_text": prompt,
+                        "action_decoding_strategy": (
+                            HIERARCHICAL_JSON_SCHEMA_STRATEGY
+                        ),
+                        "selected_action": selected_action,
+                        "selected_modify_field": None,
+                        "selected_modify_agent_id": None,
+                        "selected_add_agent_ids": None,
+                        "selected_add_agent_roles": None,
                         "parameter_schema_branch": None,
                         "parse_failure_phase": (
                             _ADD_DECLARATION_PARSE_FAILURE_PHASE
@@ -1423,6 +1809,7 @@ class SGLangReceiptDirectorClient:
                 field_name="field",
                 admitted=admitted_fields,
                 required_action="modify_agent",
+                reasoning_end_token=reasoning_end_token,
             )
             phase_receipts["modify_field_selection"] = (
                 self._hierarchical_phase_receipt(field_response)
@@ -1477,6 +1864,7 @@ class SGLangReceiptDirectorClient:
                         field_name="agent_id",
                         admitted=admitted_agent_ids,
                         required_action="modify_agent",
+                        reasoning_end_token=reasoning_end_token,
                     )
                     phase_receipts["modify_agent_selection"] = (
                         self._hierarchical_phase_receipt(agent_response)
@@ -1526,10 +1914,12 @@ class SGLangReceiptDirectorClient:
                     candidate_response.text,
                     admitted=admitted_indices,
                     required_action="set_relation",
+                    reasoning_end_token=reasoning_end_token,
                 )
             except ReceiptValidationError:
                 if not _hierarchical_selector_serialization_failed(
-                    candidate_response.text
+                    candidate_response.text,
+                    reasoning_end_token=reasoning_end_token,
                 ):
                     raise
                 # Match the existing bounded parameter regeneration boundary:
@@ -1584,6 +1974,7 @@ class SGLangReceiptDirectorClient:
                     candidate_response.text,
                     admitted=admitted_indices,
                     required_action="set_relation",
+                    reasoning_end_token=reasoning_end_token,
                 )
                 relation_candidate_regeneration_succeeded = True
             phase_receipts["relation_candidate_selection"] = (
@@ -1632,7 +2023,10 @@ class SGLangReceiptDirectorClient:
         )
         parameter_regeneration_attempted = False
         parameter_regeneration_succeeded = False
-        if _action_parameter_serialization_failed(response.text):
+        if _action_parameter_serialization_failed(
+            response.text,
+            reasoning_end_token=reasoning_end_token,
+        ):
             # SGLang may emit EOS before a schema-bound JSON object closes.
             # Preserve that exact failed sample as a phase receipt and make
             # one further request with the same schema, route, and seed.  The
@@ -1678,7 +2072,10 @@ class SGLangReceiptDirectorClient:
                 generation_seed=seed,
             )
             try:
-                AgentActionParser().parse(response.text)
+                AgentActionParser().parse(
+                    response.text,
+                    reasoning_end_token=reasoning_end_token,
+                )
             except AgentActionParseError:
                 pass
             else:
@@ -1714,6 +2111,11 @@ class SGLangReceiptDirectorClient:
             metadata["parameter_regeneration_attempted"] = True
             metadata["parameter_regeneration_succeeded"] = (
                 parameter_regeneration_succeeded
+            )
+        if action_selection_regeneration_attempted:
+            metadata["action_selection_regeneration_attempted"] = True
+            metadata["action_selection_regeneration_succeeded"] = (
+                action_selection_regeneration_succeeded
             )
         if role_selection_regeneration_attempted:
             metadata["role_selection_regeneration_attempted"] = True
@@ -1861,6 +2263,9 @@ class SGLangReceiptDirectorClient:
                 "backend_sampling_seed": payload.get(
                     "sampling_params", {}
                 ).get("sampling_seed"),
+                "chat_template_enable_thinking": self.enable_thinking,
+                "thinking_budget_tokens": self.thinking_budget_tokens,
+                "require_reasoning": payload.get("require_reasoning"),
                 "action_json_schema_version": action_json_schema_version,
                 "action_schema_branch": action_schema_branch,
                 "receipt_verified": True,
@@ -1914,6 +2319,7 @@ def _validate_v3_hierarchical_action_receipt(
     stay authoritative; sampled text is never repaired into an executed action.
     """
 
+    reasoning_end_token = _director_reasoning_end_token(metadata)
     branch = schema_request.get("action_schema_branch")
     domains_json = schema_request.get("action_target_domains_json")
     if not isinstance(branch, str) or not isinstance(domains_json, str):
@@ -1928,6 +2334,21 @@ def _validate_v3_hierarchical_action_receipt(
     decoding_strategy = metadata.get("action_decoding_strategy")
     parse_failure_phase = metadata.get("parse_failure_phase")
     phase_receipts = metadata.get("hierarchical_phase_receipts")
+    action_selection_regeneration_attempted = metadata.get(
+        "action_selection_regeneration_attempted"
+    )
+    if (
+        action_selection_regeneration_attempted is not None
+        and action_selection_regeneration_attempted is not True
+    ):
+        raise ReceiptValidationError(
+            "v3 action-selection regeneration attempt flag is invalid"
+        )
+    action_selection_failure_receipt = (
+        phase_receipts.get(_ACTION_SELECTION_SERIALIZATION_FAILURE_PHASE)
+        if isinstance(phase_receipts, Mapping)
+        else None
+    )
     parameter_regeneration_attempted = metadata.get(
         "parameter_regeneration_attempted"
     )
@@ -1999,12 +2420,26 @@ def _validate_v3_hierarchical_action_receipt(
         raise ReceiptValidationError(
             "v3 hierarchical receipt has an unsupported parse-failure phase"
         )
-    if parse_failure_phase is not None and (
-        decoding_strategy != ROLE_FIRST_ADD_DECODING_STRATEGY
-        or selected_action != "add_subgraph"
+    add_domain = domains.get("add_subgraph")
+    role_neutral_add_domain = (
+        isinstance(add_domain, Mapping)
+        and add_domain.get("contract_semantics") == "free_text"
+    )
+    declaration_only_failure = (
+        selected_action == "add_subgraph"
+        and parse_failure_phase == _ADD_DECLARATION_PARSE_FAILURE_PHASE
+        and decoding_strategy == HIERARCHICAL_JSON_SCHEMA_STRATEGY
+        and role_neutral_add_domain
+    )
+    if parse_failure_phase is not None and not (
+        (
+            decoding_strategy == ROLE_FIRST_ADD_DECODING_STRATEGY
+            and selected_action == "add_subgraph"
+        )
+        or declaration_only_failure
     ):
         raise ReceiptValidationError(
-            "v3 ADD phase parse failure requires role-first ADD decoding"
+            "v3 ADD phase parse failure has no matching structured decoding phase"
         )
     if parse_failure_phase is not None and action is not None:
         raise ReceiptValidationError(
@@ -2014,6 +2449,63 @@ def _validate_v3_hierarchical_action_receipt(
     expected_phases: set[str] = set()
     if len(actions) > 1:
         expected_phases.add("action_selection")
+    if action_selection_regeneration_attempted:
+        action_selection_regeneration_succeeded = metadata.get(
+            "action_selection_regeneration_succeeded"
+        )
+        if action_selection_regeneration_succeeded is not True:
+            raise ReceiptValidationError(
+                "v3 returned action-selection regeneration did not succeed"
+            )
+        if len(actions) <= 1 or not isinstance(
+            action_selection_failure_receipt, Mapping
+        ):
+            raise ReceiptValidationError(
+                "v3 action-selection regeneration has no initial failure receipt"
+            )
+        failed_text = action_selection_failure_receipt.get("text")
+        failed_prompt = action_selection_failure_receipt.get("prompt_text")
+        if (
+            not isinstance(failed_text, str)
+            or not failed_text
+            or not isinstance(failed_prompt, str)
+            or not failed_prompt
+            or not _hierarchical_selector_serialization_failed(
+                failed_text,
+                reasoning_end_token=reasoning_end_token,
+            )
+        ):
+            raise ReceiptValidationError(
+                "v3 action-selection initial receipt is not a serialization failure"
+            )
+        final_selector_receipt = (
+            phase_receipts.get("action_selection")
+            if isinstance(phase_receipts, Mapping)
+            else None
+        )
+        expected_regeneration_prompt = _hierarchical_continuation_prompt(
+            failed_prompt,
+            committed_json=failed_text,
+            instruction=_PARAMETER_REGENERATION_CONTINUATION,
+        )
+        if (
+            not isinstance(final_selector_receipt, Mapping)
+            or final_selector_receipt.get("prompt_text")
+            != expected_regeneration_prompt
+            or final_selector_receipt.get("generation_seed")
+            != action_selection_failure_receipt.get("generation_seed")
+        ):
+            raise ReceiptValidationError(
+                "v3 action-selection regeneration is not bound to its failed sample"
+            )
+        expected_phases.add(_ACTION_SELECTION_SERIALIZATION_FAILURE_PHASE)
+    elif (
+        metadata.get("action_selection_regeneration_succeeded") is not None
+        or action_selection_failure_receipt is not None
+    ):
+        raise ReceiptValidationError(
+            "v3 action-selection regeneration receipt has no attempt flag"
+        )
     expected_parameter_branch = selected_action
     if selected_action != "set_relation" and (
         relation_candidate_regeneration_attempted is not None
@@ -2037,14 +2529,18 @@ def _validate_v3_hierarchical_action_receipt(
         role_selection_parse_failure = (
             parse_failure_phase == _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE
         )
-        if (
-            schema_request.get("action_target_domain_version")
-            == DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION
-            and not role_first_add
-        ):
-            raise ReceiptValidationError(
-                "current live-domain ADD receipt did not use role-first decoding"
-            )
+        if schema_request.get(
+            "action_target_domain_version"
+        ) == DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION:
+            if role_neutral_add_domain and role_first_add:
+                raise ReceiptValidationError(
+                    "role-neutral live-domain ADD receipt used QA role-first decoding"
+                )
+            if not role_neutral_add_domain and not role_first_add:
+                raise ReceiptValidationError(
+                    "role-conditioned live-domain ADD receipt did not use "
+                    "role-first decoding"
+                )
         if role_first_add:
             expected_phases.add("add_agent_role_selection")
             if not role_selection_parse_failure:
@@ -2108,7 +2604,10 @@ def _validate_v3_hierarchical_action_receipt(
                 or not failed_text
                 or not isinstance(failed_prompt, str)
                 or not failed_prompt
-                or not _hierarchical_selector_serialization_failed(failed_text)
+                or not _hierarchical_selector_serialization_failed(
+                    failed_text,
+                    reasoning_end_token=reasoning_end_token,
+                )
             ):
                 raise ReceiptValidationError(
                     "v3 role-selection regeneration initial receipt is not a "
@@ -2148,7 +2647,10 @@ def _validate_v3_hierarchical_action_receipt(
             assert isinstance(role_phase, Mapping)
             try:
                 director_live_add_subgraph_role_selection_from_text(
-                    role_phase["text"],
+                    _hierarchical_schema_text(
+                        role_phase["text"],
+                        reasoning_end_token=reasoning_end_token,
+                    ),
                     domains,
                 )
             except ValueError:
@@ -2186,12 +2688,51 @@ def _validate_v3_hierarchical_action_receipt(
                 )
             return expected_phases
         if parse_failure_phase == _ADD_DECLARATION_PARSE_FAILURE_PHASE:
+            if not role_first_add:
+                if not role_neutral_add_domain:
+                    raise ReceiptValidationError(
+                        "role-neutral declaration failure has no free-text domain"
+                    )
+                declaration_prompt = declaration_phase.get("prompt_text")
+                if (
+                    not isinstance(declaration_prompt, str)
+                    or metadata.get("prompt_text") != declaration_prompt
+                ):
+                    raise ReceiptValidationError(
+                        "v3 role-neutral declaration parse-failure receipt is "
+                        "not bound to its prompt"
+                    )
+                if metadata.get("selected_add_agent_roles") is not None:
+                    raise ReceiptValidationError(
+                        "v3 role-neutral declaration failure fabricated roles"
+                    )
+                if metadata.get("selected_add_agent_ids") is not None:
+                    raise ReceiptValidationError(
+                        "v3 declaration parse failure fabricated Agent declarations"
+                    )
+                if metadata.get("selected_modify_agent_id") is not None:
+                    raise ReceiptValidationError(
+                        "v3 declaration parse failure carries a MODIFY target"
+                    )
+                if metadata.get("parameter_schema_branch") is not None:
+                    raise ReceiptValidationError(
+                        "v3 declaration parse failure carries a parameter branch"
+                    )
+                if metadata.get("request_count") != len(expected_phases):
+                    raise ReceiptValidationError(
+                        "v3 declaration parse-failure request count differs "
+                        "from its completed phases"
+                    )
+                return expected_phases
             assert role_first_add
             assert isinstance(role_phase, Mapping)
             try:
                 selected_roles = (
                     director_live_add_subgraph_role_selection_from_text(
-                        role_phase["text"],
+                        _hierarchical_schema_text(
+                            role_phase["text"],
+                            reasoning_end_token=reasoning_end_token,
+                        ),
                         domains,
                     )
                 )
@@ -2260,14 +2801,20 @@ def _validate_v3_hierarchical_action_receipt(
                 assert isinstance(role_phase, Mapping)
                 selected_roles = (
                     director_live_add_subgraph_role_selection_from_text(
-                        role_phase["text"],
+                        _hierarchical_schema_text(
+                            role_phase["text"],
+                            reasoning_end_token=reasoning_end_token,
+                        ),
                         domains,
                     )
                 )
             else:
                 selected_roles = None
             declarations = director_live_add_subgraph_agent_declarations_from_text(
-                declaration_phase["text"],
+                _hierarchical_schema_text(
+                    declaration_phase["text"],
+                    reasoning_end_token=reasoning_end_token,
+                ),
                 domains,
                 selected_agent_roles=selected_roles,
             )
@@ -2335,6 +2882,37 @@ def _validate_v3_hierarchical_action_receipt(
                     "v3 role-first ADD parameter prompt is not conditioned on "
                     "its Agent declarations"
                 )
+        elif role_neutral_add_domain:
+            declaration_prompt = declaration_phase.get("prompt_text")
+            if not isinstance(declaration_prompt, str):
+                raise ReceiptValidationError(
+                    "v3 role-neutral ADD declaration has no prompt binding"
+                )
+            selected_declarations_json = json.dumps(
+                {
+                    "action": "add_subgraph",
+                    "agents": [dict(value) for value in declarations],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            expected_parameter_prompt = _hierarchical_continuation_prompt(
+                declaration_prompt,
+                committed_json=selected_declarations_json,
+                instruction=_ADD_ACTION_CONTINUATION,
+            )
+            observed_parameter_prompt = (
+                parameter_failure_receipt.get("prompt_text")
+                if parameter_regeneration_attempted
+                and isinstance(parameter_failure_receipt, Mapping)
+                else metadata.get("prompt_text")
+            )
+            if observed_parameter_prompt != expected_parameter_prompt:
+                raise ReceiptValidationError(
+                    "v3 role-neutral ADD parameter prompt is not conditioned "
+                    "on its Agent declarations"
+                )
         declaration_values = list(declarations)
         if (
             action_value is not None
@@ -2373,13 +2951,68 @@ def _validate_v3_hierarchical_action_receipt(
                     "v3 add_subgraph relation endpoint is outside the live domain"
                 )
         add_domain = domains["add_subgraph"]
-        if verified_qa_semantic_protocol(add_domain.get("semantic_protocol")):
-            if (
+        if (
+            verified_qa_semantic_protocol(add_domain.get("semantic_protocol"))
+            or add_domain.get("contract_semantics") == "free_text"
+        ):
+            required_relation_count = add_domain.get(
+                "required_relation_count"
+            )
+            required_ingress = add_domain.get(
+                "required_existing_ingress_agent_ids"
+            )
+            exact_free_text_fan_in = bool(
+                not verified_qa_semantic_protocol(
+                    add_domain.get("semantic_protocol")
+                )
+                and add_domain.get("contract_semantics") == "free_text"
+                and add_domain.get("require_all_existing_ingress") is True
+                and type(required_relation_count) is int
+                and required_relation_count > 1
+            )
+            if action_value is not None and exact_free_text_fan_in:
+                relations = tuple(action_value.get("relations", ()))
+                if (
+                    not isinstance(required_ingress, (list, tuple))
+                    or any(
+                        not isinstance(agent_id, str) or not agent_id
+                        for agent_id in required_ingress
+                    )
+                    or len(set(required_ingress)) != len(required_ingress)
+                    or len(required_ingress) != required_relation_count
+                    or len(declared_ids) != 1
+                ):
+                    raise ReceiptValidationError(
+                        "v3 exact fan-in live domain is internally inconsistent"
+                    )
+                if len(relations) != required_relation_count:
+                    raise ReceiptValidationError(
+                        "v3 exact fan-in relation count differs from its live domain"
+                    )
+                consumer_id = declared_ids[0]
+                observed_sources: set[str] = set()
+                for relation in relations:
+                    if not (
+                        isinstance(relation, Mapping)
+                        and relation.get("target_id") == consumer_id
+                        and relation.get("source_to_target") is True
+                        and relation.get("target_to_source") is False
+                        and relation.get("source_id") in required_ingress
+                    ):
+                        raise ReceiptValidationError(
+                            "v3 exact fan-in relation violates its directed live domain"
+                        )
+                    observed_sources.add(str(relation["source_id"]))
+                if observed_sources != set(required_ingress):
+                    raise ReceiptValidationError(
+                        "v3 exact fan-in sources differ from required ingress"
+                    )
+            elif (
                 action_value is not None
                 and len(action_value.get("relations", ())) > 1
             ):
                 raise ReceiptValidationError(
-                    "v3 verified-QA add_subgraph exceeds its one-relation edit boundary"
+                    "v3 add_subgraph exceeds its one-relation edit boundary"
                 )
             allowed_relations = {
                 json.dumps(
@@ -2405,14 +3038,14 @@ def _validate_v3_hierarchical_action_receipt(
                 )
                 if relation_identity not in allowed_relations:
                     raise ReceiptValidationError(
-                        "v3 verified-QA add_subgraph relation violates the live semantic domain"
+                        "v3 add_subgraph relation violates the live domain"
                     )
                 relation_pair = frozenset(
                     (relation["source_id"], relation["target_id"])
                 )
                 if relation_pair in relation_pairs:
                     raise ReceiptValidationError(
-                        "v3 verified-QA add_subgraph repeats an unordered relation pair"
+                        "v3 add_subgraph repeats an unordered relation pair"
                     )
                 relation_pairs.add(relation_pair)
         output_agent_id = (
@@ -2461,8 +3094,13 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError(
                 "v3 MODIFY field/Agent receipt is incomplete"
             )
+        expected_action_fields = (
+            {"action", "agent_id", "execution_mode", "allowed_tools"}
+            if selected_field == "execution_profile"
+            else {"action", "agent_id", selected_field}
+        )
         if action_value is not None and (
-            set(action_value) != {"action", "agent_id", selected_field}
+            set(action_value) != expected_action_fields
             or action_value.get("agent_id") != selected_agent_id
         ):
             raise ReceiptValidationError(
@@ -2492,15 +3130,72 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError("v3 MODIFY selected an inadmissible Agent")
         if len(admitted_agent_ids) > 1:
             expected_phases.add("modify_agent_selection")
-        value_schema = parameter_schema["properties"][selected_field]
-        if (
-            action_value is not None
-            and "enum" in value_schema
-            and action_value[selected_field] not in value_schema["enum"]
-        ):
-            raise ReceiptValidationError(
-                "v3 MODIFY value is outside its discrete live domain"
+        if selected_field == "execution_profile":
+            modify_domain = domains.get("modify_agent")
+            candidates = (
+                modify_domain.get("per_agent_candidates", ())
+                if isinstance(modify_domain, Mapping)
+                else ()
             )
+            selected_candidate = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if isinstance(candidate, Mapping)
+                    and candidate.get("agent_id") == selected_agent_id
+                ),
+                None,
+            )
+            raw_profiles = (
+                selected_candidate.get("discrete_value_domains", {}).get(
+                    "execution_profile", ()
+                )
+                if isinstance(selected_candidate, Mapping)
+                and isinstance(
+                    selected_candidate.get("discrete_value_domains"), Mapping
+                )
+                else ()
+            )
+            observed_profile = (
+                None
+                if action_value is None
+                else {
+                    "execution_mode": action_value.get("execution_mode"),
+                    "allowed_tools": action_value.get("allowed_tools"),
+                }
+            )
+            if action_value is not None and observed_profile not in raw_profiles:
+                raise ReceiptValidationError(
+                    "v3 MODIFY execution profile is outside its exact live domain"
+                )
+            schema_branches = parameter_schema.get(
+                "oneOf", (parameter_schema,)
+            )
+            if action_value is not None and not any(
+                isinstance(branch, Mapping)
+                and branch.get("properties", {})
+                .get("execution_mode", {})
+                .get("const")
+                == action_value.get("execution_mode")
+                and branch.get("properties", {})
+                .get("allowed_tools", {})
+                .get("const")
+                == action_value.get("allowed_tools")
+                for branch in schema_branches
+            ):
+                raise ReceiptValidationError(
+                    "v3 MODIFY execution profile differs from its constrained schema"
+                )
+        else:
+            value_schema = parameter_schema["properties"][selected_field]
+            if (
+                action_value is not None
+                and "enum" in value_schema
+                and action_value[selected_field] not in value_schema["enum"]
+            ):
+                raise ReceiptValidationError(
+                    "v3 MODIFY value is outside its discrete live domain"
+                )
         expected_parameter_branch = f"modify_agent:{selected_field}"
         if metadata.get("selected_add_agent_ids") is not None:
             raise ReceiptValidationError("v3 MODIFY receipt carries ADD declarations")
@@ -2533,6 +3228,7 @@ def _validate_v3_hierarchical_action_receipt(
             relation_candidate_receipt["text"],
             admitted=tuple(range(len(candidates))),
             required_action="set_relation",
+            reasoning_end_token=reasoning_end_token,
         )
         if sampled_index != selected_index:
             raise ReceiptValidationError(
@@ -2554,7 +3250,10 @@ def _validate_v3_hierarchical_action_receipt(
                 or not failed_text
                 or not isinstance(failed_prompt, str)
                 or not failed_prompt
-                or not _hierarchical_selector_serialization_failed(failed_text)
+                or not _hierarchical_selector_serialization_failed(
+                    failed_text,
+                    reasoning_end_token=reasoning_end_token,
+                )
             ):
                 raise ReceiptValidationError(
                     "v3 relation-candidate regeneration initial receipt is not "
@@ -2660,15 +3359,36 @@ def _validate_v3_hierarchical_action_receipt(
             schema_branches = parameter_schema.get(
                 "oneOf", (parameter_schema,)
             )
+
+            def branch_admits_exact_value(
+                branch: Mapping[str, Any],
+                field_name: str,
+                value: object,
+            ) -> bool:
+                field_schema = (
+                    branch.get("properties", {}).get(field_name, {})
+                )
+                if not isinstance(field_schema, Mapping):
+                    return False
+                if "const" in field_schema:
+                    return field_schema.get("const") == value
+                enum_values = field_schema.get("enum", ())
+                return (
+                    isinstance(enum_values, (list, tuple))
+                    and value in enum_values
+                )
+
             if not any(
-                action_value.get("agent_id")
-                in branch.get("properties", {})
-                .get("agent_id", {})
-                .get("enum", ())
-                and action_value.get("model_id")
-                in branch.get("properties", {})
-                .get("model_id", {})
-                .get("enum", ())
+                branch_admits_exact_value(
+                    branch,
+                    "agent_id",
+                    action_value.get("agent_id"),
+                )
+                and branch_admits_exact_value(
+                    branch,
+                    "model_id",
+                    action_value.get("model_id"),
+                )
                 for branch in schema_branches
                 if isinstance(branch, Mapping)
             ):
@@ -2708,7 +3428,10 @@ def _validate_v3_hierarchical_action_receipt(
             or not failed_text
             or not isinstance(failed_prompt, str)
             or not failed_prompt
-            or not _action_parameter_serialization_failed(failed_text)
+            or not _action_parameter_serialization_failed(
+                failed_text,
+                reasoning_end_token=reasoning_end_token,
+            )
         ):
             raise ReceiptValidationError(
                 "v3 parameter-regeneration initial receipt is not a "
@@ -2922,6 +3645,11 @@ _JSON_UNSAFE = object()
 _PROVIDER_RESPONSE_METADATA_FIELDS: Tuple[str, ...] = (
     "provider_id",
     "model_id",
+    "chat_template_enable_thinking",
+    "reasoning_content_present",
+    "inline_reasoning_present",
+    "reasoning_trace_present",
+    "reasoning_trace_required",
     "prompt_tokens",
     "completion_tokens",
     "total_tokens",
@@ -3723,6 +4451,7 @@ class AgentGraphRolloutCollector:
                 **schema_request,
             )
             metadata = response.metadata
+            reasoning_end_token = _director_reasoning_end_token(metadata)
             parse_failure_phase = metadata.get("parse_failure_phase")
             if parse_failure_phase is not None and parse_failure_phase not in {
                 _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE,
@@ -3740,7 +4469,10 @@ class AgentGraphRolloutCollector:
                 # a complete AgentAction; no partial ADD may execute under
                 # phase-failure metadata.
                 try:
-                    env.parser.parse(response.text)
+                    env.parser.parse(
+                        response.text,
+                        reasoning_end_token=reasoning_end_token,
+                    )
                 except AgentActionParseError:
                     pass
                 else:
@@ -3748,7 +4480,13 @@ class AgentGraphRolloutCollector:
                         "v3 hierarchical phase-failure sample decoded as a "
                         "Canvas action"
                     )
-            canvas = await env.step(response.text)
+            if reasoning_end_token is None:
+                canvas = await env.step(response.text)
+            else:
+                canvas = await env.step(
+                    response.text,
+                    reasoning_end_token=reasoning_end_token,
+                )
 
             if metadata.get("receipt_verified") is not True:
                 raise ReceiptValidationError("Director turn lacks an exact behavior receipt")
@@ -3812,6 +4550,24 @@ class AgentGraphRolloutCollector:
                 ) != prompt:
                     raise ReceiptValidationError(
                         "role-first ADD receipt is not rooted in the Canvas prompt"
+                    )
+            elif (
+                strategy_hint == HIERARCHICAL_JSON_SCHEMA_STRATEGY
+                and metadata.get("selected_action") == "add_subgraph"
+                and metadata.get("action_json_schema_version")
+                == DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ):
+                raw_phases = metadata.get("hierarchical_phase_receipts")
+                declaration_phase = (
+                    raw_phases.get("add_agent_declarations")
+                    if isinstance(raw_phases, Mapping)
+                    else None
+                )
+                if not isinstance(declaration_phase, Mapping) or (
+                    declaration_phase.get("prompt_text") != prompt
+                ):
+                    raise ReceiptValidationError(
+                        "role-neutral ADD receipt is not rooted in the Canvas prompt"
                     )
             elif metadata.get("parameter_regeneration_attempted") is True:
                 raw_phases = metadata.get("hierarchical_phase_receipts")
@@ -4006,6 +4762,15 @@ class AgentGraphRolloutCollector:
             runtime_summary["director_backend_sampling_seed"] = (
                 metadata.get("backend_sampling_seed")
             )
+            director_thinking = metadata.get("chat_template_enable_thinking")
+            if director_thinking is not None:
+                if type(director_thinking) is not bool:
+                    raise ReceiptValidationError(
+                        "Director thinking-mode receipt must be boolean"
+                    )
+                runtime_summary["director_chat_template_enable_thinking"] = (
+                    director_thinking
+                )
             if (
                 resume_checkpoint_id is not None
                 and round_index == start_round_index
@@ -4225,22 +4990,15 @@ class AgentGraphRolloutCollector:
             else natural_terminal_reason or "max_rounds"
         )
         if termination_reason != "finish":
-            # Progressive execution remains Canvas feedback, never an implicit
-            # FINISH.  The Env is the sole semantic-lineage admission authority;
-            # reuse only its last complete, revision-consistent receipt.
-            fallback = _last_valid_evidence_lineage_fallback(env)
-            if fallback is None:
-                final_answer = None
-                final_runtime = None
-                final_graph = env.graph.to_dict()
-            else:
-                (
-                    final_answer,
-                    final_runtime,
-                    final_graph,
-                    valid_lineage_fallback_receipt,
-                ) = fallback
-                valid_lineage_fallback_used = True
+            # Progressive artifacts remain available on their immutable turn
+            # receipts for diagnosis, but only an explicit FINISH admits a
+            # terminal answer to the evaluator.  Never promote historical
+            # evidence lineage after max_rounds or a Canvas-domain terminal.
+            final_answer = None
+            final_runtime = None
+            final_graph = env.graph.to_dict()
+            valid_lineage_fallback_used = False
+            valid_lineage_fallback_receipt = {}
 
         if final_graph is None:
             final_graph = env.graph.to_dict()

@@ -34,6 +34,14 @@ def test_integer_scorer_uses_target_blind_explicit_math_forms() -> None:
     assert score_aime2026_integer(r"\boxed{42}", ["42"]).accuracy == 1.0
     assert score_aime2026_integer("Final Answer: 42", ["42"]).accuracy == 1.0
     assert (
+        score_aime2026_integer(
+            r"\text{Final Answer: } 491",
+            ["491"],
+        ).accuracy
+        == 1.0
+    )
+    assert score_aime2026_integer(r"\text{Answer: }491", ["491"]).accuracy == 1.0
+    assert (
         score_aime2026_integer("Reasoning without a final marker.\n42", ["42"]).accuracy
         == 1.0
     )
@@ -41,6 +49,13 @@ def test_integer_scorer_uses_target_blind_explicit_math_forms() -> None:
         score_aime2026_integer(
             "\\boxed{41}\nFinal Answer: 42",
             ["42"],
+        ).parsing_failure_reason
+        == "conflicting_explicit_candidates"
+    )
+    assert (
+        score_aime2026_integer(
+            "\\boxed{490}\n\\text{Final Answer: } 491",
+            ["491"],
         ).parsing_failure_reason
         == "conflicting_explicit_candidates"
     )
@@ -73,6 +88,57 @@ def test_provenance_bound_artifact_assessment_parser_is_target_blind() -> None:
         },
     )
     assert "ground_truth" not in json.dumps(assessments).casefold()
+
+
+def test_artifact_assessment_ignores_only_explicit_non_candidate_diagnostic() -> None:
+    payload = [
+        {
+            "assessed_artifact_id": "artifact:candidate",
+            "candidate": "156",
+            "assessment": "supported",
+            "basis": "The public coordinate derivation yields 155.7.",
+            "counterexample": None,
+        },
+        {
+            "assessed_artifact_id": "artifact:no-candidate",
+            "candidate": None,
+            "assessment": "insufficient_evidence",
+            "basis": "The typed source envelope exposes no parsed candidate.",
+            "counterexample": None,
+        },
+    ]
+    assessments, failure = extract_aime2026_artifact_assessments(
+        "<artifact_assessments>"
+        + json.dumps(payload)
+        + "</artifact_assessments>"
+    )
+    assert failure is None
+    assert assessments == (
+        {
+            "assessed_artifact_id": "artifact:candidate",
+            "candidate": "156",
+            "assessment": "supported",
+            "basis": "The public coordinate derivation yields 155.7.",
+            "counterexample": None,
+        },
+    )
+
+
+def test_artifact_assessment_does_not_promote_non_candidate_diagnostic() -> None:
+    diagnostic = {
+        "assessed_artifact_id": "artifact:no-candidate",
+        "candidate": None,
+        "assessment": "insufficient_evidence",
+        "basis": "The typed source envelope exposes no parsed candidate.",
+        "counterexample": None,
+    }
+    assessments, failure = extract_aime2026_artifact_assessments(
+        "<artifact_assessments>"
+        + json.dumps([diagnostic])
+        + "</artifact_assessments>"
+    )
+    assert assessments == ()
+    assert failure == "artifact_assessment_no_candidate_items"
 
 
 def test_assessment_terminal_projection_is_target_blind_and_fail_closed() -> None:

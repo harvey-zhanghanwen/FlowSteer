@@ -1,0 +1,246 @@
+# AIME 2026 runtime v44 composed-runtime-repair profile.
+# This independent condition preserves the same official 30-task population;
+# neutral Director prompt, explicit FINISH semantics, free AgentGraph, and exact
+# v18 heterogeneous thinking capability catalog. It identifies the runtime work
+# under evaluation: FlowSteer-style progressive-cache output dependency scope,
+# SkillFlow-style bounded exact-consumer repair, and provenance-preserving mixed
+# reasoning/coding artifact assessment. These are execution-consistency
+# mechanisms, not a prescribed Coding Agent, Agent role, relation pattern, or
+# topology. This profile makes no canary or Accuracy claim. Skill, training,
+# GRPO, MACE, and Bayesian update remain disabled.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+execution_timeout: 480.0
+experiment:
+  name: "aime2026_runtime_v44_composed_runtime_repair"
+  phase: "aime2026_evaluation"
+  training_enabled: false
+  seed: 20260825
+  condition_id: "aime2026_runtime_v44_composed_runtime_repair"
+  sampling_schedule_purpose: "aime2026_official_fixed_paired_evaluation_v2"
+  catalog_order_namespace: "aime2026_unified_initial_v1"
+  prompt_version: "agentgraph.director.minimal-neutral.v15"
+  tool_version: "skillflow.training-tools.computation-react.v3"
+  output_dir: "artifacts/aime2026_runtime_v44_composed_runtime_repair/evaluation"
+
+data:
+  catalog_path: "config/datasets_aime2026_official_v1.yaml"
+  registry_path: "config/datasets_runtime_aime2026_official_v1.yaml"
+  registry_dataset_key: "aime_2026"
+  train_path: "data/aime2026_official_v1/train.jsonl"
+  validation_path: "data/aime2026_official_v1/validation.jsonl"
+  test_path: "data/aime2026_official_v1/test.jsonl"
+  enforce_split_isolation: true
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+
+aime2026_evaluation:
+  dataset_key: "aime_2026"
+  stage: "final_evaluation"
+  split: "test"
+  benchmark_slice: "official_aime_2026"
+  official_2026_only: true
+  selection: "task_ids"
+  sample_count: 30
+  stable_zero_sample_count: 2
+  task_ids:
+    - "aime-2026/05"
+    - "aime-2026/10"
+    - "aime-2026/01"
+    - "aime-2026/02"
+    - "aime-2026/03"
+    - "aime-2026/04"
+    - "aime-2026/06"
+    - "aime-2026/07"
+    - "aime-2026/08"
+    - "aime-2026/09"
+    - "aime-2026/11"
+    - "aime-2026/12"
+    - "aime-2026/13"
+    - "aime-2026/14"
+    - "aime-2026/15"
+    - "aime-2026/16"
+    - "aime-2026/17"
+    - "aime-2026/18"
+    - "aime-2026/19"
+    - "aime-2026/20"
+    - "aime-2026/21"
+    - "aime-2026/22"
+    - "aime-2026/23"
+    - "aime-2026/24"
+    - "aime-2026/25"
+    - "aime-2026/26"
+    - "aime-2026/27"
+    - "aime-2026/28"
+    - "aime-2026/29"
+    - "aime-2026/30"
+  rollouts_per_task: 1
+  concurrency: 2
+  task_timeout_seconds: 3600.0
+  direct_model_id: "qwen3.5-9b-local"
+  direct_protocol: "target_blind_aime_integer_extraction_v2_qwen35_all_thinking_16k_receipt_v1"
+  protocol_equivalent_to_direct: false
+  direct_contract: "Solve the problem and return one final answer following the task's XML response format."
+  direct_generation_seed: 20260825
+  direct_reused_from: "artifacts/aime2026_runtime_v16_scalar_heterogeneous_thinking_computation/evaluation/direct_predictions.jsonl"
+
+aime_tool_runtime:
+  enabled: true
+  condition_id: "aime2026_runtime_v44_composed_runtime_repair"
+  mode: "model_driven_computation"
+  execution_modes: ["react", "coding"]
+  dataset_scope: ["aime_2026"]
+  max_turns_per_agent_call: 8
+  max_tool_calls_per_agent_call: 4
+  max_action_tokens_per_turn: 512
+  thinking_budget_tokens_per_turn: 1024
+  calculator_timeout_seconds: 2.0
+  python_timeout_seconds: 30.0
+
+storage:
+  schema_version: "flowsteer.completion_benchmark.round.v1"
+  root: "artifacts/aime2026_runtime_v44_composed_runtime_repair/evaluation/evidence"
+  selected_tasks_path: "artifacts/aime2026_runtime_v44_composed_runtime_repair/evaluation/selected_tasks.jsonl"
+  direct_predictions_path: "artifacts/aime2026_runtime_v44_composed_runtime_repair/evaluation/direct_predictions.jsonl"
+  trajectories_path: "artifacts/aime2026_runtime_v44_composed_runtime_repair/evaluation/agentgraph_trajectories.jsonl"
+  failures_path: "artifacts/aime2026_runtime_v44_composed_runtime_repair/evaluation/collection_failures.jsonl"
+  paired_results_path: "artifacts/aime2026_runtime_v44_composed_runtime_repair/evaluation/paired_results.jsonl"
+  wrong_demos_path: "artifacts/aime2026_runtime_v44_composed_runtime_repair/evaluation/wrong_demos.jsonl"
+  manifest_path: "artifacts/aime2026_runtime_v44_composed_runtime_repair/evaluation/run_manifest.json"
+  preflight_receipt_path: "artifacts/aime2026_runtime_v44_composed_runtime_repair/evaluation/preflight_receipt.json"
+  report_json_path: "reports/aime2026_runtime_v44_composed_runtime_repair/evaluation_report.json"
+  report_markdown_path: "reports/aime2026_runtime_v44_composed_runtime_repair/evaluation_report.md"
+
+director:
+  base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "qwen35-9b-base-aime2026-unified-initial-v1"
+  behavior_adapter_name: null
+  behavior_adapter_checkpoint: null
+  updated_policy_version: "unused-evaluation-only"
+  expected_server_weight_version: "default"
+  prompt_profile: "minimal"
+  enable_thinking: true
+  thinking_budget_tokens: 2048
+  dtype: "bfloat16"
+  max_context_tokens: 32768
+  max_action_tokens: 8192
+  request_timeout_seconds: 300.0
+  max_request_retries: 1
+  action_decoding: "json_schema"
+  action_schema_version: "agentgraph.canvas-action-json-schema.v1"
+  sampling_schema_version: "agentgraph.model-admissible-action-mask.v3"
+  sampling_action_profile: "model_admissible_canvas_actions"
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 20
+  execute_on_edit: true
+  history_window: 4
+  lora:
+    enabled: false
+
+agent_graph:
+  max_agents: 8
+  max_agents_per_subgraph: 3
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_subgraph, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "director_catalog_choice"
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  require_format_agent: false
+  semantic_protocol_by_source:
+    aime_2026: "none"
+  recovery_policy: "preserve_diagnose_repair_augment"
+  terminal_protocol_by_source:
+    aime_2026: "none"
+  artifact_consumption_ordering: true
+  termination_lookahead: true
+  artifact_assessment_protocol: "provenance_bound_candidate_assessment_v2"
+  task_specification_contract_guard: true
+  artifact_completeness_gate: true
+  artifact_assessment_terminal_policy: "reject_negative"
+  max_length_continuations: 1
+  length_continuation_max_tokens: 8192
+  model_catalog_path: "config/model_catalog_aime2026_heterogeneous_thinking_v18.yaml"
+
+evaluation:
+  healthbench_judge_model: ""
+  max_environment_steps: 20
+  swebench_harness_enabled: false
+  invalid_evaluator_action: "persist_and_exclude"
+
+grpo:
+  enabled: false
+  objective: "action_masked_one_pass"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 1
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 0
+  max_optimizer_updates: 0
+  learning_rate: 0.0
+  gradient_checkpointing: false
+  max_grad_norm: 0.0
+
+policy_sync:
+  enabled: false
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
+  adapter_name_prefix: "unused_aime2026_runtime_v44_"
+  request_timeout_seconds: 120
+  max_retries: 0
+  retry_backoff_seconds: 1
+
+exploration:
+  enabled: false
+  strategy: "none"
+  forced_probe_rollouts: 0
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+  library_version: "none"
+
+gpu:
+  learner_physical: 3
+  rollout_physical: 0
+  gradient_replica_physical: 5
+  learner_device: "cuda:3"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:5"
+  supervisor_gpu_id: 0
+  supervisor_api_base: "http://127.0.0.1:8015/v1"
+  training_enabled: false
+  oom_policy:
+    status: "inactive_evaluation_only"
+    micro_batch_size: 1
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [1]
+    retry_on_cuda_oom: false
+    split_items_across_learner_and_replica: false
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: false
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: false
+  require_version_compatible_skills: true
+
+
+
+

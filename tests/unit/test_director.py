@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import unittest
 
+from jsonschema import Draft202012Validator
+
 from src.interactive.agent_graph import AgentGraph, AgentNode
 from src.interactive.agent_runtime import (
     AgentResponse,
@@ -25,8 +27,18 @@ from src.interactive.director import (
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3,
     DIRECTOR_PROGRESSIVE_ACTION_MASK_PROFILE,
     DIRECTOR_PROMPT_VERSION,
+    DIRECTOR_PROMPT_VERSION_V11,
+    DIRECTOR_PROMPT_VERSION_V12,
+    DIRECTOR_PROMPT_VERSION_V13,
+    DIRECTOR_PROMPT_VERSION_V14,
+    DIRECTOR_PROMPT_VERSION_V15,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
     DIRECTOR_SYSTEM_PROMPT,
+    DIRECTOR_SYSTEM_PROMPT_V11,
+    DIRECTOR_SYSTEM_PROMPT_V12,
+    DIRECTOR_SYSTEM_PROMPT_V13,
+    DIRECTOR_SYSTEM_PROMPT_V14,
+    DIRECTOR_SYSTEM_PROMPT_V15,
     HOTPOTQA_DIRECTOR_PROMPT_VERSION,
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V11,
     HOTPOTQA_DIRECTOR_SYSTEM_PROMPT_V13,
@@ -53,11 +65,15 @@ from src.interactive.director import (
     SCALAR_DIRECTOR_PROMPT_VERSION_V4,
     SCALAR_DIRECTOR_PROMPT_VERSION_V5,
     SCALAR_DIRECTOR_PROMPT_VERSION_V6,
+    SCALAR_DIRECTOR_PROMPT_VERSION_V7,
+    SCALAR_DIRECTOR_PROMPT_VERSION_V8,
     SCALAR_DIRECTOR_SYSTEM_PROMPT,
     SCALAR_DIRECTOR_SYSTEM_PROMPT_V3,
     SCALAR_DIRECTOR_SYSTEM_PROMPT_V4,
     SCALAR_DIRECTOR_SYSTEM_PROMPT_V5,
     SCALAR_DIRECTOR_SYSTEM_PROMPT_V6,
+    SCALAR_DIRECTOR_SYSTEM_PROMPT_V7,
+    SCALAR_DIRECTOR_SYSTEM_PROMPT_V8,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V4,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V5,
     LEGACY_QA_DIRECTOR_PROMPT_VERSION_V2,
@@ -67,6 +83,7 @@ from src.interactive.director import (
     PRESERVE_DIAGNOSE_REPAIR_AUGMENT_POLICY,
     DirectorResponse,
     OpenAIDirectorClient,
+    _director_compact_execution_feedback_projection,
     decode_director_transcript,
     director_actions_from_admissible_schema_branch,
     director_action_json_schema_text,
@@ -83,6 +100,7 @@ from src.interactive.director import (
     director_live_add_subgraph_relation_candidates,
     director_live_action_parameter_json_schema_text,
     director_live_action_target_domains_json,
+    director_validate_live_action_target_domains,
     director_live_modify_agent_selector_json_schema_text,
     director_live_relation_candidate_selector_json_schema_text,
     director_modify_agent_field_sampling_json_schema_text,
@@ -228,13 +246,28 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
                 domains,
             )
         )
-        self.assertEqual(
-            {"enum": ["node_1"]},
-            parameter_schema["properties"]["agent_id"],
+        parameter_branches = parameter_schema.get(
+            "oneOf", [parameter_schema]
         )
         self.assertEqual(
-            {"enum": list(model_registry.model_ids)},
-            parameter_schema["properties"]["model_id"],
+            {"node_1"},
+            {
+                branch["properties"]["agent_id"].get(
+                    "const",
+                    branch["properties"]["agent_id"].get("enum", [None])[0],
+                )
+                for branch in parameter_branches
+            },
+        )
+        self.assertEqual(
+            set(model_registry.model_ids),
+            {
+                branch["properties"]["model_id"].get(
+                    "const",
+                    branch["properties"]["model_id"].get("enum", [None])[0],
+                )
+                for branch in parameter_branches
+            },
         )
         self.assertNotIn("solver", json.dumps(parameter_schema).casefold())
         for field_name in (
@@ -242,7 +275,12 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             "artifact_type",
             "completion_condition",
         ):
-            self.assertNotIn(field_name, parameter_schema["properties"])
+            self.assertTrue(
+                all(
+                    field_name not in branch["properties"]
+                    for branch in parameter_branches
+                )
+            )
         state = orchestrator._canvas_observation(
             env,
             include_task_context=True,
@@ -252,6 +290,444 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(20, state["terminal_progress"]["remaining_rounds"])
         self.assertTrue(state["terminal_progress"]["horizon_feasible"])
         self.assertEqual(domains, state["action_target_domains"])
+
+    def test_generic_v3_add_subgraph_uses_role_neutral_live_domain(self) -> None:
+        profiles = [
+            {"execution_mode": "reasoning", "allowed_tools": []},
+            {"execution_mode": "react", "allowed_tools": ["python"]},
+        ]
+        domains = {
+            "add_subgraph": {
+                "min_new_agents": 1,
+                "max_new_agents": 2,
+                "existing_agent_ids": ["node_1"],
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+                "model_ids": ["qwen", "other"],
+                "registered_execution_profiles": profiles,
+                "contract_semantics": "free_text",
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
+            }
+        }
+        schema = json.loads(
+            director_live_add_subgraph_agent_declarations_json_schema_text(
+                domains
+            )
+        )
+        count_branches = schema["properties"]["agents"]["oneOf"]
+        self.assertEqual([1, 2], [branch["minItems"] for branch in count_branches])
+        first_agent_branches = count_branches[0]["prefixItems"][0]["anyOf"]
+        self.assertEqual(
+            {"node_2"},
+            {
+                branch["properties"]["agent_id"]["const"]
+                for branch in first_agent_branches
+            },
+        )
+        self.assertNotIn("role_family", first_agent_branches[0]["required"])
+        self.assertEqual(
+            {("reasoning", ()), ("react", ("python",))},
+            {
+                (
+                    branch["properties"]["execution_mode"]["const"],
+                    tuple(branch["properties"]["allowed_tools"]["const"]),
+                )
+                for branch in first_agent_branches
+            },
+        )
+        self.assertNotIn("solver", json.dumps(schema).casefold())
+        self.assertNotIn("verifier", json.dumps(schema).casefold())
+
+        agents = [
+            {
+                "agent_id": "node_2",
+                "model_id": "qwen",
+                "contract": "Use the problem and return one complete artifact.",
+                "execution_mode": "reasoning",
+                "allowed_tools": [],
+            },
+            {
+                "agent_id": "node_3",
+                "model_id": "other",
+                "contract": "Use the problem and upstream artifacts.",
+                "execution_mode": "react",
+                "allowed_tools": ["python"],
+            },
+        ]
+        parsed = director_live_add_subgraph_agent_declarations_from_text(
+            json.dumps({"action": "add_subgraph", "agents": agents}),
+            domains,
+        )
+        self.assertEqual(tuple(agents), parsed)
+        mismatched = [dict(agents[0], allowed_tools=["python"])]
+        with self.assertRaisesRegex(ValueError, "registered profile"):
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps({"action": "add_subgraph", "agents": mismatched}),
+                domains,
+            )
+
+        candidates = director_live_add_subgraph_relation_candidates(
+            domains,
+            agents,
+        )
+        self.assertTrue(candidates)
+        self.assertTrue(
+            all(item["source_id"] != item["target_id"] for item in candidates)
+        )
+        self.assertTrue(
+            all(
+                "node_2" in {item["source_id"], item["target_id"]}
+                or "node_3" in {item["source_id"], item["target_id"]}
+                for item in candidates
+            )
+        )
+        reciprocal = [item for item in candidates if item["target_to_source"]]
+        self.assertEqual(1, len(reciprocal))
+        self.assertEqual(
+            {"node_2", "node_3"},
+            {reciprocal[0]["source_id"], reciprocal[0]["target_id"]},
+        )
+        final_schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=agents,
+            )
+        )
+        self.assertEqual(1, final_schema["properties"]["relations"]["maxItems"])
+        self.assertEqual(
+            ["node_1", "node_2", "node_3"],
+            final_schema["properties"]["output_agent_id"]["anyOf"][0]["enum"],
+        )
+
+    def test_generic_v3_add_subgraph_masks_model_profile_cartesian_product(
+        self,
+    ) -> None:
+        profiles = [
+            {"execution_mode": "reasoning", "allowed_tools": []},
+            {"execution_mode": "coding", "allowed_tools": ["python"]},
+        ]
+        domains = {
+            "add_subgraph": {
+                "min_new_agents": 1,
+                "max_new_agents": 1,
+                "existing_agent_ids": [],
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+                "model_ids": ["reasoning-only", "coding-capable"],
+                "registered_execution_profiles": profiles,
+                "registered_model_execution_profiles": [
+                    {
+                        "model_id": "reasoning-only",
+                        "execution_mode": "reasoning",
+                        "allowed_tools": [],
+                    },
+                    {
+                        "model_id": "coding-capable",
+                        "execution_mode": "reasoning",
+                        "allowed_tools": [],
+                    },
+                    {
+                        "model_id": "coding-capable",
+                        "execution_mode": "coding",
+                        "allowed_tools": ["python"],
+                    },
+                ],
+                "contract_semantics": "free_text",
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
+            }
+        }
+        schema = json.loads(
+            director_live_add_subgraph_agent_declarations_json_schema_text(
+                domains
+            )
+        )
+        branches = schema["properties"]["agents"]["oneOf"][0][
+            "prefixItems"
+        ][0]["anyOf"]
+        self.assertEqual(
+            {
+                ("reasoning-only", "reasoning", ()),
+                ("coding-capable", "reasoning", ()),
+                ("coding-capable", "coding", ("python",)),
+            },
+            {
+                (
+                    branch["properties"]["model_id"]["const"],
+                    branch["properties"]["execution_mode"]["const"],
+                    tuple(branch["properties"]["allowed_tools"]["const"]),
+                )
+                for branch in branches
+            },
+        )
+        invalid = {
+            "agent_id": "node_1",
+            "model_id": "reasoning-only",
+            "contract": "Use the original problem and return an artifact.",
+            "execution_mode": "coding",
+            "allowed_tools": ["python"],
+        }
+        with self.assertRaisesRegex(ValueError, "registered profile"):
+            director_live_add_subgraph_agent_declarations_from_text(
+                json.dumps({"action": "add_subgraph", "agents": [invalid]}),
+                domains,
+            )
+
+    def test_generic_v3_candidate_recovery_schema_binds_exact_multi_source_fanin(
+        self,
+    ) -> None:
+        domains = {
+            "add_subgraph": {
+                "min_new_agents": 1,
+                "max_new_agents": 1,
+                "existing_agent_ids": ["source", "owner"],
+                "required_agent_fields": [
+                    "agent_id",
+                    "model_id",
+                    "contract",
+                    "execution_mode",
+                    "allowed_tools",
+                ],
+                "model_ids": ["qwen"],
+                "registered_execution_profiles": [
+                    {"execution_mode": "reasoning", "allowed_tools": []}
+                ],
+                "contract_semantics": "free_text",
+                "required_existing_ingress_agent_ids": [
+                    "source",
+                    "owner",
+                ],
+                "required_existing_ingress_artifacts": [
+                    {
+                        "agent_id": "source",
+                        "artifact_id": "artifact:source",
+                    },
+                    {
+                        "agent_id": "owner",
+                        "artifact_id": "artifact:owner",
+                    },
+                ],
+                "required_relation_count": 2,
+                "require_all_existing_ingress": True,
+                "preserve_current_output": True,
+                "endpoint_scope": {
+                    "relation_endpoint_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                    "output_agent_id_sources": [
+                        "existing_agent_ids",
+                        "same_action_agent_ids",
+                    ],
+                },
+            }
+        }
+        director_validate_live_action_target_domains(
+            ("add_subgraph",), domains
+        )
+        agent = {
+            "agent_id": "node_1",
+            "model_id": "qwen",
+            "contract": "assess every routed public artifact",
+            "execution_mode": "reasoning",
+            "allowed_tools": [],
+        }
+        candidates = director_live_add_subgraph_relation_candidates(
+            domains, [agent]
+        )
+        self.assertEqual(
+            {
+                ("source", "node_1", True, False),
+                ("owner", "node_1", True, False),
+            },
+            {
+                (
+                    item["source_id"],
+                    item["target_id"],
+                    item["source_to_target"],
+                    item["target_to_source"],
+                )
+                for item in candidates
+            },
+        )
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "add_subgraph",
+                domains,
+                add_agents=[agent],
+            )
+        )
+        relation_schema = schema["properties"]["relations"]
+        self.assertEqual(2, relation_schema["minItems"])
+        self.assertEqual(2, relation_schema["maxItems"])
+        self.assertTrue(relation_schema["uniqueItems"])
+        self.assertFalse(relation_schema["items"])
+        relation_branches = relation_schema["prefixItems"]
+        self.assertEqual(2, len(relation_branches))
+        self.assertEqual(
+            [
+                ("source", "node_1", True, False),
+                ("owner", "node_1", True, False),
+            ],
+            [
+                (
+                    branch["properties"]["source_id"]["const"],
+                    branch["properties"]["target_id"]["const"],
+                    branch["properties"]["source_to_target"]["const"],
+                    branch["properties"]["target_to_source"]["const"],
+                )
+                for branch in relation_branches
+            ],
+        )
+        self.assertEqual(
+            {"type": "null"},
+            schema["properties"]["output_agent_id"],
+        )
+        valid_action = {
+            "action": "add_subgraph",
+            "agents": [agent],
+            "relations": [
+                {
+                    "source_id": "source",
+                    "target_id": "node_1",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                },
+                {
+                    "source_id": "owner",
+                    "target_id": "node_1",
+                    "source_to_target": True,
+                    "target_to_source": False,
+                },
+            ],
+            "output_agent_id": None,
+        }
+        validator = Draft202012Validator(schema)
+        self.assertFalse(list(validator.iter_errors(valid_action)))
+        duplicate_source = json.loads(json.dumps(valid_action))
+        duplicate_source["relations"][1] = dict(
+            duplicate_source["relations"][0]
+        )
+        self.assertTrue(list(validator.iter_errors(duplicate_source)))
+        reversed_sources = json.loads(json.dumps(valid_action))
+        reversed_sources["relations"].reverse()
+        self.assertTrue(list(validator.iter_errors(reversed_sources)))
+
+    def test_neutral_v11_prompt_adds_only_free_contract_boundary(self) -> None:
+        self.assertEqual(
+            DIRECTOR_SYSTEM_PROMPT_V11,
+            director_system_prompt_for_version(DIRECTOR_PROMPT_VERSION_V11),
+        )
+        self.assertIn("required inputs", DIRECTOR_SYSTEM_PROMPT_V11)
+        for forbidden in (
+            "solver",
+            "verifier",
+            "plan ->",
+            "parallel solvers",
+            "voting",
+        ):
+            self.assertNotIn(forbidden, DIRECTOR_SYSTEM_PROMPT_V11.casefold())
+
+    def test_neutral_v12_prompt_explains_only_public_terminal_state(self) -> None:
+        self.assertEqual(
+            DIRECTOR_SYSTEM_PROMPT_V12,
+            director_system_prompt_for_version(DIRECTOR_PROMPT_VERSION_V12),
+        )
+        normalized = DIRECTOR_SYSTEM_PROMPT_V12.casefold()
+        self.assertIn("not evidence that the candidate is correct", normalized)
+        self.assertIn("unassessed", normalized)
+        self.assertIn("output_agent_id in add_subgraph is optional", normalized)
+        for forbidden in (
+            "solver",
+            "verifier",
+            "plan ->",
+            "parallel solvers",
+            "voting",
+            "minimum agent",
+        ):
+            self.assertNotIn(forbidden, normalized)
+
+    def test_neutral_v13_projection_separates_lower_bound_from_availability(
+        self,
+    ) -> None:
+        self.assertEqual(
+            DIRECTOR_SYSTEM_PROMPT_V13,
+            director_system_prompt_for_version(DIRECTOR_PROMPT_VERSION_V13),
+        )
+        model_registry = registry()
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            problem="AIME problem",
+            allowed_actions=(
+                "add_subgraph",
+                "modify_agent",
+                "delete_agent",
+                "set_relation",
+                "set_output",
+                "finish",
+            ),
+            max_agents_per_subgraph=3,
+            termination_lookahead=True,
+        )
+        orchestrator = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            max_rounds=20,
+            prompt_version=DIRECTOR_PROMPT_VERSION_V13,
+            system_prompt=DIRECTOR_SYSTEM_PROMPT_V13,
+            sampling_action_profile=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_MASK_PROFILE
+            ),
+            sampling_action_schema_version=(
+                DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION_V3
+            ),
+        )
+
+        state = orchestrator._canvas_observation(
+            env,
+            include_task_context=True,
+            skills=(),
+        )
+        progress = state["terminal_progress"]
+        self.assertNotIn("minimum_remaining_breakdown", progress)
+        self.assertEqual(
+            "lower_bound_to_explicit_finish_not_action_availability",
+            progress["minimum_remaining_actions_semantics"],
+        )
+        self.assertEqual(
+            "admissible_action_types_and_action_target_domains",
+            progress["action_availability_source"],
+        )
+        self.assertEqual(["add_subgraph"], state["admissible_action_types"])
 
     async def test_generic_v3_empty_canvas_domain_is_typed_terminal(self) -> None:
         model_registry = registry()
@@ -1389,6 +1865,85 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertNotIn(topology_prior, suffix.casefold())
 
+    def test_scalar_v7_restores_topology_neutral_artifact_discretion(
+        self,
+    ) -> None:
+        self.assertEqual(
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V7,
+            director_system_prompt_for_version(
+                SCALAR_DIRECTOR_PROMPT_VERSION_V7
+            ),
+        )
+        strict_ordering = (
+            "Consume a fresh parseable artifact before unrelated graph growth; "
+            "repair or augment only after an observed failure, candidate conflict, "
+            "or absence of a terminal artifact."
+        )
+        neutral_discretion = (
+            "Treat a fresh parseable artifact as terminal-ready but still "
+            "unverified. Choose set_output when its public artifact is "
+            "sufficient for the task; otherwise choose one legal graph edit "
+            "that addresses a concrete gap visible in the task, artifact, "
+            "provenance, conflict, or execution feedback. Do not add an Agent "
+            "solely to increase graph size."
+        )
+        self.assertEqual(
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V7,
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V6.replace(
+                strict_ordering, neutral_discretion
+            ),
+        )
+        self.assertNotIn(strict_ordering, SCALAR_DIRECTOR_SYSTEM_PROMPT_V7)
+        self.assertIn(neutral_discretion, SCALAR_DIRECTOR_SYSTEM_PROMPT_V7)
+        for inherited_boundary in (
+            "Do not copy a current candidate value",
+            "task-external numeric value",
+            "solution-method constraint",
+        ):
+            self.assertIn(
+                inherited_boundary, SCALAR_DIRECTOR_SYSTEM_PROMPT_V7
+            )
+        for topology_prior in (
+            "solver",
+            "verifier",
+            "parallel",
+            "chain",
+            "three agents",
+            "must add",
+        ):
+            self.assertNotIn(
+                topology_prior, SCALAR_DIRECTOR_SYSTEM_PROMPT_V7.casefold()
+            )
+
+    def test_scalar_v8_adds_only_strict_action_key_serialization(self) -> None:
+        self.assertEqual(
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V8,
+            director_system_prompt_for_version(
+                SCALAR_DIRECTOR_PROMPT_VERSION_V8
+            ),
+        )
+        self.assertTrue(
+            SCALAR_DIRECTOR_SYSTEM_PROMPT_V8.startswith(
+                SCALAR_DIRECTOR_SYSTEM_PROMPT_V7
+            )
+        )
+        suffix = SCALAR_DIRECTOR_SYSTEM_PROMPT_V8[
+            len(SCALAR_DIRECTOR_SYSTEM_PROMPT_V7) :
+        ]
+        for boundary in (
+            "exactly the keys defined by the current action schema",
+            "schema-external key",
+        ):
+            self.assertIn(boundary, suffix)
+        for topology_prior in (
+            "solver",
+            "verifier",
+            "parallel",
+            "chain",
+            "three agents",
+        ):
+            self.assertNotIn(topology_prior, suffix.casefold())
+
     def test_scalar_v4_compacts_prior_live_state_and_keeps_latest_exact(
         self,
     ) -> None:
@@ -1451,6 +2006,153 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("current_artifact_receipts", historical)
         self.assertEqual(latest_payload, current)
         self.assertEqual(messages, v3._compact_historical_messages(messages))
+
+    def test_subgraph_v14_compacts_prior_live_state_and_keeps_latest_exact(
+        self,
+    ) -> None:
+        model_registry = registry()
+        v14 = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=DIRECTOR_PROMPT_VERSION_V14,
+            system_prompt=DIRECTOR_SYSTEM_PROMPT_V14,
+        )
+        v13 = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=DIRECTOR_PROMPT_VERSION_V13,
+            system_prompt=DIRECTOR_SYSTEM_PROMPT_V13,
+        )
+        historical_payload = {
+            "current_graph": {"large_stale_state": "x" * 4000},
+            "candidate_state": {"stale_candidate": "584"},
+            "current_artifact_receipts": [
+                {"artifact_preview": "stale" * 4000}
+            ],
+            "canvas_feedback": "accepted add_subgraph at revision 3",
+            "execution_diagnostic_receipt": {
+                "public_error_code": "duplicate_tool_request"
+            },
+        }
+        latest_payload = {
+            "current_graph": {"revision": 4},
+            "candidate_state": {"current_candidate": "300"},
+            "current_artifact_receipts": [
+                {"artifact_id": "artifact-current", "candidate": "300"}
+            ],
+            "admissible_action_types": ["set_output"],
+        }
+        messages = [
+            {"role": "system", "content": DIRECTOR_SYSTEM_PROMPT_V14},
+            {"role": "user", "content": "task and immutable catalog"},
+            {"role": "assistant", "content": '{"action":"add_subgraph"}'},
+            {
+                "role": "user",
+                "content": v14._observation_message(historical_payload),
+            },
+            {"role": "assistant", "content": '{"action":"set_output"}'},
+            {
+                "role": "user",
+                "content": v14._observation_message(latest_payload),
+            },
+        ]
+
+        replay = v14._compact_historical_messages(messages)
+        historical = observation_payload(replay[3])
+        current = observation_payload(replay[-1])
+
+        self.assertEqual(
+            historical_payload["canvas_feedback"], historical["canvas_feedback"]
+        )
+        self.assertEqual(
+            historical_payload["execution_diagnostic_receipt"],
+            historical["execution_diagnostic_receipt"],
+        )
+        self.assertNotIn("current_graph", historical)
+        self.assertNotIn("candidate_state", historical)
+        self.assertNotIn("current_artifact_receipts", historical)
+        self.assertEqual(latest_payload, current)
+        self.assertEqual(messages, v13._compact_historical_messages(messages))
+
+    def test_subgraph_v14_changes_only_history_policy(self) -> None:
+        self.assertEqual(DIRECTOR_SYSTEM_PROMPT_V13, DIRECTOR_SYSTEM_PROMPT_V14)
+        self.assertEqual(
+            DIRECTOR_SYSTEM_PROMPT_V14,
+            director_system_prompt_for_version(DIRECTOR_PROMPT_VERSION_V14),
+        )
+        model_registry = registry()
+        env = AgentWorkflowEnv(
+            model_registry,
+            gateway=FakeGateway(),
+            termination_lookahead=True,
+        )
+        v13 = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=DIRECTOR_PROMPT_VERSION_V13,
+            system_prompt=DIRECTOR_SYSTEM_PROMPT_V13,
+        )
+        v14 = AgentGraphOrchestrator(
+            model_registry,
+            ScriptedDirector([]),
+            prompt_version=DIRECTOR_PROMPT_VERSION_V14,
+            system_prompt=DIRECTOR_SYSTEM_PROMPT_V14,
+        )
+        self.assertEqual(
+            v13._canvas_observation(env, include_task_context=False, skills=()),
+            v14._canvas_observation(env, include_task_context=False, skills=()),
+        )
+
+    def test_subgraph_v15_compacts_only_duplicate_model_visible_raw_artifact(
+        self,
+    ) -> None:
+        self.assertEqual(DIRECTOR_SYSTEM_PROMPT_V14, DIRECTOR_SYSTEM_PROMPT_V15)
+        self.assertEqual(
+            DIRECTOR_SYSTEM_PROMPT_V15,
+            director_system_prompt_for_version(DIRECTOR_PROMPT_VERSION_V15),
+        )
+        raw_artifact = "derivation " * 2000 + "Final Answer: 156"
+        feedback = "accepted set_output at revision 4; execution_result=" + json.dumps(
+            {
+                "output_agent_id": "node_2",
+                "output": "Final Answer: 156",
+                "output_inbox": [
+                    {
+                        "source_agent_id": "node_1",
+                        "artifact_id": "artifact-1",
+                        "raw_output": raw_artifact,
+                        "content_preview": "derivation ... Final Answer: 156",
+                        "provenance_status": "unverified_work_product",
+                    }
+                ],
+                "candidate_conflict": False,
+                "candidate_observations": [
+                    {
+                        "source_agent": "node_1",
+                        "artifact_id": "artifact-1",
+                        "candidate": "156",
+                    }
+                ],
+            },
+            separators=(",", ":"),
+        )
+
+        projected = _director_compact_execution_feedback_projection(feedback)
+        payload = json.loads(projected.split("execution_result=", 1)[1])
+
+        self.assertNotIn("raw_output", payload["output_inbox"][0])
+        self.assertEqual(
+            "derivation ... Final Answer: 156",
+            payload["output_inbox"][0]["content_preview"],
+        )
+        self.assertEqual(
+            "artifact-1", payload["output_inbox"][0]["artifact_id"]
+        )
+        self.assertEqual(
+            "156", payload["candidate_observations"][0]["candidate"]
+        )
+        self.assertIn(raw_artifact, feedback)
+        self.assertLess(len(projected), len(feedback) // 10)
 
 
 
@@ -1823,7 +2525,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({}, result.valid_lineage_fallback_receipt)
         self.assertEqual(1, len(result.turns))
 
-    async def test_round_limit_returns_last_valid_evidence_lineage_snapshot(
+    async def test_round_limit_keeps_historical_lineage_debug_only(
         self,
     ) -> None:
         model_registry = registry()
@@ -1870,24 +2572,12 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         lineage = env.last_valid_evidence_lineage
         self.assertIsNotNone(lineage)
         assert lineage is not None
-        self.assertEqual("<answer>Paris</answer>", result.final_answer)
-        self.assertEqual(lineage.graph_snapshot.to_dict(), result.final_graph)
-        self.assertNotEqual(env.graph.to_dict(), result.final_graph)
+        self.assertIsNone(result.final_answer)
+        self.assertEqual(env.graph.to_dict(), result.final_graph)
         self.assertEqual("max_rounds", result.termination_reason)
         self.assertFalse(result.explicit_finish)
-        self.assertTrue(result.valid_lineage_fallback_used)
-        self.assertEqual(
-            "complete_finish_gate",
-            result.valid_lineage_fallback_receipt["admission"],
-        )
-        self.assertEqual(
-            lineage.graph_revision,
-            result.valid_lineage_fallback_receipt["graph_revision"],
-        )
-        self.assertEqual(
-            lineage.graph_snapshot.snapshot_id,
-            result.valid_lineage_fallback_receipt["graph_snapshot_id"],
-        )
+        self.assertFalse(result.valid_lineage_fallback_used)
+        self.assertEqual({}, result.valid_lineage_fallback_receipt)
         self.assertEqual(1, len(result.turns))
 
     async def test_verified_qa_empty_canvas_domain_is_natural_terminal(self) -> None:
@@ -2175,6 +2865,10 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             ["action", "field"],
             field_selector["required"],
         )
+        self.assertIn(
+            "execution_profile",
+            field_selector["properties"]["field"]["enum"],
+        )
         contract_branch = json.loads(
             director_modify_agent_field_sampling_json_schema_text("contract")
         )
@@ -2185,6 +2879,101 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {"action", "agent_id", "contract"},
             set(contract_branch["properties"]),
+        )
+        profile_branch = json.loads(
+            director_modify_agent_field_sampling_json_schema_text(
+                "execution_profile"
+            )
+        )
+        self.assertEqual(
+            {"action", "agent_id", "execution_mode", "allowed_tools"},
+            set(profile_branch["required"]),
+        )
+        self.assertEqual(
+            {"action", "agent_id", "execution_mode", "allowed_tools"},
+            set(profile_branch["properties"]),
+        )
+
+    def test_model_admissible_v3_binds_atomic_execution_profile_patch(self) -> None:
+        actions = ("modify_agent",)
+        domains = {
+            "modify_agent": {
+                "mutable_fields": [
+                    "execution_profile",
+                    "execution_mode",
+                ],
+                "per_agent_candidates": [
+                    {
+                        "agent_id": "worker",
+                        "mutable_fields": [
+                            "execution_profile",
+                            "execution_mode",
+                        ],
+                        "current_values": {
+                            "execution_profile": {
+                                "execution_mode": "reasoning",
+                                "allowed_tools": [],
+                            },
+                            "execution_mode": "reasoning",
+                        },
+                        "discrete_value_domains": {
+                            "execution_profile": [
+                                {
+                                    "execution_mode": "react",
+                                    "allowed_tools": ["python"],
+                                },
+                                {
+                                    "execution_mode": "coding",
+                                    "allowed_tools": ["python"],
+                                },
+                            ],
+                            "execution_mode": ["react"],
+                        },
+                    }
+                ],
+            }
+        }
+
+        self.assertEqual(
+            domains,
+            json.loads(
+                director_live_action_target_domains_json(actions, domains)
+            ),
+        )
+        schema = json.loads(
+            director_live_action_parameter_json_schema_text(
+                "modify_agent",
+                domains,
+                modify_field="execution_profile",
+                modify_agent_id="worker",
+            )
+        )
+        branches = schema["oneOf"]
+        self.assertEqual(2, len(branches))
+        self.assertEqual(
+            {
+                (
+                    branch["properties"]["execution_mode"]["const"],
+                    tuple(
+                        branch["properties"]["allowed_tools"]["const"]
+                    ),
+                )
+                for branch in branches
+            },
+            {("react", ("python",)), ("coding", ("python",))},
+        )
+        self.assertTrue(
+            all(
+                set(branch["required"])
+                == {
+                    "action",
+                    "agent_id",
+                    "execution_mode",
+                    "allowed_tools",
+                }
+                and "execution_profile" not in branch["properties"]
+                for branch in branches
+            )
         )
 
     def test_model_admissible_v3_binds_live_parameter_domains(self) -> None:
@@ -2531,7 +3320,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             request["action_target_domain_version"],
         )
         self.assertEqual(
-            "agentgraph.live-action-target-domains.v10",
+            "agentgraph.live-action-target-domains.v11",
             DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
         )
         initial_retriever_domain = env.model_admissible_action_targets()[
@@ -3238,6 +4027,7 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
         schema = json.loads(
             director_state_conditioned_sampling_json_schema_text("add_subgraph")
         )
+        self.assertEqual("object", schema["type"])
         relation = schema["properties"]["relations"]["items"]
         expected_required = [
             "source_id",
@@ -3258,6 +4048,16 @@ class DirectorTests(unittest.IsolatedAsyncioTestCase):
             {"const": True},
             relation["anyOf"][1]["properties"]["target_to_source"],
         )
+
+    def test_state_conditioned_finish_schema_is_an_explicit_strict_object(self) -> None:
+        schema = json.loads(
+            director_state_conditioned_sampling_json_schema_text("finish")
+        )
+
+        self.assertEqual("object", schema["type"])
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(["action"], schema["required"])
+        self.assertEqual({"const": "finish"}, schema["properties"]["action"])
 
 
 if __name__ == "__main__":
