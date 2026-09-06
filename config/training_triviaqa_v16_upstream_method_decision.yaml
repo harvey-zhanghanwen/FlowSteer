@@ -5,13 +5,13 @@
 schema_version: "flowsteer.triviaqa.upstream_method_decision.v1"
 
 experiment:
-  name: "triviaqa_v16_upstream_method_decision"
-  status: "blocked_method_conflict"
+  name: "triviaqa_v16_md_full_compliance"
+  status: "blocked_phase0_and_runtime_preflight"
   execution_enabled: false
   requested_optimizer_steps: "250-300"
   starting_branch: "backup/triviaqa-fact-memory-v16-best-82p81-20260906"
   starting_commit: "114bd8b6378af55fbd1f40cdfdda91c79314a771"
-  training_branch: "train/triviaqa-v16-skillflow-300step-20260906"
+  training_branch: "train/triviaqa-v16-md-full-compliance-20260906"
   architecture_profile: "config/evaluation_triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive.yaml"
   scope: "TriviaQA project adaptation; not a bit-exact paper reproduction"
 
@@ -27,7 +27,7 @@ sources:
   source_map: "docs/TRIVIAQA_V16_UPSTREAM_TRAINING_SOURCE_MAP.md"
 
 method_decision:
-  selected: null
+  selected: "design_document_one_pass_grpo"
   loss_mixing_allowed: false
   one_step_before_selection_allowed: false
   long_run_before_one_step_acceptance_allowed: false
@@ -48,6 +48,7 @@ method_decision:
       reward: "terminal_task_reward_only"
       same_question_same_condition_same_policy_group: true
       trainable_parameters: ["director_theta_lora"]
+      selected: true
       note: >-
         Uses the existing project objective and exact receipts. It reuses
         FlowSteer Canvas/rollout boundaries and thinly adapts SkillFlow's
@@ -60,6 +61,7 @@ method_decision:
       effective_batch: "7 questions x 4 trajectories = 28"
       max_episode_steps: 12
       trainable_parameters: ["theta_lora", "phi_lora", "task_conditioned_Z"]
+      enabled: false
       note: >-
         Directly follows SkillFlow's main learning objective after mapping a
         FlowSteer Canvas action to SkillFlow's structured action. It conflicts
@@ -139,16 +141,43 @@ project_status:
     - "policy/adapter version barrier and fail-closed W&B fields"
   project_additions_not_upstream_claims:
     - "transaction receipt, route barrier, post-sync canary, parameter-delta evidence"
-  not_implemented:
-    - "MACE posterior"
-    - "joint Bayesian posterior"
-    - "EVSI scheduling"
-    - "paired intervention"
-    - "automatic Skill publication/revocation"
+  implemented_but_not_phase_accepted:
+    - "original MACE 9D feature and disjoint LinUCB numerical primitives"
+    - "Bayesian linear posterior, posterior UCB/Thompson and particle EVSI numerical primitives"
+    - "paired-probe record and randomized arm-order primitives"
+    - "typed Skill evidence gate and candidate/active/suspended/retired lifecycle primitives"
+  not_implemented_or_not_production_wired:
+    - "Phase-1 terminal-effect MACE adapter and equal-budget random/greedy/uniform acceptance comparison"
+    - "low-rank AgentGraph feature and true same-prefix whole-rollout paired intervention"
+    - "production posterior-sampling/EVSI scheduler and three distinct criticality metrics"
+    - "multiple-candidate Skill discovery-bias control and a positive held-out ACTIVE Skill receipt"
 
 acceptance_gates:
-  method_selected_by_user: false
+  method_selected_by_user: true
+  strict_current_phase: "phase_0_data_trust"
+  phase_0_accepted: false
+  phase_0_trajectory_receipt_subgate_accepted: true
+  phase_0_trajectory_receipt: "reports/triviaqa_v16_md_full_compliance/phase0_acceptance.json"
+  phase_0_trajectory_receipt_counts:
+    trajectories: 128
+    director_turns: 910
+    agent_execution_calls: 739
+    consumed_action_tokens: 70002
+  phase_0_blockers:
+    - "starting profile is explicitly transductive and has enforce_split_isolation=false"
+    - "raw 128-trajectory evidence is external to this branch"
+    - "ReAct provider sub-calls lack per-call full prompt/output token receipts"
+    - "no same-problem/same-condition on-policy train group has been collected for this run"
+  phase_1_accepted: false
+  phase_2_accepted: false
+  phase_3_accepted: false
+  phase_4_accepted: false
+  phase_5_accepted: false
+  compliance_matrix: "docs/TRIVIAQA_V16_MD_FULL_COMPLIANCE_MATRIX.md"
   gpu_inventory_and_nonconflicting_allocation_verified: false
+  gpu_preflight_observation: "current task namespace exposes zero CUDA devices"
+  wandb_client_installed: true
+  wandb_online_authentication_present: false
   wandb_online_fail_closed_ready: false
   exact_training_data_materialized: false
   selected_loss_and_token_mask_verified: false

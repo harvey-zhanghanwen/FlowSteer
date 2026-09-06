@@ -5,28 +5,27 @@
 schema_version: "flowsteer.triviaqa.training_method_redirect.v2"
 
 experiment:
-  name: "triviaqa_v16_training_method_unresolved"
-  status: "blocked_method_conflict"
+  name: "triviaqa_v16_md_full_compliance"
+  status: "blocked_phase0_and_runtime_preflight"
   execution_enabled: false
   starting_branch: "backup/triviaqa-fact-memory-v16-best-82p81-20260906"
   starting_commit: "114bd8b6378af55fbd1f40cdfdda91c79314a771"
-  training_branch: "train/triviaqa-v16-skillflow-300step-20260906"
+  training_branch: "train/triviaqa-v16-md-full-compliance-20260906"
 
 method:
-  primary_objective: "unresolved"
+  primary_objective: "action_masked_one_pass_grpo"
   ttb_selected: false
-  grpo_selected: false
+  grpo_selected: true
   loss_mixing_allowed: false
   decision_gate: "config/training_triviaqa_v16_upstream_method_decision.yaml"
   source_map: "docs/TRIVIAQA_V16_UPSTREAM_TRAINING_SOURCE_MAP.md"
   note: >-
-    FlowSteer paper GRPO, the released FlowSteer implementation, the design
-    document's Action-Masked One-Pass GRPO, and SkillFlow TTB are not the same
-    objective. This compatibility filename must never be treated as approval
-    to run TTB.
+    The user selected the design document's terminal-only, same-problem and
+    same-condition Action-Masked One-Pass GRPO. This compatibility filename
+    must never be treated as approval to run TTB.
 
 execution_gate:
-  method_selected_by_user: false
+  method_selected_by_user: true
   one_real_step_allowed: false
   long_run_allowed: false
   rollout_batches_completed: 0

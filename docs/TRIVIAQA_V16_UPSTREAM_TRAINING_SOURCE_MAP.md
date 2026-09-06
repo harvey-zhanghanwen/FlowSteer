@@ -7,8 +7,10 @@
 
 - 架构起点：`backup/triviaqa-fact-memory-v16-best-82p81-20260906`
 - 固定提交：`114bd8b6378af55fbd1f40cdfdda91c79314a771`
-- 独立训练分支：`train/triviaqa-v16-skillflow-300step-20260906`
-- 当前状态：`blocked_method_conflict`
+- 独立训练分支：`train/triviaqa-v16-md-full-compliance-20260906`
+- 已选主目标：设计 MD 的 terminal-only、same-problem/same-condition、
+  Action-Masked One-Pass GRPO
+- 当前状态：`blocked_phase0_and_runtime_preflight`
 - 已完成 rollout / backward / optimizer.step / adapter publish / post-update
   rollout / W&B run：均为 **0**。
 
@@ -24,7 +26,7 @@
 | FlowSteer 发布代码 | `/ssd1/iclr/icassp/code/FlowSteer` @ `1c9f2abf55cb9b8ea2ca2e3359cdb91acb9964e9` | 训练核心自 `a329b577...`（arXiv v4 alignment）后未变化 |
 | SkillFlow 论文 | 用户附件 `402fe9a0-.../SkillFlow.pdf` | 全文已读；正式主目标是 TTB，GRPO 仅为 baseline / ablation |
 | SkillFlow 发布代码 | `/ssd1/iclr/2/SkillFlow` @ `74be52bb6bd9f0e9e68dacb72636b75649197983` | 已追踪正式入口、TTB、SGLang、LoRA、更新、同步和 checkpoint |
-| 项目设计文档 | 用户附件 `2ab716b4-.../FlowSteer_MACE_Bayesian_Skill_Design.md` | 主目标明确为 terminal-only Action-Masked One-Pass GRPO；MACE/Bayesian/EVSI/Skill 闭环仍未实现 |
+| 项目设计文档 | 用户附件 `2ab716b4-.../FlowSteer_MACE_Bayesian_Skill_Design.md` | 主目标明确为 terminal-only Action-Masked One-Pass GRPO；当前已有若干 MACE/Bayesian/EVSI/Skill 数值与生命周期原语，但六阶段闭环均未按 MD 依次验收 |
 
 ## 3. FlowSteer 发布代码真实调用链
 
@@ -103,7 +105,7 @@ rollout(vN) → reward → selected loss → backward → optimizer.step
 这是对 SkillFlow 发布运行时的必要薄适配；version barrier、transaction receipt、
 canary 和 fail-closed recovery 必须标为本项目工程补全，不能冒充论文原文。
 
-## 5. 三方方法冲突（不得混 loss）
+## 5. 三方方法边界（不得混 loss）
 
 | 维度 | FlowSteer 论文 | FlowSteer 发布代码 | 项目设计 MD | SkillFlow 主方法 |
 | --- | --- | --- | --- | --- |
@@ -118,15 +120,15 @@ canary 和 fail-closed recovery 必须标为本项目工程补全，不能冒充
 的单一目标。把 GRPO advantage 项和 TTB residual 同一步相加会构造第三种训练
 算法，已明确禁止。
 
-## 6. 待用户统一决定的互斥路径
+## 6. 用户已统一选择的路径
 
-### A. FlowSteer 论文主方法
+### A. FlowSteer 论文主方法（未选择）
 
 保留 FlowSteer Canvas/rollout/reward 定义，实现论文缺失的 `pi_old/pi_ref`、
 same-question rollouts、ratio、clip、KL/entropy 后训练 theta。这最接近 FlowSteer
 论文，但不符合 MD 的 terminal-only one-pass objective，也不是发布代码原样运行。
 
-### B. 项目设计 MD 主方法
+### B. 项目设计 MD 主方法（已选择）
 
 复用项目现有 `src/interactive/grpo_objective.py` 和
 `src/interactive/smoke_trainer.py` 的 exact-group Action-Masked One-Pass GRPO；
@@ -134,7 +136,7 @@ same-question rollouts、ratio、clip、KL/entropy 后训练 theta。这最接�
 薄适配 Qwen3.5 named LoRA、SGLang 和更新后权重发布。phi/Z/TTB 禁用。
 这符合设计 MD，但不能称为 SkillFlow 正式主训练或 clipped GRPO。
 
-### C. SkillFlow 正式 TTB
+### C. SkillFlow 正式 TTB（明确禁用）
 
 直接复用 `GFlowNetTrainer`、BackwardPolicy、Z、TTB、7×4 sampler 和
 theta/phi named LoRA；只把 FlowSteer Canvas 原子 edit 映射成 SkillFlow
@@ -142,9 +144,8 @@ structured action，把 TriviaQA terminal evaluator 映射成 outcome reward。
 GRPO 完全禁用。这最接近 SkillFlow 主方法，但会覆盖 MD 指定的主 objective，
 必须得到明确决定。
 
-如需先比较 B 与 C，必须是两个独立 entrypoint、optimizer、checkpoint、W&B
-run 和 branch，各自只做 1-step；不能顺序混训、共享 optimizer 或合并 loss。
-这是一项对照决策协议，不是第三个 objective。
+当前训练只能走 B；不得实例化 backward phi、task-conditioned Z 或 TTB
+residual，也不得把 SkillFlow 的 GRPO baseline/ablation 当作主训练算法。
 
 ## 7. 模块复用分类
 
@@ -159,7 +160,8 @@ run 和 branch，各自只做 1-step；不能顺序混训、共享 optimizer 或
 | `optimizer.step → publish → next rollout` 顺序 | 必要薄适配 | 关闭 SkillFlow 跨 step prefetch；sync failure fail-closed |
 | policy/adapter version、parameter-delta、transaction/canary receipts | 项目工程新增 | 用户验收要求；非论文算法声明 |
 | required/fail-closed W&B 字段 | 项目工程新增 | 两套发布代码都是 optional/fail-open |
-| MACE、联合贝叶斯后验、EVSI、paired intervention、Skill 自动发布/撤销 | 尚未实现 | 设计 MD 明确如此；不得报告已运行 |
+| 原始 MACE、贝叶斯线性头、posterior UCB/Thompson、particle EVSI、paired record、Skill 四状态/gate | 项目算法原语已存在但未通过阶段验收 | 不能把单元原语报告为 Phase 1–4 已运行 |
+| low-rank AgentGraph feature、真正同前缀 whole-rollout intervention、生产 EVSI scheduler/三类关键性、正向 ACTIVE Skill | 尚未完整实现或尚无验收证据 | 设计 MD 必需；不得报告已运行 |
 
 当前 `src/interactive/policy_sync.py` 的 transaction/route/canary 不能归类为
 SkillFlow 直接复用。它使用 SkillFlow 的 tensor-load/pause 思路，但发布 revision
@@ -170,8 +172,10 @@ SkillFlow 直接复用。它使用 SkillFlow 的 tensor-load/pause 思路，但�
 
 ## 8. 真实 1-step 验收门禁
 
-只有用户明确选择 A、B 或 C 后，才能把对应 loss、token mask、trainable
-parameters 和超参数冻结到独立 executable config。随后还必须同时满足：
+主目标已选择为 B；逐条 Phase 0–5 compliance matrix 位于
+`docs/TRIVIAQA_V16_MD_FULL_COMPLIANCE_MATRIX.md`。必须先完成 Phase 0 验收，并把 loss、token
+mask、trainable parameters 和超参数冻结到独立 executable config。随后还必须
+同时满足：
 
 1. 只读核对 GPU 进程并获得不冲突的可见 CUDA allocation；
 2. W&B client 与 online authentication 可用，初始化失败即停止；
@@ -185,6 +189,7 @@ parameters 和超参数冻结到独立 executable config。随后还必须同时
    valid/filtered rollout、GPU/throughput/error、gradient/update norm、checkpoint
    与 Skill phase 状态。
 
-当前任务 namespace 没有可见 CUDA device，且 W&B client/auth 尚不可用；这些是
+当前任务 namespace 没有可见 CUDA device；W&B client 已安装，但 online
+authentication 尚不可用。这些是
 方法选择之后仍需解除的资源门禁。未通过上述 1-step 前，250–300 step 长训
 保持禁止。

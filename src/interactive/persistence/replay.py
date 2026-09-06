@@ -98,9 +98,15 @@ def replay_snapshots(events: Iterable[GraphSnapshotEvent]) -> Dict[str, Any]:
             if event.previous_snapshot_id is not None:
                 raise SnapshotReplayError("first snapshot cannot reference a predecessor")
         else:
-            if event.revision != previous.revision + 1:
+            # A persisted event corresponds to one Director turn, while one
+            # accepted Canvas edit can apply several internal graph mutations.
+            # Its graph revision may therefore jump.  FINISH and execution
+            # reuse can emit another full snapshot at the same revision.  A
+            # decreasing revision is the only invalid ordering here; event
+            # identity and predecessor linkage are verified independently.
+            if event.revision < previous.revision:
                 raise SnapshotReplayError(
-                    f"non-consecutive graph revision {previous.revision} -> {event.revision}"
+                    f"decreasing graph revision {previous.revision} -> {event.revision}"
                 )
             if event.previous_snapshot_id != previous.snapshot_id:
                 raise SnapshotReplayError("broken snapshot hash chain")

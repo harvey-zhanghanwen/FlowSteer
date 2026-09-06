@@ -121,13 +121,34 @@ class PersistenceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     store.append_probe({"probe_id": "p", "task_split": split})
 
-    def test_snapshot_hash_chain_replays_and_detects_tampering(self) -> None:
+    def test_snapshot_chain_replays_jump_and_equal_revisions(self) -> None:
         first = GraphSnapshotEvent.create(0, {"nodes": []})
-        second = GraphSnapshotEvent.create(1, {"nodes": [{"id": "a"}]}, first.snapshot_id)
-        self.assertEqual(replay_snapshots([first, second]), {"nodes": [{"id": "a"}]})
-        tampered = replace(second, graph={"nodes": [{"id": "evil"}]})
+        second = GraphSnapshotEvent.create(
+            4,
+            {"nodes": [{"id": "a"}]},
+            first.snapshot_id,
+        )
+        third = GraphSnapshotEvent.create(
+            4,
+            {"nodes": [{"id": "a"}]},
+            second.snapshot_id,
+        )
+        self.assertEqual(
+            replay_snapshots([first, second, third]),
+            {"nodes": [{"id": "a"}]},
+        )
+
+        decreasing = GraphSnapshotEvent.create(
+            3,
+            {"nodes": [{"id": "a"}]},
+            third.snapshot_id,
+        )
+        with self.assertRaisesRegex(SnapshotReplayError, "decreasing graph revision"):
+            replay_snapshots([first, second, third, decreasing])
+
+        tampered = replace(third, graph={"nodes": [{"id": "evil"}]})
         with self.assertRaises(SnapshotReplayError):
-            replay_snapshots([first, tampered])
+            replay_snapshots([first, second, tampered])
 
 
 class SkillTests(unittest.TestCase):

@@ -1,0 +1,36 @@
+{
+  "accepted": true,
+  "checks": {
+    "exact_director_turn_receipts": true,
+    "execution_recorded_once": true,
+    "graph_snapshot_replay": true,
+    "policy_and_execution_version_binding": true,
+    "terminal_evaluator_reward_lineage": true,
+    "versioned_trajectory_roundtrip": true
+  },
+  "counts": {
+    "accepted_trajectories": 128,
+    "agent_execution_calls": 739,
+    "consumed_action_tokens": 70002,
+    "director_turns": 910,
+    "failed_trajectories": 0,
+    "grpo_eligible_trajectories": 0,
+    "input_trajectories": 128
+  },
+  "created_at": "2026-09-06T13:46:05.857554+00:00",
+  "evaluator_versions": [
+    "triviaqa.official.answer.v1"
+  ],
+  "failures": [],
+  "input_path": "/ssd1/iclr/1/.tmp/FlowSteer-triviaqa-topk-routing-v4/artifacts/triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive/agentgraph_trajectories.jsonl",
+  "policy_versions": [
+    "qwen35-9b-base-triviaqa-fact-memory-unified-v4-v16-4-full-native-transductive"
+  ],
+  "schema_version": "flowsteer.md.phase0.acceptance.v1",
+  "scope": {
+    "evaluator_recomputed": false,
+    "model_or_tool_calls": 0,
+    "statement": "Acceptance proves persisted receipt lineage and replay only; it does not independently recompute evaluator correctness or tokenization.",
+    "tokenizer_recomputed": false
+  }
+}
