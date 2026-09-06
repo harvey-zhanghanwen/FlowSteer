@@ -1,0 +1,65 @@
+{"task_id":"healthbench-professional:c19c2113ba68bb3c4a3e63836e31b558","stage":"collect","recorded_at":"2026-09-05T13:59:50.170497+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:dadbebd3dce1b5928cac5a44dde095d3","stage":"collect","recorded_at":"2026-09-05T14:09:42.819247+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:34de42d85191eec893b650337159ae32","stage":"terminal_evaluator","recorded_at":"2026-09-05T14:23:58.570627+00:00","failure_type":"healthbench_grader_error","error":"healthbench_grader_error"}
+{"task_id":"healthbench-professional:5b639eecb6a0a71ce39b9f5349cf50db","stage":"terminal_evaluator","recorded_at":"2026-09-05T14:29:52.755293+00:00","failure_type":"healthbench_grader_error","error":"healthbench_grader_error"}
+{"task_id":"healthbench-professional:af76c840abe8e2890236150d7812aaa9","stage":"collect","recorded_at":"2026-09-05T14:32:27.878963+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:50ea172e8c130fae0a8fdbbf13e71c01","stage":"terminal_evaluator","recorded_at":"2026-09-05T14:38:26.842095+00:00","failure_type":"healthbench_grader_error","error":"healthbench_grader_error"}
+{"task_id":"healthbench-professional:725e0669a5554ccfc7609d1c831c8abb","stage":"collect","recorded_at":"2026-09-05T14:39:33.430615+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:977f694d9e913f02c3cc043c3e880cf3","stage":"collect","recorded_at":"2026-09-05T14:57:58.559224+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:d07578daa48030c376c70d3e9bd81d48","stage":"terminal_evaluator","recorded_at":"2026-09-05T15:13:15.205545+00:00","failure_type":"healthbench_grader_error","error":"healthbench_grader_error"}
+{"task_id":"healthbench-professional:b2ca9a7335466400874603783b181252","stage":"collect","recorded_at":"2026-09-05T15:43:31.726493+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:57ceb8d0506f3263702e59eef9ce8ad3","stage":"collect","recorded_at":"2026-09-05T15:44:14.098301+00:00","failure_type":"empty_canvas_actions","error":"ValueError: Canvas actions must be a non-empty sequence"}
+{"task_id":"healthbench-professional:a8f50fd2cf3c7cf8fc2cebb60e3f3202","stage":"collect","recorded_at":"2026-09-05T15:46:12.963873+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:38a13bdef2c57f656969c2a2869f987e","stage":"collect","recorded_at":"2026-09-05T16:00:12.102447+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:4b21d2ae3dc5920673ec68881937653f","stage":"collect","recorded_at":"2026-09-05T16:42:46.210866+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:23385171a6ac25cffc85a38817fe4874","stage":"terminal_evaluator","recorded_at":"2026-09-05T16:43:39.607399+00:00","failure_type":"healthbench_grader_error","error":"healthbench_grader_error"}
+{"task_id":"healthbench-professional:a49ba67e6243984987c93fdb0b6cc919","stage":"collect","recorded_at":"2026-09-05T17:16:51.109092+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:c689f41c9e6ad066728129ba58a984d4","stage":"collect","recorded_at":"2026-09-05T17:31:34.668002+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:4dfee0221452571b9508a8b0102f38d4","stage":"collect","recorded_at":"2026-09-05T17:46:37.716714+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:73a89ab53f56f0aade8fa8b229c125b0","stage":"collect","recorded_at":"2026-09-05T17:52:42.642053+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:591115a0e09b5c28a0a2e9df5566babb","stage":"collect","recorded_at":"2026-09-05T18:04:41.172526+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:688978f1706b8b81e54704a901457024","stage":"collect","recorded_at":"2026-09-05T18:07:43.295825+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:2cce06fea04e6701fab68e0a1b25635b","stage":"collect","recorded_at":"2026-09-05T18:19:30.769180+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:636616fe96c980c5615f00f1c326f90a","stage":"collect","recorded_at":"2026-09-05T18:22:14.390747+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:c9e24f50a089434f7ded3c0f07c7762e","stage":"collect","recorded_at":"2026-09-05T18:55:31.375158+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:ab8b45389459eebfc6b31682b1f12041","stage":"collect","recorded_at":"2026-09-05T19:22:31.702047+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:05569de0534eb183cc9935ff9498a7cf","stage":"collect","recorded_at":"2026-09-05T19:33:18.645638+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:64d1b286b9704b7f8d13fd8dc67b1d9e","stage":"collect","recorded_at":"2026-09-05T19:41:55.054751+00:00","failure_type":"empty_canvas_actions","error":"ValueError: Canvas actions must be a non-empty sequence"}
+{"task_id":"healthbench-professional:7d9ab07f18dec074944cdc230d366ac9","stage":"collect","recorded_at":"2026-09-05T19:56:55.558462+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:933860102067253004fd605df29060fa","stage":"collect","recorded_at":"2026-09-05T19:59:43.644706+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:2d11620a117cb2aec3c1ad4054dbbc8f","stage":"collect","recorded_at":"2026-09-05T20:25:23.977087+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:da1ff050135a76bea11878d85f219df2","stage":"collect","recorded_at":"2026-09-05T20:58:51.233640+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:d0bd5b1c04da6754417366ce83d3df65","stage":"collect","recorded_at":"2026-09-05T21:14:41.399201+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:08589ea9e0b7b1d3115d7e6845d0ef21","stage":"collect","recorded_at":"2026-09-05T22:02:57.953797+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:6c6a7487d662c66166643d2a629065cb","stage":"collect","recorded_at":"2026-09-05T22:06:08.782532+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:7e56494678c6c2cb9e5ba6af14ff8170","stage":"terminal_evaluator","recorded_at":"2026-09-05T22:33:04.838941+00:00","failure_type":"healthbench_grader_error","error":"healthbench_grader_error"}
+{"task_id":"healthbench-professional:caa25e342c53b9fbd589582c4cb3883c","stage":"terminal_evaluator","recorded_at":"2026-09-05T22:40:48.910229+00:00","failure_type":"healthbench_grader_error","error":"healthbench_grader_error"}
+{"task_id":"healthbench-professional:247501f61a88c48fbf4eccaaf0bb4c97","stage":"collect","recorded_at":"2026-09-05T23:28:42.730794+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:571bb544ee42e1d03ad809b07dbc7223","stage":"collect","recorded_at":"2026-09-05T23:43:45.495484+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:cbcda7f5945a918652b0718c8c018a9e","stage":"collect","recorded_at":"2026-09-05T23:57:32.332472+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:7c89332a3de133ed53ba5a4e99f03862","stage":"collect","recorded_at":"2026-09-06T00:02:55.219404+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:a2662700c0b4e67f99c6397c5e115be4","stage":"collect","recorded_at":"2026-09-06T00:10:43.078290+00:00","failure_type":"empty_canvas_actions","error":"ValueError: Canvas actions must be a non-empty sequence"}
+{"task_id":"healthbench-professional:61e5bd474a0a42d2248ac0fb88ce5ac3","stage":"collect","recorded_at":"2026-09-06T00:23:59.753146+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:d78e01ce39d53760b290c7327833c313","stage":"collect","recorded_at":"2026-09-06T00:38:57.735807+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:dfc3fb838a4e7f1c0a70ae7d1c6ded80","stage":"collect","recorded_at":"2026-09-06T00:43:46.547093+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:e0c349a39b1d47dbf229dae82c16c55e","stage":"collect","recorded_at":"2026-09-06T00:51:45.996353+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:67521d535c05f9f20df83edddc3cbae6","stage":"terminal_evaluator","recorded_at":"2026-09-06T01:07:53.954816+00:00","failure_type":"healthbench_grader_error","error":"healthbench_grader_error"}
+{"task_id":"healthbench-professional:198d509ec40adbcbf08d00a1d402c2e7","stage":"terminal_evaluator","recorded_at":"2026-09-06T01:16:29.591288+00:00","failure_type":"healthbench_grader_error","error":"healthbench_grader_error"}
+{"task_id":"healthbench-professional:369121042da390db99c77b48abd11fc7","stage":"collect","recorded_at":"2026-09-06T01:28:21.395910+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:4f8e076d432c53c2c56fb24215143490","stage":"collect","recorded_at":"2026-09-06T01:46:27.255604+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:9e58a51eaf28c59ca9f877f6671b2cbb","stage":"collect","recorded_at":"2026-09-06T01:48:13.628285+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:5f703b49693f425f0d620b58d2efaed9","stage":"collect","recorded_at":"2026-09-06T01:55:22.755462+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:05b6fa65abadeec22256cc7d67f46e30","stage":"collect","recorded_at":"2026-09-06T02:01:02.973721+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:24fcee98a54e79c2289c6b7cc68ced5e","stage":"collect","recorded_at":"2026-09-06T02:05:38.881104+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:35d92b74375c5b57b7a476abe295ab84","stage":"collect","recorded_at":"2026-09-06T02:12:08.435720+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:880a9e8174d618b24158983f4e7d515b","stage":"collect","recorded_at":"2026-09-06T02:14:18.047185+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:b026978d1bcd145d88c80ad6ade9bc44","stage":"collect","recorded_at":"2026-09-06T02:33:42.091232+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:98bca240ac32ece9028791e722cb5438","stage":"collect","recorded_at":"2026-09-06T02:37:14.267350+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:bb96444a828382b4f651369c3f4fed07","stage":"collect","recorded_at":"2026-09-06T02:51:47.352894+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:d74a4cb4742287c5b8f0b31d2c2181ed","stage":"collect","recorded_at":"2026-09-06T02:59:56.048594+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:b49146d79a995a2e32ce3f2f7eb52955","stage":"collect","recorded_at":"2026-09-06T03:18:27.403279+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:856e608c5b92730fa9fcc8e0dea0ccac","stage":"collect","recorded_at":"2026-09-06T03:23:40.670755+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:3b27921820d74d54d7114f6f7a569902","stage":"collect","recorded_at":"2026-09-06T03:49:25.768521+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:925eab45a9e25e626618be58ccda6033","stage":"collect","recorded_at":"2026-09-06T04:14:57.203741+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:a55b3f44917cff2064614165c5c8e55f","stage":"collect","recorded_at":"2026-09-06T04:29:08.489274+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}
+{"task_id":"healthbench-professional:92bcf89bb6f0e399e0fc3ef0300ebbf0","stage":"collect","recorded_at":"2026-09-06T04:38:57.805112+00:00","failure_type":"TimeoutError","error":"TimeoutError: "}

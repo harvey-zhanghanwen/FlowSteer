@@ -1,0 +1,104 @@
+{
+  "schema_version": "flowsteer.healthbench.backup-score-snapshot.v1",
+  "dataset": "HealthBench Professional",
+  "condition_id": "healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context",
+  "backup_kind": "committed_v233_source_config_and_incomplete_score_report_snapshot",
+  "source_commit": "3b18f7a866b189254b387dd2ccc406888744b9ad",
+  "source_and_config_preserved": true,
+  "evaluation_complete": false,
+  "report_snapshot_time": "2026-09-06T04:39:03.151664+00:00",
+  "sample_count": 525,
+  "evaluator_valid": 460,
+  "explicit_finish": 460,
+  "missing_valid_evaluations": 65,
+  "strict_overall_score": 0.29521328623062576,
+  "strict_overall_score_length_adjusted": 0.27455919823062575,
+  "completed_only_overall_score": 0.33692820711104027,
+  "completed_only_overall_score_length_adjusted": 0.3133556066762576,
+  "scores_copied_from_existing_report_not_new_evaluation": true,
+  "failure_counts": {
+    "TimeoutError": 53,
+    "healthbench_grader_error": 9,
+    "empty_canvas_actions": 3
+  },
+  "score_receipt_projection": {
+    "columns": [
+      "task_id",
+      "available",
+      "valid",
+      "explicit_finish",
+      "overall_score",
+      "overall_score_length_adjusted",
+      "evaluator_version",
+      "termination_reason"
+    ],
+    "count": 525,
+    "valid": 460,
+    "raw": 0.29521328623062576,
+    "adjusted": 0.27455919823062575,
+    "source": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v233/artifacts/healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context/evaluation/paired_results.jsonl",
+    "scope": "existing score receipt projection only; excludes question, ground_truth, final_answer, graph and rubric details"
+  },
+  "report_path": "reports/healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context/evaluation_report.json",
+  "config_path": "config/evaluation_healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context.yaml",
+  "archived_files": [
+    {
+      "source": "reports/healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context/evaluation_report.json",
+      "archived": "reports/healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context/evaluation_report.json"
+    },
+    {
+      "source": "reports/healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context/evaluation_report.md",
+      "archived": "reports/healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context/evaluation_report.md"
+    },
+    {
+      "source": "artifacts/healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context/evaluation/run_manifest.json",
+      "archived": "backups/healthbench_professional_v2_33_strict_high460/receipts/later_run_manifest.json"
+    },
+    {
+      "source": "artifacts/healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context/evaluation/preflight_receipt.json",
+      "archived": "backups/healthbench_professional_v2_33_strict_high460/receipts/preflight_receipt.json"
+    }
+  ],
+  "later_resume_record": {
+    "started_at": "2026-09-06T04:40:37.985517+00:00",
+    "status": "agentgraph",
+    "progress": {
+      "completed": 505,
+      "failed_attempts": 79,
+      "pending_evaluator_retries": 0,
+      "reportable_terminal_failures": 0
+    },
+    "path": "receipts/later_run_manifest.json",
+    "same_time_as_score_report": false,
+    "preflight_also_from_later_resume": true
+  },
+  "source_scope": "Entire unchanged committed v2.33 tree; no v2.34 or later changes imported.",
+  "branch": "backup/healthbench-v233-strict-high460-of525-20260906",
+  "remote": {
+    "name": "backup",
+    "url": "https://github.com/harvey-zhanghanwen/FlowSteer.git",
+    "push_status": "consult actual push receipt, not attested before push"
+  },
+  "complete_run_comparator": {
+    "version": "v2.27",
+    "evaluator_valid": 525,
+    "strict_overall_score_length_adjusted": 0.2665977635743483,
+    "strict_overall_score": 0.2818790435743483,
+    "backup_branch": "backup/healthbench-v227-best525-evidence-20260906",
+    "separate_ranking": true
+  },
+  "external_dependencies_not_packaged": [
+    "Qwen3.5-9B weights and tokenizer",
+    "prepared dataset and private rubric cases",
+    "MedRAG database",
+    "simple-evals 652c89d and runtime environment",
+    "v2.32 Direct raw control receipts referenced by unchanged config"
+  ],
+  "operations": {
+    "training": false,
+    "evaluation": false,
+    "paid_model_calls": 0,
+    "force_push": false,
+    "main_update": false
+  }
+}
