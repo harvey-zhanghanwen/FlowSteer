@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the HotpotQA Flow-Director with sequential one-pass GRPO updates.
+"""Run the HotpotQA sequential one-pass GRPO baseline/ablation.
 
 The learning objective and exact receipt gate come from the existing
 ``train_agentgraph_smoke.py``/``smoke_trainer.py`` path.  The outer loop reuses
@@ -10,7 +10,9 @@ SkillFlow's TTB backward policy is deliberately not used because the project
 design specifies action-masked one-pass GRPO for the Flow-Director.
 
 MACE, Bayesian posterior updates, and Skill evolution are not part of this
-runner.  Their config flags are required to remain disabled.
+runner.  Their config flags are required to remain disabled.  SkillFlow's
+primary method is TTB; this entry point is therefore not eligible to serve as
+the requested SkillFlow main training run.
 """
 
 # ruff: noqa: E402 -- executable scripts add the repository root before imports.
@@ -226,6 +228,7 @@ def validate_hotpotqa_training_config(config: Mapping[str, Any]) -> None:
 
     validate_agent_graph_config(config)
     source = _mapping(config.get("source"), "source")
+    method_boundary = _mapping(config.get("method_boundary"), "method_boundary")
     experiment = _mapping(config.get("experiment"), "experiment")
     data = _mapping(config.get("data"), "data")
     batch = _mapping(data.get("batch"), "data.batch")
@@ -241,6 +244,16 @@ def validate_hotpotqa_training_config(config: Mapping[str, Any]) -> None:
         == "backup/hotpotqa-compliant-best-round01-20260906",
         "source.backup_commit": source.get("backup_commit")
         == "740e53ec6ccac635ecbe7f1f379b002bfb2574d1",
+        "method_boundary.role": method_boundary.get("role")
+        == "baseline_or_ablation_only",
+        "method_boundary.eligible_as_skillflow_main": method_boundary.get(
+            "eligible_as_skillflow_main"
+        )
+        is False,
+        "method_boundary.primary_skillflow_method": method_boundary.get(
+            "primary_skillflow_method"
+        )
+        == "tempered_trajectory_balance",
         "experiment.phase": experiment.get("phase") == "hotpotqa_grpo_training",
         "experiment.training_enabled": experiment.get("training_enabled") is True,
         "data.batch.dataset_key": batch.get("dataset_key") == "hotpotqa",
@@ -603,6 +616,8 @@ async def run_hotpotqa_training(
         "source_backup_branch": str(source["backup_branch"]),
         "source_backup_commit": str(source["backup_commit"]),
         "objective": "action_masked_one_pass",
+        "method_role": "baseline_or_ablation_only",
+        "eligible_as_skillflow_main": False,
         "ttb_enabled": False,
         "mace_enabled": False,
         "bayesian_posterior_enabled": False,

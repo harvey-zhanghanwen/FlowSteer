@@ -1,6 +1,6 @@
-# Formal HotpotQA Flow-Director training, continued from the compliant
-# Round-01 best profile.  This is the MD's terminal-reward, action-masked,
-# one-pass GRPO task-learning flow; it is not SkillFlow TTB.
+# HotpotQA GRPO baseline/ablation, continued from the compliant Round-01
+# profile.  This is the MD's action-masked one-pass objective, not SkillFlow's
+# primary TTB method.  It must never be reported as the SkillFlow main run.
 
 schema_version: "flowsteer.agentgraph.config.v1"
 
@@ -9,6 +9,13 @@ source:
   backup_commit: "740e53ec6ccac635ecbe7f1f379b002bfb2574d1"
   best_profile: "config/best_profiles/hotpotqa_agentgraph_v1.yaml"
   condition_id: "hotpotqa_round_01_stable_zero"
+
+method_boundary:
+  role: "baseline_or_ablation_only"
+  eligible_as_skillflow_main: false
+  primary_skillflow_method: "tempered_trajectory_balance"
+  conflict: "The project MD specifies Action-Masked One-Pass GRPO for task learning, while SkillFlow uses TTB regression as its main training objective."
+  resolution: "Keep this runner isolated as a non-executed baseline; use a separately wired TTB runner for the requested main training."
 
 experiment:
   name: "hotpotqa_qwen35_9b_action_masked_grpo_300step"

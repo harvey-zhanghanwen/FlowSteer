@@ -1,0 +1,158 @@
+# Method boundary and launch gate for the requested HotpotQA SkillFlow main run.
+# This file is deliberately non-runnable until the listed TTB wiring and the
+# real two-step closure gate are complete.
+
+schema_version: "flowsteer.skillflow_ttb.preflight.v1"
+
+run_identity:
+  dataset: "hotpotqa"
+  source_backup_branch: "backup/hotpotqa-compliant-best-round01-20260906"
+  source_backup_commit: "740e53ec6ccac635ecbe7f1f379b002bfb2574d1"
+  status: "blocked_preflight"
+  training_enabled: false
+  optimizer_steps_completed: 0
+
+scope_and_comparability:
+  scope: "single_dataset_project_adaptation"
+  bit_exact_skillflow_reproduction: false
+  skillflow_main_scope: "seven_IID_tasks_joint_training"
+  note: "Training HotpotQA separately is a project adaptation; SkillFlow.pdf does not include MBPP++."
+
+method_and_conflict_resolution:
+  primary: "tempered_trajectory_balance"
+  paper_formal_name: "Tempered Trajectory Balance (TTB)"
+  user_transcription_alias: "Trajectory Token Balance"
+  grpo:
+    enabled: false
+    role: "baseline_or_ablation_only"
+  conflict: "The project MD specifies Action-Masked One-Pass GRPO for task learning, while SkillFlow uses Tempered Trajectory Balance regression as its primary objective."
+  resolution: "Use TTB for this SkillFlow-main run and keep the GRPO runner isolated; never combine the two losses in one run."
+  score_only: "structured_action_tokens"
+  reasoning_tokens: "context_only_zero_loss_mask"
+  edge_log_probability: "mean_over_action_tokens"
+  rollout_policy: "current_theta_on_policy"
+  executor: "frozen"
+
+paper_hyperparameters:
+  optimizer_steps: 250
+  effective_batch_size: 28
+  questions_per_step: 7
+  trajectories_per_question: 4
+  max_trajectory_steps: 12
+  beta: 1.0
+  epsilon_min: 0.1
+  kl_coefficient: 0.01
+  optimizer: "AdamW"
+  learning_rate: 1.0e-4
+  max_gradient_norm: 3.0
+  checkpoint_every_steps: 10
+  theta_lora:
+    rank: 64
+    alpha: 128
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+  phi_lora:
+    selected_rank: 16
+    alpha: 32
+    target_modules: [q_proj, v_proj]
+  partition_function:
+    trainable: true
+    separate_optimizer_parameters: true
+  joint_updates: [theta, partition_function_Z, phi]
+
+paper_ambiguities:
+  phi_lora_rank:
+    main_table: 16
+    appendix_variant: 32
+    selected: 16
+    selection_reason: "Use the paper main-run table; preserve the appendix discrepancy explicitly."
+
+paper_hardware:
+  hardware: "4x NVIDIA A100 80GB"
+  reported_peak_memory_per_gpu: "approximately 70GB"
+  tensor_parallel_layout: "not_specified_by_paper"
+  data_parallel_layout: "not_specified_by_paper"
+  zero_stage: "not_specified_by_paper"
+  rollout_worker_count: "not_specified_by_paper"
+  sampling_parameters: "not_specified_by_paper"
+  gpu_role_mapping: "not_specified_by_paper"
+
+project_adaptations:
+  runtime: "FlowSteer AgentGraph/Canvas/evaluator/exact trajectory receipts"
+  dataset_scope: "HotpotQA-only"
+  weight_publication: "versioned theta LoRA publish, route switch, and canary"
+  staleness_policy: "zero; next rollout is admitted only after successful publication and canary"
+  provenance_note: "Publication barrier, atomic route handling, staleness policy, W&B extensions, and resolved GPU mapping are project engineering, not statements from SkillFlow.pdf."
+
+resource_admission:
+  required_before_launch: true
+  host_gpu_snapshot_observed: false
+  resolved_gpu_plan: null
+  status: "resource_blocked"
+  rule: "Do not launch until host-side memory, utilization, and process ownership prove a non-conflicting plan."
+
+wandb_contract:
+  mode: "online"
+  fail_closed: true
+  api_key_configured: false
+  package_available_in_selected_training_env: false
+  required_step_fields:
+    - optimizer_step
+    - behavior_policy_version
+    - theta_version
+    - phi_version
+    - partition_function_version
+    - adapter_version
+    - ttb_loss
+    - ttb_delta_squared
+    - reward
+    - trajectory_length
+    - valid_rollouts
+    - filtered_rollouts
+    - filter_reasons
+    - rollout_latency
+    - backward_latency
+    - sync_latency
+    - rollouts_per_second
+    - tokens_per_second
+    - gpu_memory
+    - gpu_utilization
+    - error_counts
+    - theta_gradient_norm
+    - phi_gradient_norm
+    - partition_function_gradient_norm
+    - theta_update_l2
+    - phi_update_l2
+    - partition_function_update_l2
+    - checkpoint
+    - publish_status
+    - canary_status
+    - skill_phase_event
+
+closure_gate:
+  required_real_optimizer_steps: 2
+  passed: false
+  require_single_behavior_policy_per_batch: true
+  require_rollout_batch_consumed_once: true
+  require_nonzero_gradients: [theta, partition_function_Z, phi]
+  require_nonzero_parameter_updates: [theta, partition_function_Z, phi]
+  require_new_theta_in_next_step_receipts: true
+  require_publish_and_canary: true
+
+wiring_status:
+  flowsteer_agentgraph_runtime: "implemented"
+  flowsteer_exact_trajectory_receipts: "implemented"
+  skillflow_ttb_action_token_adapter: "not_implemented"
+  theta_phi_Z_joint_training_on_agentgraph_trajectory: "not_implemented"
+  formal_TTB_checkpoint_resume: "not_implemented"
+  real_two_step_closure: "not_run"
+  mace: "present_unwired"
+  joint_bayesian_posterior: "present_unwired"
+  evsi: "present_unwired"
+  paired_intervention: "present_unwired"
+  automatic_skill_publication: "present_unwired"
+
+actual_status:
+  launch_allowed: false
+  optimizer_steps_completed: 0
+  wandb_run: null
+  convergence_claim: null
