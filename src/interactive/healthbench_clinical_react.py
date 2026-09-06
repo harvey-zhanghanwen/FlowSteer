@@ -111,7 +111,7 @@ class HealthBenchClinicalReactExecutionAdapter(
         if value.get("type") == "object":
             if not any(
                 tool_id in _SEARCH_TOOLS
-                or tool_id in {"healthbench-source.read", "healthbench-drug.lookup"}
+                or tool_id in {"healthbench-source.read", "healthbench-drug.lookup", "healthbench-knowledge.search"}
                 for tool_id in request.agent.allowed_tools
             ):
                 # Availability of a calculator does not turn a numeric

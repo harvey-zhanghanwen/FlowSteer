@@ -83,6 +83,10 @@ from src.interactive.healthbench_clinical_tools import (
 from src.interactive.healthbench_clinical_react import (
     HealthBenchClinicalReactExecutionAdapter,
 )
+from src.interactive.healthbench_knowledge_tools import (
+    HealthBenchKnowledgeReactExecutionAdapter,
+    open_healthbench_knowledge_tool_registry,
+)
 from src.interactive.hotpot_training_schedule import (
     FrozenHotpotTrainingSchedule,
     HotpotTrainingCursorState,
@@ -1007,9 +1011,9 @@ def _healthbench_tool_runtime_settings(
         ),
     }
     toolset = section.get("toolset", "default")
-    if toolset not in {"default", "optional_clinical_v1"}:
+    if toolset not in {"default", "optional_clinical_v1", "source_separated_clinical_v1"}:
         raise ConfigurationError("healthbench_tool_runtime.toolset is unsupported")
-    if toolset == "optional_clinical_v1" and (
+    if toolset in {"optional_clinical_v1", "source_separated_clinical_v1"} and (
         runtime_mode != HEALTHBENCH_AUTHORITATIVE_TOOL_RUNTIME_MODE
         or section.get("require_initial_search") is not False
         or section.get("require_refinement_on_insufficient_evidence", False)
@@ -1019,6 +1023,12 @@ def _healthbench_tool_runtime_settings(
             "initial search or search refinement; each Agent chooses its tools"
         )
     settings["toolset"] = toolset
+    if toolset == "source_separated_clinical_v1":
+        for key in ("knowledge_root", "skillflow_source"):
+            value = section.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigurationError(f"healthbench_tool_runtime.{key} must be non-empty text")
+            settings[key] = value
     raw_profile_allowlist = section.get("execution_profile_allowlist")
     if raw_profile_allowlist is not None:
         if (
@@ -2536,7 +2546,9 @@ class LiveSmokeBackend:
                     ),
                 )
                 open_registry = (
-                    open_healthbench_clinical_tool_registry
+                    open_healthbench_knowledge_tool_registry
+                    if healthbench_settings["toolset"] == "source_separated_clinical_v1"
+                    else open_healthbench_clinical_tool_registry
                     if healthbench_settings["toolset"] == "optional_clinical_v1"
                     else open_healthbench_authoritative_tool_registry
                 )
@@ -2569,8 +2581,15 @@ class LiveSmokeBackend:
                     ),
                 }
                 if authoritative:
+                    if healthbench_settings["toolset"] == "source_separated_clinical_v1":
+                        adapter_arguments.update(
+                            knowledge_root=_resolve(self.project_root, healthbench_settings["knowledge_root"]),
+                            skillflow_source=_resolve(self.project_root, healthbench_settings["skillflow_source"]),
+                        )
                     adapter_class = (
-                        HealthBenchClinicalReactExecutionAdapter
+                        HealthBenchKnowledgeReactExecutionAdapter
+                        if healthbench_settings["toolset"] == "source_separated_clinical_v1"
+                        else HealthBenchClinicalReactExecutionAdapter
                         if healthbench_settings["toolset"] == "optional_clinical_v1"
                         else HealthBenchAuthoritativeReactExecutionAdapter
                     )

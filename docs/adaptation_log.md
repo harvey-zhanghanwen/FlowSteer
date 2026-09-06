@@ -1651,3 +1651,50 @@ change was made during profile selection.
   v2.33 process or SGLang service. New handoff config reuses the tested coordinator
   and launches after old completion and verified/pushed readiness. The public
   test collection has informed development and is reported as reevaluation.
+
+## 2026-09-06 — v2.36：对话、医学文献与药品来源分库
+
+- 用户要求在工具调用过程中结合健康对话和真实外部资料，分别建立可查询
+  数据库。本次在独立 `/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v236`
+  worktree 开发，基于已备份的 v2.35 `a3dd5e6`；不修改正在执行的旧条件，
+  也不将旧条件得分改名为新架构得分。
+- 新增 `healthbench_knowledge_store.py`，直接使用 SkillFlow
+  `skillev/benchmarks/retrieval.py::DocumentPassage/build_retrieval_index/`
+  `RetrievalIndex.search/read`，复用本项目 QA 模块加载与
+  `_ThreadAffineRetrievalWorker`。未新增数据库 schema 或排序算法；精确的
+  源码调用与必要适配原因记录于 `docs/source_map.md` 的 v2.36 节。
+- 分类为 `conversation`、`medical_references`、`drug_labels`。对话完整保留
+  speaker、content、turn index，仅作当前任务上下文，绝不是医学事实依据。
+  外部来源仅接收真实 MedRAG/textbooks、NCBI PubMed、NLM DailyMed 的公开
+  Tool evidence；没有 rubric、reference response、人工答案或生成式改写。
+- `healthbench_knowledge_tools.py` 在现有工具后端返回后追加索引；不重新发送
+  检索请求。初始化仅接收当前 Agent 自己保留的 receipts，以及实际图关系
+  传入的 upstream/peer evidence envelopes；不读取未连接节点输出或其他任务
+  数据。Agent 总结与解释不是外部来源，不入医学证据库。
+- 每个 invocation 独立目录。原公开记录追加到 `records.jsonl`，实际查询时
+  lazy build SQLite FTS5；有新证据后构建新的不可变 revision 路径。原始版本、
+  文档 ID、日期、URL、完整 excerpt 和分页 continuation 保留，不以 document ID
+  粗粒度去重覆盖不同版本或后续页面。无证据的外部库显式为空，不生成替代内容。
+- 查询使用可选 `healthbench-knowledge.search(database, query)`，不是固定角色
+  或强制检索步骤。ReAct 仍为每 Agent 的执行模式；原调用预算、Action–Observation
+  continuation、Canvas 执行顺序、图关系及唯一 Output 不变。按来源分库并不表示
+  自动给每个 Agent 读取其他节点数据的权限。
+- 这不是新下载的完整医学语料库，也不是 benchmark 答案库或跨任务 Skill/
+  memory 系统。外部检索仍负责获取资料，本地索引只使本节点已有资料可复查。
+  当前对话帮助约束查询中的实体、关系与适用条件，不补造患者事实。工具索引
+  receipt 只报告路径、数量和状态，不反复复制完整对话。
+- Store 定向验证已通过 10 项真实 upstream FTS5 测试（另有 4 个参数化子项），
+  覆盖来源与请求隔离、线程亲和性、长内容保持、版本/分页保留及旧索引可读。
+  测试使用临时目录和合成文档，无模型/API/grader 调用；工具接线及配置的最终
+  验证由主线负责，本记录不将尚未运行的正式评测描述为完成。
+- 本次没有训练、backward、optimizer update、GRPO、LoRA、MACE、Bayesian
+  更新或 Skill evolution，也没有 v2.36 正式新分数。后续重评测必须使用匹配的
+  Direct/AgentGraph 工具条件与官方 rubric evaluator，不能以索引可用或工程测试
+  通过推断官方分数已经提高。
+- 主线整合验证：工具与请求隔离/实际图关系接线、原有可选 ReAct、runtime
+  allowlist 及评测协议合计 81 项测试、4 个子项通过；按数据库而非整个 store
+  判断重复查询的定向测试再次通过。新增 v2.36 配置和模型目录，保持同批
+  525 题、seed、并发、generation、Canvas 和 evaluator 不变；Direct/Graph
+  均可使用六项工具，未复用不同工具条件的 Direct。525 题 prepare-only
+  返回 `prepared`、`metrics=null`，未启动模型/API/grader。当前 v2.35 队列
+  不变，v2.36 仅完成候选准备和独立备份。

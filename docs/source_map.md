@@ -925,3 +925,29 @@ Qwen3.5 Flash repeated an already dispatched action and is not promoted to ReAct
 Changing tools makes old Direct receipts a different condition: v2.35 must collect
 its own matched Direct. Tool availability is a project extension, not native
 HealthBench infrastructure and not evidence of a score improvement.
+
+## HealthBench Professional v2.36：按来源分类的请求级知识库（2026-09-06）
+
+本次是 `v2.35` 外部工具的必要数据接线，不重新实现检索器、ReAct
+执行循环或 AgentGraph。知识库按**数据来源**分类，不按预定义医疗角色分类。
+
+| 本项目边界 | 真实源码来源与复用分类 |
+| --- | --- |
+| `healthbench_knowledge_store.HealthBenchKnowledgeStore._build/search` | **直接复用 SkillFlow：**`/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src/skillev/benchmarks/retrieval.py::DocumentPassage`、`build_retrieval_index`、`RetrievalIndex.search/read`。SQLite FTS5 schema、tokenizer、BM25 排序、完整 passage 读取均由原实现负责，不另造 ranker/schema。 |
+| 模块加载、索引生命周期与线程亲和性 | **直接复用现有项目适配：**`src/interactive/qa_retrieval.py::_load_retrieval_module`、`src/interactive/qa_tool_adapter.py::_ThreadAffineRetrievalWorker`；构建与打开流程参考同文件 `open_provided_context_qa_tool_registry`。**必要适配：**同步 Tool 接口通过原 worker 的单线程 executor 调用原 index，避免在运行中的 event loop 内另开 `asyncio.run`。 |
+| 三个独立数据分区 | **必要 HealthBench task-specific adaptation：**`conversation` 保存当前完整 `role/content/turn_index`；`medical_references` 仅保存真实 `MedRAG/textbooks`、`NCBI PubMed` 公开 Tool evidence；`drug_labels` 仅保存真实 `NLM DailyMed` evidence。没有将患者陈述、先前 assistant 陈述或模型总结认定为外部医学事实。 |
+| 来源记录与不可变索引版本 | **必要 schema 兼容层：**原 `DocumentPassage` 仅有 passage/document ID、title、text，因此 source ID、日期、URL、content type、version、offset、truncated、next offset 等原来源字段保存在白名单 sidecar；`records.jsonl` 追加保存。首次实际查询时才构建 FTS5；追加内容后使用新的 `revision-N.sqlite3`，不覆盖已发布的不可变索引，也不把不同版本或分页误合并。 |
+| 现有工具结果进入本地库 | **直接复用现有工具：**`healthbench_knowledge_tools._IndexingToolBackend.invoke` 调用原 `ToolRegistry.ainvoke`；MedRAG/PubMed/source-read/DailyMed/calculator 后端仍来自 v2.35。**薄适配：**只从实际成功 Tool result 中提取公开 evidence，再附加数量、路径和索引错误 receipt。计算结果不伪装为文献；索引错误不应丢弃原工具已成功取得的结果，不增加重复网络请求。 |
+| 图关系限定的证据输入 | **复用现有 FlowSteer 通信边界：**`AgentRequest.prior_tool_receipts`、`upstream`、`peer_draft` 与公开 `input_artifact_provenance`；候选提取复用 `openai_gateway._healthbench_search_candidates`。**必要适配：**`healthbench_knowledge_tools._routed_receipts` 仅沿当前请求实际收到的 envelopes 遍历，并遵守 `UPSTREAM_MASKED`；不读取全图缓存，不共享其他任务/Agent 的目录，不把 Agent 自由文本解释追加为医学来源。 |
+| 请求作用域、查询能力与 ReAct | **薄适配：**`HealthBenchKnowledgeReactExecutionAdapter.execute` 为每次 Agent invocation 创建独立 `request-*` 目录及 ContextVar，结束时关闭 worker；`_KnowledgeSearchBackend` 暴露可选 `healthbench-knowledge.search(database, query)`。继续复用 `HealthBenchClinicalReactExecutionAdapter` 和 `ToolReactExecutionAdapter.execute` 的 Action–Observation、调用预算、continuation、completion 与 receipt；不新增 Director 每工具调用一次的替代调度器。 |
+| 自由编排与 evaluator | **保持原实现：**FlowSteer Canvas incremental execution、自由 `agent_id + model_id + free-text contract`、关系、唯一 Output 和 FINISH；ReAct 是 execution mode，不是 role。继续使用 `healthbench_professional_adapter.parse_model_visible_conversation` 的公开对话边界；rubric/reference 仅归官方 evaluator，不进入建库接口。没有固定医疗工作流、训练、GRPO、LoRA、MACE、Bayesian 更新或 Skill evolution。 |
+
+`conversation` 查询返回 `conversation_matches` 且 `evidence=[]`；外部库没有
+真实来源时返回 `status=empty`，不表示外界不存在证据。查询 metadata receipt
+只含路径、版本、数量和检索后端；完整对话不会被重复塞进每次工具结果。
+本次并未下载完整的新医学语料库，也没有构建 benchmark 答案库；这是对当前
+节点实际获取或经图边传入的外部来源进行可查询索引，不等于跨任务的共享医学记忆。
+
+知识库模块已用合成数据运行真实 upstream FTS5 的 10 项定向测试（另有 4 个
+参数化子项），没有模型、HTTP 或 grader 调用。工具接线、运行配置与最终整合
+由主线另行核验；此记录不声称 v2.36 已完成正式评测，也不声称分数提升。

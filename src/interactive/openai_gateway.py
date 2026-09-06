@@ -480,6 +480,7 @@ def _is_healthbench_search_receipt(receipt: Mapping[str, object]) -> bool:
         "healthbench-medrag.search",
         "healthbench-source.read",
         "healthbench-drug.lookup",
+        "healthbench-knowledge.search",
     }
 
 
@@ -534,6 +535,7 @@ def _healthbench_search_candidates(
             "healthbench-medrag.search": "search",
             "healthbench-source.read": "read_source",
             "healthbench-drug.lookup": "drug_lookup",
+            "healthbench-knowledge.search": "search",
         }.get(str(receipt.get("tool_id")))
         if not isinstance(request, Mapping) or request.get("action") != expected_action:
             continue
@@ -860,7 +862,7 @@ def _healthbench_v3_receipts(
                 continue
             key = (str(result.get("source") or ""), document_id)
             result_matches = matches
-            if tool_id in {"healthbench-source.read", "healthbench-drug.lookup"}:
+            if tool_id in {"healthbench-source.read", "healthbench-drug.lookup", "healthbench-knowledge.search"}:
                 # Reading a document page is not a repeat of the earlier
                 # search snippet. Distinguish new retrieval pages/versions
                 # while still deduplicating the same page across producers.

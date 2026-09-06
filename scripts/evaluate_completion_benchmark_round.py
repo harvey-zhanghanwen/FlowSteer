@@ -451,7 +451,7 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
             )
             optional_clinical = bool(
                 isinstance(tool_runtime, Mapping)
-                and tool_runtime.get("toolset") == "optional_clinical_v1"
+                and tool_runtime.get("toolset") in {"optional_clinical_v1", "source_separated_clinical_v1"}
             )
             if optional_clinical:
                 # Necessary adaptation of the existing paired-tool check:
@@ -461,7 +461,8 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                         "healthbench-authoritative.search", "healthbench-medrag.search",
                         "healthbench-source.read", "healthbench-drug.lookup",
                         "healthbench-computation.calculator",
-                    ]
+                    ] + (["healthbench-knowledge.search"]
+                         if tool_runtime.get("toolset") == "source_separated_clinical_v1" else [])
                 )
             checks["healthbench_tool_runtime.enabled"] = bool(
                 isinstance(tool_runtime, Mapping)
