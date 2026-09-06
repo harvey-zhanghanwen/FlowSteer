@@ -1,0 +1,18 @@
+{
+  "old": {
+    "cwd": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v233",
+    "config": "config/evaluation_healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context.yaml",
+    "lock": "artifacts/healthbench_professional_mixed_all_thinking_v2_33_full525_evidence_context/evaluation/evaluation.lock"
+  },
+  "new": {
+    "cwd": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v234",
+    "config": "config/evaluation_healthbench_professional_mixed_all_thinking_v2_34_full525_director_evidence_feedback.yaml",
+    "lock": "artifacts/healthbench_professional_mixed_all_thinking_v2_34_full525_director_evidence_feedback/evaluation/evaluation.lock"
+  },
+  "env_file": "/ssd1/iclr/1/FlowSteer/.env",
+  "python": "/ssd1/iclr/gpf/venvs/skillflow/bin/python",
+  "state_dir": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v234/artifacts/healthbench_professional_mixed_all_thinking_v2_34_full525_director_evidence_feedback/handoff",
+  "readiness_path": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v234/artifacts/healthbench_professional_mixed_all_thinking_v2_34_full525_director_evidence_feedback/handoff/readiness.json",
+  "poll_seconds": 60,
+  "max_old_resumes": 2
+}

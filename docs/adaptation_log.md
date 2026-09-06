@@ -1602,3 +1602,12 @@ change was made during profile selection.
   Old pending evaluator results reuse their saved answers; missing old tasks
   use bounded exact resume, not unconditional resampling. Scripts do not
   autonomously modify architecture or generate Skills from test-set failures.
+- Final handoff checks: 25 synthetic coordinator tests passed, including a
+  harmless local-shell test of inherited flock lifetime. Ten v4 model-interface
+  tests also passed, confirming unchanged downstream/peer payloads and runtime
+  evidence-validator wiring. Across the four non-overlapping final test groups:
+  203 tests plus 23 subtests passed, without model or evaluator calls.
+- Accepted architecture commit `5b218f7` was pushed to the existing GitHub
+  backup remote on the independent v2.34 branch. The handoff script, its tests,
+  explicit host configuration and recovery notes are a separate operational
+  commit; runtime readiness is recorded only after its push succeeds.

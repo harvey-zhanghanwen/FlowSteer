@@ -27,6 +27,7 @@ Director 当前 artifact/evidence 回执总预算为 24,000 字符，超限明�
 
 - 41 项 Director/证据投影/Direct-reference 检查通过。
 - 127 项 runtime/Director/config/feedback 回归通过，另23项 subtests；其中包含13项新版反馈测试。
+- 10项v4模型接线测试及25项自动交接测试通过；以上不重叠的最终测试组共203项，另23项subtests。
 - 固定官方公开 test 的同一批525题 prepare-only通过。
 - 原有模型池v7、所有既有thinking设置、seed、并发4、900秒任务预算、官方rubric grader及聚合方式不变。
 - Direct复用原始459个有效回答和66个按原协议计零的失败，不再生成或评分；完整分母原始评分13.968705%、长度调整后16.756929%。
@@ -43,3 +44,5 @@ Director 当前 artifact/evidence 回执总预算为 24,000 字符，超限明�
 这些公开题已经用于开发和错误分析；完整重评也不是未接触测试集的泛化证明。rubric/reference仍只在evaluator与离线报告中出现，不得进入Director/Agent输入。
 
 当前新版状态以运行manifest为准：`prepared`只表示完成数据及配置准备，不表示已开始推理，也不表示已有评分。
+
+架构提交`5b218f7`已推送至原GitHub项目的独立分支`feature/healthbench-v2.34-director-evidence-feedback-20260905`。自动监控与交接入口、边界和恢复说明见`docs/healthbench_evaluation_handoff.md`，运行态以handoff/state.json为准。
