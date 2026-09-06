@@ -1,0 +1,186 @@
+# Formal HotpotQA Flow-Director training, continued from the compliant
+# Round-01 best profile.  This is the MD's terminal-reward, action-masked,
+# one-pass GRPO task-learning flow; it is not SkillFlow TTB.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+
+source:
+  backup_branch: "backup/hotpotqa-compliant-best-round01-20260906"
+  backup_commit: "740e53ec6ccac635ecbe7f1f379b002bfb2574d1"
+  best_profile: "config/best_profiles/hotpotqa_agentgraph_v1.yaml"
+  condition_id: "hotpotqa_round_01_stable_zero"
+
+experiment:
+  name: "hotpotqa_qwen35_9b_action_masked_grpo_300step"
+  phase: "hotpotqa_grpo_training"
+  training_enabled: true
+  seed: 42
+  target_optimizer_steps: 300
+  # Round-01 already uses theta_smoke_step_000001.  The first new update is
+  # therefore absolute adapter update 2; this also materializes AdamW state
+  # for exact continuation of all later steps.
+  initial_update_step: 2
+  checkpoint_every_steps: 10
+  prefetch_next_step: false
+  condition_id: "hotpotqa_grpo_natural_v1"
+  output_dir: "artifacts/hotpotqa_grpo_300step"
+
+data:
+  # The aligned split remains outside this branch worktree; override with
+  # HOTPOTQA_AGENTGRAPH_TRAIN_PATH when scheduling on another host.
+  train_path: "${HOTPOTQA_AGENTGRAPH_TRAIN_PATH:-/ssd1/iclr/1/FlowSteer/data/agentgraph_v1/train.jsonl}"
+  validation_path: "${HOTPOTQA_AGENTGRAPH_VALIDATION_PATH:-/ssd1/iclr/1/FlowSteer/data/agentgraph_v1/validation.jsonl}"
+  enforce_split_isolation: true
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+  batch:
+    dataset_key: "hotpotqa"
+    selection: "skillflow_seeded_sample"
+    seed_offset: 0
+    tasks_per_step: 7
+    rollouts_per_task: 4
+    expected_rollouts_per_step: 28
+
+storage:
+  schema_version: "flowsteer.hotpotqa.grpo_training.v1"
+  root: "artifacts/hotpotqa_grpo_300step/evidence"
+  persist_exact_policy_receipts: true
+  manifest_path: "artifacts/hotpotqa_grpo_300step/run_manifest.json"
+  state_path: "artifacts/hotpotqa_grpo_300step/run_state.json"
+  training_log_path: "artifacts/hotpotqa_grpo_300step/training_log.jsonl"
+
+versions:
+  prompt: "agentgraph.director.minimal.v2"
+  tool: "agentgraph.executor-react.v2"
+
+director:
+  base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "qwen35-9b-smoke-step-0001"
+  updated_policy_version: "hotpotqa-grpo-step-runtime"
+  updated_policy_version_prefix: "qwen35-9b-hotpotqa-grpo-step-"
+  expected_server_weight_version: "default"
+  behavior_adapter_name: "theta_smoke_step_000001"
+  behavior_adapter_checkpoint: "${HOTPOTQA_ROUND01_ADAPTER_CHECKPOINT:-/ssd1/iclr/1/FlowSteer/artifacts/agentgraph_smoke/checkpoint_final/supervisor_lora/step_000001_20260815T071303632043Z/theta}"
+  optimizer_state_checkpoint: null
+  prompt_profile: "minimal"
+  dtype: "bfloat16"
+  max_context_tokens: 8192
+  max_action_tokens: 256
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 20
+  execute_on_edit: true
+  history_window: 4
+  lora:
+    enabled: true
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+agent_graph:
+  max_agents: 10
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_agent, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "seeded_weighted_random"
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  model_catalog_path: "config/model_catalog.yaml"
+
+evaluation:
+  # Required by the shared runtime constructor, but never invoked by the
+  # HotpotQA official-compatible EM/F1 evaluator.
+  healthbench_judge_model: "gpt-4o-mini"
+  max_environment_steps: 12
+  invalid_evaluator_action: "persist_and_exclude"
+
+grpo:
+  enabled: true
+  objective: "action_masked_one_pass"
+  ttb_enabled: false
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 4
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  invalid_evaluator_action: "persist_and_exclude"
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 1
+  max_optimizer_updates_per_step: 1
+  learning_rate: 1.0e-4
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: true
+  max_grad_norm: 3.0
+
+policy_sync:
+  enabled: true
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}"
+  adapter_name_prefix: "theta_hotpotqa_grpo_step_"
+  behavior_policy_version_required: true
+  adapter_checkpoint_version_required: true
+  request_timeout_seconds: 120
+  max_retries: 3
+  retry_backoff_seconds: 2
+  fail_run_on_sync_error: true
+  post_update_canary_count: 1
+
+tracking:
+  enabled: true
+  mode: "online"
+  project: "flowsteer-hotpotqa"
+  entity: "${WANDB_ENTITY:-}"
+  run_name: "hotpotqa-qwen35-9b-grpo-300step"
+  run_id: "${WANDB_RUN_ID:-}"
+  tags: [flowsteer, hotpotqa, qwen3.5-9b, grpo, one-pass]
+
+# Separate evidence flows are intentionally excluded from this run.  The MD
+# forbids mixing forced probes/posterior or unvalidated Skills into GRPO.
+exploration:
+  enabled: false
+  strategy: "none"
+  forced_probe_rollouts: 0
+
+mace:
+  enabled: false
+
+bayesian_posterior:
+  enabled: false
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+
+gpu:
+  # Physical IDs are a scheduling request only.  The launch must wait until a
+  # host-side nvidia-smi/PID preflight proves these devices are unoccupied.
+  learner_physical: 3
+  rollout_physical: 4
+  gradient_replica_physical: 5
+  learner_device: "cuda:3"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:5"
+  supervisor_gpu_id: 4
+  training_enabled: true
+  oom_policy:
+    status: "active"
+    micro_batch_size: 4
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [4, 2, 1]
+    retry_on_cuda_oom: true
+    split_items_across_learner_and_replica: true
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: true
