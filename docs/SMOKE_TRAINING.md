@@ -1,5 +1,9 @@
 # AgentGraph Qwen3.5 smoke training
 
+> 本文记录 2026-08-15 的历史 smoke transaction，不是
+> `MD_FULL_COMPLIANCE_20260906_V2` 当前分支的 Phase 0 或单步验收证据；当前状态以
+> `docs/MD_FULL_COMPLIANCE_20260906_V2.md` 为准。
+
 本轮只验证最小真实训练闭环，不是大规模实验：从七个对齐训练源中各按顺序取第 1、2 条样本，共 14 个 task；同题由同一冻结版本的 Qwen3.5-9B Director 采样 2 条 rollout，共请求 28 条；过滤后最多执行 1 次 optimizer update。唯一配置入口是
 `config/training_agentgraph_smoke.yaml`。
 
@@ -19,8 +23,8 @@
 
 | 状态 | 模块 | 边界 |
 | --- | --- | --- |
-| 直接复用 | FlowSteer progressive Canvas、逐轮轨迹/动作记录、同题分组和 GRPO loss 基础 | 保留真实 Director prompt/response、action mask、policy version 和终局回报；不复用旧 Operator 结构奖励。 |
-| 直接复用 | SkillFlow 的 Qwen3.5-9B SGLang、LoRA rank/target、梯度 checkpoint、双副本与 micro-batch 思路 | 启动参数来自其 Supervisor 路径；本项目只把物理卡映射到 3/4/5。 |
+| 直接复用/薄适配 | FlowSteer progressive Canvas、逐轮轨迹/动作记录和 policy-gradient 边界 | 同题同条件分组、exact receipt、action mask 与 terminal-only One-Pass loss 是 MD 必要修正；不复用旧 source 分组或结构奖励。 |
+| 薄适配 | SkillFlow 的 Qwen3.5-9B、SGLang、θ-LoRA rank/target、gradient checkpointing 和同一步并行思路 | 物理 GPU 映射、group-preserving token-cost split、optimizer state 与 strict publication transaction 是项目工程补全，不是 SkillFlow 直接复用。 |
 | 必要适配 | Qwen3.5 本地模型与独立 tokenizer | `start_qwen35_director_server.sh` 增加 `--tokenizer-path` 和 `--enable-multimodal`；不使用 FlowSteer 的 Qwen3-8B/vLLM 启动路径。 |
 | 必要适配 | 七源顺序采样、异构 Agent 模型目录和 evaluator gate | 所有 14 个 task 都可采 rollout；只有 evaluator 有效且满足 on-policy receipt 的轨迹能进入梯度。 |
 | 项目算法新增 | 自由文本 Agent contract、每节点模型选择、两比特关系、terminal-only action-masked one-pass 目标 | 来自项目设计文档的 AgentGraph/信号隔离设计，不宣称是 SkillFlow 的 TTB/GFlowNet。 |

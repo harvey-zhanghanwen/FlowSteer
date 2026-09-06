@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Run the HotpotQA sequential one-pass GRPO baseline/ablation.
+"""Run the HotpotQA MD Action-Masked One-Pass GRPO transaction loop.
 
 The learning objective and exact receipt gate come from the existing
 ``train_agentgraph_smoke.py``/``smoke_trainer.py`` path.  The outer loop reuses
-SkillFlow's formal execution boundary: sample a complete batch, finish all
-rollouts, compute and commit one optimizer update, publish the new theta LoRA
-under pause/drain, verify it with a canary, and only then admit the next batch.
-SkillFlow's TTB backward policy is deliberately not used because the project
-design specifies action-masked one-pass GRPO for the Flow-Director.
+SkillFlow's same-step rollout concurrency, Qwen3.5/PEFT, SGLang, and LoRA
+transport.  The strict transaction order—finish the batch, commit one update,
+save recoverable state, publish under pause/drain, canary, then admit the next
+batch—is MD-required project engineering because SkillFlow prefetches the next
+batch before the current optimizer update.  SkillFlow's TTB objective,
+backward policy, and partition function are disabled.
 
 MACE, Bayesian posterior updates, and Skill evolution are not part of this
-runner.  Their config flags are required to remain disabled.  SkillFlow's
-primary method is TTB; this entry point is therefore not eligible to serve as
-the requested SkillFlow main training run.
+runner.  Their config flags remain disabled until their respective MD phases
+are implemented and accepted; their evidence is never added to the GRPO
+reward.
 """
 
 # ruff: noqa: E402 -- executable scripts add the repository root before imports.
@@ -229,6 +230,7 @@ def validate_hotpotqa_training_config(config: Mapping[str, Any]) -> None:
     validate_agent_graph_config(config)
     source = _mapping(config.get("source"), "source")
     method_boundary = _mapping(config.get("method_boundary"), "method_boundary")
+    compliance = _mapping(config.get("md_compliance"), "md_compliance")
     experiment = _mapping(config.get("experiment"), "experiment")
     data = _mapping(config.get("data"), "data")
     batch = _mapping(data.get("batch"), "data.batch")
@@ -244,18 +246,28 @@ def validate_hotpotqa_training_config(config: Mapping[str, Any]) -> None:
         == "backup/hotpotqa-compliant-best-round01-20260906",
         "source.backup_commit": source.get("backup_commit")
         == "740e53ec6ccac635ecbe7f1f379b002bfb2574d1",
+        "method_boundary.compliance_marker": method_boundary.get(
+            "compliance_marker"
+        )
+        == "MD_FULL_COMPLIANCE_20260906_V2",
+        "method_boundary.decision_status": method_boundary.get("decision_status")
+        == "selected",
         "method_boundary.role": method_boundary.get("role")
-        == "baseline_or_ablation_only",
-        "method_boundary.eligible_as_skillflow_main": method_boundary.get(
-            "eligible_as_skillflow_main"
+        == "primary_task_learning_objective",
+        "method_boundary.primary_objective": method_boundary.get(
+            "primary_objective"
+        )
+        == "action_masked_one_pass_grpo",
+        "method_boundary.ttb_enabled": method_boundary.get("ttb_enabled") is False,
+        "method_boundary.mixing_losses_allowed": method_boundary.get(
+            "mixing_losses_allowed"
         )
         is False,
-        "method_boundary.primary_skillflow_method": method_boundary.get(
-            "primary_skillflow_method"
-        )
-        == "tempered_trajectory_balance",
+        "md_compliance.marker": compliance.get("marker")
+        == "MD_FULL_COMPLIANCE_20260906_V2",
         "experiment.phase": experiment.get("phase") == "hotpotqa_grpo_training",
-        "experiment.training_enabled": experiment.get("training_enabled") is False,
+        "experiment.training_enabled": type(experiment.get("training_enabled"))
+        is bool,
         "data.batch.dataset_key": batch.get("dataset_key") == "hotpotqa",
         "data.batch.tasks_per_step": batch.get("tasks_per_step") == 7,
         "data.batch.rollouts_per_task": batch.get("rollouts_per_task") == 4,
@@ -567,7 +579,7 @@ async def run_hotpotqa_training(
     *,
     project_root: Optional[str | Path] = None,
     prepare_only: bool = False,
-    allow_grpo_baseline: bool = False,
+    allow_md_grpo: bool = False,
     resume: bool = False,
     stop_after_optimizer_steps: Optional[int] = None,
     backend_factory: Optional[BackendFactory] = None,
@@ -584,11 +596,34 @@ async def run_hotpotqa_training(
     )
     config = load_yaml(resolved_config)
     validate_hotpotqa_training_config(config)
-    if not prepare_only and not allow_grpo_baseline:
-        raise HotpotTrainingError(
-            "GRPO is a baseline/ablation only; pass --allow-grpo-baseline "
-            "explicitly and never report it as the SkillFlow TTB main run"
-        )
+    experiment = _mapping(config["experiment"], "experiment")
+    compliance = _mapping(config["md_compliance"], "md_compliance")
+    gpu = _mapping(config["gpu"], "gpu")
+    if not prepare_only:
+        if not allow_md_grpo:
+            raise HotpotTrainingError(
+                "the selected MD GRPO requires explicit --allow-md-grpo authorization"
+            )
+        if experiment.get("training_enabled") is not True or gpu.get(
+            "training_enabled"
+        ) is not True:
+            raise HotpotTrainingError(
+                "training is disabled by the current MD compliance gate"
+            )
+        if compliance.get("phase_0_status") != "passed" or compliance.get(
+            "real_step_authorized"
+        ) is not True:
+            raise HotpotTrainingError(
+                "Phase 0 and real-step admission must pass before optimizer execution"
+            )
+        requested_steps = stop_after_optimizer_steps
+        if requested_steps is None or requested_steps > 1:
+            if compliance.get("one_step_closure_status") != "passed" or compliance.get(
+                "long_training_authorized"
+            ) is not True:
+                raise HotpotTrainingError(
+                    "long training requires a passed real one-step closure"
+                )
     paths = _training_paths(config, root)
     paths["root"].mkdir(parents=True, exist_ok=True)
     experiment = _mapping(config["experiment"], "experiment")
@@ -622,8 +657,8 @@ async def run_hotpotqa_training(
         "source_backup_branch": str(source["backup_branch"]),
         "source_backup_commit": str(source["backup_commit"]),
         "objective": "action_masked_one_pass",
-        "method_role": "baseline_or_ablation_only",
-        "eligible_as_skillflow_main": False,
+        "compliance_marker": "MD_FULL_COMPLIANCE_20260906_V2",
+        "method_role": "primary_task_learning_objective",
         "ttb_enabled": False,
         "mace_enabled": False,
         "bayesian_posterior_enabled": False,
@@ -1044,9 +1079,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate and materialize the first task plan without API/GPU/W&B",
     )
     parser.add_argument(
-        "--allow-grpo-baseline",
+        "--allow-md-grpo",
         action="store_true",
-        help="explicitly authorize this non-TTB baseline/ablation",
+        help="explicitly authorize the selected MD Action-Masked One-Pass GRPO",
     )
     parser.add_argument(
         "--resume",
@@ -1071,7 +1106,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 _resolve(PROJECT_ROOT, args.config),
                 project_root=PROJECT_ROOT,
                 prepare_only=bool(args.prepare_only),
-                allow_grpo_baseline=bool(args.allow_grpo_baseline),
+                allow_md_grpo=bool(args.allow_md_grpo),
                 resume=bool(args.resume),
                 stop_after_optimizer_steps=args.stop_after_optimizer_steps,
             )

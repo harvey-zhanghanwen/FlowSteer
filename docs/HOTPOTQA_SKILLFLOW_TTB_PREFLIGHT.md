@@ -1,33 +1,21 @@
-# HotpotQA dual-source training preflight
+# HotpotQA MD training preflight
 
-The requested training run has **not started**. No primary loss is selected.
-FlowSteer/the project MD's Action-Masked One-Pass GRPO and SkillFlow's Tempered
-Trajectory Balance (TTB) are separate candidate objectives. They must not be
-combined, renamed as one another, or reported under one condition.
+`MD_FULL_COMPLIANCE_20260906_V2` 已确定任务学习主算法：terminal-only、same-problem/same-condition、Action-Masked One-Pass GRPO。SkillFlow Tempered Trajectory Balance、φ-LoRA、partition function Z 和 TTB residual 全部禁用；本文件保留原名称仅用于说明旧 preflight 已退役，不是可启动的 TTB 配置。
 
-The paper's formal term is "Tempered Trajectory Balance." SkillFlow TTB scores
-only structured action tokens; reasoning is context, each edge uses mean
-action-token log-probability, and theta LoRA, phi LoRA, and Z are jointly
-optimized. None of those statements applies to the GRPO candidate.
+当前训练未开始：optimizer steps 为 0，model service、GPU task 与 W&B run 均未启动。
 
-The complete commit-exact mapping and conflicts are recorded in
-`docs/FLOWSTEER_SKILLFLOW_TRAINING_SOURCE_MAP.md`. HotpotQA-only training is a
-project adaptation; it is not a bit-exact reproduction of SkillFlow's
-seven-IID-task joint run.
+完整 compliance matrix 与 commit-exact source map：
 
-## Current blockers
+- `docs/MD_FULL_COMPLIANCE_20260906_V2.md`
+- `docs/FLOWSTEER_SKILLFLOW_TRAINING_SOURCE_MAP.md`
 
-1. The primary objective is unresolved. TTB and one-pass GRPO remain disabled.
-2. If TTB is selected, its HotpotQA scalar reward (EM versus the release code's
-   token F1) and AgentGraph action-token adapter remain unresolved.
-3. A real one-step update plus post-update rollout has not run. It must prove
-   non-zero gradients/updates for the selected trainable state and a successful
-   publication/canary using the new theta version.
-4. This execution environment cannot observe host GPU memory/process ownership
-   and has no mapped `/dev/nvidia*`, so no non-conflicting GPU plan is resolved.
-5. The selected training environment currently lacks W&B and no online W&B
-   credential is configured. Formal training is fail-closed on this condition.
+## 当前门控
 
-The adapter publication barrier, route switch, zero-staleness policy, W&B
-extensions, and eventual GPU role mapping are project engineering additions;
-they are not attributed to SkillFlow.pdf.
+1. 当前处于 Phase 0 数据可信性，尚未以 fresh HotpotQA trajectory 完成 terminal reward lineage 与 snapshot replay 验收。
+2. Phase 1–4 只有部分 primitive/schema/unit test；没有真实阶段实验与晋级证据。
+3. 当前 θ checkpoint 只覆盖 adapter 与 AdamW state；scheduler、Python/NumPy/PyTorch/CUDA RNG 和完整训练元数据的保存/恢复尚未完成。
+4. W&B online fail-closed 前置尚未验证。
+5. 尚未执行不冲突 GPU resource admission。
+6. 一个真实 GRPO optimizer step 及其 checkpoint→publish→route switch→canary→new-policy rollout 尚未运行。
+
+因此当前 `real_step_authorized=false` 且 `long_training_authorized=false`。只有 Phase 0 与单步闭环依次通过，才允许进入后续阶段或 250–300 steps。

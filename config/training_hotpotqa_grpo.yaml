@@ -1,7 +1,7 @@
-# HotpotQA FlowSteer/MD objective candidate, continued from the compliant
-# Round-01 profile.  The existing runner remains tagged as a baseline/ablation
-# and non-runnable until the user selects a primary objective.  It must never be
-# reported as SkillFlow TTB.
+# HotpotQA MD Action-Masked One-Pass GRPO, continued from the compliant
+# Round-01 profile.  This is the sole task-learning objective selected by
+# MD_FULL_COMPLIANCE_20260906_V2.  Training remains fail-closed until Phase 0
+# and the real one-step admission checks are complete.
 
 schema_version: "flowsteer.agentgraph.config.v1"
 
@@ -12,13 +12,23 @@ source:
   condition_id: "hotpotqa_round_01_stable_zero"
 
 method_boundary:
-  decision_status: "awaiting_user_decision"
-  role: "baseline_or_ablation_only"
-  eligible_as_skillflow_main: false
-  primary_skillflow_method: "tempered_trajectory_balance"
-  conflict: "The project MD specifies Action-Masked One-Pass GRPO for task learning, while SkillFlow uses TTB regression as its main training objective."
-  resolution: null
+  compliance_marker: "MD_FULL_COMPLIANCE_20260906_V2"
+  decision_status: "selected"
+  role: "primary_task_learning_objective"
+  primary_objective: "action_masked_one_pass_grpo"
+  ttb_enabled: false
+  skillflow_scope: "rollout_sglang_lora_checkpoint_publication_sync_only"
+  resolution: "The project MD is authoritative: use terminal-only same-problem/same-condition Action-Masked One-Pass GRPO; SkillFlow TTB is disabled."
   mixing_losses_allowed: false
+
+md_compliance:
+  marker: "MD_FULL_COMPLIANCE_20260906_V2"
+  current_phase: "phase_0_data_trustworthiness"
+  phase_0_status: "incomplete"
+  real_step_authorized: false
+  one_step_closure_status: "not_run"
+  long_training_authorized: false
+  matrix: "docs/MD_FULL_COMPLIANCE_20260906_V2.md"
 
 experiment:
   name: "hotpotqa_qwen35_9b_action_masked_grpo_300step"
@@ -154,7 +164,7 @@ tracking:
   entity: "${WANDB_ENTITY:-}"
   run_name: "hotpotqa-qwen35-9b-grpo-300step"
   run_id: "${WANDB_RUN_ID:-}"
-  tags: [flowsteer, hotpotqa, qwen3.5-9b, grpo, one-pass]
+  tags: [flowsteer, hotpotqa, qwen3.5-9b, action-masked-one-pass-grpo]
 
 # Separate evidence flows are intentionally excluded from this run.  The MD
 # forbids mixing forced probes/posterior or unvalidated Skills into GRPO.

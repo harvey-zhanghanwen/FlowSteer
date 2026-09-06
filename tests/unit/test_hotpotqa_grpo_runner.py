@@ -238,6 +238,14 @@ def _create_project(root: Path) -> Path:
     config["data"]["train_path"] = "data/train.jsonl"
     config["data"]["validation_path"] = "data/validation.jsonl"
     config["experiment"]["output_dir"] = "artifacts/training"
+    config["experiment"]["training_enabled"] = True
+    config["gpu"]["training_enabled"] = True
+    config["md_compliance"].update(
+        phase_0_status="passed",
+        real_step_authorized=True,
+        one_step_closure_status="passed",
+        long_training_authorized=True,
+    )
     config["storage"].update(
         root="artifacts/training/evidence",
         manifest_path="artifacts/training/run_manifest.json",
@@ -276,6 +284,24 @@ class ConfigAndSamplingTests(unittest.TestCase):
         )
         self.assertEqual([item.task_id for item in first], [item.task_id for item in second])
         self.assertEqual(7, len({_MODULE._base_task_id(item) for item in first}))
+
+    def test_checked_in_md_config_is_fail_closed_before_runtime_construction(self) -> None:
+        def forbidden_backend(config, project_root):
+            raise AssertionError("backend must not be constructed")
+
+        import asyncio
+
+        with self.assertRaisesRegex(HotpotTrainingError, "compliance gate"):
+            asyncio.run(
+                run_hotpotqa_training(
+                    _CONFIG,
+                    project_root=_CONFIG.parents[1],
+                    allow_md_grpo=True,
+                    stop_after_optimizer_steps=1,
+                    backend_factory=forbidden_backend,
+                    tracker=FakeTracker(),
+                )
+            )
 
 
 class StepTransactionTests(unittest.TestCase):
@@ -325,7 +351,7 @@ class SequentialRunnerTests(unittest.TestCase):
                     run_hotpotqa_training(
                         config_path,
                         project_root=root,
-                        allow_grpo_baseline=True,
+                        allow_md_grpo=True,
                         stop_after_optimizer_steps=2,
                         backend_factory=factory,
                         tracker=tracker,

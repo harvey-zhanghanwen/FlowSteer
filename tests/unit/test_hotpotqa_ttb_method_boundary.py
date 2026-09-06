@@ -12,44 +12,35 @@ def _load(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def test_primary_method_is_unselected_and_both_candidates_are_disabled() -> None:
+def test_md_selects_one_pass_grpo_and_disables_ttb() -> None:
     config = _load(TTB_CONFIG)
     method = config["method_and_conflict_resolution"]
-    assert method["decision_status"] == "awaiting_user_decision"
-    assert method["primary"] is None
+    assert method["compliance_marker"] == "MD_FULL_COMPLIANCE_20260906_V2"
+    assert method["decision_status"] == "selected"
+    assert method["primary"] == "action_masked_one_pass_grpo"
     assert method["paper_formal_name"] == "Tempered Trajectory Balance (TTB)"
-    assert method["grpo"] == {
-        "enabled": False,
-        "role": "primary_candidate_from_flowsteer_and_project_md",
-        "implementation": "action_masked_one_pass_group_policy_gradient",
-    }
+    assert method["grpo"]["enabled"] is True
+    assert method["grpo"]["role"] == "primary_task_learning_objective"
     assert method["ttb"]["enabled"] is False
-    assert method["resolution"] is None
+    assert method["ttb"]["role"] == "disabled_not_permitted_in_md_training"
+    assert method["mixing_losses_allowed"] is False
     assert config["run_identity"]["training_enabled"] is False
     assert config["actual_status"]["launch_allowed"] is False
 
 
-def test_ttb_scoring_and_joint_trainable_contract() -> None:
+def test_disabled_ttb_reference_is_not_a_launch_contract() -> None:
     config = _load(TTB_CONFIG)
-    method = config["method_and_conflict_resolution"]
-    paper = config["paper_hyperparameters"]
-    assert method["score_only"] == "structured_action_tokens"
-    assert method["reasoning_tokens"] == "context_only_zero_loss_mask"
-    assert method["edge_log_probability"] == "mean_over_action_tokens"
-    assert method["rollout_policy"] == "current_theta_on_policy"
-    assert method["executor"] == "frozen"
-    assert method["terminal_reward"]["primary"] is None
-    assert method["terminal_reward"]["candidates"] == [
-        "official_exact_match",
-        "token_f1",
-    ]
-    assert paper["joint_updates"] == ["theta", "partition_function_Z", "phi"]
-    assert paper["partition_function"]["trainable"] is True
+    assert config["schema_version"] == "flowsteer.disabled_method_reference.v1"
+    assert config["run_identity"]["status"] == (
+        "disabled_by_MD_FULL_COMPLIANCE_20260906_V2"
+    )
+    assert config["closure_gate"]["require_nonzero_gradients"] == ["theta"]
+    assert config["closure_gate"]["require_nonzero_parameter_updates"] == ["theta"]
 
 
-def test_paper_parameters_and_phi_ambiguity_are_explicit() -> None:
+def test_disabled_ttb_paper_reference_remains_attributed() -> None:
     config = _load(TTB_CONFIG)
-    paper = config["paper_hyperparameters"]
+    paper = config["disabled_ttb_reference_hyperparameters"]
     assert paper["optimizer_steps"] == 250
     assert (paper["questions_per_step"], paper["trajectories_per_question"]) == (7, 4)
     assert paper["effective_batch_size"] == 28
@@ -69,7 +60,7 @@ def test_paper_parameters_and_phi_ambiguity_are_explicit() -> None:
         "alpha": 32,
         "target_modules": ["q_proj", "v_proj"],
     }
-    ambiguity = config["paper_ambiguities"]["phi_lora_rank"]
+    ambiguity = config["disabled_ttb_reference_ambiguities"]["phi_lora_rank"]
     assert (ambiguity["main_table"], ambiguity["appendix_variant"]) == (16, 32)
 
 
@@ -93,8 +84,10 @@ def test_hardware_and_project_engineering_provenance_are_separate() -> None:
 def test_unimplemented_components_and_real_closure_remain_blocked() -> None:
     config = _load(TTB_CONFIG)
     wiring = config["wiring_status"]
-    assert wiring["skillflow_ttb_action_token_adapter"] == "not_implemented"
-    assert wiring["theta_phi_Z_joint_training_on_agentgraph_trajectory"] == "not_implemented"
+    assert wiring["skillflow_ttb_action_token_adapter"] == "disabled_not_permitted"
+    assert wiring["theta_phi_Z_joint_training_on_agentgraph_trajectory"] == (
+        "disabled_not_permitted"
+    )
     assert wiring["real_two_step_closure"] == "not_run"
     for name in (
         "mace",
@@ -106,14 +99,19 @@ def test_unimplemented_components_and_real_closure_remain_blocked() -> None:
         assert wiring[name] == "present_unwired"
 
 
-def test_grpo_runner_is_an_unselected_isolated_baseline() -> None:
+def test_grpo_runner_is_selected_but_phase_gated() -> None:
     config = _load(GRPO_CONFIG)
     boundary = config["method_boundary"]
-    assert boundary["decision_status"] == "awaiting_user_decision"
-    assert boundary["role"] == "baseline_or_ablation_only"
-    assert boundary["eligible_as_skillflow_main"] is False
-    assert boundary["primary_skillflow_method"] == "tempered_trajectory_balance"
-    assert boundary["resolution"] is None
+    assert boundary["compliance_marker"] == "MD_FULL_COMPLIANCE_20260906_V2"
+    assert boundary["decision_status"] == "selected"
+    assert boundary["role"] == "primary_task_learning_objective"
+    assert boundary["primary_objective"] == "action_masked_one_pass_grpo"
+    assert boundary["ttb_enabled"] is False
     assert boundary["mixing_losses_allowed"] is False
+    compliance = config["md_compliance"]
+    assert compliance["phase_0_status"] == "incomplete"
+    assert compliance["real_step_authorized"] is False
+    assert compliance["one_step_closure_status"] == "not_run"
+    assert compliance["long_training_authorized"] is False
     assert config["experiment"]["training_enabled"] is False
     assert config["gpu"]["training_enabled"] is False

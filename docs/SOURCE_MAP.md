@@ -27,9 +27,9 @@ Qwen3.5 path.
 | Qwen3.5-9B Supervisor default | `configs/skillflow.yaml` | Mirrored in `config/training_agent_graph.yaml`. |
 | SGLang Supervisor child | `training/sglang_manager.py::SGLangSupervisorManager` | Adapted in `src/interactive/sglang_manager.py`; import remains side-effect free. |
 | Standalone SGLang launch arguments | `scripts/restart_sglang.sh` | Adapted in `scripts/start_qwen35_director_server.sh`; only one rollout service is declared. |
-| Forward/backward LoRA profile | `training/gflownet_trainer.py::setup` | Configuration only: theta rank 64 and phi rank 16. No optimizer is connected. |
-| Three-role GPU topology | `device`, `supervisor_gpu_id`, and `extra_device` in SkillFlow | Mapped to physical GPUs 3, 4, and 5 in `training_agent_graph.yaml`. |
-| Split micro-batch backward | `GFlowNetTrainer._batched_logprob_backward` | Represented only by inactive OOM/micro-batch configuration. No backward code is claimed in this phase. |
+| Director θ-LoRA profile | `training/gflownet_trainer.py::setup` | θ rank 64/alpha 128/q,k,v,o is adapted for the selected MD GRPO. SkillFlow φ-LoRA and TTB are disabled. |
+| GPU role configuration | `device`, `supervisor_gpu_id`, and `extra_device` in SkillFlow config | Physical IDs are only a project scheduling request and require host resource admission; neither paper specifies this mapping. |
+| Split micro-batch backward | `GFlowNetTrainer._batched_logprob_backward` | The two-replica boundary is adapted, but group-preserving token-cost partition and OOM retry are project engineering rather than direct SkillFlow reuse. |
 | Skill injection after bootstrap | `GenericTaskEnvironment` and `SkillWorkspace` | The Director prompt omits the Skill field when the validated Skill list is empty. |
 | Bounded visible interaction history | `training/react_prompts.py` (`action_history`, `history_length`) and `training/environment.py::_build_react_prompt` | The Director receives only the configured recent Canvas-history window. Entries contain canonical action, acceptance/terminal state, graph revision, compact feedback, and whether execution was reused; no role template or unvalidated Skill is injected. |
 | Dataset preparation fields | `data/prepare_v3.py` | Adapted in `scripts/prepare_agentgraph_datasets.py`: retains `question`, `answer`, `task_type`, `context`, `extra`, and environment fields while adding the design-note `TaskRecord` keys. |
@@ -37,13 +37,13 @@ Qwen3.5 path.
 | SWE-bench evaluator handle | `training/swebench_client.py` | The aligned records retain the Verified instance ID and harness payload; no repository checkout or tests are run during preparation. |
 | JSONL loading boundary | FlowSteer `train_interactive.py::load_dataset` and `eval_only.py::load_dataset` | `src/interactive/task_dataset.py` retains streaming JSONL while enforcing the design-note schema and split isolation; `scripts/run_agentgraph.py --dry-load` exercises it without a model call. |
 | Exact generation seed | `runtime/openai_provider.py` and `rollout/types.py::derive_generation_seed` | `openai_gateway.py` sends the fixed run seed at the provider edge. The native exact-receipt Director sends the deployed SGLang 0.5.15 equivalent, `sampling_seed`, and persists it per turn. |
-| Existing adapter inference readiness | `training/external_sglang.py::publish_external_adapter` and `runtime/sglang_gateway.py` | `policy_sync.py::ensure_loaded_adapter` reuses only model-list, load, verification, and canary for evaluation. It neither trains nor publishes a new policy. |
+| Existing adapter inference readiness | `training/gflownet_trainer.py::_sync_lora_to_vllm`, `training/batch_inference.py`, and `training/sglang_manager.py` | `policy_sync.py::ensure_loaded_adapter` adapts model-list/load/route handling; the chat canary and versioned transaction are project engineering. It neither trains nor publishes a new policy. |
 | Multi-hop one-call contract | `training/task_prompts.py::MULTI_HOP_QA` | The paired local Direct path uses the upstream brief multi-hop contract through the existing Agent gateway; it bypasses Director, Canvas, and AgentGraph. |
 
-SkillFlow's TTB objective, backward policy training, partition head, skill
-evolution loop, benchmark environment, and local multi-executor launcher are
-not copied into this phase.  The project continues to reserve terminal-only
-GRPO as specified by the design note, but GRPO is disabled.
+SkillFlow's TTB objective, backward policy training, partition head, process/
+Skill reward, and TTB optimizer path are disabled.  The selected task-learning
+objective is the MD's terminal-only Action-Masked One-Pass GRPO, while its
+runtime remains fail-closed until Phase 0 and the real one-step gate pass.
 
 ## Project-specific algorithm modules
 

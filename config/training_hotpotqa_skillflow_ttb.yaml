@@ -1,15 +1,14 @@
-# Method-decision and launch gate for HotpotQA training.
-# This file is deliberately non-runnable.  FlowSteer/MD one-pass GRPO and
-# SkillFlow TTB are alternative primary objectives; neither is selected until
-# the user resolves the documented conflict.
+# Disabled historical method record.  It is deliberately non-runnable and is
+# retained only to document why SkillFlow TTB must not enter the MD training
+# path selected by MD_FULL_COMPLIANCE_20260906_V2.
 
-schema_version: "flowsteer.dual_source_training.preflight.v2"
+schema_version: "flowsteer.disabled_method_reference.v1"
 
 run_identity:
   dataset: "hotpotqa"
   source_backup_branch: "backup/hotpotqa-compliant-best-round01-20260906"
   source_backup_commit: "740e53ec6ccac635ecbe7f1f379b002bfb2574d1"
-  status: "blocked_method_selection"
+  status: "disabled_by_MD_FULL_COMPLIANCE_20260906_V2"
   training_enabled: false
   optimizer_steps_completed: 0
 
@@ -31,37 +30,24 @@ source_revisions:
     revision: "740e53ec6ccac635ecbe7f1f379b002bfb2574d1"
 
 method_and_conflict_resolution:
-  decision_status: "awaiting_user_decision"
-  primary: null
+  compliance_marker: "MD_FULL_COMPLIANCE_20260906_V2"
+  decision_status: "selected"
+  primary: "action_masked_one_pass_grpo"
   paper_formal_name: "Tempered Trajectory Balance (TTB)"
-  user_transcription_alias: "Trajectory Token Balance"
   grpo:
-    enabled: false
-    role: "primary_candidate_from_flowsteer_and_project_md"
+    enabled: true
+    role: "primary_task_learning_objective"
     implementation: "action_masked_one_pass_group_policy_gradient"
+    active_config: "config/training_hotpotqa_grpo.yaml"
   ttb:
     enabled: false
-    role: "primary_candidate_from_skillflow"
+    role: "disabled_not_permitted_in_md_training"
     implementation: "tempered_trajectory_balance"
   conflict: "The project MD specifies Action-Masked One-Pass GRPO for task learning, while SkillFlow uses Tempered Trajectory Balance regression as its primary objective. These are different objectives and cannot be combined or substituted silently."
-  resolution: null
-  allowed_resolutions:
-    - "select_flowsteer_md_one_pass_grpo"
-    - "select_skillflow_ttb_as_explicit_project_adaptation"
-    - "run_two_isolated_versioned_experiments_without_mixing_losses"
-  score_only: "structured_action_tokens"
-  reasoning_tokens: "context_only_zero_loss_mask"
-  edge_log_probability: "mean_over_action_tokens"
-  residual: "log_Z_theta(question) + sum(log_P_theta_edge_mean) - beta*log(reward+epsilon_min) - sum(log_P_phi_edge_mean)"
-  loss: "square(residual / action_edge_count)"
-  rollout_policy: "current_theta_on_policy"
-  executor: "frozen"
-  terminal_reward:
-    primary: null
-    candidates: [official_exact_match, token_f1]
-    source_conflict: "SkillFlow.pdf describes EM for multi-hop QA, while the original release maps multi_hop_qa to token F1. The scalar TTB reward remains undecided."
+  resolution: "The MD is authoritative. TTB, phi-LoRA, partition function Z, and TTB residual are disabled; SkillFlow is used only for the runtime boundaries named in the source map."
+  mixing_losses_allowed: false
 
-paper_hyperparameters:
+disabled_ttb_reference_hyperparameters:
   optimizer_steps: 250
   effective_batch_size: 28
   questions_per_step: 7
@@ -87,7 +73,7 @@ paper_hyperparameters:
     separate_optimizer_parameters: true
   joint_updates: [theta, partition_function_Z, phi]
 
-paper_ambiguities:
+disabled_ttb_reference_ambiguities:
   phi_lora_rank:
     main_table: 16
     appendix_variant: 32
@@ -141,12 +127,9 @@ wandb_contract:
   required_step_fields:
     - optimizer_step
     - behavior_policy_version
-    - theta_version
-    - phi_version
-    - partition_function_version
+    - policy_version
     - adapter_version
-    - ttb_loss
-    - ttb_delta_squared
+    - action_masked_one_pass_loss
     - reward
     - trajectory_length
     - valid_rollouts
@@ -161,11 +144,7 @@ wandb_contract:
     - gpu_utilization
     - error_counts
     - theta_gradient_norm
-    - phi_gradient_norm
-    - partition_function_gradient_norm
     - theta_update_l2
-    - phi_update_l2
-    - partition_function_update_l2
     - checkpoint
     - publish_status
     - canary_status
@@ -176,8 +155,8 @@ closure_gate:
   passed: false
   require_single_behavior_policy_per_batch: true
   require_rollout_batch_consumed_once: true
-  require_nonzero_gradients: [theta, partition_function_Z, phi]
-  require_nonzero_parameter_updates: [theta, partition_function_Z, phi]
+  require_nonzero_gradients: [theta]
+  require_nonzero_parameter_updates: [theta]
   require_new_theta_in_next_step_receipts: true
   require_post_update_rollout_before_long_run: true
   require_publish_and_canary: true
@@ -185,9 +164,9 @@ closure_gate:
 wiring_status:
   flowsteer_agentgraph_runtime: "implemented"
   flowsteer_exact_trajectory_receipts: "implemented"
-  skillflow_ttb_action_token_adapter: "not_implemented"
-  theta_phi_Z_joint_training_on_agentgraph_trajectory: "not_implemented"
-  formal_TTB_checkpoint_resume: "not_implemented"
+  skillflow_ttb_action_token_adapter: "disabled_not_permitted"
+  theta_phi_Z_joint_training_on_agentgraph_trajectory: "disabled_not_permitted"
+  formal_TTB_checkpoint_resume: "disabled_not_permitted"
   real_two_step_closure: "not_run"
   mace: "present_unwired"
   joint_bayesian_posterior: "present_unwired"
@@ -202,7 +181,7 @@ actual_status:
   wandb_run: null
   convergence_claim: null
   blocked_by:
-    - "primary_objective_not_selected"
-    - "ttb_reward_scalar_not_selected_if_ttb_is_chosen"
+    - "phase_0_data_trustworthiness_not_accepted"
+    - "real_one_step_closure_not_run"
     - "resource_admission_unresolved"
     - "wandb_online_preflight_unresolved"

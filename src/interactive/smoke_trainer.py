@@ -1,12 +1,14 @@
 """One-update-per-sealed-batch Qwen3.5 LoRA trainer for AgentGraph rollouts.
 
-Source boundary: model/PEFT loading, trainable adapter continuation, optimizer
-checkpointing, gradient checkpointing, token-cost-balanced replica splitting,
-and checkpoint layout are direct SkillFlow reuse.  Qwen3.5 multimodal loading
-and the two-physical-GPU split are necessary adaptations.  Terminal-only,
-action-masked one-pass GRPO is the project algorithm addition built on
-FlowSteer's objective contract.  SkillFlow's TTB backward policy/partition head
-and the project's MACE, Bayesian, and Skill loops are not implemented here.
+Source boundary: Qwen3.5/PEFT loading, trainable adapter continuation, gradient
+checkpointing, and the adapter-directory convention are adapted from
+SkillFlow.  The two-physical-GPU layout, group-preserving token-cost split,
+optimizer-state persistence, exact behavior receipt checks, and recoverable
+step metadata are project engineering required by the MD; SkillFlow's released
+checkpoint does not provide those contracts.  Terminal-only, action-masked
+one-pass GRPO is the MD algorithm implemented from FlowSteer's policy-gradient
+boundary.  SkillFlow's TTB backward policy/partition head is disabled, and the
+MACE, Bayesian, and Skill flows are not wired into this trainer.
 """
 
 from __future__ import annotations
