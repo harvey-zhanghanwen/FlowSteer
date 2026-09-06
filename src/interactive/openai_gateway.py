@@ -481,6 +481,8 @@ def _is_healthbench_search_receipt(receipt: Mapping[str, object]) -> bool:
         "healthbench-source.read",
         "healthbench-drug.lookup",
         "healthbench-knowledge.search",
+        "healthbench-literature.search",
+        "healthbench-trials.search",
     }
 
 
@@ -540,6 +542,8 @@ def _healthbench_search_candidates(
             "healthbench-source.read": "read_source",
             "healthbench-drug.lookup": "drug_lookup",
             "healthbench-knowledge.search": "search",
+            "healthbench-literature.search": "search",
+            "healthbench-trials.search": "search",
         }.get(str(receipt.get("tool_id")))
         if not isinstance(request, Mapping) or request.get("action") != expected_action:
             continue
@@ -866,7 +870,8 @@ def _healthbench_v3_receipts(
                 continue
             key = (str(result.get("source") or ""), document_id)
             result_matches = matches
-            if tool_id in {"healthbench-source.read", "healthbench-drug.lookup", "healthbench-knowledge.search"}:
+            if tool_id in {"healthbench-source.read", "healthbench-drug.lookup", "healthbench-knowledge.search",
+                           "healthbench-literature.search", "healthbench-trials.search"}:
                 # Reading a document page is not a repeat of the earlier
                 # search snippet. Distinguish new retrieval pages/versions
                 # while still deduplicating the same page across producers.
@@ -918,6 +923,8 @@ def _healthbench_v3_receipts(
                 for field in (
                     "source_id", "content_type", "version", "truncated",
                     "offset", "next_offset", "total_characters", "published_date",
+                    "pmid", "pmcid", "doi", "full_text_source_id",
+                    "publication_types", "is_open_access", "is_preprint",
                 )
                 if field in result
             }

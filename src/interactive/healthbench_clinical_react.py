@@ -29,6 +29,7 @@ from .tool_runtime import StructuredAction
 
 _SEARCH_TOOLS = frozenset({
     "healthbench-authoritative.search", "healthbench-medrag.search",
+    "healthbench-literature.search", "healthbench-trials.search",
 })
 
 
@@ -196,12 +197,12 @@ class HealthBenchClinicalReactExecutionAdapter(
             return inherited
         # The parent's check is scoped to authoritative.search. Reuse only
         # its existing lexical task-anchor boundary for the optional local
-        # MedRAG search; do not add a medical vocabulary, rewrite entities,
+        # MedRAG and external literature/registry searches; do not add a medical vocabulary, rewrite entities,
         # tighten local query length, or merge duplicate requests across
         # distinct sources. Drug names/source IDs/calculations are unaffected.
         if (
             self._require_task_query_anchor
-            and action.resource_id == "healthbench-medrag.search"
+            and action.resource_id in _SEARCH_TOOLS - {"healthbench-authoritative.search"}
             and action.name == "search"
             and not _query_preserves_task_surface(request.problem, action.arguments.get("query"))
         ):

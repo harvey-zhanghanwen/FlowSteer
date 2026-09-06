@@ -1023,6 +1023,14 @@ def _healthbench_tool_runtime_settings(
             "initial search or search refinement; each Agent chooses its tools"
         )
     settings["toolset"] = toolset
+    external_sources = section.get("external_medical_sources_enabled", False)
+    if type(external_sources) is not bool or (
+        external_sources and toolset != "source_separated_clinical_v1"
+    ):
+        raise ConfigurationError(
+            "external_medical_sources_enabled must be bool and requires source_separated_clinical_v1"
+        )
+    settings["external_medical_sources_enabled"] = external_sources
     if toolset == "source_separated_clinical_v1":
         for key in ("knowledge_root", "skillflow_source"):
             value = section.get(key)
@@ -2555,6 +2563,8 @@ class LiveSmokeBackend:
                 opened = open_registry(
                     **common_open_arguments,
                     pubmed_client=pubmed_client,
+                    **({"external_medical_sources_enabled": True}
+                       if healthbench_settings["external_medical_sources_enabled"] else {}),
                     max_query_content_tokens=int(
                         healthbench_settings["max_query_content_tokens"]
                     ),

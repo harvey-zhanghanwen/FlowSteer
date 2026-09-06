@@ -120,7 +120,7 @@ class _KnowledgeSearchBackend:
 
 
 def build_healthbench_knowledge_tool_registry(original: ToolRegistry) -> ToolRegistry:
-    """Wrap the existing five tools and register one classified local search."""
+    """Wrap the selected source tools and register one classified local search."""
     registrations = []
     for tool_id in original.resource_ids:
         capability = original.require_capability(tool_id)

@@ -28,12 +28,16 @@ DATABASES = ("conversation", "medical_references", "drug_labels")
 _SOURCE_DATABASE = {
     "MedRAG/textbooks": "medical_references",
     "NCBI PubMed": "medical_references",
+    "Europe PMC": "medical_references",
+    "ClinicalTrials.gov": "medical_references",
     "NLM DailyMed": "drug_labels",
 }
 _PUBLIC_EVIDENCE_FIELDS = frozenset({
     "source_type", "source", "source_id", "document_id", "title", "excerpt",
     "date", "url", "content_type", "version", "offset", "truncated",
     "next_offset", "published_date", "total_characters",
+    "pmid", "pmcid", "doi", "full_text_source_id", "publication_types",
+    "is_open_access", "is_preprint",
 })
 
 
@@ -117,6 +121,8 @@ class HealthBenchKnowledgeStore:
             key: value for key, value in evidence.items()
             if key in _PUBLIC_EVIDENCE_FIELDS and (
                 value is None or type(value) in (str, int, bool)
+                or (key == "publication_types" and isinstance(value, list)
+                    and all(isinstance(item, str) for item in value))
             )
         }
         identity = json.dumps(record, sort_keys=True, ensure_ascii=False, allow_nan=False)

@@ -996,3 +996,23 @@ Director 仍为本地 Qwen3.5-9B、minimal-neutral.v20；模型池及 thinking�
 receipt 同时记录 configured/effective budget。零余量在本地拒绝；不删任务、
 证据或关闭 thinking。此修复在首轮结束后完成，不归因到首轮评分，也不称为
 SkillFlow 原有动态预算实现。
+
+## 2026-09-06 — v2.38：外部医学知识源（未评分）
+
+用户要求增加医学知识并接入 Agent。HealthBench Professional 的构建来源是
+医生实际使用/对抗测试对话，以及医生撰写、复核与裁定的 rubric；不是从
+指定医学问答数据库直接抽取题目。官方论文 §3.2–3.3、§3.6 允许医生基线
+查阅文献/指南/药品数据库，但没有给出一套可直接当作解题知识库的官方库清单。
+来源：[官方论文](https://cdn.openai.com/dd128428-0184-4e25-b155-3a7686c7d744/HealthBench-Professional.pdf)。
+
+| 模块 | 源码/协议来源与状态 |
+| --- | --- |
+| MedRAG、PubMed、DailyMed | 直接复用项目 v2.35–v2.37；MedRAG 对应 SkillFlow `training/environment.py::_load_external_corpus/_search_external_corpus`，不新增排名模型。 |
+| `healthbench_europe_pmc.py` | 必要外部 API 适配，参考现有 `PubMedEUtilitiesClient`、`DailyMedClient` urllib 生命周期。使用 [Europe PMC REST](https://europepmc.org/RestfulWebService) 的 core search、精确 ID 摘要和 OA JATS 全文接口；上游没有此数据库客户端。 |
+| `healthbench_clinical_trials.py` | 必要外部 API 适配，参考同一传输接口和 `_source_page/_source_receipt`。[ClinicalTrials.gov v2 数据结构](https://clinicaltrials.gov/data-api/about-api/study-data-structure)决定真实 `protocolSection/hasResults/resultsSection` 投影，不能把注册方案改写成已证实疗效。 |
+| Tool 注册/执行 | `healthbench_clinical_tools` 新增两个可选 search capability，既有 `source.read` 增加精确来源分发；`HealthBenchClinicalReactExecutionAdapter` 复用既有 ReAct、查询约束、去重、预算、completion，不增加角色或调度器。旧配置默认关闭新增源。 |
+| 证据入库与通信 | `healthbench_knowledge_tools/store` 直接复用 SkillFlow `benchmarks/retrieval.py::DocumentPassage/build_retrieval_index/RetrievalIndex.search/read`，只扩充来源与来源元数据。`openai_gateway._healthbench_search_candidates/_healthbench_v3_receipts` 识别新工具并保留 PMID/PMCID/DOI、文献类型、OA/预印本标记与全文入口。 |
+| Canvas、Director、评分 | FlowSteer `workflow_env.py::step` 的 edit→execution→feedback/history 范式、用户 MD §3 自由节点/关系/唯一 Output、现有 Qwen3.5-9B Director、minimal-neutral.v20 及官方 rubric evaluator 均未改变。 |
+
+两篇上游论文没有提供这两个数据库的特定协议实现；本版只扩展 Tool Adapter
+和必要配置，不把 API 客户端称作上游现成功能。没有训练、Skill 或后验更新。

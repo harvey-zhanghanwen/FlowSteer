@@ -43,6 +43,8 @@ from .tool_runtime import ToolCapability, ToolRegistration, ToolRegistry, ToolRe
 HEALTHBENCH_SOURCE_READ_TOOL_ID = "healthbench-source.read"
 HEALTHBENCH_DRUG_LOOKUP_TOOL_ID = "healthbench-drug.lookup"
 HEALTHBENCH_CALCULATOR_TOOL_ID = "healthbench-computation.calculator"
+HEALTHBENCH_LITERATURE_SEARCH_TOOL_ID = "healthbench-literature.search"
+HEALTHBENCH_TRIAL_SEARCH_TOOL_ID = "healthbench-trials.search"
 HEALTHBENCH_CLINICAL_TOOL_VERSION = "healthbench-clinical-tools-v1"
 DAILYMED_BASE_URL = "https://dailymed.nlm.nih.gov/dailymed/services/v2"
 SOURCE_PAGE_CHARACTERS = 16_000
@@ -195,6 +197,8 @@ class HealthBenchSourceReadToolBackend:
     corpus: FrozenMedRAGBM25Corpus
     pubmed: PubMedEUtilitiesClient
     drug_client: DailyMedClient
+    literature_client: object | None = None
+    trial_client: object | None = None
 
     def _read_pubmed(self, pmid: str) -> dict[str, object]:
         if not pmid.isdigit():
@@ -255,6 +259,10 @@ class HealthBenchSourceReadToolBackend:
             return self._read_pubmed(source_id.removeprefix("pubmed:"))
         if source_id.startswith("dailymed:") or _SETID_PATTERN.fullmatch(source_id):
             return self.drug_client.read(source_id.removeprefix("dailymed:"))
+        if self.literature_client is not None and source_id.startswith(("europepmc:", "pmc:")):
+            return self.literature_client.read(source_id)
+        if self.trial_client is not None and source_id.startswith("clinicaltrials:"):
+            return self.trial_client.read(source_id)
         raise LookupError("source_id is not a known MedRAG document, PMID, or DailyMed SETID")
 
     def invoke(self, request: ToolRequest) -> ToolResult:
@@ -281,6 +289,21 @@ class HealthBenchDrugLookupToolBackend:
         if request.action != "drug_lookup" or set(request.arguments) != {"drug_name"}:
             raise ValueError("drug_lookup requires exactly drug_name")
         return ToolResult(self.client.lookup(_text_argument(request.arguments["drug_name"], "drug_name")))
+
+
+@dataclass(frozen=True, slots=True)
+class HealthBenchExternalSearchToolBackend:
+    """Thin transport adapter; reuse ToolRegistry/ReAct and evidence receipts."""
+
+    client: object
+
+    def invoke(self, request: ToolRequest) -> ToolResult:
+        if request.action != "search" or set(request.arguments) != {"query"}:
+            raise ValueError("external search requires exactly query")
+        query = _text_argument(request.arguments["query"], "query")
+        if len(query) > 160:
+            raise ValueError("external search query exceeds 160 characters")
+        return ToolResult(self.client.search(query))
 
 
 def _clinical_output_schema() -> dict[str, object]:
@@ -323,10 +346,21 @@ def build_healthbench_clinical_tool_registry(
     timeout_seconds: float = 30.0,
     max_query_content_tokens: int = AUTHORITATIVE_QUERY_MAX_CONTENT_TOKENS,
     drug_client: DailyMedClient | None = None,
+    external_medical_sources_enabled: bool = False,
+    literature_client: object | None = None,
+    trial_client: object | None = None,
 ) -> ToolRegistry:
     """Compose existing registrations plus optional source/label/calculator."""
     pubmed = pubmed_client or PubMedEUtilitiesClient()
     drugs = drug_client or DailyMedClient()
+    if external_medical_sources_enabled:
+        # Necessary API adapters: neither upstream implements these services.
+        from .healthbench_europe_pmc import EuropePMCClient
+        from .healthbench_clinical_trials import ClinicalTrialsClient
+        literature_client = literature_client or EuropePMCClient()
+        trial_client = trial_client or ClinicalTrialsClient()
+    else:
+        literature_client = trial_client = None
     registries = (
         build_healthbench_authoritative_tool_registry(corpus, pubmed_client=pubmed, timeout_seconds=timeout_seconds, max_query_content_tokens=max_query_content_tokens),
         build_healthbench_medrag_tool_registry(corpus, timeout_seconds=timeout_seconds),
@@ -347,8 +381,14 @@ def build_healthbench_clinical_tool_registry(
             "properties": {"drug_name": {"type": "string", "minLength": 1, "maxLength": 160, "description": "Generic or brand name; returns bounded DailyMed product-label candidates, not patient-specific advice or a complete interaction checker."}},
         },
     }
+    if external_medical_sources_enabled:
+        inputs["read_source"]["properties"]["source_id"]["description"] += (
+            " Also accepts europepmc:MED:PMID for an abstract, pmc:PMCID for available "
+            "open-access article XML, and clinicaltrials:NCT######## for a registered "
+            "study and any posted results. Use IDs returned by search."
+        )
     for tool_id, action, backend in (
-        (HEALTHBENCH_SOURCE_READ_TOOL_ID, "read_source", HealthBenchSourceReadToolBackend(corpus, pubmed, drugs)),
+        (HEALTHBENCH_SOURCE_READ_TOOL_ID, "read_source", HealthBenchSourceReadToolBackend(corpus, pubmed, drugs, literature_client, trial_client)),
         (HEALTHBENCH_DRUG_LOOKUP_TOOL_ID, "drug_lookup", HealthBenchDrugLookupToolBackend(drugs)),
     ):
         registrations.append(ToolRegistration(tool_id, backend, ToolCapability(
@@ -366,6 +406,32 @@ def build_healthbench_clinical_tool_registry(
         output_schema=calculator.output_schema, side_effect=calculator.side_effect,
         timeout_seconds=calculator.timeout_seconds, version=calculator.version,
     )))
+    if external_medical_sources_enabled:
+        for tool_id, client, description in (
+            (HEALTHBENCH_LITERATURE_SEARCH_TOOL_ID, literature_client,
+             "Search Europe PMC literature abstracts using the original named entity and requested relation. "
+             "Preprints are excluded. An abstract is not a full paper; read available OA full text by full_text_source_id. "
+             "Do not send the full conversation or search benchmark questions, rubrics, or reference answers."),
+            (HEALTHBENCH_TRIAL_SEARCH_TOOL_ID, trial_client,
+             "Search ClinicalTrials.gov for registered study names, interventions, populations and outcomes. "
+             "Registration describes a protocol, not proof of efficacy; distinguish posted results from planned outcomes. "
+             "Use short clinical terms, not the full conversation or benchmark/reference-answer content."),
+        ):
+            arguments = {
+                "type": "object", "additionalProperties": False,
+                "required": ["query"], "properties": {
+                    "query": {"type": "string", "minLength": 1, "maxLength": 160,
+                              "description": description},
+                },
+            }
+            output_schema = _clinical_output_schema()
+            output_schema["properties"]["operation"] = {"const": "search"}
+            registrations.append(ToolRegistration(tool_id, HealthBenchExternalSearchToolBackend(client), ToolCapability(
+                tool_id=tool_id, dataset_scope=HEALTHBENCH_PROFESSIONAL_DATASET_SCOPE,
+                action_schemas={"search": arguments}, input_schema=arguments,
+                output_schema=output_schema, side_effect="none",
+                timeout_seconds=timeout_seconds, version="healthbench-external-medical-sources-v1",
+            )))
     return ToolRegistry(tuple(registrations))
 
 
@@ -379,11 +445,16 @@ def open_healthbench_clinical_tool_registry(
     timeout_seconds: float = 30.0,
     max_query_content_tokens: int = AUTHORITATIVE_QUERY_MAX_CONTENT_TOKENS,
     drug_client: DailyMedClient | None = None,
+    external_medical_sources_enabled: bool = False,
+    literature_client: object | None = None,
+    trial_client: object | None = None,
 ) -> OpenHealthBenchAuthoritativeToolRegistry:
     """Reuse the existing owned corpus lifetime without another resource type."""
     corpus = FrozenMedRAGBM25Corpus.open(corpus_root, source_identity=source_identity, expected_source_revision=expected_source_revision, expected_rows=expected_rows)
     try:
-        registry = build_healthbench_clinical_tool_registry(corpus, pubmed_client=pubmed_client, timeout_seconds=timeout_seconds, max_query_content_tokens=max_query_content_tokens, drug_client=drug_client)
+        registry = build_healthbench_clinical_tool_registry(corpus, pubmed_client=pubmed_client, timeout_seconds=timeout_seconds, max_query_content_tokens=max_query_content_tokens, drug_client=drug_client,
+            external_medical_sources_enabled=external_medical_sources_enabled,
+            literature_client=literature_client, trial_client=trial_client)
     except BaseException:
         corpus.close()
         raise

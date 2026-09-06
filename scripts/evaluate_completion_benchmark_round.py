@@ -463,6 +463,8 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                         "healthbench-computation.calculator",
                     ] + (["healthbench-knowledge.search"]
                          if tool_runtime.get("toolset") == "source_separated_clinical_v1" else [])
+                    + (["healthbench-literature.search", "healthbench-trials.search"]
+                       if tool_runtime.get("external_medical_sources_enabled") is True else [])
                 )
             checks["healthbench_tool_runtime.enabled"] = bool(
                 isinstance(tool_runtime, Mapping)

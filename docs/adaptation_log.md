@@ -1745,3 +1745,28 @@ context overflow HTTP400，1 题 900 秒 TimeoutError；五题 strict 指标 N/A
 已补上下文预算代码及 15 项离线定向测试；不裁剪输入，39102 等大于上下文
 的输入仍本地失败，29102 输入对应最多 3666 生成 tokens。补丁没有重新运行
 模型，因此不报告它的新得分，也不把首轮已完成三题改标为补丁版本。
+
+## 2026-09-06 — v2.38 外部医学知识源接入
+
+- 保留 v2.37 `df8adc4` 作为可恢复基线，在独立分支
+  `feature/healthbench-v2.38-external-medical-sources-20260906` 开发；不覆盖旧评测。
+- 用户请求扩充知识来源，本轮接入 Europe PMC 文献/可获取 OA 全文、
+  ClinicalTrials.gov 注册试验/真实发布结果。沿用 MedRAG 125,847 个片段、
+  PubMed、DailyMed；不是“新增下载了数百万篇全文”，也不是 benchmark 答案库。
+- 通过显式 `external_medical_sources_enabled: true` 激活两个工具，扩充已具备
+  ReAct 能力模型的 tool capability scope；Qwen Flash 原有 reasoning-only
+  能力边界不改，不把它虚报为已通过新工具模型 canary。
+- 新来源进入原 `medical_references` 索引，保留来源类型；药品标签仍独立。
+  不把患者对话或 Agent 总结当外部医学事实；不检索 rubric/参考回答。
+- ReAct 仍每次 Agent 调用最多 3 次真实 Tool dispatch，6 个回合；新增工具
+  不独占额外预算，不强制 Agent 检索。Director 原提示词、图结构约束和
+  execution feedback 边界保持不变。
+- 两个接口各完成一次非 benchmark 免费 HTTP schema 检查；没有调用模型、
+  grader 或重跑旧样本。定向离线测试包含查询、阅读、来源分页、去重、
+  索引、实际关系传递、旧配置兼容和 Direct/AgentGraph 工具条件一致性。
+- 既有五题 ID 原样保留在独立 v2.38 配置，仅 prepare-only；本版没有分数，
+  不据此替换 best-profile，不自动启动全量评测。详细状态见本版中文报告。
+
+随后用户明确授权用最新版评分同一组 5 题。离线 118 项测试、35 个子项通过
+并完成 prepare-only 后，主线单独发起 AgentGraph 五题；无新 Direct、训练或
+525 题运行。代码冻结在启动前备份提交，实测指标以单独结果报告为准。

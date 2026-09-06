@@ -1506,6 +1506,14 @@ def _evidence_schema() -> dict[str, object]:
             "total_characters": {"type": "integer", "minimum": 0},
             "truncated": {"type": "boolean"},
             "next_offset": {"type": ["integer", "null"], "minimum": 0},
+            # Optional publication metadata from the new external adapters.
+            "pmid": {"type": ["string", "null"]},
+            "pmcid": {"type": ["string", "null"]},
+            "doi": {"type": ["string", "null"]},
+            "full_text_source_id": {"type": ["string", "null"]},
+            "publication_types": {"type": "array", "items": {"type": "string"}},
+            "is_open_access": {"type": "boolean"},
+            "is_preprint": {"type": "boolean"},
             # SkillFlow BM25 fields are present only on frozen-textbook
             # evidence.  PubMed evidence therefore keeps them optional under
             # the shared evidence schema.
