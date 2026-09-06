@@ -12,15 +12,19 @@ def _load(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def test_primary_method_is_ttb_and_grpo_is_disabled() -> None:
+def test_primary_method_is_unselected_and_both_candidates_are_disabled() -> None:
     config = _load(TTB_CONFIG)
     method = config["method_and_conflict_resolution"]
-    assert method["primary"] == "tempered_trajectory_balance"
+    assert method["decision_status"] == "awaiting_user_decision"
+    assert method["primary"] is None
     assert method["paper_formal_name"] == "Tempered Trajectory Balance (TTB)"
     assert method["grpo"] == {
         "enabled": False,
-        "role": "baseline_or_ablation_only",
+        "role": "primary_candidate_from_flowsteer_and_project_md",
+        "implementation": "action_masked_one_pass_group_policy_gradient",
     }
+    assert method["ttb"]["enabled"] is False
+    assert method["resolution"] is None
     assert config["run_identity"]["training_enabled"] is False
     assert config["actual_status"]["launch_allowed"] is False
 
@@ -34,8 +38,11 @@ def test_ttb_scoring_and_joint_trainable_contract() -> None:
     assert method["edge_log_probability"] == "mean_over_action_tokens"
     assert method["rollout_policy"] == "current_theta_on_policy"
     assert method["executor"] == "frozen"
-    assert method["terminal_reward"]["primary"] == "official_exact_match"
-    assert method["terminal_reward"]["auxiliary_metric"] == "token_f1"
+    assert method["terminal_reward"]["primary"] is None
+    assert method["terminal_reward"]["candidates"] == [
+        "official_exact_match",
+        "token_f1",
+    ]
     assert paper["joint_updates"] == ["theta", "partition_function_Z", "phi"]
     assert paper["partition_function"]["trainable"] is True
 
@@ -99,9 +106,14 @@ def test_unimplemented_components_and_real_closure_remain_blocked() -> None:
         assert wiring[name] == "present_unwired"
 
 
-def test_grpo_runner_is_only_a_baseline() -> None:
+def test_grpo_runner_is_an_unselected_isolated_baseline() -> None:
     config = _load(GRPO_CONFIG)
     boundary = config["method_boundary"]
+    assert boundary["decision_status"] == "awaiting_user_decision"
     assert boundary["role"] == "baseline_or_ablation_only"
     assert boundary["eligible_as_skillflow_main"] is False
     assert boundary["primary_skillflow_method"] == "tempered_trajectory_balance"
+    assert boundary["resolution"] is None
+    assert boundary["mixing_losses_allowed"] is False
+    assert config["experiment"]["training_enabled"] is False
+    assert config["gpu"]["training_enabled"] is False

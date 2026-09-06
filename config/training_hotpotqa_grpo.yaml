@@ -1,6 +1,7 @@
-# HotpotQA GRPO baseline/ablation, continued from the compliant Round-01
-# profile.  This is the MD's action-masked one-pass objective, not SkillFlow's
-# primary TTB method.  It must never be reported as the SkillFlow main run.
+# HotpotQA FlowSteer/MD objective candidate, continued from the compliant
+# Round-01 profile.  The existing runner remains tagged as a baseline/ablation
+# and non-runnable until the user selects a primary objective.  It must never be
+# reported as SkillFlow TTB.
 
 schema_version: "flowsteer.agentgraph.config.v1"
 
@@ -11,11 +12,13 @@ source:
   condition_id: "hotpotqa_round_01_stable_zero"
 
 method_boundary:
+  decision_status: "awaiting_user_decision"
   role: "baseline_or_ablation_only"
   eligible_as_skillflow_main: false
   primary_skillflow_method: "tempered_trajectory_balance"
   conflict: "The project MD specifies Action-Masked One-Pass GRPO for task learning, while SkillFlow uses TTB regression as its main training objective."
-  resolution: "Keep this runner isolated as a non-executed baseline; use a separately wired TTB runner for the requested main training."
+  resolution: null
+  mixing_losses_allowed: false
 
 experiment:
   name: "hotpotqa_qwen35_9b_action_masked_grpo_300step"
@@ -181,7 +184,7 @@ gpu:
   rollout_engine: "sglang"
   gradient_replica_device: "cuda:5"
   supervisor_gpu_id: 4
-  training_enabled: true
+  training_enabled: false
   oom_policy:
     status: "active"
     micro_batch_size: 4

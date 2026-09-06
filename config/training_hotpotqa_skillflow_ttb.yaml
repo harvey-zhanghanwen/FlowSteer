@@ -1,14 +1,15 @@
-# Method boundary and launch gate for the requested HotpotQA SkillFlow main run.
-# This file is deliberately non-runnable until the listed TTB wiring and the
-# real two-step closure gate are complete.
+# Method-decision and launch gate for HotpotQA training.
+# This file is deliberately non-runnable.  FlowSteer/MD one-pass GRPO and
+# SkillFlow TTB are alternative primary objectives; neither is selected until
+# the user resolves the documented conflict.
 
-schema_version: "flowsteer.skillflow_ttb.preflight.v1"
+schema_version: "flowsteer.dual_source_training.preflight.v2"
 
 run_identity:
   dataset: "hotpotqa"
   source_backup_branch: "backup/hotpotqa-compliant-best-round01-20260906"
   source_backup_commit: "740e53ec6ccac635ecbe7f1f379b002bfb2574d1"
-  status: "blocked_preflight"
+  status: "blocked_method_selection"
   training_enabled: false
   optimizer_steps_completed: 0
 
@@ -18,15 +19,36 @@ scope_and_comparability:
   skillflow_main_scope: "seven_IID_tasks_joint_training"
   note: "Training HotpotQA separately is a project adaptation; SkillFlow.pdf does not include MBPP++."
 
+source_revisions:
+  flowsteer_paper_aligned_code:
+    repository: "https://github.com/beita6969/FlowSteer"
+    revision: "a329b577a8e8c2f2d5492983b492473a06a8e718"
+  skillflow_original_code:
+    repository: "https://github.com/beita6969/SkillFlow"
+    revision: "74be52bb6bd9f0e9e68dacb72636b75649197983"
+    local_checkout: "/ssd1/iclr/owner/skillflow-iclr/06_GITHUB_RELEASE_20260816"
+  project_agentgraph_backup:
+    revision: "740e53ec6ccac635ecbe7f1f379b002bfb2574d1"
+
 method_and_conflict_resolution:
-  primary: "tempered_trajectory_balance"
+  decision_status: "awaiting_user_decision"
+  primary: null
   paper_formal_name: "Tempered Trajectory Balance (TTB)"
   user_transcription_alias: "Trajectory Token Balance"
   grpo:
     enabled: false
-    role: "baseline_or_ablation_only"
-  conflict: "The project MD specifies Action-Masked One-Pass GRPO for task learning, while SkillFlow uses Tempered Trajectory Balance regression as its primary objective."
-  resolution: "Use TTB for this SkillFlow-main run and keep the GRPO runner isolated; never combine the two losses in one run."
+    role: "primary_candidate_from_flowsteer_and_project_md"
+    implementation: "action_masked_one_pass_group_policy_gradient"
+  ttb:
+    enabled: false
+    role: "primary_candidate_from_skillflow"
+    implementation: "tempered_trajectory_balance"
+  conflict: "The project MD specifies Action-Masked One-Pass GRPO for task learning, while SkillFlow uses Tempered Trajectory Balance regression as its primary objective. These are different objectives and cannot be combined or substituted silently."
+  resolution: null
+  allowed_resolutions:
+    - "select_flowsteer_md_one_pass_grpo"
+    - "select_skillflow_ttb_as_explicit_project_adaptation"
+    - "run_two_isolated_versioned_experiments_without_mixing_losses"
   score_only: "structured_action_tokens"
   reasoning_tokens: "context_only_zero_loss_mask"
   edge_log_probability: "mean_over_action_tokens"
@@ -35,9 +57,9 @@ method_and_conflict_resolution:
   rollout_policy: "current_theta_on_policy"
   executor: "frozen"
   terminal_reward:
-    primary: "official_exact_match"
-    auxiliary_metric: "token_f1"
-    source_conflict: "SkillFlow.pdf Appendix G specifies EM for multi-hop QA, while the inspected release maps multi_hop_qa to token F1; this project selects the paper EM for TTB reward."
+    primary: null
+    candidates: [official_exact_match, token_f1]
+    source_conflict: "SkillFlow.pdf describes EM for multi-hop QA, while the original release maps multi_hop_qa to token F1. The scalar TTB reward remains undecided."
 
 paper_hyperparameters:
   optimizer_steps: 250
@@ -90,6 +112,9 @@ project_adaptations:
   provenance_note: "Publication barrier, atomic route handling, staleness policy, W&B extensions, and resolved GPU mapping are project engineering, not statements from SkillFlow.pdf."
 
 source_map:
+  detailed_report: "docs/FLOWSTEER_SKILLFLOW_TRAINING_SOURCE_MAP.md"
+  flowsteer_revision: "a329b577a8e8c2f2d5492983b492473a06a8e718"
+  skillflow_revision: "74be52bb6bd9f0e9e68dacb72636b75649197983"
   skillflow_root: "/ssd1/iclr/owner/skillflow-iclr/06_GITHUB_RELEASE_20260816"
   trajectory_contract: "training/trajectory.py"
   edge_normalization: "training/flow_metrics.py::edge_logprob_tilde"
@@ -147,13 +172,14 @@ wandb_contract:
     - skill_phase_event
 
 closure_gate:
-  required_real_optimizer_steps: 2
+  required_real_optimizer_steps: 1
   passed: false
   require_single_behavior_policy_per_batch: true
   require_rollout_batch_consumed_once: true
   require_nonzero_gradients: [theta, partition_function_Z, phi]
   require_nonzero_parameter_updates: [theta, partition_function_Z, phi]
   require_new_theta_in_next_step_receipts: true
+  require_post_update_rollout_before_long_run: true
   require_publish_and_canary: true
 
 wiring_status:
@@ -175,3 +201,8 @@ actual_status:
   optimizer_steps_completed: 0
   wandb_run: null
   convergence_claim: null
+  blocked_by:
+    - "primary_objective_not_selected"
+    - "ttb_reward_scalar_not_selected_if_ttb_is_chosen"
+    - "resource_admission_unresolved"
+    - "wandb_online_preflight_unresolved"
