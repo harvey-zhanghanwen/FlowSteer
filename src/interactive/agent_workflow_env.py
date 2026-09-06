@@ -647,6 +647,45 @@ class AgentWorkflowEnv:
                 pending.append(node.id)
         return tuple(pending)
 
+    def _stepwise_react_success_pending_agent_ids(self) -> Tuple[str, ...]:
+        """Return resumable Agents whose latest Tool observation succeeded.
+
+        SkillFlow's bounded ReAct loop requires one following ``complete``
+        action after a successful Tool observation.  Materialize that exact
+        public Action--Observation prefix before exposing an unrelated Canvas
+        edit; otherwise a tested artifact can be stranded while another
+        branch consumes the remaining FlowSteer edit budget.
+        """
+
+        pending = set(self._stepwise_react_pending_agent_ids())
+        if not pending:
+            return ()
+        state = self.public_react_state()
+        if not isinstance(state, Mapping):
+            return ()
+        successful: list[str] = []
+        for raw_agent in state.get("agents", ()):
+            if not isinstance(raw_agent, Mapping):
+                continue
+            agent_id = raw_agent.get("agent_id")
+            observation = raw_agent.get("latest_observation")
+            if (
+                isinstance(agent_id, str)
+                and agent_id in pending
+                and isinstance(observation, Mapping)
+                and observation.get("observation_status") == "success"
+            ):
+                successful.append(agent_id)
+        return tuple(
+            node.id for node in self._graph.nodes if node.id in successful
+        )
+
+    def _stepwise_react_continue_agent_ids(self) -> Tuple[str, ...]:
+        """Return the live state-conditioned ``continue`` target domain."""
+
+        successful = self._stepwise_react_success_pending_agent_ids()
+        return successful or self._stepwise_react_pending_agent_ids()
+
     @staticmethod
     def _public_react_history(
         metadata: Mapping[str, object],
@@ -1106,8 +1145,16 @@ class AgentWorkflowEnv:
         """
 
         finish_admitted = self.finish_admissibility().get("admissible") is True
+        dataset_id = (
+            self.runtime.dataset_id.casefold()
+            if isinstance(self.runtime.dataset_id, str)
+            else ""
+        )
         if (
-            self._uses_semantic_lineage_protocol()
+            (
+                self._uses_semantic_lineage_protocol()
+                or dataset_id == "mbpp_plus"
+            )
             and self.recovery_policy == _PRESERVE_REPAIR_RECOVERY_POLICY
             and finish_admitted
             and AgentActionType.FINISH.value in self._allowed_action_type_set
@@ -1129,30 +1176,13 @@ class AgentWorkflowEnv:
             # exceed the local model's context window.  This remains a choice
             # between two ordinary FlowSteer actions; it does not choose a
             # role, contract, algorithm, relation, or topology.
-            react_state = self.public_react_state()
-            pending_stepwise_agent_set = set(pending_stepwise_agents)
-            latest_observations = tuple(
-                agent_state.get("latest_observation")
-                for agent_state in (
-                    react_state.get("agents", ())
-                    if isinstance(react_state, Mapping)
-                    else ()
-                )
-                if (
-                    isinstance(agent_state, Mapping)
-                    and agent_state.get("agent_id")
-                    in pending_stepwise_agent_set
-                )
+            successful_stepwise_agents = (
+                self._stepwise_react_success_pending_agent_ids()
             )
-            all_latest_actions_succeeded = bool(latest_observations) and all(
-                isinstance(observation, Mapping)
-                and observation.get("observation_status") == "success"
-                for observation in latest_observations
-            )
+            if successful_stepwise_agents:
+                return (AgentActionType.CONTINUE.value,)
             step_actions: list[str] = []
             if (
-                not all_latest_actions_succeeded
-                and
                 AgentActionType.MODIFY_AGENT.value
                 in self._allowed_action_type_set
                 and self._model_admissible_modify_agent_ids()
@@ -1181,6 +1211,27 @@ class AgentWorkflowEnv:
             # ``canvas_action_domain_exhausted`` terminal diagnosis instead of
             # sampling an unrelated contract or topology edit.
             return ()
+
+        if dataset_id == "mbpp_plus":
+            tested_agent_ids = self._mbppplus_tested_agent_ids()
+            if tested_agent_ids:
+                output_agent_id = self._graph.output_agent_id
+                if (
+                    output_agent_id not in tested_agent_ids
+                    and AgentActionType.SET_OUTPUT.value
+                    in self._allowed_action_type_set
+                ):
+                    output_targets = set(
+                        self._model_admissible_output_agent_ids()
+                    )
+                    if output_targets.intersection(tested_agent_ids):
+                        return (AgentActionType.SET_OUTPUT.value,)
+                if (
+                    self._mbppplus_redundant_failed_agent_ids()
+                    and AgentActionType.DELETE_AGENT.value
+                    in self._allowed_action_type_set
+                ):
+                    return (AgentActionType.DELETE_AGENT.value,)
 
         stalled_semantic_repair_ids = self._stalled_semantic_repair_agent_ids()
         if stalled_semantic_repair_ids and not any(
@@ -4109,11 +4160,18 @@ class AgentWorkflowEnv:
                 ],
             }
         if AgentActionType.DELETE_AGENT.value in admitted:
+            mbppplus_delete_ids = set(
+                self._mbppplus_redundant_failed_agent_ids()
+            )
             targets[AgentActionType.DELETE_AGENT.value] = {
                 "agent_ids": [
                     node_id
                     for node_id in node_ids
                     if self._delete_admission_issue(node_id) is None
+                    and (
+                        not mbppplus_delete_ids
+                        or node_id in mbppplus_delete_ids
+                    )
                 ]
             }
         if AgentActionType.SET_RELATION.value in admitted:
@@ -4124,13 +4182,23 @@ class AgentWorkflowEnv:
                 "candidates": self._model_admissible_relation_candidates(),
             }
         if AgentActionType.SET_OUTPUT.value in admitted:
+            output_agent_ids = list(self._model_admissible_output_agent_ids())
+            tested_agent_ids = set(self._mbppplus_tested_agent_ids())
+            if tested_agent_ids:
+                tested_output_ids = [
+                    agent_id
+                    for agent_id in output_agent_ids
+                    if agent_id in tested_agent_ids
+                ]
+                if tested_output_ids:
+                    output_agent_ids = tested_output_ids
             targets[AgentActionType.SET_OUTPUT.value] = {
-                "agent_ids": list(self._model_admissible_output_agent_ids()),
+                "agent_ids": output_agent_ids,
                 "current_output_agent_id": self._graph.output_agent_id,
             }
         if AgentActionType.CONTINUE.value in admitted:
             targets[AgentActionType.CONTINUE.value] = {
-                "agent_ids": list(self._stepwise_react_pending_agent_ids()),
+                "agent_ids": list(self._stepwise_react_continue_agent_ids()),
                 "execution_semantics": "one_action_one_observation",
                 "graph_revision_unchanged": True,
                 "current_state": self.public_react_state(),
@@ -4315,6 +4383,7 @@ class AgentWorkflowEnv:
                     prior_failure_metadata=self._failure_continuations,
                     unavailable_model_ids=self._unavailable_model_ids,
                     dirty_agents=dirty_agents,
+                    include_missing_outputs_in_dirty_closure=False,
                     format_output_agent=self._uses_format_agent_protocol(),
                 )
             except AgentRuntimeError as exc:
@@ -4543,6 +4612,10 @@ class AgentWorkflowEnv:
             )
             else None
         )
+        mbppplus_has_tested_artifact_before_edit = bool(
+            self._is_mbppplus_dataset()
+            and self._mbppplus_tested_agent_ids()
+        )
         previous_revision = self._graph.revision
         candidate = self._graph.fork()
         try:
@@ -4685,9 +4758,26 @@ class AgentWorkflowEnv:
                 try:
                     prior_failure_metadata = dict(self._failure_continuations)
                     prior_failure_metadata.update(recovery_continuation_handoff)
+                    mbppplus_scope_to_edit_dirty_closure = bool(
+                        mbppplus_has_tested_artifact_before_edit
+                        and action.action_type
+                        in {
+                            AgentActionType.DELETE_AGENT,
+                            AgentActionType.SET_OUTPUT,
+                            AgentActionType.SET_RELATION,
+                        }
+                    )
+                    mbppplus_missing_relation_endpoints = set(
+                        self._mbppplus_missing_relation_endpoint_ids(action)
+                    )
                     execution_dirty_agents = (
                         execution_scope_set
                         if isolated_execution_scope
+                        else (
+                            set(dirty_agents)
+                            | mbppplus_missing_relation_endpoints
+                        )
+                        if mbppplus_scope_to_edit_dirty_closure
                         else (
                             set(self._unresolved_dirty_agents)
                             | self._triviaqa_retrievers_requiring_validation(
@@ -4704,6 +4794,9 @@ class AgentWorkflowEnv:
                         prior_failure_metadata=prior_failure_metadata,
                         unavailable_model_ids=self._unavailable_model_ids,
                         dirty_agents=execution_dirty_agents,
+                        include_missing_outputs_in_dirty_closure=(
+                            not mbppplus_scope_to_edit_dirty_closure
+                        ),
                         format_output_agent=(
                             False
                             if isolated_execution_scope
@@ -5605,6 +5698,12 @@ class AgentWorkflowEnv:
         tool_plan_exhausted = record.metadata.get("tool_plan_exhausted")
         if type(tool_plan_exhausted) is bool:
             result["tool_plan_exhausted"] = tool_plan_exhausted
+        elif AgentWorkflowEnv._tool_continuation_exhausted(result):
+            # AgentRuntime may cancel a sibling after partial public execution.
+            # That receipt retains the exact ReAct trace but has no exception
+            # attribute to copy. Infer only the typed public terminal budget
+            # observation already present in that trace.
+            result["tool_plan_exhausted"] = True
         return result if len(result) > 1 else None
 
     def _recovery_continuation_handoff(
@@ -5747,6 +5846,12 @@ class AgentWorkflowEnv:
                 sources.append(observation)
             for item in sources:
                 if item.get("tool_plan_exhausted") is True:
+                    return True
+                if (
+                    item.get("observation_status") == "budget_exhausted"
+                    and item.get("public_error_code")
+                    == "tool_call_budget_exhausted"
+                ):
                     return True
                 diagnosis = item.get("terminal_failure_diagnosis")
                 if isinstance(diagnosis, Mapping) and (
@@ -9036,6 +9141,200 @@ class AgentWorkflowEnv:
             and agent_id not in self._unresolved_dirty_agents
         )
 
+    def _is_mbppplus_dataset(self) -> bool:
+        return bool(
+            isinstance(self.runtime.dataset_id, str)
+            and self.runtime.dataset_id.casefold() == "mbpp_plus"
+        )
+
+    def _mbppplus_missing_relation_endpoint_ids(
+        self,
+        action: AgentAction,
+    ) -> Tuple[str, ...]:
+        """Return new relation sources whose current artifact is unavailable.
+
+        ``SET_RELATION`` invalidates the relation target and its downstream
+        dirty closure.  When the newly connected source has not executed yet,
+        the source must also run in the same execute-after-edit boundary;
+        otherwise the target is blocked on an input that the scoped Runtime
+        call was never allowed to materialize.
+        """
+
+        if (
+            not self._is_mbppplus_dataset()
+            or action.action_type is not AgentActionType.SET_RELATION
+        ):
+            return ()
+        directed_source_ids = []
+        if action.source_to_target is True and action.source_id is not None:
+            directed_source_ids.append(action.source_id)
+        if action.target_to_source is True and action.target_id is not None:
+            directed_source_ids.append(action.target_id)
+        return tuple(
+            dict.fromkeys(
+                agent_id
+                for agent_id in directed_source_ids
+                if agent_id not in self._progressive_outputs
+            )
+        )
+
+    @staticmethod
+    def _mbppplus_source_matches(left: object, right: object) -> bool:
+        """Compare Python source while ignoring terminal whitespace only."""
+
+        return (
+            isinstance(left, str)
+            and isinstance(right, str)
+            and bool(left.strip())
+            and left.rstrip() == right.rstrip()
+        )
+
+    def _mbppplus_receipt_tests_source(
+        self,
+        receipt: object,
+        source: object,
+    ) -> bool:
+        """Return whether one typed Tool receipt successfully tested source."""
+
+        if not isinstance(receipt, Mapping):
+            return False
+        request = receipt.get("request")
+        result = receipt.get("result")
+        arguments = request.get("arguments") if isinstance(request, Mapping) else None
+        value = result.get("value") if isinstance(result, Mapping) else None
+        return bool(
+            receipt.get("tool_id") == "mbpp-plus.python_exec"
+            and isinstance(request, Mapping)
+            and request.get("action") == "run_public_test"
+            and isinstance(arguments, Mapping)
+            and self._mbppplus_source_matches(arguments.get("code"), source)
+            and isinstance(value, Mapping)
+            and value.get("ok") is True
+        )
+
+    def _mbppplus_agent_has_tested_artifact(self, agent_id: str) -> bool:
+        """Return whether an Agent owns or losslessly forwards tested source.
+
+        A downstream Agent is receipt-matched only when its current output is
+        the same Python source (apart from terminal whitespace) carried by an
+        input artifact and that provenance entry carries the successful
+        ``run_public_test`` Tool receipt.  This preserves FlowSteer's real
+        artifact communication instead of forcing the Tool-using Agent to be
+        the Output Agent when it is not a quotient-graph sink.
+        """
+
+        if not self._is_mbppplus_dataset() or not self._has_successful_artifact(
+            agent_id
+        ):
+            return False
+        artifact = self._progressive_outputs.get(agent_id)
+        metadata = self._progressive_output_metadata.get(agent_id)
+        if not isinstance(artifact, str) or not isinstance(metadata, Mapping):
+            return False
+        receipts = metadata.get("tool_receipts", ())
+        if isinstance(receipts, (list, tuple)):
+            if any(
+                self._mbppplus_receipt_tests_source(receipt, artifact)
+                for receipt in receipts
+            ):
+                return True
+
+        provenance = metadata.get("input_artifact_provenance", ())
+        if not isinstance(provenance, (list, tuple)):
+            return False
+        for item in provenance:
+            if not isinstance(item, Mapping):
+                continue
+            source = next(
+                (
+                    item.get(field)
+                    for field in ("artifact_body", "artifact", "content", "raw_output")
+                    if isinstance(item.get(field), str)
+                ),
+                None,
+            )
+            if not self._mbppplus_source_matches(source, artifact):
+                continue
+            inherited_receipts = item.get("tool_receipts", ())
+            if isinstance(inherited_receipts, (list, tuple)) and any(
+                self._mbppplus_receipt_tests_source(receipt, source)
+                for receipt in inherited_receipts
+            ):
+                return True
+        return False
+
+    def _mbppplus_tested_agent_ids(self) -> Tuple[str, ...]:
+        """Return current Agents owning receipt-matched MBPP+ source."""
+
+        return tuple(
+            node.id
+            for node in self._graph.nodes
+            if self._mbppplus_agent_has_tested_artifact(node.id)
+        )
+
+    def _mbppplus_redundant_failed_agent_ids(self) -> Tuple[str, ...]:
+        """Return removable leaves of branches replaced by tested source.
+
+        Deletion remains an explicit FlowSteer Canvas edit.  It is admitted
+        only after another current Agent has completed receipt-matched source.
+        A repair-exhausted failed root and its artifact-free dependent branch
+        are removed from the leaves upward, so no live dependent artifact or
+        shared replacement ingress is discarded.
+        """
+
+        if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
+            return ()
+        tested_ids = self._mbppplus_tested_agent_ids()
+        if not tested_ids:
+            return ()
+        tested_artifact_types = {
+            self._graph.get_node(agent_id).artifact_type.casefold()
+            for agent_id in tested_ids
+        }
+        exhausted_roots = {
+            node.id
+            for node in self._graph.nodes
+            if (
+                node.id not in tested_ids
+                and node.id in self._failed_agent_ids
+                and node.id in self._repair_exhausted_agent_ids
+                and (record := self._latest_failure_record_by_agent.get(node.id))
+                is not None
+                and self._execution_failure_diagnosis(record)[0]
+                in _BOUNDED_REACT_FAILURE_CATEGORIES
+                and not self._has_successful_artifact(node.id)
+            )
+        }
+        branch_ids = set(exhausted_roots)
+        frontier = list(exhausted_roots)
+        while frontier:
+            source_id = frontier.pop()
+            for target_id in self._directed_successors(self._graph, source_id):
+                if target_id in branch_ids or target_id in tested_ids:
+                    continue
+                branch_ids.add(target_id)
+                frontier.append(target_id)
+
+        redundant: list[str] = []
+        for node in self._graph.nodes:
+            agent_id = node.id
+            predecessors = set(self._graph.directed_predecessors(agent_id))
+            if (
+                agent_id not in branch_ids
+                or agent_id in tested_ids
+                or self._has_successful_artifact(agent_id)
+                or self._graph.output_agent_id == agent_id
+                or self._directed_successors(self._graph, agent_id)
+                or (
+                    agent_id not in exhausted_roots
+                    and not predecessors.issubset(branch_ids)
+                )
+                or node.artifact_type.casefold() not in tested_artifact_types
+            ):
+                continue
+            redundant.append(agent_id)
+        return tuple(redundant)
+
     def _has_valid_evidence_retriever_artifact(self) -> bool:
         """Return whether any current Retriever owns valid grounded evidence."""
 
@@ -9213,10 +9512,19 @@ class AgentWorkflowEnv:
     def _preserved_input_agent_ids(self) -> Tuple[str, ...]:
         """Return successful Agents whose current input identity is immutable."""
 
-        if (
-            self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY
-            or not self._uses_semantic_lineage_protocol()
-        ):
+        if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
+            return ()
+        if self._is_mbppplus_dataset():
+            # MBPP+ keeps the successful source and Tool receipt in the
+            # progressive artifact store, but a later FlowSteer relation edit
+            # must remain able to connect an otherwise terminal-unreachable
+            # component.  The changed downstream closure is re-executed, and
+            # a ReAct Agent must produce a new successful test receipt before
+            # the new source is terminal.  Treating predecessor identity as
+            # immutable here removes every legal reachability repair and traps
+            # the Director in SET_OUTPUT/ADD_SUBGRAPH loops.
+            return ()
+        if not self._uses_semantic_lineage_protocol():
             # FlowSteer's progressive Canvas permits a later relation edit to
             # invalidate and re-execute only the changed downstream closure.
             # Predecessor-identity preservation is a stricter invariant of the
@@ -9697,6 +10005,8 @@ class AgentWorkflowEnv:
         if self.recovery_policy != _PRESERVE_REPAIR_RECOVERY_POLICY:
             return None
         if agent_id is None or not self._graph.has_node(agent_id):
+            return None
+        if agent_id in self._mbppplus_redundant_failed_agent_ids():
             return None
         if agent_id in self._capacity_blocking_failed_auxiliary_delete_ids():
             return None

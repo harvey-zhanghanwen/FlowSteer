@@ -2898,6 +2898,34 @@ class LiveSmokeBackend:
             raise ConfigurationError(
                 "director.action_decoding must be unconstrained or json_schema"
             )
+        enable_director_thinking = director.get("enable_thinking", False)
+        if type(enable_director_thinking) is not bool:
+            raise ConfigurationError("director.enable_thinking must be boolean")
+        enable_strict_thinking = director.get("enable_strict_thinking", False)
+        if type(enable_strict_thinking) is not bool:
+            raise ConfigurationError(
+                "director.enable_strict_thinking must be boolean"
+            )
+        max_thinking_tokens = director.get("max_thinking_tokens")
+        if enable_director_thinking and action_decoding == "json_schema":
+            if not enable_strict_thinking:
+                raise ConfigurationError(
+                    "thinking with json_schema requires SGLang "
+                    "enable_strict_thinking=true"
+                )
+            if (
+                type(max_thinking_tokens) is not int
+                or max_thinking_tokens <= 0
+            ):
+                raise ConfigurationError(
+                    "thinking with json_schema requires a positive "
+                    "director.max_thinking_tokens"
+                )
+        elif enable_strict_thinking or max_thinking_tokens is not None:
+            raise ConfigurationError(
+                "strict thinking settings require director.enable_thinking=true "
+                "with json_schema action decoding"
+            )
         if action_decoding == "json_schema" and not evaluation_only:
             raise ConfigurationError(
                 "json_schema Director decoding is evaluation-only until the "
@@ -2981,6 +3009,12 @@ class LiveSmokeBackend:
             top_p=float(director["top_p"]),
             top_k=int(director["top_k"]),
             max_tokens=int(director["max_action_tokens"]),
+            enable_thinking=enable_director_thinking,
+            max_thinking_tokens=(
+                int(max_thinking_tokens)
+                if max_thinking_tokens is not None
+                else None
+            ),
             action_json_schema=(
                 director_sglang_sampling_json_schema_text(
                     tuple(str(value) for value in graph_config["actions"])

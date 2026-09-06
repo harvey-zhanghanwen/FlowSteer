@@ -599,6 +599,7 @@ class AgentRuntime:
             Mapping[str, Mapping[str, object]]
         ] = None,
         dirty_agents: Optional[Collection[str]] = None,
+        include_missing_outputs_in_dirty_closure: bool = True,
         unavailable_model_ids: Optional[Collection[str]] = None,
         format_output_agent: bool = False,
         communication_condition: Union[
@@ -682,11 +683,22 @@ class AgentRuntime:
             if any(not isinstance(agent_id, str) for agent_id in dirty_agents):
                 raise TypeError("dirty_agents must contain strings")
             dirty_seeds = set(dirty_agents)
+        if not isinstance(include_missing_outputs_in_dirty_closure, bool):
+            raise TypeError(
+                "include_missing_outputs_in_dirty_closure must be a boolean"
+            )
         # Missing upstream artifacts invalidate their complete dependent
         # closure just like an explicit Canvas edit.  Computing the closure
         # only before adding missing IDs could otherwise reuse a stale cached
-        # downstream artifact.
-        dirty_seeds.update(agent_id for agent_id in nodes if agent_id not in outputs)
+        # downstream artifact.  A scoped FlowSteer Canvas execution (including
+        # CONTINUE) is the exception: it advances only the selected dirty
+        # closure, while other already-recorded failed components remain
+        # unresolved for later repair/augmentation instead of being re-run in
+        # parallel and cancelling the selected Action--Observation.
+        if include_missing_outputs_in_dirty_closure:
+            dirty_seeds.update(
+                agent_id for agent_id in nodes if agent_id not in outputs
+            )
         dirty = execution_graph.dirty_closure(dirty_seeds)
         # FlowSteer's executor cache is valid only for an unchanged input
         # identity.  A dirty Agent and every dependent successor therefore
@@ -706,6 +718,18 @@ class AgentRuntime:
             plan,
             format_output_agent=format_output_agent,
         )
+        if not include_missing_outputs_in_dirty_closure:
+            # A scoped Canvas action is limited to its selected dirty closure.
+            # Other unresolved components retain their recorded failure state
+            # and must not be scheduled merely because they have no cached
+            # output; otherwise their repeated failure cancels the selected
+            # execution before its Action--Observation can complete.
+            deferred_components.update(
+                component
+                for component in plan.components
+                if component not in dirty_components
+                and any(agent_id not in outputs for agent_id in component)
+            )
         unavailable_components = {
             component
             for component in plan.components

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from io import BytesIO
 import inspect
 import json
 import math
@@ -29,7 +30,9 @@ import threading
 import time
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence, Tuple, Union
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from uuid import uuid4
+
+import httpx
 
 from .agent_action_parser import (
     AgentAction,
@@ -403,9 +406,10 @@ class SGLangReceiptDirectorClient:
     """Qwen3.5 Director client using SGLang's exact native token receipt.
 
     ``tokenizer`` must be loaded from the same Qwen3.5 checkpoint as the SGLang
-    behavior server.  The client intentionally requires
-    ``apply_chat_template(..., enable_thinking=False)`` and never falls back to
-    an approximately reconstructed prompt.
+    behavior server.  The selected Qwen chat-template thinking mode is applied
+    explicitly and the resulting input IDs remain the authoritative behavior
+    prompt receipt; the client never falls back to an approximately
+    reconstructed prompt.
     """
 
     def __init__(
@@ -424,6 +428,8 @@ class SGLangReceiptDirectorClient:
         max_tokens: int = 768,
         timeout_seconds: float = 180.0,
         max_retries: int = 2,
+        enable_thinking: bool = False,
+        max_thinking_tokens: Optional[int] = None,
         action_json_schema: Optional[str] = None,
         action_json_schema_version: Optional[str] = None,
     ) -> None:
@@ -442,6 +448,17 @@ class SGLangReceiptDirectorClient:
             raise ValueError("top_k must be -1 or a positive integer")
         if max_tokens <= 0 or timeout_seconds <= 0 or max_retries < 0:
             raise ValueError("Director token, timeout, and retry limits are invalid")
+        if type(enable_thinking) is not bool:
+            raise ValueError("enable_thinking must be boolean")
+        if max_thinking_tokens is not None and (
+            type(max_thinking_tokens) is not int
+            or max_thinking_tokens <= 0
+        ):
+            raise ValueError("max_thinking_tokens must be a positive integer")
+        if not enable_thinking and max_thinking_tokens is not None:
+            raise ValueError(
+                "max_thinking_tokens requires enable_thinking=true"
+            )
         if not isinstance(policy_version, str) or not policy_version.strip():
             raise ValueError("policy_version must be non-empty")
         if action_json_schema is not None and (
@@ -489,6 +506,8 @@ class SGLangReceiptDirectorClient:
         self.max_tokens = int(max_tokens)
         self.timeout_seconds = float(timeout_seconds)
         self.max_retries = int(max_retries)
+        self.enable_thinking = enable_thinking
+        self.max_thinking_tokens = max_thinking_tokens
         self.action_json_schema = action_json_schema
         self.action_json_schema_version = action_json_schema_version
 
@@ -566,11 +585,11 @@ class SGLangReceiptDirectorClient:
                 messages,
                 tokenize=True,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                enable_thinking=self.enable_thinking,
             )
         except TypeError as exc:
             raise ReceiptValidationError(
-                "Qwen3.5 tokenizer must support enable_thinking=False"
+                "Qwen3.5 tokenizer must support the explicit enable_thinking option"
             ) from exc
         return _token_ids(encoded, "prompt_token_ids")
 
@@ -591,6 +610,7 @@ class SGLangReceiptDirectorClient:
         prompt_ids = self.prompt_token_ids(prompt)
         payload: dict[str, Any] = {
             "input_ids": list(prompt_ids),
+            "require_reasoning": self.enable_thinking,
             "sampling_params": {
                 "temperature": self.temperature,
                 "top_p": self.top_p,
@@ -606,6 +626,10 @@ class SGLangReceiptDirectorClient:
             "return_text_in_logprobs": True,
             "stream": False,
         }
+        if self.max_thinking_tokens is not None:
+            payload["sampling_params"]["custom_params"] = {
+                "thinking_budget": self.max_thinking_tokens,
+            }
         if seed is not None:
             # SkillFlow's OpenAI boundary calls this field ``seed``.  The
             # deployed SGLang 0.5.15 native /generate SamplingParams exposes
@@ -919,13 +943,27 @@ class SGLangReceiptDirectorClient:
         last_http_detail: str | None = None
         started_at = time.monotonic()
         for attempt in range(self.max_retries + 1):
+            attempt_payload = dict(payload)
+            transport_request_id = f"flowsteer-director-{uuid4().hex}"
+            attempt_payload["rid"] = transport_request_id
             try:
-                value = await asyncio.to_thread(self._post_json, payload)
+                value = await self._post_json_async(attempt_payload)
                 return (
                     value,
                     max((time.monotonic() - started_at) * 1000.0, 0.0),
                     attempt + 1,
                 )
+            except asyncio.CancelledError:
+                try:
+                    await asyncio.shield(
+                        self._post_abort_json_async(transport_request_id)
+                    )
+                except Exception:
+                    # Preserve the scheduler cancellation. SGLang also watches
+                    # the disconnected HTTP request, so an abort transport
+                    # error must not replace CancelledError.
+                    pass
+                raise
             except HTTPError as exc:
                 last_error = exc
                 try:
@@ -1040,6 +1078,14 @@ class SGLangReceiptDirectorClient:
             "backend_sampling_seed": metadata.get("backend_sampling_seed"),
             "server_weight_version": metadata.get("server_weight_version"),
             "receipt_verified": metadata.get("receipt_verified"),
+            "reasoning_content": metadata.get("reasoning_content"),
+            "post_reasoning_action_text": metadata.get(
+                "post_reasoning_action_text"
+            ),
+            "post_reasoning_action_start": metadata.get(
+                "post_reasoning_action_start"
+            ),
+            "max_thinking_tokens": metadata.get("max_thinking_tokens"),
         }
         if metadata.get("action_target_domain_version") is not None:
             receipt["action_json_schema_version"] = metadata.get(
@@ -1106,7 +1152,7 @@ class SGLangReceiptDirectorClient:
                 generation_seed=seed,
             )
             selected_action = self._hierarchical_choice(
-                selector_response.text,
+                self._action_text(selector_response),
                 field_name="action",
                 admitted=actions,
             )
@@ -1177,7 +1223,7 @@ class SGLangReceiptDirectorClient:
             try:
                 selected_add_agents = (
                     director_live_add_subgraph_agent_declarations_from_text(
-                        declaration_response.text,
+                        self._action_text(declaration_response),
                         action_target_domains,
                     )
                 )
@@ -1267,13 +1313,13 @@ class SGLangReceiptDirectorClient:
             try:
                 selected_add_agent_roles = (
                     director_live_add_subgraph_role_selection_from_text(
-                        role_selection_response.text,
+                        self._action_text(role_selection_response),
                         action_target_domains,
                     )
                 )
             except ValueError as exc:
                 if not _hierarchical_selector_serialization_failed(
-                    role_selection_response.text
+                    self._action_text(role_selection_response)
                 ):
                     raise ReceiptValidationError(
                         "v3 add_subgraph Agent role-selection phase is invalid: "
@@ -1292,7 +1338,7 @@ class SGLangReceiptDirectorClient:
                 ] = self._hierarchical_phase_receipt(role_selection_response)
                 regeneration_prompt = _hierarchical_continuation_prompt(
                     prompt,
-                    committed_json=role_selection_response.text,
+                    committed_json=self._action_text(role_selection_response),
                     instruction=_PARAMETER_REGENERATION_CONTINUATION,
                 )
                 regeneration_payload = dict(
@@ -1328,7 +1374,7 @@ class SGLangReceiptDirectorClient:
                 try:
                     selected_add_agent_roles = (
                         director_live_add_subgraph_role_selection_from_text(
-                            role_selection_response.text,
+                            self._action_text(role_selection_response),
                             action_target_domains,
                         )
                     )
@@ -1427,7 +1473,7 @@ class SGLangReceiptDirectorClient:
             try:
                 selected_add_agents = (
                     director_live_add_subgraph_agent_declarations_from_text(
-                        declaration_response.text,
+                        self._action_text(declaration_response),
                         action_target_domains,
                         selected_agent_roles=selected_add_agent_roles,
                     )
@@ -1541,7 +1587,7 @@ class SGLangReceiptDirectorClient:
             field_selector = json.loads(field_schema)
             admitted_fields = field_selector["properties"]["field"]["enum"]
             selected_modify_field = self._hierarchical_choice(
-                field_response.text,
+                self._action_text(field_response),
                 field_name="field",
                 admitted=admitted_fields,
                 required_action="modify_agent",
@@ -1595,7 +1641,7 @@ class SGLangReceiptDirectorClient:
                         generation_seed=seed,
                     )
                     selected_modify_agent_id = self._hierarchical_choice(
-                        agent_response.text,
+                        self._action_text(agent_response),
                         field_name="agent_id",
                         admitted=admitted_agent_ids,
                         required_action="modify_agent",
@@ -1643,15 +1689,16 @@ class SGLangReceiptDirectorClient:
             admitted_indices = candidate_selector["properties"]["candidate_index"][
                 "enum"
             ]
+            candidate_action_text = self._action_text(candidate_response)
             try:
                 selected_relation_candidate = self._hierarchical_index_choice(
-                    candidate_response.text,
+                    candidate_action_text,
                     admitted=admitted_indices,
                     required_action="set_relation",
                 )
             except ReceiptValidationError:
                 if not _hierarchical_selector_serialization_failed(
-                    candidate_response.text
+                    candidate_action_text
                 ):
                     raise
                 # Match the existing bounded parameter regeneration boundary:
@@ -1665,7 +1712,7 @@ class SGLangReceiptDirectorClient:
                 ] = self._hierarchical_phase_receipt(candidate_response)
                 regeneration_prompt = _hierarchical_continuation_prompt(
                     prompt,
-                    committed_json=candidate_response.text,
+                    committed_json=candidate_action_text,
                     instruction=_PARAMETER_REGENERATION_CONTINUATION,
                 )
                 regeneration_payload = dict(
@@ -1703,7 +1750,7 @@ class SGLangReceiptDirectorClient:
                     generation_seed=seed,
                 )
                 selected_relation_candidate = self._hierarchical_index_choice(
-                    candidate_response.text,
+                    self._action_text(candidate_response),
                     admitted=admitted_indices,
                     required_action="set_relation",
                 )
@@ -1754,7 +1801,8 @@ class SGLangReceiptDirectorClient:
         )
         parameter_regeneration_attempted = False
         parameter_regeneration_succeeded = False
-        if _action_parameter_serialization_failed(response.text):
+        response_action_text = self._action_text(response)
+        if _action_parameter_serialization_failed(response_action_text):
             # SGLang may emit EOS before a schema-bound JSON object closes.
             # Preserve that exact failed sample as a phase receipt and make
             # one further request with the same schema, route, and seed.  The
@@ -1766,7 +1814,7 @@ class SGLangReceiptDirectorClient:
             )
             regeneration_prompt = _hierarchical_continuation_prompt(
                 parameter_prompt,
-                committed_json=response.text,
+                committed_json=response_action_text,
                 instruction=_PARAMETER_REGENERATION_CONTINUATION,
             )
             regeneration_payload = dict(
@@ -1863,23 +1911,52 @@ class SGLangReceiptDirectorClient:
             metadata["selected_relation_candidate"] = selected_relation_candidate
         return DirectorResponse(text=response.text, metadata=metadata)
 
-    def _post_json(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        request = Request(
-            self.generate_url,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "FlowSteer-SGLang-Receipt/1",
-            },
-            method="POST",
-        )
-        with urlopen(request, timeout=self.timeout_seconds) as response:
-            value = json.load(response)
+    async def _post_json_async(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                response = await client.post(
+                    self.generate_url,
+                    json=dict(payload),
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Accept": "application/json",
+                        "User-Agent": "FlowSteer-SGLang-Receipt/1",
+                    },
+                )
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(str(exc)) from exc
+        except httpx.RequestError as exc:
+            raise URLError(str(exc)) from exc
+        if response.status_code >= 400:
+            raise HTTPError(
+                str(response.request.url),
+                response.status_code,
+                response.reason_phrase,
+                dict(response.headers),
+                BytesIO(response.content),
+            )
+        value = response.json()
         if not isinstance(value, dict):
             raise ReceiptValidationError("SGLang returned a non-object response")
         return value
+
+    async def _post_abort_json_async(self, request_id: str) -> None:
+        async with httpx.AsyncClient(
+            timeout=min(self.timeout_seconds, 10.0)
+        ) as client:
+            response = await client.post(
+                self.base_url + "/abort_request",
+                json={"rid": request_id},
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Accept": "application/json",
+                    "User-Agent": "FlowSteer-SGLang-Receipt/1",
+                },
+            )
+            response.raise_for_status()
 
     def _decode(self, token_ids: Sequence[int]) -> str:
         try:
@@ -1895,6 +1972,46 @@ class SGLangReceiptDirectorClient:
         if not isinstance(text, str):
             raise ReceiptValidationError("tokenizer.decode returned non-text output")
         return text
+
+    def _reasoning_parts(self, text: str) -> tuple[str | None, str, int]:
+        """Split Qwen reasoning from the Canvas action with SGLang's parser."""
+
+        if not self.enable_thinking:
+            return None, text, 0
+        try:
+            from sglang.srt.parser.reasoning_parser import ReasoningParser
+
+            reasoning_text, action_text = ReasoningParser(
+                model_type="qwen3",
+                stream_reasoning=False,
+                force_reasoning=True,
+                tokenizer=self.tokenizer,
+            ).parse_non_stream(text)
+        except Exception as exc:
+            raise ReceiptValidationError(
+                "SGLang Qwen reasoning output could not be separated"
+            ) from exc
+        if not isinstance(action_text, str) or not action_text.strip():
+            raise ReceiptValidationError(
+                "thinking Director response has no post-reasoning action"
+            )
+        action_start = text.rfind(action_text)
+        if action_start < 0:
+            raise ReceiptValidationError(
+                "post-reasoning action is not an exact sampled-text suffix"
+            )
+        return reasoning_text, action_text, action_start
+
+    @staticmethod
+    def _action_text(response: DirectorResponse) -> str:
+        action_text = response.metadata.get("post_reasoning_action_text")
+        if action_text is None:
+            return response.text
+        if not isinstance(action_text, str) or not action_text.strip():
+            raise ReceiptValidationError(
+                "Director receipt has an invalid post-reasoning action"
+            )
+        return action_text
 
     def _parse_response(
         self,
@@ -1931,6 +2048,8 @@ class SGLangReceiptDirectorClient:
                 raise ReceiptValidationError(
                     "SGLang output_ids disagree with output_token_logprobs token IDs"
                 )
+
+        reasoning_text, action_text, action_text_start = self._reasoning_parts(text)
 
         prompt_ids = _token_ids(payload.get("input_ids"), "prompt_token_ids")
         prompt_count = _exact_count(meta_info.get("prompt_tokens"), "prompt_tokens")
@@ -1985,6 +2104,11 @@ class SGLangReceiptDirectorClient:
                 ).get("sampling_seed"),
                 "action_json_schema_version": action_json_schema_version,
                 "action_schema_branch": action_schema_branch,
+                "chat_template_enable_thinking": self.enable_thinking,
+                "max_thinking_tokens": self.max_thinking_tokens,
+                "reasoning_content": reasoning_text,
+                "post_reasoning_action_text": action_text,
+                "post_reasoning_action_start": action_text_start,
                 "receipt_verified": True,
             }
         if action_target_domain_version is not None:
@@ -2020,6 +2144,29 @@ class SGLangReceiptDirectorClient:
         raise ReceiptValidationError(
             "the Canvas-consumed character prefix is not a sampled token prefix"
         )
+
+
+def _phase_action_text(receipt: Mapping[str, Any]) -> str:
+    """Return a phase's executable suffix while preserving its raw receipt."""
+
+    sampled_text = receipt.get("text")
+    if not isinstance(sampled_text, str) or not sampled_text:
+        raise ReceiptValidationError("hierarchical phase has no sampled text")
+    action_text = receipt.get("post_reasoning_action_text")
+    action_start = receipt.get("post_reasoning_action_start")
+    if action_text is None and action_start is None:
+        return sampled_text
+    if (
+        not isinstance(action_text, str)
+        or not action_text.strip()
+        or type(action_start) is not int
+        or not 0 <= action_start < len(sampled_text)
+        or sampled_text[action_start:] != action_text
+    ):
+        raise ReceiptValidationError(
+            "hierarchical phase reasoning/action boundary is invalid"
+        )
+    return action_text
 
 
 def _validate_v3_hierarchical_action_receipt(
@@ -2242,12 +2389,10 @@ def _validate_v3_hierarchical_action_receipt(
                 raise ReceiptValidationError(
                     "v3 role-selection regeneration has no initial failure receipt"
                 )
-            failed_text = role_selection_failure_receipt.get("text")
+            failed_text = _phase_action_text(role_selection_failure_receipt)
             failed_prompt = role_selection_failure_receipt.get("prompt_text")
             if (
-                not isinstance(failed_text, str)
-                or not failed_text
-                or not isinstance(failed_prompt, str)
+                not isinstance(failed_prompt, str)
                 or not failed_prompt
                 or not _hierarchical_selector_serialization_failed(failed_text)
             ):
@@ -2289,7 +2434,7 @@ def _validate_v3_hierarchical_action_receipt(
             assert isinstance(role_phase, Mapping)
             try:
                 director_live_add_subgraph_role_selection_from_text(
-                    role_phase["text"],
+                    _phase_action_text(role_phase),
                     domains,
                 )
             except ValueError:
@@ -2331,7 +2476,7 @@ def _validate_v3_hierarchical_action_receipt(
                 assert isinstance(declaration_phase, Mapping)
                 try:
                     director_live_add_subgraph_agent_declarations_from_text(
-                        declaration_phase["text"],
+                        _phase_action_text(declaration_phase),
                         domains,
                     )
                 except ValueError:
@@ -2379,7 +2524,7 @@ def _validate_v3_hierarchical_action_receipt(
             try:
                 selected_roles = (
                     director_live_add_subgraph_role_selection_from_text(
-                        role_phase["text"],
+                        _phase_action_text(role_phase),
                         domains,
                     )
                 )
@@ -2448,14 +2593,14 @@ def _validate_v3_hierarchical_action_receipt(
                 assert isinstance(role_phase, Mapping)
                 selected_roles = (
                     director_live_add_subgraph_role_selection_from_text(
-                        role_phase["text"],
+                        _phase_action_text(role_phase),
                         domains,
                     )
                 )
             else:
                 selected_roles = None
             declarations = director_live_add_subgraph_agent_declarations_from_text(
-                declaration_phase["text"],
+                _phase_action_text(declaration_phase),
                 domains,
                 selected_agent_roles=selected_roles,
             )
@@ -2749,7 +2894,7 @@ def _validate_v3_hierarchical_action_receipt(
                 "v3 relation candidate selection has no exact phase receipt"
             )
         sampled_index = SGLangReceiptDirectorClient._hierarchical_index_choice(
-            relation_candidate_receipt["text"],
+            _phase_action_text(relation_candidate_receipt),
             admitted=tuple(range(len(candidates))),
             required_action="set_relation",
         )
@@ -2766,12 +2911,10 @@ def _validate_v3_hierarchical_action_receipt(
                 raise ReceiptValidationError(
                     "v3 relation-candidate regeneration has no initial failure receipt"
                 )
-            failed_text = relation_candidate_failure_receipt.get("text")
+            failed_text = _phase_action_text(relation_candidate_failure_receipt)
             failed_prompt = relation_candidate_failure_receipt.get("prompt_text")
             if (
-                not isinstance(failed_text, str)
-                or not failed_text
-                or not isinstance(failed_prompt, str)
+                not isinstance(failed_prompt, str)
                 or not failed_prompt
                 or not _hierarchical_selector_serialization_failed(failed_text)
             ):
@@ -2849,12 +2992,10 @@ def _validate_v3_hierarchical_action_receipt(
             raise ReceiptValidationError(
                 "v3 parameter regeneration has no initial failure receipt"
             )
-        failed_text = parameter_failure_receipt.get("text")
+        failed_text = _phase_action_text(parameter_failure_receipt)
         failed_prompt = parameter_failure_receipt.get("prompt_text")
         if (
-            not isinstance(failed_text, str)
-            or not failed_text
-            or not isinstance(failed_prompt, str)
+            not isinstance(failed_prompt, str)
             or not failed_prompt
             or not _action_parameter_serialization_failed(failed_text)
         ):

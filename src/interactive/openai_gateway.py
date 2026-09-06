@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 import json
 import os
 import socket
 import time
 from typing import Any, Dict, Mapping, Optional, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from uuid import uuid4
+
+import httpx
 
 from scripts.prompts.prompt import FORMAT_PROMPT
 
@@ -99,6 +102,28 @@ def supports_local_sglang_top_k(request: AgentRequest) -> bool:
         declared_value("sampling_backend") == "sglang"
         and declared_value("deployment_locality") == "local"
         and declared_value("supports_top_k") == "true"
+    )
+
+
+def supports_local_sglang_request_control(request: AgentRequest) -> bool:
+    """Return whether the provider is the declared local SGLang runtime.
+
+    SGLang exposes ``rid`` on Chat Completions and ``/abort_request`` at the
+    server root.  These fields are not portable OpenAI API fields, so request
+    cancellation is enabled only for a model/provider pair whose frozen
+    metadata explicitly declares the local SGLang backend.
+    """
+
+    provider_metadata = request.provider.metadata
+    model_metadata = request.model.metadata
+
+    def declared_value(key: str) -> str:
+        value = model_metadata.get(key, provider_metadata.get(key, ""))
+        return value.strip().casefold() if isinstance(value, str) else ""
+
+    return bool(
+        declared_value("sampling_backend") == "sglang"
+        and declared_value("deployment_locality") == "local"
     )
 
 
@@ -895,6 +920,11 @@ class OpenAICompatibleGateway:
             requested_sampling["seed"] = scientific_generation_seed
             requested_sampling["backend_seed"] = payload.get("seed")
         url = endpoint.rstrip("/") + "/chat/completions"
+        abort_url = (
+            self._local_sglang_abort_url(endpoint)
+            if supports_local_sglang_request_control(request)
+            else None
+        )
 
         last_error: BaseException | None = None
         started_at = time.monotonic()
@@ -902,8 +932,20 @@ class OpenAICompatibleGateway:
         for attempt in range(self.max_retries + 1):
             attempt_started_at = time.monotonic()
             backoff_seconds = 0.0
+            attempt_payload = dict(payload)
+            transport_request_id = None
+            if abort_url is not None:
+                # SGLang's OpenAI protocol forwards ``rid`` into its native
+                # GenerateReqInput. Each physical HTTP attempt receives an
+                # independent ID so cancellation cannot match another retry.
+                transport_request_id = f"flowsteer-agent-{uuid4().hex}"
+                attempt_payload["rid"] = transport_request_id
             try:
-                response = await asyncio.to_thread(self._post_json, url, api_key, payload)
+                response = await self._post_json_async(
+                    url,
+                    api_key,
+                    attempt_payload,
+                )
                 parsed = self._parse_response(response, request)
                 retry_receipts.append(
                     {
@@ -914,6 +956,7 @@ class OpenAICompatibleGateway:
                         "status": "completed",
                         "http_status": 200,
                         "retryable": False,
+                        "transport_request_id": transport_request_id,
                         "backoff_seconds": 0.0,
                         "latency_ms": max(
                             (time.monotonic() - attempt_started_at) * 1000.0,
@@ -937,6 +980,23 @@ class OpenAICompatibleGateway:
                     }
                 )
                 return AgentResponse(parsed.text, metadata)
+            except asyncio.CancelledError:
+                if abort_url is not None and transport_request_id is not None:
+                    try:
+                        await asyncio.shield(
+                            self._post_abort_json_async(
+                                abort_url,
+                                api_key,
+                                transport_request_id,
+                            )
+                        )
+                    except Exception:
+                        # Cancellation must preserve the original scheduler
+                        # signal.  The server also observes the disconnected
+                        # HTTP request, so an abort transport failure is not a
+                        # reason to replace CancelledError.
+                        pass
+                raise
             except HTTPError as exc:
                 last_error = exc
                 retryable = exc.code in {408, 409, 425, 429} or exc.code >= 500
@@ -952,6 +1012,7 @@ class OpenAICompatibleGateway:
                         "error_type": type(exc).__name__,
                         "http_status": exc.code,
                         "retryable": retryable,
+                        "transport_request_id": transport_request_id,
                         "backoff_seconds": backoff_seconds,
                         "latency_ms": max(
                             (time.monotonic() - attempt_started_at) * 1000.0,
@@ -975,6 +1036,7 @@ class OpenAICompatibleGateway:
                         "error_type": type(exc).__name__,
                         "http_status": None,
                         "retryable": True,
+                        "transport_request_id": transport_request_id,
                         "backoff_seconds": backoff_seconds,
                         "latency_ms": max(
                             (time.monotonic() - attempt_started_at) * 1000.0,
@@ -1007,24 +1069,66 @@ class OpenAICompatibleGateway:
         )
         raise error from last_error
 
-    def _post_json(self, url: str, api_key: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        request = Request(
-            url,
-            data=body,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "FlowSteer-AgentGraph/1",
-            },
-            method="POST",
-        )
-        with urlopen(request, timeout=self.timeout_seconds) as response:
-            value = json.load(response)
+    async def _post_json_async(
+        self,
+        url: str,
+        api_key: str,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                response = await client.post(
+                    url,
+                    json=dict(payload),
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Accept": "application/json",
+                        "User-Agent": "FlowSteer-AgentGraph/1",
+                    },
+                )
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(str(exc)) from exc
+        except httpx.RequestError as exc:
+            raise URLError(str(exc)) from exc
+        if response.status_code >= 400:
+            raise HTTPError(
+                str(response.request.url),
+                response.status_code,
+                response.reason_phrase,
+                dict(response.headers),
+                BytesIO(response.content),
+            )
+        value = response.json()
         if not isinstance(value, dict):
             raise OpenAICompatibleGatewayError("provider returned a non-object response")
         return value
+
+    @staticmethod
+    def _local_sglang_abort_url(endpoint: str) -> str:
+        normalized = endpoint.rstrip("/")
+        if normalized.endswith("/v1"):
+            normalized = normalized[:-3]
+        return normalized + "/abort_request"
+
+    async def _post_abort_json_async(
+        self,
+        url: str,
+        api_key: str,
+        request_id: str,
+    ) -> None:
+        async with httpx.AsyncClient(
+            timeout=min(self.timeout_seconds, 10.0)
+        ) as client:
+            response = await client.post(
+                url,
+                json={"rid": request_id},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Accept": "application/json",
+                    "User-Agent": "FlowSteer-AgentGraph/1",
+                },
+            )
+            response.raise_for_status()
 
     @staticmethod
     def _parse_response(response: Mapping[str, Any], request: AgentRequest) -> AgentResponse:

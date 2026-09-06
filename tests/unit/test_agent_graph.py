@@ -542,6 +542,19 @@ class ParserTests(unittest.TestCase):
         self.assertIs(action.action_type, AgentActionType.FINISH)
         self.assertEqual('{"action":"finish"}', text[action.consumed_start:action.consumed_end])
 
+    def test_qwen_reasoning_json_is_not_parsed_as_canvas_action(self) -> None:
+        text = (
+            'Compare {"action":"delete_agent","agent_id":"kept"} '
+            'as a hypothetical.\n</think>\n'
+            '{"action":"finish"}'
+        )
+        action = self.parser.parse(text)
+        self.assertIs(action.action_type, AgentActionType.FINISH)
+        self.assertEqual(
+            '{"action":"finish"}',
+            text[action.consumed_start : action.consumed_end],
+        )
+
     def test_add_subgraph_accepts_one_to_three_agents_and_consumes_full_object(self) -> None:
         payloads = [
             '{"action":"add_subgraph","agents":['

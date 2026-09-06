@@ -1,0 +1,49 @@
+{
+  "adapter_name": null,
+  "checkpoint_path": null,
+  "evaluator_preflight": {
+    "base_passed": true,
+    "dataset_version": "v0.2.0",
+    "evaluator_protocol": "evalplus.mbpp-plus.pass-at-1.v0.3.1.complete-source.v2",
+    "evaluator_version": "evalplus.mbpp-plus.pass-at-1.v0.3.1.complete-source.v2",
+    "passed": true,
+    "plus_passed": true,
+    "runtime_version": "0.3.1",
+    "selected_task_count": 100,
+    "selection_disjoint": true
+  },
+  "healthbench_judge_model": null,
+  "healthbench_judge_receipt": null,
+  "loaded_now": false,
+  "mbppplus_evaluator_receipt": {
+    "canonical_solution_model_visible": false,
+    "evaluator_version": "evalplus.mbpp-plus.pass-at-1.v0.3.1.complete-source.v2",
+    "hidden_tests_model_visible": false,
+    "mode": "official_evalplus_terminal_evaluator",
+    "selected_task_count": 100
+  },
+  "mode": "base_model",
+  "policy_published": false,
+  "sglang_server_runtime": {
+    "attention_backend": "fa3",
+    "context_length": 32768,
+    "cuda_graph_backend_decode": null,
+    "enable_deterministic_inference": false,
+    "enable_strict_thinking": true,
+    "max_running_requests": 8,
+    "max_running_requests_source": "server_info.max_running_requests",
+    "max_total_num_tokens": 630335,
+    "reasoning_parser": "qwen3",
+    "recorded_at": "2026-08-31T10:34:37.774570+00:00",
+    "request_attempts": {
+      "server_info": 1
+    },
+    "sampling_backend": "flashinfer",
+    "schema_version": "flowsteer.sglang.server-runtime-receipt.v1",
+    "weight_version": "default"
+  },
+  "status": "base_model_ready",
+  "success": true,
+  "swebench_harness_receipt": null,
+  "training_performed": false
+}

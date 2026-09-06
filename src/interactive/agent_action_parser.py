@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 
 AGENT_EXECUTION_MODES = frozenset({"reasoning", "react", "coding"})
+QWEN_REASONING_END_TOKEN = "</think>"
 
 
 class AgentActionType(str, Enum):
@@ -274,6 +275,16 @@ class AgentActionParser:
         if not isinstance(text, str) or not text:
             raise AgentActionParseError("response must be a non-empty string")
         stripped_start = len(text) - len(text.lstrip())
+        reasoning_end = text.find(QWEN_REASONING_END_TOKEN, stripped_start)
+        if reasoning_end >= 0:
+            # Qwen/SGLang emits the exact sampled reasoning block before the
+            # schema-constrained Canvas action. Keep character offsets bound
+            # to the raw sample while excluding reasoning-internal JSON from
+            # action selection.
+            suffix_start = reasoning_end + len(QWEN_REASONING_END_TOKEN)
+            stripped_start = suffix_start + len(text[suffix_start:]) - len(
+                text[suffix_start:].lstrip()
+            )
         start = stripped_start
         try:
             leading_value, leading_end = self._decoder.raw_decode(text[start:])

@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from src.interactive.config_loader import load_model_registry, load_yaml
 from src.interactive.task_evaluator import (
     AIME2026_EVALUATOR_VERSION,
@@ -86,6 +88,34 @@ def test_runner_reuses_hotpot_graph_and_stable_zero_boundaries():
         _MODULE._trajectory_resume_matches
         is _MODULE.hotpot_round._trajectory_resume_matches
     )
+
+
+def test_strict_thinking_server_runtime_must_match_director():
+    director = {
+        "enable_strict_thinking": True,
+        "reasoning_parser": "qwen3",
+    }
+    _MODULE._validate_director_thinking_server(
+        director,
+        {"reasoning_parser": "qwen3", "enable_strict_thinking": True},
+    )
+
+    with pytest.raises(
+        _MODULE.CompletionBenchmarkRoundError,
+        match="reasoning_parser",
+    ):
+        _MODULE._validate_director_thinking_server(
+            director,
+            {"reasoning_parser": None, "enable_strict_thinking": True},
+        )
+    with pytest.raises(
+        _MODULE.CompletionBenchmarkRoundError,
+        match="enable_strict_thinking",
+    ):
+        _MODULE._validate_director_thinking_server(
+            director,
+            {"reasoning_parser": "qwen3", "enable_strict_thinking": False},
+        )
 
 
 def test_supported_configs_are_evaluation_only():
@@ -1784,6 +1814,73 @@ def test_interactive_direct_condition_records_every_environment_policy_call():
     assert len(result["executions"]) == 2
     assert result["final_answer"] == "click[action-2]"
     assert result["evaluation"]["metrics"]["success"] == 1.0
+
+
+def test_mbppplus_direct_condition_declares_python_script_artifact():
+    registry = load_model_registry(
+        _ROOT / "config" / "model_catalog_multidataset_tool_v8.yaml"
+    )
+
+    class Gateway:
+        def __init__(self):
+            self.requests = []
+
+        async def generate(self, request):
+            self.requests.append(request)
+            return SimpleNamespace(text="def add(a, b):\n    return a + b\n")
+
+    gateway = Gateway()
+    backend = SimpleNamespace(
+        registry=registry,
+        runtime=SimpleNamespace(gateway=gateway),
+        config={},
+    )
+    task = _MODULE.TaskRecord(
+        task_id="mbpp-plus:Mbpp/2",
+        question="Write add(a, b).",
+        ground_truth="evaluator_only",
+        split="test",
+        metadata={"dataset_key": "mbpp_plus", "entry_point": "add"},
+    )
+
+    async def fake_evaluate(_backend, _task, prediction, *, run_graph=None):
+        assert prediction == "def add(a, b):\n    return a + b\n"
+        assert run_graph is None
+        return EvaluationOutcome(
+            valid=True,
+            reward=1.0,
+            metrics={"pass_at_1": 1.0, "base_pass_at_1": 1.0},
+            reason="official evaluator",
+            evaluator_version="evalplus.mbpp_plus.v1",
+        )
+
+    execution = SimpleNamespace(
+        metadata={"response": {"generation_seed": 17}},
+        to_dict=lambda: {
+            "output": "def add(a, b):\n    return a + b\n",
+            "metadata": {"response": {"generation_seed": 17}},
+        },
+    )
+    with patch.object(
+        _MODULE,
+        "execution_record_from_call",
+        return_value=execution,
+    ), patch.object(_MODULE, "_evaluate_prediction", new=fake_evaluate):
+        asyncio.run(
+            _MODULE._direct_one(
+                backend,
+                task,
+                0,
+                model_id="qwen3.5-9b-local",
+                protocol="evalplus_complete_python_source_greedy_v1",
+                contract="Return only raw complete Python source.",
+                seed=17,
+                run_label="mbppplus-direct-type-test",
+            )
+        )
+
+    assert len(gateway.requests) == 1
+    assert gateway.requests[0].agent.artifact_type == "python_script"
 
 
 def test_swe_direct_condition_is_one_coding_agent_with_repository_tools():

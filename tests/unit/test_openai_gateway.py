@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 import json
 import os
@@ -582,7 +583,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         gateway = OpenAICompatibleGateway(max_retries=0)
         captured = {}
 
-        def fake_post(url, api_key, payload):
+        async def fake_post(url, api_key, payload):
             captured["payload"] = payload
             return {
                 "id": "req-local",
@@ -593,7 +594,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 "usage": {},
             }
 
-        gateway._post_json = fake_post  # type: ignore[method-assign]
+        gateway._post_json_async = fake_post  # type: ignore[method-assign]
         response = await gateway.generate(item)
 
         self.assertEqual(29, captured["payload"]["seed"])
@@ -628,17 +629,85 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             replace(item, provider=declared_provider, model=declared_model)
         )
         self.assertEqual(-1, local_payload["top_k"])
+        self.assertNotIn("rid", local_payload)
 
         remote_payload = OpenAICompatibleGateway().request_payload(
             replace(item, model=declared_model)
         )
         self.assertNotIn("top_k", remote_payload)
+        self.assertNotIn("rid", remote_payload)
+
+    async def test_cancelled_local_sglang_request_calls_abort_endpoint(self) -> None:
+        item = request()
+        item = replace(
+            item,
+            provider=replace(
+                item.provider,
+                endpoint="http://127.0.0.1:8015/v1",
+                metadata={
+                    "sampling_backend": "sglang",
+                    "deployment_locality": "local",
+                },
+            ),
+            model=replace(
+                item.model,
+                metadata={
+                    **dict(item.model.metadata),
+                    "sampling_backend": "sglang",
+                    "deployment_locality": "local",
+                },
+            ),
+        )
+        started = asyncio.Event()
+        released = asyncio.Event()
+        abort_calls = []
+        transport_payloads = []
+        gateway = OpenAICompatibleGateway(max_retries=0)
+
+        async def blocked_post(url, api_key, payload):
+            transport_payloads.append(dict(payload))
+            started.set()
+            await released.wait()
+            return {
+                "id": payload["rid"],
+                "model": "supervisor_theta",
+                "choices": [
+                    {"message": {"content": "answer"}, "finish_reason": "stop"}
+                ],
+                "usage": {},
+            }
+
+        async def abort_post(url, api_key, request_id):
+            abort_calls.append((url, api_key, request_id))
+            released.set()
+
+        gateway._post_json_async = blocked_post  # type: ignore[method-assign]
+        gateway._post_abort_json_async = abort_post  # type: ignore[method-assign]
+        generation = asyncio.create_task(gateway.generate(item))
+        await asyncio.wait_for(started.wait(), 1.0)
+        generation.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await generation
+
+        self.assertEqual(1, len(transport_payloads))
+        transport_request_id = transport_payloads[0]["rid"]
+        self.assertTrue(transport_request_id.startswith("flowsteer-agent-"))
+        self.assertEqual(
+            [
+                (
+                    "http://127.0.0.1:8015/abort_request",
+                    "EMPTY",
+                    transport_request_id,
+                )
+            ],
+            abort_calls,
+        )
 
     async def test_request_and_response_mapping(self) -> None:
         gateway = OpenAICompatibleGateway(max_retries=0, default_seed=17)
         captured = {}
 
-        def fake_post(url, api_key, payload):
+        async def fake_post(url, api_key, payload):
             captured.update(url=url, api_key=api_key, payload=payload)
             return {
                 "id": "req-1",
@@ -647,7 +716,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
             }
 
-        gateway._post_json = fake_post  # type: ignore[method-assign]
+        gateway._post_json_async = fake_post  # type: ignore[method-assign]
         response = await gateway.generate(request())
         self.assertEqual(response.text, "answer")
         self.assertEqual(captured["url"], "https://example.invalid/v1/chat/completions")
@@ -680,7 +749,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         gateway = OpenAICompatibleGateway(max_retries=1)
         payloads = []
 
-        def fake_post(url, api_key, payload):
+        async def fake_post(url, api_key, payload):
             payloads.append(dict(payload))
             if len(payloads) == 1:
                 raise HTTPError(url, 429, "rate limited", {}, None)
@@ -693,7 +762,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 "usage": {},
             }
 
-        gateway._post_json = fake_post  # type: ignore[method-assign]
+        gateway._post_json_async = fake_post  # type: ignore[method-assign]
         with patch(
             "src.interactive.openai_gateway.asyncio.sleep",
             new=AsyncMock(),
@@ -723,7 +792,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_malformed_provider_response_is_rejected(self) -> None:
         gateway = OpenAICompatibleGateway(max_retries=0)
-        gateway._post_json = lambda *_: {"choices": []}  # type: ignore[method-assign]
+        async def invalid_response(*_):
+            return {"choices": []}
+
+        gateway._post_json_async = invalid_response  # type: ignore[method-assign]
         with self.assertRaises(OpenAICompatibleGatewayError):
             await gateway.generate(request())
 

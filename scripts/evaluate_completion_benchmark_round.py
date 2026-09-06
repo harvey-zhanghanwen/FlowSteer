@@ -325,6 +325,7 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                 "complete_source_stepwise_react_feedback_v15",
                 "complete_source_stepwise_react_feedback_v16",
                 "complete_source_stepwise_react_feedback_v17",
+                "complete_source_stepwise_react_feedback_v18",
             }
         )
         if runtime_contract_profile in {
@@ -344,6 +345,7 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
             "complete_source_stepwise_react_feedback_v15",
             "complete_source_stepwise_react_feedback_v16",
             "complete_source_stepwise_react_feedback_v17",
+            "complete_source_stepwise_react_feedback_v18",
         }:
             checks["mbpp_plus.live_action_target_schema"] = (
                 director.get("sampling_schema_version")
@@ -373,6 +375,7 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                         "complete_source_stepwise_react_feedback_v15",
                         "complete_source_stepwise_react_feedback_v16",
                         "complete_source_stepwise_react_feedback_v17",
+                        "complete_source_stepwise_react_feedback_v18",
                     }
                     else []
                 ),
@@ -1228,6 +1231,30 @@ def _evaluator_preflight_receipt(
     }
 
 
+def _validate_director_thinking_server(
+    director: Mapping[str, Any],
+    server_runtime: Mapping[str, Any],
+) -> None:
+    """Fail closed when a strict-thinking run reaches the wrong SGLang mode."""
+
+    if director.get("enable_strict_thinking", False) is not True:
+        return
+    expected_parser = director.get("reasoning_parser")
+    if not isinstance(expected_parser, str) or not expected_parser.strip():
+        raise CompletionBenchmarkRoundError(
+            "strict Director thinking requires director.reasoning_parser"
+        )
+    actual_parser = server_runtime.get("reasoning_parser")
+    if actual_parser != expected_parser.strip():
+        raise CompletionBenchmarkRoundError(
+            "SGLang reasoning_parser does not match the Director configuration"
+        )
+    if server_runtime.get("enable_strict_thinking") is not True:
+        raise CompletionBenchmarkRoundError(
+            "SGLang enable_strict_thinking is not enabled"
+        )
+
+
 async def _run_evaluator_preflight(
     backend: LiveSmokeBackend,
     config: Mapping[str, Any],
@@ -1596,7 +1623,14 @@ async def _direct_one(
         run_id=run_id,
         graph_revision=0,
         problem=direct_problem,
-        agent=AgentNode("direct", model_id, contract),
+        agent=AgentNode(
+            "direct",
+            model_id,
+            contract,
+            artifact_type=(
+                "python_script" if dataset_key == "mbpp_plus" else "text"
+            ),
+        ),
         model=model,
         provider=provider,
         phase=ExecutionPhase.SINGLE,
@@ -3776,6 +3810,17 @@ async def run_completion_benchmark_round(
             "mem_fraction_static": float(
                 os.environ.get("FLOWSTEER_SUPERVISOR_MEM_FRACTION", "0.82")
             ),
+            "director_thinking": {
+                "enable_thinking": bool(
+                    director_config.get("enable_thinking", False)
+                ),
+                "enable_strict_thinking": bool(
+                    director_config.get("enable_strict_thinking", False)
+                ),
+                "max_thinking_tokens": director_config.get(
+                    "max_thinking_tokens"
+                ),
+            },
         },
         "artifacts": {name: str(path) for name, path in paths.items()},
     }
@@ -3985,6 +4030,16 @@ async def run_completion_benchmark_round(
         sglang_server_runtime = await asyncio.to_thread(
             backend.publisher.server_runtime_receipt
         )
+        preflight["sglang_server_runtime"] = sglang_server_runtime
+        manifest["runtime_resource"]["sglang_server_runtime"] = (
+            sglang_server_runtime
+        )
+        _write_json(paths["manifest"], manifest)
+        _write_json(paths["preflight"], preflight)
+        _validate_director_thinking_server(
+            director,
+            sglang_server_runtime,
+        )
         evaluator_preflight = await _run_evaluator_preflight(
             backend,
             config,
@@ -4004,9 +4059,6 @@ async def run_completion_benchmark_round(
             "swebench_harness_receipt": swebench_harness_receipt,
             "mbppplus_evaluator_receipt": mbppplus_evaluator_receipt,
         })
-        manifest["runtime_resource"]["sglang_server_runtime"] = (
-            sglang_server_runtime
-        )
         _write_json(paths["manifest"], manifest)
         _write_json(paths["preflight"], preflight)
     except Exception as exc:

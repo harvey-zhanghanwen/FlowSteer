@@ -167,6 +167,29 @@ def test_live_backend_rejects_invalid_model_admissible_sampling_contract():
             },
             "model-admissible Director sampling requires",
         ),
+        (
+            {
+                "action_decoding": "json_schema",
+                "enable_thinking": True,
+                "sampling_action_profile": "model_admissible_canvas_actions",
+                "sampling_schema_version": (
+                    "agentgraph.model-admissible-action-mask.v3"
+                ),
+            },
+            "requires SGLang enable_strict_thinking=true",
+        ),
+        (
+            {
+                "action_decoding": "json_schema",
+                "enable_thinking": True,
+                "enable_strict_thinking": True,
+                "sampling_action_profile": "model_admissible_canvas_actions",
+                "sampling_schema_version": (
+                    "agentgraph.model-admissible-action-mask.v3"
+                ),
+            },
+            "requires a positive director.max_thinking_tokens",
+        ),
     )
     for director_values, expected_message in invalid_cases:
         config = copy.deepcopy(source)
@@ -185,6 +208,49 @@ def test_live_backend_rejects_invalid_model_admissible_sampling_contract():
                     root,
                     evaluation_only=True,
                 )
+
+
+def test_live_backend_wires_strict_thinking_with_json_schema():
+    root = Path(__file__).resolve().parents[2]
+    config = yaml.safe_load(
+        (root / "config/evaluation_hotpotqa_unified_architecture_v1.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    config["execution_timeout"] = 37.0
+    config["director"].update(
+        {
+            "action_decoding": "json_schema",
+            "enable_thinking": True,
+            "enable_strict_thinking": True,
+            "max_thinking_tokens": 256,
+            "sampling_action_profile": "model_admissible_canvas_actions",
+            "sampling_schema_version": (
+                "agentgraph.model-admissible-action-mask.v3"
+            ),
+        }
+    )
+    fake_transformers = SimpleNamespace(
+        AutoTokenizer=SimpleNamespace(
+            from_pretrained=lambda *args, **kwargs: object()
+        )
+    )
+    with patch.dict(
+        os.environ,
+        {"VECTOR_ENGINE_API_KEY": "unit-test-placeholder"},
+        clear=False,
+    ), patch.dict(sys.modules, {"transformers": fake_transformers}), patch.object(
+        _MODULE,
+        "SGLangReceiptDirectorClient",
+        return_value=object(),
+    ) as director_client:
+        _MODULE.LiveSmokeBackend.from_config(
+            config,
+            root,
+            evaluation_only=True,
+        )
+
+    assert director_client.call_args.kwargs["enable_thinking"] is True
 
 
 def test_live_backend_requires_and_wires_explicit_execution_timeout():

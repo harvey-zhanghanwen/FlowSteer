@@ -44,6 +44,8 @@ class _SGLangControl:
             "max_running_requests": 4,
             "max_total_num_tokens": 717868,
             "enable_deterministic_inference": True,
+            "enable_strict_thinking": True,
+            "reasoning_parser": "qwen3",
             "sampling_backend": "pytorch",
             "attention_backend": "fa3",
             "cuda_graph_backend_decode": "disabled",
@@ -229,6 +231,8 @@ class PolicySyncTests(unittest.TestCase):
         self.assertEqual(receipt["max_running_requests"], 4)
         self.assertEqual(receipt["max_total_num_tokens"], 717868)
         self.assertTrue(receipt["enable_deterministic_inference"])
+        self.assertTrue(receipt["enable_strict_thinking"])
+        self.assertEqual(receipt["reasoning_parser"], "qwen3")
         self.assertEqual(receipt["sampling_backend"], "pytorch")
         self.assertEqual(receipt["attention_backend"], "fa3")
         self.assertEqual(receipt["request_attempts"], {"server_info": 1})

@@ -8,7 +8,11 @@ import time
 import pytest
 from jsonschema import Draft202012Validator
 
-from src.interactive.agent_action_parser import AgentActionParseError, AgentActionParser
+from src.interactive.agent_action_parser import (
+    AgentActionParseError,
+    AgentActionParser,
+    AgentActionType,
+)
 from src.interactive.agent_runtime import AgentResponse
 from src.interactive.agent_workflow_env import (
     AgentWorkflowEnv,
@@ -64,6 +68,7 @@ from src.interactive.rollout_collector import (
     _ADD_ACTION_CONTINUATION,
     _ADD_DECLARATION_CONTINUATION,
     _hierarchical_continuation_prompt,
+    _phase_action_text,
     _validate_v3_hierarchical_action_receipt,
     select_balanced_tasks,
 )
@@ -103,7 +108,7 @@ class ScriptedSGLangClient(SGLangReceiptDirectorClient):
         self.payloads = []
         super().__init__(CharacterTokenizer(), **kwargs)
 
-    def _post_json(self, payload):
+    async def _post_json_async(self, payload):
         self.payloads.append(payload)
         text = self.actions.pop(0)
         output_ids = [ord(character) for character in text]
@@ -125,8 +130,8 @@ class ScriptedSGLangClient(SGLangReceiptDirectorClient):
 
 
 class MismatchedTokenClient(ScriptedSGLangClient):
-    def _post_json(self, payload):
-        value = dict(super()._post_json(payload))
+    async def _post_json_async(self, payload):
+        value = dict(await super()._post_json_async(payload))
         value["output_ids"] = list(value["output_ids"])
         value["output_ids"][-1] += 1
         return value
@@ -350,6 +355,9 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
         "enable_thinking": False,
     }
     assert client.generate_url == "http://127.0.0.1:8015/generate"
+    assert payload["rid"].startswith("flowsteer-director-")
+    assert payload["require_reasoning"] is False
+    assert "custom_params" not in payload["sampling_params"]
     assert payload["input_ids"] == [101, 102, 103]
     assert payload["return_logprob"] is True
     assert payload["lora_path"] == "theta_live"
@@ -370,11 +378,106 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     assert len(response.metadata["output_token_ids"]) == len(
         response.metadata["behavior_log_probs"]
     )
+    assert response.metadata["chat_template_enable_thinking"] is False
 
     action = AgentActionParser().parse(text)
     consumed = client.executed_prefix_tokens(response, action)
     assert consumed == action.consumed_end
     assert consumed < len(response.metadata["output_token_ids"])
+
+
+def test_native_sglang_receipt_can_enable_qwen_thinking_template():
+    raw_text = 'consider alternatives</think>\n{"action":"finish"}'
+    client = ScriptedSGLangClient(
+        [raw_text],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+        enable_thinking=True,
+        max_thinking_tokens=512,
+    )
+
+    response = asyncio.run(client.propose("ordinary prompt", seed=23))
+
+    _, template_kwargs = client.tokenizer.chat_calls[0]
+    payload = client.payloads[0]
+    assert template_kwargs["enable_thinking"] is True
+    assert payload["require_reasoning"] is True
+    assert payload["sampling_params"]["custom_params"] == {
+        "thinking_budget": 512
+    }
+    assert response.text == raw_text
+    assert response.metadata["chat_template_enable_thinking"] is True
+    assert response.metadata["max_thinking_tokens"] == 512
+    assert response.metadata["reasoning_content"] == "consider alternatives"
+    assert response.metadata["post_reasoning_action_text"] == '\n{"action":"finish"}'
+    action = AgentActionParser().parse(response.text)
+    assert action.action_type is AgentActionType.FINISH
+    assert action.consumed_start > response.text.index("</think>")
+    assert client.executed_prefix_tokens(response, action) == action.consumed_end
+
+
+def test_hierarchical_phase_validation_uses_post_reasoning_action_suffix():
+    sampled = (
+        'consider {"action":"finish"} only hypothetically</think>\n'
+        '{"action":"add_subgraph","agents":[]}'
+    )
+    action_text = '\n{"action":"add_subgraph","agents":[]}'
+    assert _phase_action_text(
+        {
+            "text": sampled,
+            "post_reasoning_action_text": action_text,
+            "post_reasoning_action_start": sampled.index("</think>")
+            + len("</think>"),
+        }
+    ) == action_text
+
+
+def test_cancelled_native_sglang_request_calls_abort_endpoint():
+    async def exercise():
+        client = SGLangReceiptDirectorClient(
+            CharacterTokenizer(),
+            policy_version=POLICY_VERSION,
+            expected_server_weight_version="default",
+            max_retries=0,
+        )
+        started = asyncio.Event()
+        released = asyncio.Event()
+        abort_calls = []
+
+        async def blocked_post(payload):
+            started.set()
+            await released.wait()
+            return {
+                "text": '{"action":"finish"}',
+                "output_ids": [ord(value) for value in '{"action":"finish"}'],
+                "meta_info": {
+                    "id": payload["rid"],
+                    "weight_version": "default",
+                    "prompt_tokens": len(payload["input_ids"]),
+                    "completion_tokens": len('{"action":"finish"}'),
+                    "finish_reason": {"type": "stop"},
+                    "output_token_logprobs": [
+                        [-0.01, ord(value), None]
+                        for value in '{"action":"finish"}'
+                    ],
+                },
+            }
+
+        async def abort_post(request_id):
+            abort_calls.append(request_id)
+            released.set()
+
+        client._post_json_async = blocked_post  # type: ignore[method-assign]
+        client._post_abort_json_async = abort_post  # type: ignore[method-assign]
+        generation = asyncio.create_task(client.propose("ordinary prompt", seed=23))
+        await asyncio.wait_for(started.wait(), 1.0)
+        generation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await generation
+        assert len(abort_calls) == 1
+        assert abort_calls[0].startswith("flowsteer-director-")
+
+    asyncio.run(exercise())
 
 
 def test_native_sglang_projects_uint64_seed_to_signed_backend_receipt():

@@ -322,6 +322,19 @@ class SGLangPolicyPublisher:
             raise _RequestFailure(
                 "SGLang server-info enable_deterministic_inference must be boolean"
             )
+        strict_thinking = payload.get("enable_strict_thinking")
+        if not isinstance(strict_thinking, bool):
+            raise _RequestFailure(
+                "SGLang server-info enable_strict_thinking must be boolean"
+            )
+        reasoning_parser = payload.get("reasoning_parser")
+        if reasoning_parser is not None and (
+            not isinstance(reasoning_parser, str)
+            or not reasoning_parser.strip()
+        ):
+            raise _RequestFailure(
+                "SGLang server-info reasoning_parser must be null or non-empty"
+            )
         for field_name in ("attention_backend", "sampling_backend"):
             value = payload.get(field_name)
             if not isinstance(value, str) or not value.strip():
@@ -335,6 +348,8 @@ class SGLangPolicyPublisher:
             "max_running_requests_source": max_running_requests_source,
             "max_total_num_tokens": int(payload["max_total_num_tokens"]),
             "enable_deterministic_inference": deterministic,
+            "enable_strict_thinking": strict_thinking,
+            "reasoning_parser": reasoning_parser,
             "sampling_backend": str(payload["sampling_backend"]),
             "attention_backend": str(payload["attention_backend"]),
             "cuda_graph_backend_decode": payload.get(
