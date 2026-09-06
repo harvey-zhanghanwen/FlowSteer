@@ -271,6 +271,38 @@ def _requested_sampling(payload: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _structured_output_request_receipt(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Compact receipt of the client's actual structured-output parameters.
+
+    Reuses SkillFlow's response_format.json_schema boundary. This describes
+    the payload passed to _post_json, not server support or valid generation.
+    Never retain schema bodies, prompts, headers or credentials here.
+    """
+    response_format = payload.get("response_format")
+    receipt: Dict[str, Any] = {
+        "requested": isinstance(response_format, Mapping),
+        "scope": "client_request_only",
+        "provider_enforcement_verified": False,
+    }
+    if not isinstance(response_format, Mapping):
+        return receipt
+    json_schema = response_format.get("json_schema")
+    json_schema = json_schema if isinstance(json_schema, Mapping) else {}
+    schema = json_schema.get("schema")
+    schema = schema if isinstance(schema, Mapping) else {}
+    root = [schema["type"]] if isinstance(schema.get("type"), str) else []
+    combinator = next((key for key in ("oneOf", "anyOf") if isinstance(schema.get(key), list)), None)
+    if combinator is not None:
+        root.append(combinator)
+    receipt.update({
+        "type": response_format.get("type"),
+        "strict": json_schema.get("strict"),
+        "schema_root": "+".join(root) if root else None,
+        "schema_branch_count": len(schema[combinator]) if combinator else (1 if schema else 0),
+    })
+    return receipt
+
+
 def _sglang_backend_sampling_seed(seed: int) -> int:
     """Project a scientific uint64 seed into SGLang's signed int64 domain."""
 
@@ -2033,6 +2065,7 @@ class OpenAICompatibleGateway:
                         "generation_seed": scientific_generation_seed,
                         "backend_sampling_seed": payload.get("seed"),
                         "requested_sampling": requested_sampling,
+                        "structured_output_request": _structured_output_request_receipt(payload),
                         "request_status": "completed",
                     }
                 )

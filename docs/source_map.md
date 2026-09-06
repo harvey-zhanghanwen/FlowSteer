@@ -1,5 +1,31 @@
 # Dataset adaptation source map
 
+## HealthBench v2.42 — per-model budgets and observed-source schema
+
+- `react_execution.py`: directly retains SkillFlow-style StructuredAction and
+  the existing HealthBench action union. The opt-in budget reads the existing
+  ModelSpec metadata rather than replacing every Executor budget with the
+  Director budget. A state-aware completion hook delegates to existing schemas.
+- `healthbench_evidence_adapter.py`, `healthbench_clinical_react.py`: reuse actual
+  Tool Observations, `_successful_search_evidence` and routed receipts; constrain
+  only complete source-metadata tuples in the existing completion schema.
+  Strict span validation still runs; no answer, quote or clinical claim is filled in.
+- `openai_gateway.py`: add a small receipt from the existing payload passed to
+  `_post_json`, following SkillFlow's response_schema interface. This records a
+  client request, not proof of provider-side schema enforcement.
+- `agent_workflow_env.py`: reuse `_provider_repair_catalog_domain`, the same
+  repair target mask and admission checks; opt in to retaining compatible
+  same-provider alternatives on a 429 of unknown scope. No new router or
+  provider model is introduced, and the Director still chooses the edit.
+- `train_agentgraph_smoke.py` and versioned configs: thin opt-in forwarding;
+  reuse the existing AgentRuntime timeout setting (360 seconds per invocation,
+  not per model turn). Task deadline remains 900 seconds.
+- Candidate profile v2.42 reuses the v2.41 helper/collector and MD §§10–11
+  boundaries. It remains unvalidated/rejectable; no ACTIVE publication or training.
+
+See `docs/healthbench_v242_run_conditions.md` and
+`docs/healthbench_v242_skill_changes.md` for the precise experimental changes.
+
 ## HealthBench v2.41 — inference-only bounded recovery and candidate conditions
 
 | Changed module | Concrete source / reuse | Necessary adaptation |

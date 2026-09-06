@@ -16,6 +16,7 @@ IDs, rubrics, reference responses, ground truth, or evaluator state.
 from __future__ import annotations
 
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 import json
@@ -763,6 +764,8 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
         require_structured_evidence_artifact: bool = False,
         require_complete_natural_language_artifact: bool = False,
         enable_evidence_repair_feedback: bool = False,
+        constrain_evidence_metadata: bool = False,
+        respect_model_action_token_budget: bool = False,
         completion_quality_profile: str = (
             HEALTHBENCH_COMPLETION_QUALITY_PROFILE_V1
         ),
@@ -774,6 +777,8 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
             raise TypeError("require_initial_search must be boolean")
         if type(enable_evidence_repair_feedback) is not bool:
             raise TypeError("enable_evidence_repair_feedback must be boolean")
+        if type(constrain_evidence_metadata) is not bool:
+            raise TypeError("constrain_evidence_metadata must be boolean")
         if type(require_relevant_evidence) is not bool:
             raise TypeError("require_relevant_evidence must be boolean")
         if type(require_task_query_anchor) is not bool:
@@ -808,7 +813,10 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
         maximum_query_content_tokens = _validated_max_query_content_tokens(
             max_query_content_tokens
         )
-        super().__init__(**kwargs)
+        super().__init__(
+            respect_model_action_token_budget=respect_model_action_token_budget,
+            **kwargs,
+        )
         if max_successful_searches is None:
             max_successful_searches = min(
                 AUTHORITATIVE_MAX_SUCCESSFUL_SEARCHES,
@@ -823,6 +831,7 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
             )
         self._require_initial_search = require_initial_search
         self._enable_evidence_repair_feedback = enable_evidence_repair_feedback
+        self._constrain_evidence_metadata = constrain_evidence_metadata
         self._require_relevant_evidence = require_relevant_evidence
         self._require_task_query_anchor = require_task_query_anchor
         self._require_refinement_on_insufficient_evidence = (
@@ -1041,6 +1050,81 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
             },
             "additionalProperties": False,
         }
+
+    def _completion_arguments_schema_for_state(
+        self,
+        request: AgentRequest,
+        observations: list[Mapping[str, object]],
+    ) -> Mapping[str, object]:
+        """Constrain copied source metadata, never generate or approve claims.
+
+        Necessary HealthBench adaptation of SkillFlow's public Action schema
+        boundary. Reuse the existing successful-source projection and Runtime
+        provenance walk. Each branch describes one whole observed metadata
+        tuple; independent per-field enums would admit fabricated mixtures.
+        The unchanged completion validator still requires a continuous span
+        from that receipt. A schema-valid claim is not a clinical correctness
+        judgment, and metadata-only hits cannot supply an evidence span.
+        """
+        schema = self._completion_arguments_schema(request)
+        if not self._constrain_evidence_metadata:
+            return schema
+        value_schema = schema.get("properties", {}).get("value", {})
+        if value_schema.get("type") != "object" or "evidence_items" not in value_schema.get("properties", {}):
+            # Output Agents still emit the original complete assistant
+            # response; non-literature contracts retain their existing type.
+            return schema
+
+        receipts = list(_routed_evidence_receipts(request))
+        for observation in observations:
+            action = observation.get("executed_action")
+            if (
+                observation.get("observation_status") != "success"
+                or observation.get("completed") is not True
+                or not isinstance(action, Mapping)
+                or action.get("kind") != "tool"
+                or not isinstance(observation.get("result"), Mapping)
+            ):
+                continue
+            # The executor's public Observation is the ToolReceipt's result
+            # plus the actual dispatched action; restore only that envelope.
+            receipts.append({
+                "tool_id": action.get("resource_id"),
+                "error_type": None,
+                "request": {"action": action.get("name"), "arguments": action.get("arguments")},
+                "result": {"completed": True, "value": observation["result"]},
+            })
+        fields = ("document_id", "source", "title", "date", "url")
+        metadata_rows = []
+        for source in self._successful_search_evidence(receipts):
+            if (
+                not isinstance(source.get("excerpt"), str)
+                or not source["excerpt"].strip()
+                or any(not isinstance(source.get(key), str) or not source[key].strip()
+                       for key in fields[:3])
+                or any(source.get(key) is not None and not isinstance(source[key], str)
+                       for key in fields[3:])
+            ):
+                continue
+            metadata = {key: source.get(key) for key in fields}
+            if metadata not in metadata_rows:
+                metadata_rows.append(metadata)
+
+        constrained = deepcopy(dict(schema))
+        properties = constrained["properties"]["value"]["properties"]
+        if metadata_rows:
+            properties["evidence_items"]["items"]["anyOf"] = [
+                {"properties": {key: {"const": row[key]} for key in fields}}
+                for row in metadata_rows
+            ]
+        else:
+            # This is exactly the existing no-evidence completion boundary,
+            # expressed before sampling rather than after a made-up citation.
+            # Completion remains legal; search and topology are not forced.
+            properties["status"] = {"const": "insufficient"}
+            properties["evidence_items"]["maxItems"] = 0
+            properties["uncertainties"]["minItems"] = 1
+        return constrained
 
     def _completion_error(
         self,
@@ -1691,7 +1775,7 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
                         resource_id=HEALTHBENCH_AUTHORITATIVE_SEARCH_TOOL_ID,
                     ),
                     self._action_schema(
-                        arguments_schema=self._completion_arguments_schema(request),
+                        arguments_schema=self._completion_arguments_schema_for_state(request, observations),
                         kind="complete",
                         name="complete",
                         resource_id=None,

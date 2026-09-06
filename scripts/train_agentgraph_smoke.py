@@ -1057,6 +1057,13 @@ def _healthbench_tool_runtime_settings(
             "enable_evidence_repair_feedback must be bool and requires authoritative mode"
         )
     settings["enable_evidence_repair_feedback"] = evidence_repair_feedback
+    for field in ("constrain_evidence_metadata", "respect_model_action_token_budget"):
+        value = section.get(field, False)
+        if type(value) is not bool or (
+            value and runtime_mode != HEALTHBENCH_AUTHORITATIVE_TOOL_RUNTIME_MODE
+        ):
+            raise ConfigurationError(f"{field} must be bool and requires authoritative mode")
+        settings[field] = value
     if toolset == "source_separated_clinical_v1":
         for key in ("knowledge_root", "skillflow_source"):
             value = section.get(key)
@@ -2619,6 +2626,8 @@ class LiveSmokeBackend:
                     ),
                 }
                 if authoritative:
+                    adapter_arguments["constrain_evidence_metadata"] = healthbench_settings["constrain_evidence_metadata"]
+                    adapter_arguments["respect_model_action_token_budget"] = healthbench_settings["respect_model_action_token_budget"]
                     adapter_arguments["enable_evidence_repair_feedback"] = (
                         healthbench_settings["enable_evidence_repair_feedback"]
                     )
@@ -3945,6 +3954,9 @@ class LiveSmokeBackend:
                 semantic_protocol=semantic_protocol,
                 recovery_policy=recovery_policy,
                 required_evidence_tool_id=required_evidence_tool_id,
+                allow_same_provider_transient_repair=graph_config.get(
+                    "allow_same_provider_transient_repair", False
+                ),
                 finish_only_when_admissible=bool(
                     graph_config.get("finish_only_when_admissible", False)
                 ),

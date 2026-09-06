@@ -1,5 +1,29 @@
 # Dataset adaptation log
 
+## 2026-09-06 — HealthBench v2.42 candidate
+
+The v2.41 five-task runs were kept frozen. Their failures justify per-model
+generation budgets, bounded source-metadata choices and an Agent-invocation
+budget that can accommodate multiple ReAct turns. v2.42 changes neither the
+official evaluator nor the strict evidence-span validator; it does not repair
+truncated JSON by inventing missing output. New candidate rules focus on
+unverified premises, specific error recovery and faithful final synthesis.
+
+Correction to the preliminary diagnosis: HealthBench's actual subclasses
+already send full-domain oneOf schemas. The generic base-class multi-action
+behavior was not the executed path. No replacement union-schema implementation
+is retained. Provider enforcement remains unverified; the next run records the
+client's actual structured-output request parameters compactly.
+
+Tests: new budget/hook plus existing ReAct tests 39 passed/5 subtests passed;
+source schema 22 passed; response-format receipt 5 passed; new and previous
+factory tests 27 passed. These are offline checks, not new task scores.
+
+The opt-in 429 repair domain now preserves other available, execution-compatible
+models from the same provider when only a model-level transient failure is
+observed. Its 18 targeted tests passed; the final factory/config integration
+passed seven targeted checks. No additional provider probes were performed.
+
 ## 2026-09-06 — HealthBench v2.41
 
 Scope: repair concrete v2.40 context exhaustion and repeated evidence completion

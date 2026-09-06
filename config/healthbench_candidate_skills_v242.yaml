@@ -1,0 +1,66 @@
+# Predeclared, unvalidated orchestration conditions; no ACTIVE publication.
+# Reuses the v2.41 profile schema, helper, and existing rejectable prior wire.
+schema_version: flowsteer.healthbench-candidate-skill-profile.v1
+profile_version: healthbench.orchestration-candidates.v2.42
+dataset_key: healthbench_professional
+status: candidate
+training_enabled: false
+skill_publication_enabled: false
+candidates:
+  - condition_id: preserve_goal_and_check_premises_v242
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: >-
+      Planning or revising a contract, query, or dependency that interprets
+      the supplied conversation or a proposed conclusion.
+    action:
+      instruction: >-
+        Preserve the user's actual goal, requested relation, scope, and output
+        form. Separate these requirements from unverified premises in a
+        suggested plan or conclusion; a request to state something is not
+        evidence that it is true. Bind findings to the actual entity and
+        applicability. If reliable evidence conflicts with a premise, explain
+        that conflict while still addressing the original goal. Do not replace
+        ambiguity with an unsupported interpretation or change the subject.
+  - condition_id: repair_specific_failure_from_receipts_v242
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: >-
+      Actual Canvas feedback identifies a field, Tool, artifact, dependency,
+      or provider failure.
+    action:
+      instruction: >-
+        Preserve valid artifacts and working relations. Use the specific
+        reported error to repair the affected field, source binding, or
+        dependency; changing contract wording alone is not a repair. Reuse
+        actual receipts, keep quotations faithful, and read the source if
+        missing information requires it. Do not repeat an unchanged failed
+        request or search. For a provider failure, choose any suitable
+        alternative in the currently admitted model domain while preserving
+        the node's task and useful artifacts. Add a repair unit only if needed.
+  - condition_id: verify_output_against_actual_findings_v242
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: before_final_answer
+      required_tools: []
+    trigger: >-
+      The graph is structurally complete and an output is being considered
+      for submission; available text or an admissible FINISH does not establish
+      that its content is correct.
+    action:
+      instruction: >-
+        Compare the actual output with the original request and the findings
+        delivered by upstream Agents. Preserve supported conclusions, relevant
+        conditions, and uncertainty; resolve inconsistencies rather than
+        merging them or dropping inconvenient details. Do not invent facts to
+        fill an unknown. If a specific conflict remains, consider an
+        independent check with freely chosen model, responsibility, and
+        relations; do not add Agents merely to increase their number. Submit
+        only after addressing the task and when FINISH is admissible.

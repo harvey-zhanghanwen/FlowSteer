@@ -429,6 +429,7 @@ class AgentWorkflowEnv:
         reuse_unchanged_agent_inputs: bool = False,
         require_output_protocol_artifact_for_set_output: bool = False,
         require_reciprocal_terminal_artifact_lineage: bool = False,
+        allow_same_provider_transient_repair: bool = False,
     ) -> None:
         if runtime is None and gateway is None:
             raise AgentWorkflowStateError("gateway or runtime is required")
@@ -471,6 +472,7 @@ class AgentWorkflowEnv:
                 require_explicit_safety_scope_preservation,
             ),
             ("reuse_unchanged_agent_inputs", reuse_unchanged_agent_inputs),
+            ("allow_same_provider_transient_repair", allow_same_provider_transient_repair),
             (
                 "require_output_protocol_artifact_for_set_output",
                 require_output_protocol_artifact_for_set_output,
@@ -590,6 +592,7 @@ class AgentWorkflowEnv:
             require_explicit_safety_scope_preservation
         )
         self.reuse_unchanged_agent_inputs = reuse_unchanged_agent_inputs
+        self.allow_same_provider_transient_repair = allow_same_provider_transient_repair
         self.require_output_protocol_artifact_for_set_output = (
             require_output_protocol_artifact_for_set_output
         )
@@ -3776,6 +3779,8 @@ class AgentWorkflowEnv:
     def _provider_repair_catalog_domain(
         self,
         current_model_id: str,
+        *,
+        include_same_provider: bool = False,
     ) -> Tuple[str, ...]:
         """Return cross-provider arms, or same-provider fallback if necessary."""
 
@@ -3787,6 +3792,8 @@ class AgentWorkflowEnv:
             for model_id in self._available_model_ids()
             if model_id != current_model_id
         )
+        if include_same_provider:
+            return alternatives
         cross_provider = tuple(
             model_id
             for model_id in alternatives
@@ -3920,7 +3927,34 @@ class AgentWorkflowEnv:
         current_model_id = self._graph.get_node(agent_id).model_id
         if not self._provider_repair_required(agent_id):
             return ()
-        return self._provider_repair_catalog_domain(current_model_id)
+        include_same_provider = self._same_provider_transient_repair_allowed(agent_id)
+        alternatives = self._provider_repair_catalog_domain(
+            current_model_id, include_same_provider=include_same_provider,
+        )
+        if include_same_provider:
+            node = self._graph.get_node(agent_id)
+            return tuple(model_id for model_id in alternatives
+                         if self.runtime.model_supports_execution_profile(
+                             model_id, node.execution_mode.value, node.allowed_tools,
+                         ))
+        return alternatives
+
+    def _same_provider_transient_repair_allowed(self, agent_id: str) -> bool:
+        """An observed model's 429 is not a provider-wide availability fact.
+
+        Necessary correction within the existing SkillFlow model/provider
+        distinction and FlowSteer admission boundary. Require the actual
+        typed HTTP receipt; do not infer this opt-in from arbitrary text.
+        """
+        record = self._latest_failure_record_by_agent.get(agent_id)
+        return bool(
+            self.allow_same_provider_transient_repair
+            and record is not None
+            and type(record.metadata.get("http_status")) is int
+            and record.metadata["http_status"] == 429
+            and self._execution_failure_diagnosis(record)
+            == ("provider_request_failure", "transient_provider", 429)
+        )
 
     def _provider_repair_avoid_provider_id(
         self,
@@ -3929,6 +3963,8 @@ class AgentWorkflowEnv:
         """Return the failed provider only when a cross-provider arm exists."""
 
         if not self._graph.has_node(agent_id):
+            return None
+        if self._same_provider_transient_repair_allowed(agent_id):
             return None
         current_model_id = self._graph.get_node(agent_id).model_id
         current_provider_id = self.model_registry.provider_for(
@@ -4819,6 +4855,7 @@ class AgentWorkflowEnv:
             require_reciprocal_terminal_artifact_lineage=(
                 self.require_reciprocal_terminal_artifact_lineage
             ),
+            allow_same_provider_transient_repair=self.allow_same_provider_transient_repair,
         )
         result._turn_count = state.turn_count
         result._finished = state.finished
@@ -12506,12 +12543,15 @@ class AgentWorkflowEnv:
                         ],
                     }
             elif category == "provider_request_failure" and model_id is not None:
-                admitted_model_ids = self._provider_repair_catalog_domain(
-                    model_id
+                include_same_provider = self._same_provider_transient_repair_allowed(record.agent_id)
+                admitted_model_ids = (
+                    self._provider_repair_model_ids(record.agent_id)
+                    if include_same_provider
+                    else self._provider_repair_catalog_domain(model_id)
                 )
                 avoid_provider_id = (
                     provider_id
-                    if any(
+                    if not include_same_provider and any(
                         self.model_registry.provider_for(candidate_model_id).provider_id
                         != provider_id
                         for candidate_model_id in admitted_model_ids
@@ -12525,6 +12565,7 @@ class AgentWorkflowEnv:
                         "field": "model_id",
                         "admitted_model_ids": list(admitted_model_ids),
                         **(
+                            {} if include_same_provider else
                             {"avoid_provider_id": avoid_provider_id}
                             if avoid_provider_id is not None
                             else {"fallback_provider_id": provider_id}

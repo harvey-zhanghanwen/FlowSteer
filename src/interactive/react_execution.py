@@ -142,6 +142,7 @@ class ToolReactExecutionAdapter:
         max_action_tokens: int = 512,
         execution_mode: str = "react",
         enforce_state_conditioned_completion_admission: bool = False,
+        respect_model_action_token_budget: bool = False,
         sampling_base_seed: int | None = None,
         sampling_coordinate: ScientificSamplingCoordinate | None = None,
     ) -> None:
@@ -161,6 +162,8 @@ class ToolReactExecutionAdapter:
             raise TypeError(
                 "enforce_state_conditioned_completion_admission must be bool"
             )
+        if type(respect_model_action_token_budget) is not bool:
+            raise TypeError("respect_model_action_token_budget must be bool")
         if (sampling_base_seed is None) != (sampling_coordinate is None):
             raise ValueError(
                 "sampling_base_seed and sampling_coordinate must be supplied together"
@@ -199,6 +202,7 @@ class ToolReactExecutionAdapter:
         self._enforce_state_conditioned_completion_admission = (
             enforce_state_conditioned_completion_admission
         )
+        self._respect_model_action_token_budget = respect_model_action_token_budget
         self._sampling_base_seed = sampling_base_seed
         self._sampling_coordinate = sampling_coordinate
         # AgentRuntime's timeout boundary normalizes CancelledError.  Preserve
@@ -283,7 +287,7 @@ class ToolReactExecutionAdapter:
             and not admitted_tool_actions
             and completion_admitted
         ):
-            arguments_schema = self._completion_arguments_schema(request)
+            arguments_schema = self._completion_arguments_schema_for_state(request, observations)
             kind = "complete"
             name = "complete"
         if arguments_schema is None or kind is None or name is None:
@@ -306,6 +310,33 @@ class ToolReactExecutionAdapter:
             },
             "additionalProperties": False,
         }
+
+    def _completion_arguments_schema_for_state(
+        self, request: AgentRequest, observations: list[Mapping[str, object]],
+    ) -> Mapping[str, object]:
+        """Thin hook for schemas bound to already observed source metadata."""
+        del observations
+        return self._completion_arguments_schema(request)
+
+    def _action_token_budget(self, request: AgentRequest) -> int:
+        """Opt-in per-model generation allowance, with no implicit coercion.
+
+        ModelRegistry stores configuration metadata as strings. Accept its
+        decimal integer representation as well as a typed positive integer;
+        a declared malformed value must not silently fall back to 4096.
+        """
+        if not self._respect_model_action_token_budget or "max_tokens" not in request.model.metadata:
+            return self._max_action_tokens
+        declared = request.model.metadata["max_tokens"]
+        if type(declared) is int:
+            maximum = declared
+        elif isinstance(declared, str) and declared.strip().isascii() and declared.strip().isdigit():
+            maximum = int(declared.strip())
+        else:
+            raise ValueError("model metadata max_tokens must be a positive integer")
+        if maximum <= 0:
+            raise ValueError("model metadata max_tokens must be a positive integer")
+        return maximum
 
     @staticmethod
     def _model_visible_observations(
@@ -446,7 +477,7 @@ class ToolReactExecutionAdapter:
         completion_schema = {
             "kind": {"const": "complete"},
             "name": {"const": "complete"},
-            "arguments": dict(self._completion_arguments_schema(request)),
+            "arguments": dict(self._completion_arguments_schema_for_state(request, observations)),
             "resource_id": {"const": None},
             "skill_id": {"const": None},
         }
@@ -528,6 +559,7 @@ class ToolReactExecutionAdapter:
             raise ReactExecutionError(
                 "execution adapter mode does not match the Agent contract"
             )
+        action_token_budget = self._action_token_budget(request)
         observations = self._continuation_observations(request.action_history)
         continuation_source = request.continuation_source_agent_id
         trace: list[dict[str, object]] = [
@@ -601,7 +633,7 @@ class ToolReactExecutionAdapter:
             )
             model_metadata = {
                 **dict(request.model.metadata),
-                "max_tokens": str(self._max_action_tokens),
+                "max_tokens": str(action_token_budget),
             }
             absolute_step_index = continuation_step_offset + turn
             scientific_sampling_receipt: dict[str, object] | None = None
@@ -609,7 +641,7 @@ class ToolReactExecutionAdapter:
                 "temperature": None,
                 "top_p": None,
                 "top_k": None,
-                "max_tokens": self._max_action_tokens,
+                "max_tokens": action_token_budget,
                 "seed": None,
             }
             if (
@@ -638,7 +670,7 @@ class ToolReactExecutionAdapter:
                     "temperature": 1.0,
                     "top_p": 1.0,
                     "top_k": top_k,
-                    "max_tokens": self._max_action_tokens,
+                    "max_tokens": action_token_budget,
                     "seed": generation_seed,
                 }
                 raw_enable_thinking = model_metadata.get(

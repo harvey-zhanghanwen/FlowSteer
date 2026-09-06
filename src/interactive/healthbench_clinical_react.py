@@ -167,7 +167,7 @@ class HealthBenchClinicalReactExecutionAdapter(
             for tool_id, name in sorted(admitted)
         ]
         branches.append(self._action_schema(
-            arguments_schema=self._completion_arguments_schema(request),
+            arguments_schema=self._completion_arguments_schema_for_state(request, observations),
             kind="complete", name="complete", resource_id=None,
         ))
         return branches[0] if len(branches) == 1 else {"oneOf": branches}
