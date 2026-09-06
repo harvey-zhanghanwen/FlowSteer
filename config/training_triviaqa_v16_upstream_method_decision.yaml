@@ -115,6 +115,45 @@ common_runtime_contract_after_method_selection:
   sync_failure_policy: "fail_closed"
   wandb: "required_online_fail_closed"
 
+wandb_binding:
+  schema_version: "flowsteer.wandb.binding.v1"
+  specification: "docs/TRIVIAQA_V16_WANDB_BINDING.md"
+  required: true
+  mode: "online"
+  entity: "zhanghanwen6660909-dut"
+  project: "flowsteer-triviaqa"
+  credential_source: "wandb_sdk_standard"
+  resume: "never"
+  run_id: null
+  require_run_url_before_training_started_status: true
+  api_key_in_config_allowed: false
+  step_fields:
+    - "global_step"
+    - "dataset"
+    - "behavior_policy_version"
+    - "updated_policy_version"
+    - "checkpoint_version"
+    - "terminal_reward"
+    - "group_reward_mean"
+    - "group_reward_std"
+    - "valid_rollouts"
+    - "grpo_loss"
+    - "grad_norm"
+    - "lora_update_l2"
+    - "train_metrics"
+    - "validation_metrics"
+    - "gpu_metrics"
+    - "step_elapsed_seconds"
+    - "checkpoint_status"
+    - "publish_status"
+    - "route_switch_status"
+    - "canary_status"
+  checkpoint_artifact:
+    type: "model"
+    latest_alias: "every_materialized_optimizer_checkpoint"
+    best_alias: "same_split_same_evaluator_same_protocol_held_out_improvement_only"
+    recovery_metadata_required: true
+
 source_implementation_gaps:
   flowsteer_released_code:
     - "Configured clip/KL/entropy are not used by the formal loss function."
@@ -177,8 +216,16 @@ acceptance_gates:
   gpu_inventory_and_nonconflicting_allocation_verified: false
   gpu_preflight_observation: "current task namespace exposes zero CUDA devices"
   wandb_client_installed: true
-  wandb_online_authentication_present: false
+  wandb_standard_credentials_reported_by_user: true
+  wandb_online_connection_verified: false
+  wandb_run_url: null
   wandb_online_fail_closed_ready: false
+  wandb_runner_adapter_implemented: true
+  wandb_mock_tests_passed: true
+  wandb_concrete_held_out_and_gpu_evidence_provider_implemented: false
+  complete_checkpoint_schema_implemented: true
+  complete_checkpoint_cpu_tests_passed: true
+  complete_checkpoint_real_step_verified: false
   exact_training_data_materialized: false
   selected_loss_and_token_mask_verified: false
   one_real_step_closed_loop_verified: false

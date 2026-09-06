@@ -1,0 +1,41 @@
+{
+  "schema_version": "flowsteer.wandb.binding-status.v1",
+  "marker": "WANDB_BINDING_20260906_V1",
+  "dataset": "triviaqa",
+  "entity": "zhanghanwen6660909-dut",
+  "project": "flowsteer-triviaqa",
+  "mode": "online",
+  "credential_source": "wandb_sdk_standard",
+  "training_objective": "action_masked_one_pass_grpo",
+  "ttb_enabled": false,
+  "starting_branch": "backup/triviaqa-fact-memory-v16-best-82p81-20260906",
+  "starting_commit": "114bd8b6378af55fbd1f40cdfdda91c79314a771",
+  "training_branch": "train/triviaqa-v16-md-full-compliance-20260906",
+  "md_full_compliance_accepted": false,
+  "strict_current_phase": "phase_0_data_trust",
+  "phase_0_accepted": false,
+  "runner_adapter_implemented": true,
+  "complete_checkpoint_schema_implemented": true,
+  "mock_sdk_tests_passed": true,
+  "formal_held_out_validation_provider_implemented": false,
+  "gpu_telemetry_provider_implemented": false,
+  "online_connection_verified": false,
+  "wandb_run_id": null,
+  "wandb_run_url": null,
+  "optimizer_steps": 0,
+  "adapter_publications": 0,
+  "post_update_rollouts": 0,
+  "test_receipt": {
+    "passed": 59,
+    "subtests_passed": 10,
+    "scope": "checkpoint, W&B mock SDK, one-pass GRPO records/objective, smoke selection and prepare-only"
+  },
+  "blocking_conditions": [
+    "Phase 0 split isolation is not accepted",
+    "branch-local raw trajectory evidence is incomplete",
+    "ReAct provider sub-call token receipts are incomplete",
+    "same-problem same-condition on-policy train groups are not materialized",
+    "formal held-out validation and GPU telemetry providers are not production-wired",
+    "the current task namespace exposes no CUDA device"
+  ]
+}

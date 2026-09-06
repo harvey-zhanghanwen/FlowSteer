@@ -30,6 +30,12 @@ from .grpo_objective import (
 from .records import TrajectoryRecord
 
 
+_COMPLETE_TRAINING_STATE_FORMAT = "flowsteer-one-pass-grpo-training-state-v2"
+_DISABLED_SCHEDULER_STATUS = "disabled_constant_learning_rate"
+_CHECKPOINT_ADAPTER_RELATIVE_PATH = "."
+_TRAINING_STATE_RELATIVE_PATH = "training_state.pt"
+
+
 @dataclass(frozen=True)
 class SmokeTrainerConfig:
     model_path: str
@@ -205,6 +211,15 @@ class SmokeTrainingSummary:
     optimizer_resume_status: str = "not_started"
     optimizer_state_checkpoint: str = ""
     optimizer_state_saved: bool = False
+    checkpoint_ready: bool = False
+    checkpoint_version: str = ""
+    training_state_checkpoint: str = ""
+    training_state_format: str = ""
+    scheduler_state_status: str = "not_saved"
+    rng_state_saved: bool = False
+    rng_state_restored: bool = False
+    consumed_trajectory_ids: Tuple[str, ...] = ()
+    consumed_group_keys: Tuple[Tuple[str, str, str], ...] = ()
     gradient_partition_token_costs: Tuple[int, int] = (0, 0)
     provider_logprob_diagnostic_exceeded: bool = False
     provider_logprob_diagnostic_tolerance: float = 0.0
@@ -212,6 +227,46 @@ class SmokeTrainingSummary:
     provider_logprob_exceeded_tokens: int = 0
     provider_logprob_mean_abs_delta: float = 0.0
     provider_logprob_p95_abs_delta: float = 0.0
+
+    def __post_init__(self) -> None:
+        # A reported optimizer update is not committed until both the SkillFlow
+        # PEFT adapter and the FlowSteer-style complete training state are
+        # durably materialized.  This keeps publish/route-switch code from
+        # treating an adapter-only directory as a recoverable checkpoint.
+        if self.optimizer_updates > 0 and not self.checkpoint_ready:
+            raise ValueError(
+                "an optimizer update requires a complete recoverable checkpoint"
+            )
+        if self.checkpoint_ready:
+            required_strings = (
+                self.checkpoint_dir,
+                self.checkpoint_version,
+                self.training_state_checkpoint,
+                self.training_state_format,
+                self.updated_policy_version,
+            )
+            if any(not value for value in required_strings):
+                raise ValueError("checkpoint-ready summary is missing checkpoint metadata")
+            if not self.optimizer_state_saved or not self.rng_state_saved:
+                raise ValueError(
+                    "checkpoint-ready summary requires optimizer and RNG state"
+                )
+            if self.scheduler_state_status != _DISABLED_SCHEDULER_STATUS:
+                raise ValueError(
+                    "checkpoint-ready summary requires the scheduler state contract"
+                )
+            if self.update_step <= 0 or self.committed_step != self.update_step:
+                raise ValueError(
+                    "checkpoint-ready summary must bind the committed update step"
+                )
+            if len(self.consumed_trajectory_ids) != self.trained_trajectories:
+                raise ValueError(
+                    "checkpoint-ready summary trajectory count differs from consumed IDs"
+                )
+            if len(self.consumed_group_keys) != self.trained_groups:
+                raise ValueError(
+                    "checkpoint-ready summary group count differs from consumed keys"
+                )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -315,6 +370,8 @@ class Qwen35OnePassSmokeTrainer:
 
     def __init__(self, config: SmokeTrainerConfig) -> None:
         self.config = config
+        self._rng_state_restored = False
+        self._scheduler_state_status = "not_restored"
 
     def train(
         self,
@@ -443,6 +500,24 @@ class Qwen35OnePassSmokeTrainer:
         devices = [self.config.learner_device, self.config.gradient_replica_device]
 
         try:
+            # FlowSteer restores optimizer/scheduler/RNG state before entering
+            # the resumed step.  This trainer intentionally has no scheduler;
+            # the checkpoint therefore carries a validated disabled contract
+            # instead of introducing a new scheduling algorithm.
+            trainable = [
+                parameter
+                for parameter in learner.parameters()
+                if parameter.requires_grad
+            ]
+            optimizer = torch.optim.AdamW(
+                trainable,
+                lr=self.config.learning_rate,
+                weight_decay=0.01,
+            )
+            optimizer_resume_status = self._restore_optimizer_state(
+                torch,
+                optimizer,
+            )
             with ThreadPoolExecutor(max_workers=2) as pool:
                 futures = [
                     pool.submit(
@@ -544,6 +619,9 @@ class Qwen35OnePassSmokeTrainer:
                         if self.config.behavior_adapter_checkpoint is not None
                         else 0
                     ),
+                    optimizer_resume_status=optimizer_resume_status,
+                    scheduler_state_status=self._scheduler_state_status,
+                    rng_state_restored=self._rng_state_restored,
                     gradient_partition_token_costs=partition_token_costs,
                     provider_logprob_diagnostic_exceeded=(
                         provider_logprob_diagnostic_exceeded
@@ -591,7 +669,13 @@ class Qwen35OnePassSmokeTrainer:
                             models, devices, accepted_partitions
                         )
                     ]
-                    results: list[tuple[float, int] | None] = []
+                    results: list[
+                        tuple[
+                            float,
+                            tuple[tuple[tuple[str, str, str], str], ...],
+                        ]
+                        | None
+                    ] = []
                     failures: list[BaseException] = []
                     for future in futures:
                         try:
@@ -621,23 +705,35 @@ class Qwen35OnePassSmokeTrainer:
                     "micro-batch schedule"
                 )
 
+            consumed_pairs = tuple(
+                pair
+                for _, partition_consumed in partition_stats
+                for pair in partition_consumed
+            )
+            expected_pairs = {
+                (key, item.trajectory_id)
+                for key, group in accepted_groups
+                for item in group
+            }
+            if len(consumed_pairs) != len(set(consumed_pairs)) or set(
+                consumed_pairs
+            ) != expected_pairs:
+                raise RuntimeError(
+                    "backward consumption differs from the sealed accepted batch"
+                )
+            consumed_trajectory_ids = tuple(
+                sorted(trajectory_id for _, trajectory_id in consumed_pairs)
+            )
+            consumed_group_keys = tuple(sorted({key for key, _ in consumed_pairs}))
+            consumed_group_count = len(consumed_group_keys)
+
             self._merge_replica_grads(learner, replica)
-            trainable = [parameter for parameter in learner.parameters() if parameter.requires_grad]
             grad_norm_tensor = torch.nn.utils.clip_grad_norm_(
                 trainable, self.config.max_grad_norm
             )
             grad_norm = float(grad_norm_tensor.detach().cpu())
             if not math.isfinite(grad_norm) or grad_norm <= 0.0:
                 raise RuntimeError("informative GRPO batch produced no finite parameter gradient")
-            optimizer = torch.optim.AdamW(
-                trainable,
-                lr=self.config.learning_rate,
-                weight_decay=0.01,
-            )
-            optimizer_resume_status = self._restore_optimizer_state(
-                torch,
-                optimizer,
-            )
             before_step = [parameter.detach().clone() for parameter in trainable]
             optimizer.step()
             update_l2_sq = sum(
@@ -681,9 +777,59 @@ class Qwen35OnePassSmokeTrainer:
                 raise RuntimeError(
                     "PEFT did not materialize a complete theta adapter checkpoint"
                 )
-            optimizer_state_checkpoint, optimizer_state_saved = (
-                self._save_optimizer_state(torch, optimizer, checkpoint)
+            total_loss = sum(item[0] for item in partition_stats)
+            trained_trajectories = len(consumed_trajectory_ids)
+            trained_rewards = [
+                float(records_by_id[trajectory_id].evaluation.reward or 0.0)
+                for trajectory_id in consumed_trajectory_ids
+            ]
+            reward_mean = (
+                sum(trained_rewards) / len(trained_rewards)
+                if trained_rewards
+                else 0.0
             )
+            reward_variance = (
+                sum((value - reward_mean) ** 2 for value in trained_rewards)
+                / len(trained_rewards)
+                if trained_rewards
+                else 0.0
+            )
+            checkpoint_version = checkpoint_root.name
+            training_metadata = {
+                "objective": "action_masked_one_pass_grpo",
+                "datasets": sorted(
+                    {
+                        str(record.task.metadata.get("dataset_key", "unknown"))
+                        for record in records
+                    }
+                ),
+                "input_trajectories": len(records),
+                "trained_trajectories": trained_trajectories,
+                "trained_groups": consumed_group_count,
+                "consumed_trajectory_ids": list(consumed_trajectory_ids),
+                "consumed_group_keys": [list(key) for key in consumed_group_keys],
+                "terminal_reward_mean": reward_mean,
+                "terminal_reward_std": math.sqrt(reward_variance),
+                "grpo_loss": float(total_loss),
+                "grad_norm": grad_norm,
+                "trainable_update_l2": trainable_update_l2,
+                "learning_rate": self.config.learning_rate,
+                "lora_rank": self.config.lora_rank,
+                "lora_alpha": self.config.lora_alpha,
+                "lora_target_modules": list(self.config.lora_target_modules),
+                "learner_device": self.config.learner_device,
+                "gradient_replica_device": self.config.gradient_replica_device,
+            }
+            training_state_checkpoint = self._save_training_state(
+                torch,
+                optimizer,
+                checkpoint,
+                checkpoint_version=checkpoint_version,
+                training_metadata=training_metadata,
+            )
+            # The complete state supersedes the historical optimizer-only file.
+            optimizer_state_checkpoint = training_state_checkpoint
+            optimizer_state_saved = True
             (checkpoint / "policy_version.json").write_text(
                 json.dumps(
                     {
@@ -691,13 +837,26 @@ class Qwen35OnePassSmokeTrainer:
                         "updated_policy_version": self.config.updated_policy_version,
                         "optimizer_updates": 1,
                         "optimizer_updates_this_run": 1,
+                        "global_step": self.config.update_step,
+                        "update_step": self.config.update_step,
                         "committed_step": self.config.update_step,
                         "continuation_adapter_checkpoint": (
                             self.config.behavior_adapter_checkpoint
                         ),
                         "optimizer_resume_status": optimizer_resume_status,
-                        "optimizer_state_checkpoint": optimizer_state_checkpoint,
+                        "optimizer_state_checkpoint": _TRAINING_STATE_RELATIVE_PATH,
                         "optimizer_state_saved": optimizer_state_saved,
+                        "checkpoint_ready": True,
+                        "checkpoint_version": checkpoint_version,
+                        "checkpoint_dir": _CHECKPOINT_ADAPTER_RELATIVE_PATH,
+                        "training_state_checkpoint": _TRAINING_STATE_RELATIVE_PATH,
+                        "training_state_format": _COMPLETE_TRAINING_STATE_FORMAT,
+                        "scheduler_state_status": _DISABLED_SCHEDULER_STATUS,
+                        "rng_state_saved": True,
+                        "consumed_trajectory_ids": list(consumed_trajectory_ids),
+                        "consumed_group_keys": [
+                            list(key) for key in consumed_group_keys
+                        ],
                         "trainable_update_l2": trainable_update_l2,
                     },
                     ensure_ascii=False,
@@ -707,16 +866,13 @@ class Qwen35OnePassSmokeTrainer:
                 + "\n",
                 encoding="utf-8",
             )
-
-            total_loss = sum(item[0] for item in partition_stats)
-            trained_trajectories = sum(item[1] for item in partition_stats)
             summary = SmokeTrainingSummary(
                 optimizer_updates=1,
                 input_trajectories=len(records),
                 record_eligible_trajectories=sum(item.grpo_eligible for item in records),
                 exact_groups=len(exact_groups),
                 informative_groups=len(informative),
-                trained_groups=trained_group_count,
+                trained_groups=consumed_group_count,
                 trained_trajectories=trained_trajectories,
                 zero_information_groups=zero_groups,
                 excluded_groups=len(exclusions),
@@ -728,7 +884,7 @@ class Qwen35OnePassSmokeTrainer:
                 micro_batch_size_used=micro_batch_size_used,
                 oom_backoff_count=oom_backoff_count,
                 trainable_update_l2=trainable_update_l2,
-                checkpoint_dir=str(checkpoint),
+                checkpoint_dir=str(checkpoint.resolve()),
                 exclusions=exclusions,
                 continuation_adapter_checkpoint=(
                     self.config.behavior_adapter_checkpoint or ""
@@ -741,6 +897,15 @@ class Qwen35OnePassSmokeTrainer:
                 optimizer_resume_status=optimizer_resume_status,
                 optimizer_state_checkpoint=optimizer_state_checkpoint,
                 optimizer_state_saved=optimizer_state_saved,
+                checkpoint_ready=True,
+                checkpoint_version=checkpoint_version,
+                training_state_checkpoint=training_state_checkpoint,
+                training_state_format=_COMPLETE_TRAINING_STATE_FORMAT,
+                scheduler_state_status=_DISABLED_SCHEDULER_STATUS,
+                rng_state_saved=True,
+                rng_state_restored=self._rng_state_restored,
+                consumed_trajectory_ids=consumed_trajectory_ids,
+                consumed_group_keys=consumed_group_keys,
                 gradient_partition_token_costs=partition_token_costs,
                 provider_logprob_diagnostic_exceeded=(
                     provider_logprob_diagnostic_exceeded
@@ -852,6 +1017,86 @@ class Qwen35OnePassSmokeTrainer:
             raise ValueError(
                 "behavior adapter policy metadata differs from the configured policy"
             )
+        if committed_step > 0:
+            if payload.get("checkpoint_ready") is not True:
+                raise ValueError(
+                    "formal behavior adapter is not a complete recoverable checkpoint"
+                )
+            required_receipt_fields = (
+                "global_step",
+                "update_step",
+                "checkpoint_version",
+                "checkpoint_dir",
+                "training_state_checkpoint",
+                "training_state_format",
+            )
+            if any(not payload.get(name) for name in required_receipt_fields):
+                raise ValueError(
+                    "formal behavior adapter is missing complete checkpoint metadata"
+                )
+            if payload.get("global_step") != committed_step or payload.get(
+                "update_step"
+            ) != committed_step:
+                raise ValueError("behavior adapter step metadata differs")
+            adapter_path = Path(self.config.behavior_adapter_checkpoint).resolve()
+            expected_state_path = (adapter_path / "training_state.pt").resolve()
+            configured_state_path = Path(
+                self.config.optimizer_state_checkpoint or ""
+            ).resolve()
+            receipt_state_path = Path(str(payload["training_state_checkpoint"]))
+            if (
+                receipt_state_path.is_absolute()
+                or receipt_state_path != Path(_TRAINING_STATE_RELATIVE_PATH)
+                or configured_state_path != expected_state_path
+            ):
+                raise ValueError(
+                    "behavior adapter and configured training state differ"
+                )
+            if payload.get("checkpoint_dir") != _CHECKPOINT_ADAPTER_RELATIVE_PATH:
+                raise ValueError("behavior adapter checkpoint directory differs")
+            checkpoint_version = str(payload["checkpoint_version"])
+            if checkpoint_version != adapter_path.parent.name:
+                raise ValueError("behavior adapter checkpoint version differs")
+            required_adapter_files = (
+                adapter_path / "adapter_config.json",
+                adapter_path / "adapter_model.safetensors",
+                expected_state_path,
+            )
+            if not all(path.is_file() for path in required_adapter_files):
+                raise ValueError(
+                    "formal behavior adapter directory is incomplete"
+                )
+            if payload.get("training_state_format") != _COMPLETE_TRAINING_STATE_FORMAT:
+                raise ValueError("behavior adapter training state format differs")
+
+            import torch
+
+            training_state = torch.load(
+                expected_state_path,
+                map_location="cpu",
+                weights_only=False,
+            )
+            if not isinstance(training_state, Mapping):
+                raise ValueError("formal training state must be a mapping")
+            self._validate_complete_training_state(
+                training_state,
+                for_resume=True,
+            )
+            if (
+                training_state.get("checkpoint_dir")
+                != _CHECKPOINT_ADAPTER_RELATIVE_PATH
+            ):
+                raise ValueError("training state adapter directory differs")
+            cross_fields = (
+                "committed_step",
+                "behavior_policy_version",
+                "updated_policy_version",
+                "checkpoint_version",
+            )
+            if any(training_state.get(name) != payload.get(name) for name in cross_fields):
+                raise ValueError(
+                    "policy receipt and training state metadata differ"
+                )
 
     def _restore_optimizer_state(self, torch, optimizer) -> str:
         state_checkpoint = self.config.optimizer_state_checkpoint
@@ -866,15 +1111,30 @@ class Qwen35OnePassSmokeTrainer:
                 return "warm_start_fresh_optimizer"
             return "fresh_optimizer"
 
+        # New complete FlowSteer-style state is restored through CPU just as in
+        # train_interactive.py.  The historical optimizer-only file retains its
+        # original device mapping solely for explicit non-formal compatibility.
+        complete_state = Path(state_checkpoint).name == "training_state.pt"
         payload = torch.load(
             state_checkpoint,
-            map_location=self.config.learner_device,
+            map_location="cpu" if complete_state else self.config.learner_device,
             weights_only=False,
         )
         if not isinstance(payload, Mapping):
             raise ValueError("optimizer checkpoint payload must be a mapping")
+        if payload.get("format") == _COMPLETE_TRAINING_STATE_FORMAT:
+            self._validate_complete_training_state(payload, for_resume=True)
+            optimizer.load_state_dict(payload["optimizer_state_dict"])
+            self._restore_random_states(torch, payload)
+            self._scheduler_state_status = _DISABLED_SCHEDULER_STATUS
+            self._rng_state_restored = True
+            return "restored_complete_training_state"
         if payload.get("format") != "flowsteer-smoke-optimizer-v1":
             raise ValueError("optimizer checkpoint format differs")
+        if self.config.exact_optimizer_continuation:
+            raise ValueError(
+                "formal continuation rejects the legacy optimizer-only checkpoint"
+            )
         committed_step = payload.get("committed_step")
         if committed_step != self.config.update_step - 1:
             raise ValueError(
@@ -891,9 +1151,235 @@ class Qwen35OnePassSmokeTrainer:
         optimizer.load_state_dict(optimizer_state)
         return "restored_optimizer"
 
+    def _save_training_state(
+        self,
+        torch,
+        optimizer,
+        checkpoint: Path,
+        *,
+        checkpoint_version: str,
+        training_metadata: Mapping[str, Any],
+    ) -> str:
+        """Persist and verify the complete post-update continuation state.
+
+        The state fields follow FlowSteer's ``training_state.pt`` save/restore
+        contract.  The PEFT adapter itself remains saved by the existing
+        SkillFlow-derived ``save_pretrained(selected_adapters=[\"theta\"])``
+        path before this method is called.
+        """
+
+        import random
+
+        try:
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover - runtime dependency
+            raise RuntimeError("complete checkpointing requires NumPy RNG state") from exc
+
+        if not isinstance(checkpoint_version, str) or not checkpoint_version:
+            raise ValueError("checkpoint_version must be non-empty")
+        if checkpoint.resolve().parent.name != checkpoint_version:
+            raise ValueError(
+                "checkpoint_version must match the adapter parent directory"
+            )
+        if not isinstance(training_metadata, Mapping) or not training_metadata:
+            raise ValueError("training_metadata must be a non-empty mapping")
+
+        cuda_available = bool(torch.cuda.is_available())
+        if cuda_available:
+            cuda_random_state = {
+                "learner_device": {
+                    "device": self.config.learner_device,
+                    "state": torch.cuda.get_rng_state(self.config.learner_device),
+                },
+                "gradient_replica_device": {
+                    "device": self.config.gradient_replica_device,
+                    "state": torch.cuda.get_rng_state(
+                        self.config.gradient_replica_device
+                    ),
+                },
+            }
+            cuda_rng_status = "captured_training_devices"
+        else:
+            cuda_random_state = {}
+            cuda_rng_status = "not_available"
+        payload = {
+            "format": _COMPLETE_TRAINING_STATE_FORMAT,
+            "global_step": self.config.update_step,
+            "update_step": self.config.update_step,
+            "committed_step": self.config.update_step,
+            "behavior_policy_version": self.config.behavior_policy_version,
+            "updated_policy_version": self.config.updated_policy_version,
+            "checkpoint_version": checkpoint_version,
+            "checkpoint_dir": _CHECKPOINT_ADAPTER_RELATIVE_PATH,
+            "optimizer_state_dict": optimizer.state_dict(),
+            # There is deliberately no scheduler in this one-update trainer.
+            "scheduler_state_dict": None,
+            "scheduler_contract": {
+                "enabled": False,
+                "scheduler_class": None,
+                "status": _DISABLED_SCHEDULER_STATUS,
+            },
+            "random_state": random.getstate(),
+            "np_random_state": np.random.get_state(),
+            "torch_random_state": torch.get_rng_state(),
+            "torch_cuda_random_state": cuda_random_state,
+            "torch_cuda_rng_status": cuda_rng_status,
+            "training_metadata": dict(training_metadata),
+        }
+        incomplete_path = checkpoint / ".training_state.pt.incomplete"
+        state_path = checkpoint / "training_state.pt"
+        torch.save(payload, incomplete_path)
+        if not incomplete_path.is_file():
+            raise RuntimeError("complete training state was not materialized")
+        verified = torch.load(
+            incomplete_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+        self._validate_complete_training_state(verified, for_resume=False)
+        incomplete_path.replace(state_path)
+        if not state_path.is_file():
+            raise RuntimeError("verified complete training state was not committed")
+        return str(state_path.resolve())
+
+    def _validate_complete_training_state(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        for_resume: bool,
+    ) -> None:
+        required = {
+            "format",
+            "global_step",
+            "update_step",
+            "committed_step",
+            "behavior_policy_version",
+            "updated_policy_version",
+            "checkpoint_version",
+            "checkpoint_dir",
+            "optimizer_state_dict",
+            "scheduler_state_dict",
+            "scheduler_contract",
+            "random_state",
+            "np_random_state",
+            "torch_random_state",
+            "torch_cuda_random_state",
+            "torch_cuda_rng_status",
+            "training_metadata",
+        }
+        missing = sorted(required.difference(payload))
+        if missing:
+            raise ValueError(
+                f"complete training state is missing fields: {missing!r}"
+            )
+        if payload.get("format") != _COMPLETE_TRAINING_STATE_FORMAT:
+            raise ValueError("complete training state format differs")
+        expected_step = (
+            self.config.update_step - 1 if for_resume else self.config.update_step
+        )
+        for name in ("global_step", "update_step", "committed_step"):
+            if payload.get(name) != expected_step:
+                raise ValueError(
+                    f"complete training state {name} does not bind the expected step"
+                )
+        if (
+            not for_resume
+            and payload.get("behavior_policy_version")
+            != self.config.behavior_policy_version
+        ):
+            raise ValueError("complete training state behavior policy differs")
+        expected_updated = (
+            self.config.updated_policy_version
+            if not for_resume
+            else self.config.behavior_policy_version
+        )
+        if payload.get("updated_policy_version") != expected_updated:
+            raise ValueError("complete training state updated policy differs")
+        if not isinstance(payload.get("optimizer_state_dict"), Mapping):
+            raise ValueError("complete training state is missing optimizer state")
+        scheduler_contract = payload.get("scheduler_contract")
+        if (
+            not isinstance(scheduler_contract, Mapping)
+            or scheduler_contract.get("enabled") is not False
+            or scheduler_contract.get("scheduler_class") is not None
+            or scheduler_contract.get("status") != _DISABLED_SCHEDULER_STATUS
+            or payload.get("scheduler_state_dict") is not None
+        ):
+            raise ValueError("complete training state scheduler contract differs")
+        if not isinstance(payload.get("training_metadata"), Mapping) or not payload.get(
+            "training_metadata"
+        ):
+            raise ValueError("complete training state is missing training metadata")
+        if not payload.get("checkpoint_version"):
+            raise ValueError("complete training state is missing checkpoint identity")
+        if payload.get("checkpoint_dir") != _CHECKPOINT_ADAPTER_RELATIVE_PATH:
+            raise ValueError("complete training state adapter path differs")
+        if any(
+            payload.get(name) is None
+            for name in ("random_state", "np_random_state", "torch_random_state")
+        ):
+            raise ValueError("complete training state is missing CPU RNG state")
+        cuda_status = payload.get("torch_cuda_rng_status")
+        cuda_state = payload.get("torch_cuda_random_state")
+        if cuda_status == "not_available":
+            if cuda_state != {}:
+                raise ValueError("complete training state CUDA RNG contract differs")
+        elif cuda_status == "captured_training_devices":
+            if not isinstance(cuda_state, Mapping) or set(cuda_state) != {
+                "learner_device",
+                "gradient_replica_device",
+            }:
+                raise ValueError("complete training state CUDA RNG contract differs")
+            expected_devices = {
+                "learner_device": self.config.learner_device,
+                "gradient_replica_device": self.config.gradient_replica_device,
+            }
+            for role, expected_device in expected_devices.items():
+                entry = cuda_state.get(role)
+                if (
+                    not isinstance(entry, Mapping)
+                    or entry.get("device") != expected_device
+                    or entry.get("state") is None
+                ):
+                    raise ValueError(
+                        "complete training state CUDA RNG device binding differs"
+                    )
+        else:
+            raise ValueError("complete training state CUDA RNG status differs")
+
+    @staticmethod
+    def _restore_random_states(torch, payload: Mapping[str, Any]) -> None:
+        import random
+
+        try:
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover - runtime dependency
+            raise RuntimeError("complete checkpoint restore requires NumPy") from exc
+
+        random.setstate(payload["random_state"])
+        np.random.set_state(payload["np_random_state"])
+        torch.set_rng_state(payload["torch_random_state"])
+        saved_cuda_status = payload["torch_cuda_rng_status"]
+        saved_cuda_state = payload["torch_cuda_random_state"]
+        if saved_cuda_status == "not_available":
+            if torch.cuda.is_available():
+                raise RuntimeError(
+                    "checkpoint lacks CUDA RNG for the configured training devices"
+                )
+            return
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA RNG state cannot be restored without CUDA")
+        for role in ("learner_device", "gradient_replica_device"):
+            entry = saved_cuda_state[role]
+            torch.cuda.set_rng_state(
+                entry["state"],
+                device=entry["device"],
+            )
+
     def _save_optimizer_state(self, torch, optimizer, checkpoint: Path) -> tuple[str, bool]:
-        # Keep the historical smoke profile compatible, while the formal
-        # profile saves AdamW state from Step 1 onward for exact continuation.
+        # Compatibility entry point for pre-v2 smoke fixtures only.  ``train``
+        # no longer calls this optimizer-only saver; every real update uses
+        # ``_save_training_state`` and cannot become checkpoint-ready without it.
         if self.config.update_step < 2 and not self.config.exact_optimizer_continuation:
             return "", False
         state_path = checkpoint / "optimizer_state.pt"
@@ -1032,20 +1518,23 @@ class Qwen35OnePassSmokeTrainer:
         advantages: Mapping[str, float],
         total_groups: int,
         micro_batch_size: int,
-    ) -> tuple[float, int]:
+    ) -> tuple[
+        float,
+        tuple[tuple[tuple[str, str, str], str], ...],
+    ]:
         import torch
 
         total_loss = 0.0
-        trained = 0
+        consumed: list[tuple[tuple[str, str, str], str]] = []
         items = [
-            (item, len(group))
-            for _, group in partition
+            (key, item, len(group))
+            for key, group in partition
             for item in group
         ]
         for start in range(0, len(items), micro_batch_size):
             batch_terms = []
             batch_items = items[start : start + micro_batch_size]
-            for item, group_size in batch_items:
+            for key, item, group_size in batch_items:
                 record = records_by_id[item.trajectory_id]
                 turn_log_probs = []
                 turn_masks = []
@@ -1072,13 +1561,13 @@ class Qwen35OnePassSmokeTrainer:
                 )
                 scaled = term / float(group_size * total_groups)
                 total_loss += float(scaled.detach().float().cpu())
-                trained += 1
+                consumed.append((key, item.trajectory_id))
                 batch_terms.append(scaled)
                 del flat_log_probs, flat_mask, term, scaled
             if batch_terms:
                 torch.stack(batch_terms).sum().backward()
             del batch_terms
-        return total_loss, trained
+        return total_loss, tuple(consumed)
 
     @staticmethod
     def _turn_log_probs(model, device: str, turn):

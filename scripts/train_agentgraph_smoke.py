@@ -11,9 +11,11 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any, Awaitable, Callable, Mapping, Optional, Protocol, Sequence
 
 
@@ -127,6 +129,12 @@ from src.interactive.task_evaluator import (
     evaluate_task,
 )
 from src.interactive.versioning import VersionBundle
+from src.interactive.wandb_training import (
+    OptimizerStepTelemetry,
+    WandbBinding,
+    WandbTrainingError,
+    WandbTrainingRun,
+)
 
 
 PROMPT_VERSION = DIRECTOR_PROMPT_VERSION
@@ -147,6 +155,10 @@ EXPECTED_SOURCE_ORDER = (
     "alfworld",
     "swe_bench",
 )
+
+WANDB_ENTITY = "zhanghanwen6660909-dut"
+WANDB_PROJECT = "flowsteer-triviaqa"
+WANDB_MODE = "online"
 
 
 class SmokeRunError(RuntimeError):
@@ -1934,6 +1946,32 @@ class SmokeBackend(Protocol):
     async def publish(self, summary: Any) -> Any: ...
 
 
+class WandbStepEvidenceProvider(Protocol):
+    """Supply evidence the current runner does not yet produce itself.
+
+    The smoke runner already owns rollout rewards, GRPO loss, checkpoint state,
+    policy publication, and the post-route canary.  It does *not* own a formal
+    held-out validation pass or GPU telemetry.  A formal W&B-enabled config is
+    therefore rejected before rollout unless the outer training driver supplies this
+    narrow interface.  Canary results are never accepted as validation.
+    """
+
+    def preflight(
+        self,
+        *,
+        config: Mapping[str, Any],
+        selected_tasks: Sequence[TaskRecord],
+    ) -> None: ...
+
+    def optimizer_step_evidence(
+        self,
+        *,
+        config: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        summary: Mapping[str, Any],
+    ) -> Mapping[str, Any]: ...
+
+
 JudgeCallback = Callable[[Sequence[Mapping[str, str]], str], Awaitable[Any]]
 
 
@@ -3590,6 +3628,477 @@ def _artifact_paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
     return paths
 
 
+def _wandb_binding_config(
+    config: Mapping[str, Any],
+) -> Optional[Mapping[str, Any]]:
+    value = config.get("wandb_binding")
+    if value is None:
+        return None
+    binding = _mapping(value, "wandb_binding")
+    checks = {
+        "wandb_binding.required": binding.get("required") is True,
+        "wandb_binding.entity": binding.get("entity") == WANDB_ENTITY,
+        "wandb_binding.project": binding.get("project") == WANDB_PROJECT,
+        "wandb_binding.mode": binding.get("mode") == WANDB_MODE,
+        "wandb_binding.credential_source": (
+            binding.get("credential_source") == "wandb_sdk_standard"
+        ),
+        "wandb_binding.require_run_url_before_training_started_status": (
+            binding.get("require_run_url_before_training_started_status") is True
+        ),
+        "wandb_binding.api_key_in_config_allowed": (
+            binding.get("api_key_in_config_allowed") is False
+        ),
+    }
+    failed = [name for name, valid in checks.items() if not valid]
+    if failed:
+        raise ConfigurationError(
+            "formal W&B binding violates fixed contract: " + ", ".join(failed)
+        )
+    if "api_key" in binding:
+        raise ConfigurationError(
+            "wandb_binding must not accept an API key; use standard SDK credentials"
+        )
+    resume = str(binding.get("resume", "never"))
+    run_id = binding.get("run_id")
+    if resume not in {"never", "must"}:
+        raise ConfigurationError("wandb_binding.resume must be never or must")
+    if resume == "must" and (
+        not isinstance(run_id, str) or not run_id.strip()
+    ):
+        raise ConfigurationError("wandb_binding resume=must requires run_id")
+    if resume == "never" and run_id is not None:
+        raise ConfigurationError("a new W&B binding cannot provide run_id")
+    return binding
+
+
+def _require_md_full_compliance_acceptance(config: Mapping[str, Any]) -> None:
+    gates = _mapping(config.get("acceptance_gates"), "acceptance_gates")
+    incomplete_phases = [
+        phase
+        for phase in range(6)
+        if gates.get(f"phase_{phase}_accepted") is not True
+    ]
+    if incomplete_phases:
+        raise ConfigurationError(
+            "MD_FULL_COMPLIANCE_20260906_V2 is not accepted; W&B initialization "
+            "and rollout are blocked at Phase "
+            + ", ".join(str(phase) for phase in incomplete_phases)
+        )
+    if gates.get("selected_loss_and_token_mask_verified") is not True:
+        raise ConfigurationError(
+            "Action-Masked One-Pass GRPO loss/token mask is not accepted"
+        )
+
+
+def _finite_metrics(value: Any, *, label: str) -> dict[str, float]:
+    if not isinstance(value, Mapping) or not value:
+        raise WandbTrainingError(f"{label} are required and must be non-empty")
+    result: dict[str, float] = {}
+    for key, metric in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise WandbTrainingError(f"{label} contain an invalid metric name")
+        if isinstance(metric, bool):
+            raise WandbTrainingError(f"{label}.{key} must be numeric")
+        try:
+            numeric = float(metric)
+        except (TypeError, ValueError) as exc:
+            raise WandbTrainingError(f"{label}.{key} must be numeric") from exc
+        if not math.isfinite(numeric):
+            raise WandbTrainingError(f"{label}.{key} must be finite")
+        result[key.strip()] = numeric
+    return result
+
+
+def _training_reward_statistics(
+    records: Sequence[TrajectoryRecord],
+    *,
+    consumed_trajectory_ids: Sequence[str],
+    consumed_group_keys: Sequence[Sequence[str]],
+) -> tuple[float, float, float, int, dict[str, float]]:
+    if not consumed_trajectory_ids or any(
+        not isinstance(value, str) or not value
+        for value in consumed_trajectory_ids
+    ):
+        raise WandbTrainingError(
+            "optimizer-step telemetry has no consumed trajectory receipt"
+        )
+    if len(consumed_trajectory_ids) != len(set(consumed_trajectory_ids)):
+        raise WandbTrainingError("consumed trajectory receipt contains duplicates")
+    records_by_id = {record.trajectory_id: record for record in records}
+    if len(records_by_id) != len(records):
+        raise WandbTrainingError("persisted trajectories contain duplicate IDs")
+    try:
+        eligible = tuple(records_by_id[value] for value in consumed_trajectory_ids)
+    except KeyError as exc:
+        raise WandbTrainingError(
+            "consumed trajectory is absent from the persisted batch"
+        ) from exc
+    if any(
+        not record.grpo_eligible or not record.evaluation.valid
+        for record in eligible
+    ):
+        raise WandbTrainingError(
+            "optimizer consumed a trajectory without a valid GRPO receipt"
+        )
+    rewards = [float(record.evaluation.reward or 0.0) for record in eligible]
+    terminal_mean = sum(rewards) / len(rewards)
+    grouped: dict[tuple[str, str, str], list[float]] = defaultdict(list)
+    for record, reward in zip(eligible, rewards):
+        grouped[record.group_key].append(reward)
+    normalized_group_keys = {
+        tuple(str(part) for part in value) for value in consumed_group_keys
+    }
+    if not normalized_group_keys or set(grouped) != normalized_group_keys:
+        raise WandbTrainingError(
+            "consumed group receipt differs from consumed trajectories"
+        )
+    group_means = [sum(values) / len(values) for values in grouped.values()]
+    group_mean = sum(group_means) / len(group_means)
+    group_stds = []
+    for values in grouped.values():
+        within_mean = sum(values) / len(values)
+        within_variance = sum(
+            (value - within_mean) ** 2 for value in values
+        ) / len(values)
+        group_stds.append(math.sqrt(within_variance))
+    reward_variance = sum(
+        (value - terminal_mean) ** 2 for value in rewards
+    ) / len(rewards)
+    train_metrics = {
+        "terminal_reward_mean": terminal_mean,
+        "terminal_reward_std": math.sqrt(reward_variance),
+        "evaluator_valid_grpo_rollouts": float(len(eligible)),
+        "exact_groups": float(len(grouped)),
+    }
+    return (
+        terminal_mean,
+        group_mean,
+        sum(group_stds) / len(group_stds),
+        len(eligible),
+        train_metrics,
+    )
+
+
+class _WandbLifecycle:
+    """Own one optional, fail-closed W&B run around the smoke transaction."""
+
+    def __init__(
+        self,
+        *,
+        config: Mapping[str, Any],
+        sdk: Any,
+        evidence_provider: Optional[WandbStepEvidenceProvider],
+    ) -> None:
+        self.binding_config = _wandb_binding_config(config)
+        self.sdk = sdk
+        self.evidence_provider = evidence_provider
+        self.tracker: Optional[WandbTrainingRun] = None
+        self.started_at = 0.0
+        self.step_logging_attempted = False
+        self.logged_step = False
+
+    @property
+    def enabled(self) -> bool:
+        return self.binding_config is not None
+
+    @property
+    def url(self) -> str:
+        return self.tracker.url if self.tracker is not None else ""
+
+    @property
+    def run_id(self) -> str:
+        return self.tracker.run_id if self.tracker is not None else ""
+
+    def start_after_prepare(
+        self,
+        *,
+        config: Mapping[str, Any],
+        selected_tasks: Sequence[TaskRecord],
+    ) -> str:
+        if not self.enabled:
+            return ""
+        _require_md_full_compliance_acceptance(config)
+        selected_datasets = {
+            str(task.metadata.get("dataset_key", "")) for task in selected_tasks
+        }
+        if selected_datasets != {"triviaqa"}:
+            raise ConfigurationError(
+                "the fixed flowsteer-triviaqa W&B project accepts only TriviaQA tasks"
+            )
+        if self.evidence_provider is None:
+            raise ConfigurationError(
+                "formal W&B training is missing post-update held-out validation "
+                "and GPU telemetry sources"
+            )
+        self.evidence_provider.preflight(
+            config=config,
+            selected_tasks=selected_tasks,
+        )
+        sdk = self.sdk
+        if sdk is None:  # pragma: no cover - exercised only by a real online run
+            try:
+                import wandb as sdk
+            except ImportError as exc:
+                raise WandbTrainingError("the W&B SDK is unavailable") from exc
+        experiment = _mapping(config["experiment"], "experiment")
+        director = _mapping(config["director"], "director")
+        update_step = int(experiment.get("update_step", 1))
+        run_name = (
+            f"{str(experiment.get('name', 'agentgraph-grpo')).strip()}-"
+            f"step-{update_step:06d}"
+        )
+        binding = WandbBinding(
+            entity=WANDB_ENTITY,
+            project=WANDB_PROJECT,
+            run_name=run_name,
+            mode=WANDB_MODE,
+            group=str(experiment.get("name", "agentgraph-grpo")),
+            tags=("triviaqa", "action-masked-one-pass-grpo"),
+            resume=str(self.binding_config.get("resume", "never")),
+            run_id=self.binding_config.get("run_id"),
+        )
+        tracker = WandbTrainingRun(sdk=sdk, binding=binding)
+        run_config = {
+            "objective": "action_masked_one_pass_grpo",
+            "dataset": "triviaqa",
+            "experiment": str(experiment.get("name", "")),
+            "condition_id": str(experiment.get("condition_id", "")),
+            "global_step": update_step,
+            "behavior_policy_version": str(
+                director.get("behavior_policy_version", "")
+            ),
+            "updated_policy_version": str(
+                director.get("updated_policy_version", "")
+            ),
+            "ttb_enabled": False,
+        }
+        url = tracker.start(run_config=run_config)
+        self.tracker = tracker
+        self.started_at = time.monotonic()
+        return url
+
+    def log_optimizer_step(
+        self,
+        *,
+        config: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        paths: Mapping[str, Path],
+    ) -> bool:
+        if not self.enabled or self.logged_step:
+            return False
+        if self.tracker is None:
+            return False
+        summary_value = manifest.get("training")
+        if not isinstance(summary_value, Mapping):
+            return False
+        if int(summary_value.get("optimizer_updates", 0)) != 1:
+            return False
+        self.step_logging_attempted = True
+        if summary_value.get("checkpoint_ready") is not True:
+            raise WandbTrainingError(
+                "optimizer update lacks a complete recoverable checkpoint"
+            )
+        if summary_value.get("optimizer_state_saved") is not True:
+            raise WandbTrainingError("optimizer state was not saved")
+        if summary_value.get("rng_state_saved") is not True:
+            raise WandbTrainingError("random state was not saved")
+        if self.evidence_provider is None:  # guarded before rollout
+            raise WandbTrainingError("W&B step evidence provider is unavailable")
+
+        records = _read_trajectory_records(paths["trajectories"])
+        consumed_trajectory_ids = summary_value.get("consumed_trajectory_ids")
+        consumed_group_keys = summary_value.get("consumed_group_keys")
+        if not isinstance(consumed_trajectory_ids, Sequence) or isinstance(
+            consumed_trajectory_ids, (str, bytes)
+        ):
+            raise WandbTrainingError(
+                "training summary has no consumed trajectory IDs"
+            )
+        if not isinstance(consumed_group_keys, Sequence) or isinstance(
+            consumed_group_keys, (str, bytes)
+        ):
+            raise WandbTrainingError("training summary has no consumed group keys")
+        (
+            terminal_reward,
+            group_reward_mean,
+            group_reward_std,
+            valid_rollouts,
+            train_metrics,
+        ) = _training_reward_statistics(
+            records,
+            consumed_trajectory_ids=consumed_trajectory_ids,
+            consumed_group_keys=consumed_group_keys,
+        )
+        evidence = self.evidence_provider.optimizer_step_evidence(
+            config=config,
+            manifest=manifest,
+            summary=summary_value,
+        )
+        if not isinstance(evidence, Mapping):
+            raise WandbTrainingError("optimizer-step evidence must be a mapping")
+        sync = manifest.get("policy_sync")
+        sync_value = sync if isinstance(sync, Mapping) else {}
+        manifest_status = str(manifest.get("status", "unknown"))
+        publish_status = str(sync_value.get("status", "not_attempted"))
+        route_switched = (
+            sync_value.get("success") is True
+            and sync_value.get("new_policy_version")
+            == summary_value.get("updated_policy_version")
+        )
+        post_update = manifest.get("post_update_canaries")
+        canary_passed = isinstance(post_update, Mapping) and int(
+            post_update.get("collected", 0)
+        ) > 0
+        if canary_passed:
+            canary_status = "passed"
+        elif manifest_status == "failed_post_update_canary":
+            canary_status = "failed"
+        else:
+            canary_status = "not_completed"
+
+        validation = _mapping(
+            evidence.get("validation"), "wandb optimizer-step validation evidence"
+        )
+        validation_complete = validation.get("complete") is True
+        if validation_complete:
+            if (
+                validation.get("scope") != "held_out"
+                or validation.get("split") != "validation"
+                or not isinstance(validation.get("evaluator_version"), str)
+                or not str(validation["evaluator_version"]).strip()
+            ):
+                raise WandbTrainingError(
+                    "formal held-out validation evidence is incomplete"
+                )
+            validation_metrics = _finite_metrics(
+                validation.get("metrics"), label="validation metrics"
+            )
+        elif route_switched and canary_passed:
+            raise WandbTrainingError(
+                "a successful published policy requires held-out validation evidence"
+            )
+        else:
+            # Publication/canary failures make updated-policy validation
+            # impossible.  Record that fact without attaching stale metrics.
+            validation_metrics = {"evaluated": 0.0}
+        gpu_metrics = _finite_metrics(
+            evidence.get("gpu_metrics"), label="GPU metrics"
+        )
+        extra_train = evidence.get("train_metrics", {})
+        if extra_train:
+            train_metrics.update(
+                _finite_metrics(extra_train, label="additional training metrics")
+            )
+
+        is_best = validation_complete and validation.get("is_best") is True
+        if is_best:
+            comparison = validation.get("best_comparison")
+            if not isinstance(comparison, Mapping) or not all(
+                comparison.get(field) is True
+                for field in (
+                    "same_protocol",
+                    "same_split",
+                    "same_task_denominator",
+                    "improved",
+                )
+            ):
+                raise WandbTrainingError(
+                    "best alias requires an improved same-protocol held-out comparison"
+                )
+
+        checkpoint_dir = Path(str(summary_value.get("checkpoint_dir", "")))
+        training_state = Path(
+            str(summary_value.get("training_state_checkpoint", ""))
+        )
+        optimizer_state = Path(
+            str(summary_value.get("optimizer_state_checkpoint", ""))
+        )
+        expected_training_state = checkpoint_dir / "training_state.pt"
+        if (
+            not checkpoint_dir.is_dir()
+            or not training_state.is_file()
+            or not optimizer_state.is_file()
+            or training_state.resolve() != expected_training_state.resolve()
+            or optimizer_state.resolve() != expected_training_state.resolve()
+        ):
+            raise WandbTrainingError(
+                "complete checkpoint or training state is not materialized"
+            )
+
+        experiment = _mapping(config["experiment"], "experiment")
+        datasets = sorted(
+            {
+                str(record.task.metadata.get("dataset_key", "unknown"))
+                for record in records
+            }
+        )
+        if datasets != ["triviaqa"]:
+            raise WandbTrainingError(
+                "the fixed flowsteer-triviaqa W&B run contains non-TriviaQA rollouts"
+            )
+        telemetry = OptimizerStepTelemetry(
+            global_step=int(experiment.get("update_step", 1)),
+            dataset="triviaqa",
+            behavior_policy_version=str(
+                summary_value["behavior_policy_version"]
+            ),
+            updated_policy_version=str(summary_value["updated_policy_version"]),
+            checkpoint_version=str(summary_value["checkpoint_version"]),
+            terminal_reward=terminal_reward,
+            group_reward_mean=group_reward_mean,
+            group_reward_std=group_reward_std,
+            valid_rollouts=valid_rollouts,
+            grpo_loss=float(summary_value["loss"]),
+            grad_norm=float(summary_value["grad_norm"]),
+            lora_update_l2=float(summary_value["trainable_update_l2"]),
+            train_metrics=train_metrics,
+            validation_metrics=validation_metrics,
+            gpu_metrics=gpu_metrics,
+            step_elapsed_seconds=max(0.0, time.monotonic() - self.started_at),
+            checkpoint_status="saved",
+            publish_status=publish_status,
+            route_switch_status="switched" if route_switched else "not_verified",
+            canary_status=canary_status,
+        )
+        recovery_metadata = {
+            "checkpoint_adapter_path": ".",
+            "training_state_checkpoint": "training_state.pt",
+            "training_state_format": str(
+                summary_value.get("training_state_format", "")
+            ),
+            "optimizer_state_checkpoint": "training_state.pt",
+            "scheduler_state_checkpoint": "training_state.pt",
+            "scheduler_state_status": str(
+                summary_value.get("scheduler_state_status", "")
+            ),
+            "rng_state_checkpoint": "training_state.pt",
+            "rng_state_saved": True,
+            "committed_step": int(summary_value.get("committed_step", 0)),
+            "training_cursor": {
+                "global_step": int(experiment.get("update_step", 1)),
+                "committed_step": int(summary_value.get("committed_step", 0)),
+            },
+            "validation_evaluator_version": str(
+                validation.get("evaluator_version", "not_run")
+            ),
+            "validation_metrics": dict(validation_metrics),
+            "best_alias_applied": is_best,
+        }
+        self.tracker.log_optimizer_step(
+            telemetry,
+            checkpoint_dir=checkpoint_dir,
+            recovery_metadata=recovery_metadata,
+            is_best=is_best,
+        )
+        self.logged_step = True
+        return True
+
+    def finish(self, *, exit_code: int) -> None:
+        if self.tracker is not None:
+            self.tracker.finish(exit_code=exit_code)
+
+
 def _audit_active_skills_after_policy_update(
     backend: Any,
     *,
@@ -3809,13 +4318,14 @@ def _select_run_scope(
     )
 
 
-async def run_smoke(
+async def _run_smoke_transaction(
     config_path: str | Path,
     *,
     prepare_only: bool = False,
     resume_initial_rollouts: bool = False,
     backend: Optional[SmokeBackend] = None,
     project_root: Optional[str | Path] = None,
+    wandb_lifecycle: Optional[_WandbLifecycle] = None,
 ) -> Mapping[str, Any]:
     """Execute the exact bounded pipeline and return its persisted manifest."""
 
@@ -3902,6 +4412,21 @@ async def run_smoke(
         manifest["completed_at"] = _utc_now()
         _write_json(paths["manifest"], manifest)
         return manifest
+
+    if wandb_lifecycle is not None and wandb_lifecycle.enabled:
+        run_url = wandb_lifecycle.start_after_prepare(
+            config=config,
+            selected_tasks=selected,
+        )
+        manifest["wandb"] = {
+            "status": "initialized",
+            "mode": WANDB_MODE,
+            "entity": WANDB_ENTITY,
+            "project": WANDB_PROJECT,
+            "run_url": run_url,
+            "run_id": wandb_lifecycle.run_id,
+            "optimizer_step_logged": False,
+        }
 
     if not resume_initial_rollouts:
         _write_json(paths["manifest"], manifest)
@@ -4210,6 +4735,25 @@ async def run_smoke(
         raise SmokeRunError("post-update canary did not use the published adapter")
     _write_jsonl(paths["post_update"], canaries)
 
+    manifest["policy_sync"] = sync_value
+    manifest["post_update_canaries"] = {
+        "collected": len(canaries),
+        "adapter_name": adapter_name,
+        "policy_version": updated_policy,
+        "trajectory_ids": [record.trajectory_id for record in canaries],
+    }
+    if wandb_lifecycle is not None and wandb_lifecycle.enabled:
+        manifest["status"] = "logging_optimizer_step"
+        _write_json(paths["manifest"], manifest)
+        wandb_lifecycle.log_optimizer_step(
+            config=config,
+            manifest=manifest,
+            paths=paths,
+        )
+        manifest["wandb"]["status"] = "optimizer_step_logged"
+        manifest["wandb"]["optimizer_step_logged"] = True
+        _write_json(paths["manifest"], manifest)
+
     cursor_value: Optional[Mapping[str, Any]] = None
     if progress is not None:
         assert next_cursor_path is not None
@@ -4232,18 +4776,146 @@ async def run_smoke(
 
     manifest.update(
         status="completed",
-        policy_sync=sync_value,
-        post_update_canaries={
-            "collected": len(canaries),
-            "adapter_name": adapter_name,
-            "policy_version": updated_policy,
-            "trajectory_ids": [record.trajectory_id for record in canaries],
-        },
         completed_at=_utc_now(),
     )
     if cursor_value is not None:
         manifest["selection_receipt"]["cursor_after"] = dict(cursor_value)
     _write_json(paths["manifest"], manifest)
+    return manifest
+
+
+async def run_smoke(
+    config_path: str | Path,
+    *,
+    prepare_only: bool = False,
+    resume_initial_rollouts: bool = False,
+    backend: Optional[SmokeBackend] = None,
+    project_root: Optional[str | Path] = None,
+    wandb_sdk: Any = None,
+    wandb_step_evidence_provider: Optional[WandbStepEvidenceProvider] = None,
+) -> Mapping[str, Any]:
+    """Run the bounded transaction with an optional mandatory W&B envelope.
+
+    Existing smoke configs without ``wandb_binding`` retain their upstream
+    behavior.  A formal W&B-bound config is fail-closed: the MD Phase 0–5 and
+    telemetry preflight happens before SDK initialization and before rollout;
+    a materialized optimizer update is logged even when publication or canary
+    subsequently fails.
+    """
+
+    resolved_config = Path(config_path).expanduser().resolve()
+    root = (
+        Path(project_root).expanduser().resolve()
+        if project_root is not None
+        else resolved_config.parent.parent
+    )
+    config = load_yaml(resolved_config)
+    lifecycle = _WandbLifecycle(
+        config=config,
+        sdk=wandb_sdk,
+        evidence_provider=wandb_step_evidence_provider,
+    )
+    paths: Optional[Mapping[str, Path]] = None
+    try:
+        paths = _artifact_paths(config, root)
+    except Exception:
+        # The canonical transaction will report malformed base config fields.
+        paths = None
+
+    try:
+        manifest = await _run_smoke_transaction(
+            resolved_config,
+            prepare_only=prepare_only,
+            resume_initial_rollouts=resume_initial_rollouts,
+            backend=backend,
+            project_root=root,
+            wandb_lifecycle=lifecycle,
+        )
+    except Exception as transaction_error:
+        logging_error: Optional[BaseException] = None
+        if (
+            lifecycle.enabled
+            and lifecycle.tracker is not None
+            and not lifecycle.step_logging_attempted
+            and paths is not None
+            and paths["manifest"].is_file()
+        ):
+            try:
+                persisted = dict(
+                    _read_json_mapping(
+                        paths["manifest"], label="failed W&B training manifest"
+                    )
+                )
+                if lifecycle.log_optimizer_step(
+                    config=config,
+                    manifest=persisted,
+                    paths=paths,
+                ):
+                    wandb_state = persisted.get("wandb")
+                    if isinstance(wandb_state, Mapping):
+                        persisted["wandb"] = {
+                            **dict(wandb_state),
+                            "status": "optimizer_step_logged_failed_transaction",
+                            "optimizer_step_logged": True,
+                        }
+                    _write_json(paths["manifest"], persisted)
+            except Exception as exc:
+                logging_error = exc
+                if paths["manifest"].is_file():
+                    try:
+                        persisted = dict(
+                            _read_json_mapping(
+                                paths["manifest"],
+                                label="failed W&B training manifest",
+                            )
+                        )
+                        persisted["status"] = "failed_wandb_optimizer_step_logging"
+                        persisted["wandb"] = {
+                            "status": "failed",
+                            "mode": WANDB_MODE,
+                            "entity": WANDB_ENTITY,
+                            "project": WANDB_PROJECT,
+                            "run_url": lifecycle.url,
+                            "run_id": lifecycle.run_id,
+                            "optimizer_step_logged": False,
+                            "error": _safe_error(exc),
+                        }
+                        persisted["completed_at"] = _utc_now()
+                        _write_json(paths["manifest"], persisted)
+                    except Exception:
+                        pass
+        try:
+            lifecycle.finish(exit_code=1)
+        except Exception as exc:
+            if logging_error is None:
+                logging_error = exc
+        if logging_error is not None:
+            raise SmokeRunError(
+                "mandatory W&B finalization failed after the training transaction"
+            ) from logging_error
+        raise transaction_error
+
+    if lifecycle.enabled and lifecycle.tracker is not None:
+        if not prepare_only and not lifecycle.logged_step:
+            try:
+                lifecycle.finish(exit_code=1)
+            finally:
+                raise SmokeRunError(
+                    "completed optimizer transaction has no W&B step record"
+                )
+        try:
+            lifecycle.finish(exit_code=0)
+        except Exception as exc:
+            if paths is not None and paths["manifest"].is_file():
+                failed = dict(
+                    _read_json_mapping(
+                        paths["manifest"], label="W&B finish training manifest"
+                    )
+                )
+                failed["status"] = "failed_wandb_finish"
+                failed["completed_at"] = _utc_now()
+                _write_json(paths["manifest"], failed)
+            raise SmokeRunError("mandatory W&B finish failed") from exc
     return manifest
 
 

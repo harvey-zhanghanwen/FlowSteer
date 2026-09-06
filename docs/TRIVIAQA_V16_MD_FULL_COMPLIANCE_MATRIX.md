@@ -98,11 +98,11 @@
 | --- | --- | --- |
 | 真实非零 backward/step | `Qwen35OnePassSmokeTrainer.train`；SkillFlow replica/gradient merge 思路 | 主干存在；本次计数 0 |
 | 每 step 保存 theta adapter | `smoke_trainer.py` 的 PEFT save | 存在 |
-| 保存 optimizer/scheduler/RNG/训练元数据 | 当前只保存 optimizer 和简化 step metadata；FlowSteer `train_interactive.py:1371-1396,2012-2027` 有 scheduler/RNG 模式 | **缺失**；只薄适配状态 payload/restore，不移植旧 reward/loss |
-| 保存完成后再 publish | `TransactionalAdapterPublisher` | 事务主干存在；需 durable checkpoint completion gate |
+| 保存 optimizer/scheduler/RNG/训练元数据 | `Qwen35OnePassSmokeTrainer._save_training_state/_restore_optimizer_state`；FlowSteer `train_interactive.py:1371-1396,2012-2027` 的状态保存/恢复边界 | **部分满足**；完整 `training_state.pt` schema、恢复门禁和 CPU 定向测试已通过，当前无 scheduler 时保存显式 disabled contract；尚无真实 CUDA step 证据 |
+| 保存完成后再 publish | `SmokeTrainingSummary.checkpoint_ready`；`TransactionalAdapterPublisher` | durable checkpoint completion gate 已实现并通过 CPU 定向测试；尚无真实 publish 事务证据 |
 | pause/drain、load、route switch、canary | `RolloutGate`；`policy_sync.py`；SkillFlow `_sync_lora_to_vllm`/`batch_inference.py` 原语 | 部分满足；transaction/route/canary 是项目工程补全，不能称为 SkillFlow 原文 |
 | 下一轮使用新权重 | post-update canary/trajectory version checks | 代码存在；本次尚无运行证据 |
-| W&B 实时且 fail-closed | 两套上游均为 optional/fail-open；现代 runner 尚未接入 | **缺失**；正式 1-step 前必须完成 |
+| W&B 实时且 fail-closed | `WandbTrainingRun`、runner `_WandbLifecycle`；两套上游均为 optional/fail-open；用户已固定 `zhanghanwen6660909-dut/flowsteer-triviaqa` online binding | **部分满足**；online-only、run URL/run ID、逐 step 字段、可恢复 model artifact、`latest`/held-out-only `best`、异常 finish 均已接线并通过 mock SDK 测试；正式 held-out validation 与 GPU telemetry provider 尚未生产接线，online run 尚未初始化 |
 | 禁止 stale rollout | 禁用 SkillFlow `_next_future` 跨 step prefetch | 配置边界已确定；尚待 executable runner 验收 |
 
 ## 8. 当前允许的下一步
@@ -112,12 +112,14 @@
 2. Phase 0 整体通过后，修正 Phase 1 的 terminal-effect 接口并准备同预算
    random/greedy/uniform/LinUCB 对照；未得到真实 acceptance evidence 前不进入
    Phase 2。
-3. 在 Phase 0–5 全部通过后，补齐完整 checkpoint 和 fail-closed W&B，再进行
-   本版本 1 个真实端到端 GRPO step。
+3. 补齐正式 held-out validation 与 GPU telemetry provider；在 Phase 0–5 全部
+   通过后，以当前完整 checkpoint 和 fail-closed W&B 接线进行本版本 1 个真实
+   端到端 GRPO step；实现通过不等于运行验收通过。
 4. 只有该 step 证明 `rollout(vN) → terminal reward → one-pass loss → backward
    → optimizer.step → checkpoint → publish → route switch → canary →
    rollout(vN+1)`，才允许 250–300 step 长训练。
 
 本次只读 preflight 的当前结果是：任务 namespace 暴露 **0 个 CUDA device**；
-训练 venv 已安装 W&B client，但没有可用的 online authentication。两项都必须在
+训练 venv 已安装 W&B client，用户确认标准 W&B 凭据已配置，但尚未实际初始化
+online run 或获得 run URL。两项都必须在
 真实 1-step 前重新通过门禁；不得停止或抢占其他项目进程。

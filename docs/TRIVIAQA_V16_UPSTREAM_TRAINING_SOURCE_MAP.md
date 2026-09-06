@@ -158,8 +158,9 @@ residual，也不得把 SkillFlow 的 GRPO baseline/ablation 当作主训练算�
 | SGLang tensor load、pause primitive、model-list verification | 直接复用 SkillFlow primitives | 严格 step barrier 与 canary 是项目补全 |
 | AgentGraph action → exact training token/context receipt | 必要薄适配 | MD mask 与 SkillFlow action-only mask 互斥，需先选方法 |
 | `optimizer.step → publish → next rollout` 顺序 | 必要薄适配 | 关闭 SkillFlow 跨 step prefetch；sync failure fail-closed |
+| `training_state.pt` 与 formal continuation | FlowSteer 状态边界薄适配 | `Qwen35OnePassSmokeTrainer._save_training_state/_restore_optimizer_state` 保存 optimizer、显式 scheduler contract、训练设备 RNG、step/policy/checkpoint 与 consumed trajectory/group receipt；SkillFlow named `theta` adapter 保存路径保持不变 |
 | policy/adapter version、parameter-delta、transaction/canary receipts | 项目工程新增 | 用户验收要求；非论文算法声明 |
-| required/fail-closed W&B 字段 | 项目工程新增 | 两套发布代码都是 optional/fail-open |
+| required/fail-closed W&B 字段 | SkillFlow/FlowSteer W&B 调用边界薄适配 + 项目工程补全 | `WandbTrainingRun` 与 runner `_WandbLifecycle` 固定 online binding、run ID/URL、逐 step telemetry、可恢复 artifact 及异常 finish；两套发布代码都是 optional/fail-open |
 | 原始 MACE、贝叶斯线性头、posterior UCB/Thompson、particle EVSI、paired record、Skill 四状态/gate | 项目算法原语已存在但未通过阶段验收 | 不能把单元原语报告为 Phase 1–4 已运行 |
 | low-rank AgentGraph feature、真正同前缀 whole-rollout intervention、生产 EVSI scheduler/三类关键性、正向 ACTIVE Skill | 尚未完整实现或尚无验收证据 | 设计 MD 必需；不得报告已运行 |
 
@@ -173,8 +174,9 @@ SkillFlow 直接复用。它使用 SkillFlow 的 tensor-load/pause 思路，但�
 ## 8. 真实 1-step 验收门禁
 
 主目标已选择为 B；逐条 Phase 0–5 compliance matrix 位于
-`docs/TRIVIAQA_V16_MD_FULL_COMPLIANCE_MATRIX.md`。必须先完成 Phase 0 验收，并把 loss、token
-mask、trainable parameters 和超参数冻结到独立 executable config。随后还必须
+`docs/TRIVIAQA_V16_MD_FULL_COMPLIANCE_MATRIX.md`。必须先依次完成 Phase 0–5 验收，
+并把 loss、token mask、trainable parameters 和超参数冻结到独立 executable
+config。随后还必须
 同时满足：
 
 1. 只读核对 GPU 进程并获得不冲突的可见 CUDA allocation；
@@ -189,7 +191,7 @@ mask、trainable parameters 和超参数冻结到独立 executable config。随�
    valid/filtered rollout、GPU/throughput/error、gradient/update norm、checkpoint
    与 Skill phase 状态。
 
-当前任务 namespace 没有可见 CUDA device；W&B client 已安装，但 online
-authentication 尚不可用。这些是
+当前任务 namespace 没有可见 CUDA device；W&B client 已安装，用户确认标准
+SDK 凭据已配置，但尚未初始化 online run 或取得 run URL。这些是
 方法选择之后仍需解除的资源门禁。未通过上述 1-step 前，250–300 step 长训
 保持禁止。

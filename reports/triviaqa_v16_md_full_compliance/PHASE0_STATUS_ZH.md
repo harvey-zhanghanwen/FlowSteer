@@ -53,7 +53,14 @@ TriviaQA 使用确定性的 accepted-answer EM/F1 evaluator，不调用 judge，
 
 - 当前任务 namespace 可见 CUDA device：0；
 - W&B client：已安装；
-- W&B online authentication：当前不可用；
+- W&B binding：固定为 `zhanghanwen6660909-dut/flowsteer-triviaqa`、online；
+- W&B 标准凭据：用户确认已配置，将仅由 SDK 在正式 run 初始化时读取；
+- W&B online connection/run URL：尚未初始化、尚未验证；
+- W&B runner adapter：固定绑定、run URL/run ID 门禁、逐 step telemetry、
+  checkpoint artifact 与异常 finish 已通过 mock SDK 定向测试；正式 held-out
+  validation/GPU telemetry provider 尚未生产接线；
+- complete checkpoint schema：已实现并通过 CPU 定向测试，但没有真实 CUDA
+  optimizer step 的落盘/恢复证据；
 - rollout / backward / optimizer.step / checkpoint / publish / route switch /
   post-update rollout / W&B run：全部为 0。
 
@@ -61,5 +68,5 @@ TriviaQA 使用确定性的 accepted-answer EM/F1 evaluator，不调用 judge，
 
 先建立 train-only Tool/index 与独立 validation/test 资源边界，生成 split-isolation
 receipt；补齐 ReAct provider sub-call receipt；在可用且不冲突的 CUDA allocation
-和 W&B online authentication 到位后，收集同一 task、condition、policy version
+和 W&B online run 初始化成功且取得 run URL 后，收集同一 task、condition、policy version
 下的真实 train rollout group。上述条件未满足前不得进入 Phase 1 验收或长训练。
