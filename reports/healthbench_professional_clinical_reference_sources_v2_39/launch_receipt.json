@@ -1,0 +1,33 @@
+{
+  "condition_id": "healthbench_professional_clinical_reference_sources_v2_39_dev5",
+  "code_commit": "9fb27de",
+  "branch": "feature/healthbench-v2.39-guidelines-sources-20260906",
+  "started_at": "2026-09-06T10:18:10.746946+00:00",
+  "config": "config/evaluation_healthbench_professional_clinical_reference_sources_v2_39_dev5.yaml",
+  "collection_arm": "agentgraph",
+  "sample_count": 5,
+  "sample_selection": "same_five_development_cases_as_v2_38",
+  "prepare_only_passed": true,
+  "targeted_tests_passed": 234,
+  "additional_subtests_passed": 107,
+  "python": "/ssd1/iclr/gpf/venvs/skillflow/bin/python",
+  "physical_gpu": 6,
+  "supervisor_port": 8026,
+  "evaluation_concurrency": 4,
+  "task_timeout_seconds": 900,
+  "new_model_canary_calls": 0,
+  "optimizer_updates": 0,
+  "direct_rerun": false,
+  "full_525_rerun": false,
+  "architecture_backup": {
+    "local_commit_created": true,
+    "push_succeeded": false,
+    "push_error": "Existing Git credential configuration could not supply HTTPS authentication; terminal prompting disabled."
+  },
+  "artifacts": {
+    "manifest": "artifacts/healthbench_professional_clinical_reference_sources_v2_39_dev5/evaluation/run_manifest.json",
+    "trajectories": "artifacts/healthbench_professional_clinical_reference_sources_v2_39_dev5/evaluation/agentgraph_trajectories.jsonl",
+    "progress": "artifacts/healthbench_professional_clinical_reference_sources_v2_39_dev5/evaluation/rollout_progress.jsonl",
+    "console": "reports/healthbench_professional_clinical_reference_sources_v2_39/evaluation_console.log"
+  }
+}

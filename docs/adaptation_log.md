@@ -1811,3 +1811,18 @@ context overflow HTTP400，1 题 900 秒 TimeoutError；五题 strict 指标 N/A
 合法短答及原 Runtime 定向回归已通过。测试中修正了两个不成立的假设：
 调度首个请求不一定是节点 a；节点 b 先前已合法接收的 a 来源应继续保留，
 只有 a 的本轮新草稿需要等待阶段屏障。这是测试断言修正，不是放宽通信边界。
+
+2026-09-06 v2.39同五题运行已收尾，源码固定9fb27de，GPU6/8026，原并发4、
+900秒单题时限不变。3题FINISH且官方grader有效，IBD/HIV与MDT各一次collect
+TimeoutError。严格5题raw/length-adjusted均N/A；completed-only 3题为
+33.33%/33.00%。未扩分母、未将缺失当0、未自动补跑、未训练。
+
+已完成Barrett从标题变正文且raw100，但不是新增正文guard触发的重试；
+ASTRONAUT/WATERFALL仍在Director初始contract发生语义漂移。双向阶段局部
+索引保留IBD来源，但任务未收敛；超时collect路径没有独立保存完整未完成trace。
+这些是剩余问题，不将v2.39称为最佳或Stable Zero完全通过。详见
+`reports/healthbench_professional_clinical_reference_sources_v2_39/evaluation_report_zh.md`。
+
+离线新增AgentGraph-only报告适配，复用现有I/O与receipt渲染；默认仍要求完整
+收束，显式允许operational failure时固定五题、严格指标N/A，缺失题仅投影
+本轮selected question/progress/collect失败，不构造假轨迹。没有新增API调用。

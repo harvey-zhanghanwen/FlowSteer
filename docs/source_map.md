@@ -1057,3 +1057,17 @@ metadata 不等于临床发现、contract 预设不等于来源结论；不改 D
   自身此前合法收到的来源可继续保留，不误当成提前读取对方新草稿。
 - 定向测试使用真实 Canvas step→Runtime、build_agent_messages 和本地
   合成 Tool receipt；没有用 benchmark 答案编码规则，没有改官方 evaluator。
+
+### v2.39 五题结果与离线报告适配（2026-09-06）
+
+`scripts/report_healthbench_agentgraph_development.py` 为 AgentGraph-only
+结果提供必要的离线报告适配，直接复用本项目既有
+`report_healthbench_failure_demos._turn_view/_execution_view/_json_details`、
+`report_multidataset_stable_zero._communication_envelopes/_react_trace_entries/
+_tool_receipts` 与 `_atomic_text`。旧报告要求 Direct/paired 文件，本轮没有
+这些 arm，故不伪造 paired 数据，改为只投影原生 AgentGraph metrics。
+合并成功与失败执行中已有 receipt，避免重复计算 continuation 历史。
+显式 operational-failure 模式保留固定5题及2题N/A；不重评、不失败置零。
+
+真实运行3/5完成、2题collect超时，完整五题分数N/A；已完成子集不能代表
+完整 benchmark。新增来源收益未证实，不能因定向测试通过而标为闭环全部修好。

@@ -1,0 +1,635 @@
+{
+  "collection_arm": "agentgraph",
+  "completed_count": 3,
+  "completed_only_native_metric_means": {
+    "overall_score": {
+      "mean": 0.3333333333333333,
+      "observed_count": 3,
+      "selected_count": 5
+    },
+    "overall_score_length_adjusted": {
+      "mean": 0.3300209333333333,
+      "observed_count": 3,
+      "selected_count": 5
+    }
+  },
+  "finish_count": 3,
+  "missing_trajectory_task_ids": [
+    "healthbench-professional:dadbebd3dce1b5928cac5a44dde095d3",
+    "healthbench-professional:37101607e2947481e85e8fe3597a1acf"
+  ],
+  "native_metric_means": {
+    "overall_score": {
+      "mean": null,
+      "observed_count": 3,
+      "scope": "strict full fixed population; missing is not zero",
+      "selected_count": 5
+    },
+    "overall_score_length_adjusted": {
+      "mean": null,
+      "observed_count": 3,
+      "scope": "strict full fixed population; missing is not zero",
+      "selected_count": 5
+    }
+  },
+  "operational_failure_count": 2,
+  "report_generation": {
+    "grader_calls": 0,
+    "model_calls": 0,
+    "tool_calls": 0,
+    "training_performed": false
+  },
+  "sample_count": 5,
+  "schema_version": "flowsteer.healthbench.agentgraph-development-report.v1",
+  "scope": "development observations; not a final benchmark estimate",
+  "source_evaluation_dir": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v237/artifacts/healthbench_professional_clinical_reference_sources_v2_39_dev5/evaluation",
+  "task_population_validation": "exact selected_task_ids; finished collection with current-run operational evidence",
+  "tasks": [
+    {
+      "agent_model": {
+        "by_model": {
+          "MiniMax-M3": 3,
+          "deepseek-v4-flash": 2,
+          "qwen3.5-9b-local": 5,
+          "unknown": 1
+        },
+        "recorded_calls": 11,
+        "request_status_counts": {
+          "cancelled": 1,
+          "completed": 8,
+          "failed": 2
+        },
+        "sources_without_model_receipts": 0,
+        "usage": {
+          "attempt_count": {
+            "covered": 8,
+            "sum": 8,
+            "total": 11
+          },
+          "completion_tokens": {
+            "covered": 8,
+            "sum": 5611,
+            "total": 11
+          },
+          "latency_ms": {
+            "covered": 8,
+            "sum": 59720.07170505822,
+            "total": 11
+          },
+          "prompt_tokens": {
+            "covered": 8,
+            "sum": 47577,
+            "total": 11
+          },
+          "total_tokens": {
+            "covered": 8,
+            "sum": 53365,
+            "total": 11
+          }
+        }
+      },
+      "communication_envelopes": 1,
+      "director": {
+        "model_id": null,
+        "policy_versions": [
+          "qwen35-9b-base-healthbench-professional-external-medical-sources-v2-38-dev5"
+        ],
+        "recorded_phase_calls": 12,
+        "recorded_phase_usage": {
+          "attempt_count": {
+            "covered": 12,
+            "sum": 12,
+            "total": 12
+          },
+          "completion_tokens": {
+            "covered": 12,
+            "sum": 2128,
+            "total": 12
+          },
+          "latency_ms": {
+            "covered": 12,
+            "sum": 16946.365146897733,
+            "total": 12
+          },
+          "prompt_tokens": {
+            "covered": 12,
+            "sum": 245976,
+            "total": 12
+          },
+          "total_tokens": {
+            "covered": 0,
+            "sum": null,
+            "total": 12
+          }
+        },
+        "turn_attempt_count": {
+          "covered": 6,
+          "sum": 26,
+          "total": 6
+        },
+        "turn_latency_ms": {
+          "covered": 6,
+          "sum": 56285.259385593235,
+          "total": 6
+        },
+        "turns": 6,
+        "turns_with_phase_receipts": 6
+      },
+      "errors": {
+        "execution_error_types": {},
+        "grader_error_present": false,
+        "grader_provider_errors": 1,
+        "provider_identified_runtime_failure_receipts": 2,
+        "runtime_failure_receipts": 3,
+        "runtime_failure_types": {
+          "ReactGenerationError": 2,
+          "TimeoutError": 1
+        }
+      },
+      "explicit_finish": true,
+      "grader": {
+        "api_call_receipts": 3,
+        "api_calls": 3,
+        "latency_ms": 6501.516260206699,
+        "model_id": "gpt-5.4-2026-03-05",
+        "token_usage": {
+          "input_cached_tokens": 0,
+          "input_tokens": 1870,
+          "output_reasoning_tokens": 63,
+          "output_tokens": 225,
+          "total_tokens": 2095
+        },
+        "usage_scope": "saved grader_telemetry for this terminal evaluator receipt; no unrecorded retries"
+      },
+      "graph": {
+        "available": true,
+        "directed_edge_count": 1,
+        "max_saved_node_count": 2,
+        "node_count": 2,
+        "nodes": [
+          {
+            "execution_mode": "react",
+            "id": "node_1",
+            "model_id": "qwen3.5-9b-local"
+          },
+          {
+            "execution_mode": "react",
+            "id": "node_2",
+            "model_id": "qwen3.5-9b-local"
+          }
+        ],
+        "output_agent_id": "node_2",
+        "relation_count": 1,
+        "relations": [
+          {
+            "source_id": "node_1",
+            "source_to_target": true,
+            "target_id": "node_2",
+            "target_to_source": false
+          }
+        ],
+        "revision": 7,
+        "snapshot_scope": "last saved Canvas graph_snapshot; not inferred execution topology",
+        "topology": "node_1 → node_2"
+      },
+      "native_metrics": {
+        "overall_score": 0.0,
+        "overall_score_length_adjusted": 0.028635599999999997
+      },
+      "task_id": "healthbench-professional:f056cdb489e3636b0b51afb8fd6b3a8a",
+      "terminal_failure": false,
+      "termination_reason": "finish",
+      "tools": {
+        "actual_calls": 6,
+        "by_tool": {
+          "healthbench-literature.search": 4,
+          "healthbench-medrag.search": 1,
+          "healthbench-trials.search": 1
+        },
+        "distinct_receipt_events": 6,
+        "duplicate_receipt_occurrences": 6,
+        "error_types": {},
+        "events_without_call_identity": 0,
+        "latency_ms": {
+          "covered": 6,
+          "sum": 7513.491861522198,
+          "total": 6
+        },
+        "receipt_occurrences": 12
+      },
+      "trajectory_available": true,
+      "trajectory_id": "trajectory_74baff03e4aa9d545604ee90",
+      "valid": true
+    },
+    {
+      "agent_model": {
+        "by_model": {
+          "MiniMax-M3": 1,
+          "deepseek-v4-flash": 2,
+          "qwen3.5-9b-local": 5
+        },
+        "recorded_calls": 8,
+        "request_status_counts": {
+          "completed": 6,
+          "failed": 2
+        },
+        "sources_without_model_receipts": 1,
+        "usage": {
+          "attempt_count": {
+            "covered": 6,
+            "sum": 6,
+            "total": 8
+          },
+          "completion_tokens": {
+            "covered": 6,
+            "sum": 8235,
+            "total": 8
+          },
+          "latency_ms": {
+            "covered": 6,
+            "sum": 70817.7152397111,
+            "total": 8
+          },
+          "prompt_tokens": {
+            "covered": 6,
+            "sum": 21751,
+            "total": 8
+          },
+          "total_tokens": {
+            "covered": 6,
+            "sum": 30045,
+            "total": 8
+          }
+        }
+      },
+      "communication_envelopes": 2,
+      "director": {
+        "model_id": null,
+        "policy_versions": [
+          "qwen35-9b-base-healthbench-professional-external-medical-sources-v2-38-dev5"
+        ],
+        "recorded_phase_calls": 10,
+        "recorded_phase_usage": {
+          "attempt_count": {
+            "covered": 10,
+            "sum": 10,
+            "total": 10
+          },
+          "completion_tokens": {
+            "covered": 10,
+            "sum": 4008,
+            "total": 10
+          },
+          "latency_ms": {
+            "covered": 10,
+            "sum": 30809.521119110286,
+            "total": 10
+          },
+          "prompt_tokens": {
+            "covered": 10,
+            "sum": 184393,
+            "total": 10
+          },
+          "total_tokens": {
+            "covered": 0,
+            "sum": null,
+            "total": 10
+          }
+        },
+        "turn_attempt_count": {
+          "covered": 5,
+          "sum": 22,
+          "total": 5
+        },
+        "turn_latency_ms": {
+          "covered": 5,
+          "sum": 66307.23601114005,
+          "total": 5
+        },
+        "turns": 5,
+        "turns_with_phase_receipts": 5
+      },
+      "errors": {
+        "execution_error_types": {},
+        "grader_error_present": false,
+        "grader_provider_errors": 0,
+        "provider_identified_runtime_failure_receipts": 2,
+        "runtime_failure_receipts": 3,
+        "runtime_failure_types": {
+          "CancelledError": 1,
+          "ReactGenerationError": 2
+        }
+      },
+      "explicit_finish": true,
+      "grader": {
+        "api_call_receipts": 3,
+        "api_calls": 3,
+        "latency_ms": 4144.355927594006,
+        "model_id": "gpt-5.4-2026-03-05",
+        "token_usage": {
+          "input_cached_tokens": 0,
+          "input_tokens": 2441,
+          "output_reasoning_tokens": 85,
+          "output_tokens": 329,
+          "total_tokens": 2770
+        },
+        "usage_scope": "saved grader_telemetry for this terminal evaluator receipt; no unrecorded retries"
+      },
+      "graph": {
+        "available": true,
+        "directed_edge_count": 2,
+        "max_saved_node_count": 3,
+        "node_count": 3,
+        "nodes": [
+          {
+            "execution_mode": "react",
+            "id": "node_1",
+            "model_id": "qwen3.5-9b-local"
+          },
+          {
+            "execution_mode": "reasoning",
+            "id": "node_2",
+            "model_id": "MiniMax-M3"
+          },
+          {
+            "execution_mode": "react",
+            "id": "node_3",
+            "model_id": "qwen3.5-9b-local"
+          }
+        ],
+        "output_agent_id": "node_3",
+        "relation_count": 2,
+        "relations": [
+          {
+            "source_id": "node_1",
+            "source_to_target": true,
+            "target_id": "node_3",
+            "target_to_source": false
+          },
+          {
+            "source_id": "node_2",
+            "source_to_target": true,
+            "target_id": "node_3",
+            "target_to_source": false
+          }
+        ],
+        "revision": 8,
+        "snapshot_scope": "last saved Canvas graph_snapshot; not inferred execution topology",
+        "topology": "node_1 → node_3; node_2 → node_3"
+      },
+      "native_metrics": {
+        "overall_score": 0.0,
+        "overall_score_length_adjusted": 0.048069
+      },
+      "task_id": "healthbench-professional:ed8b3ca0a4dabfd0827c17a08513a181",
+      "terminal_failure": false,
+      "termination_reason": "finish",
+      "tools": {
+        "actual_calls": 2,
+        "by_tool": {
+          "healthbench-authoritative.search": 1,
+          "healthbench-trials.search": 1
+        },
+        "distinct_receipt_events": 2,
+        "duplicate_receipt_occurrences": 0,
+        "error_types": {},
+        "events_without_call_identity": 0,
+        "latency_ms": {
+          "covered": 2,
+          "sum": 2590.083943679929,
+          "total": 2
+        },
+        "receipt_occurrences": 2
+      },
+      "trajectory_available": true,
+      "trajectory_id": "trajectory_70bc71282324feecfbba7872",
+      "valid": true
+    },
+    {
+      "agent_model": {
+        "by_model": {
+          "MiniMax-M3": 6,
+          "deepseek-v4-flash": 1,
+          "qwen3.5-9b-local": 3
+        },
+        "recorded_calls": 10,
+        "request_status_counts": {
+          "completed": 9,
+          "failed": 1
+        },
+        "sources_without_model_receipts": 0,
+        "usage": {
+          "attempt_count": {
+            "covered": 9,
+            "sum": 9,
+            "total": 10
+          },
+          "completion_tokens": {
+            "covered": 9,
+            "sum": 6548,
+            "total": 10
+          },
+          "latency_ms": {
+            "covered": 9,
+            "sum": 70098.96198473871,
+            "total": 10
+          },
+          "prompt_tokens": {
+            "covered": 9,
+            "sum": 41735,
+            "total": 10
+          },
+          "total_tokens": {
+            "covered": 9,
+            "sum": 48637,
+            "total": 10
+          }
+        }
+      },
+      "communication_envelopes": 1,
+      "director": {
+        "model_id": null,
+        "policy_versions": [
+          "qwen35-9b-base-healthbench-professional-external-medical-sources-v2-38-dev5"
+        ],
+        "recorded_phase_calls": 10,
+        "recorded_phase_usage": {
+          "attempt_count": {
+            "covered": 10,
+            "sum": 10,
+            "total": 10
+          },
+          "completion_tokens": {
+            "covered": 10,
+            "sum": 2303,
+            "total": 10
+          },
+          "latency_ms": {
+            "covered": 10,
+            "sum": 18864.115686155856,
+            "total": 10
+          },
+          "prompt_tokens": {
+            "covered": 10,
+            "sum": 183399,
+            "total": 10
+          },
+          "total_tokens": {
+            "covered": 0,
+            "sum": null,
+            "total": 10
+          }
+        },
+        "turn_attempt_count": {
+          "covered": 5,
+          "sum": 22,
+          "total": 5
+        },
+        "turn_latency_ms": {
+          "covered": 5,
+          "sum": 52985.05584616214,
+          "total": 5
+        },
+        "turns": 5,
+        "turns_with_phase_receipts": 5
+      },
+      "errors": {
+        "execution_error_types": {},
+        "grader_error_present": false,
+        "grader_provider_errors": 0,
+        "provider_identified_runtime_failure_receipts": 1,
+        "runtime_failure_receipts": 2,
+        "runtime_failure_types": {
+          "ReactExecutionError": 1,
+          "ReactGenerationError": 1
+        }
+      },
+      "explicit_finish": true,
+      "grader": {
+        "api_call_receipts": 2,
+        "api_calls": 2,
+        "latency_ms": 4362.785450182855,
+        "model_id": "gpt-5.4-2026-03-05",
+        "token_usage": {
+          "input_cached_tokens": 0,
+          "input_tokens": 3408,
+          "output_reasoning_tokens": 55,
+          "output_tokens": 202,
+          "total_tokens": 3610
+        },
+        "usage_scope": "saved grader_telemetry for this terminal evaluator receipt; no unrecorded retries"
+      },
+      "graph": {
+        "available": true,
+        "directed_edge_count": 1,
+        "max_saved_node_count": 2,
+        "node_count": 2,
+        "nodes": [
+          {
+            "execution_mode": "react",
+            "id": "node_1",
+            "model_id": "qwen3.5-9b-local"
+          },
+          {
+            "execution_mode": "reasoning",
+            "id": "node_2",
+            "model_id": "qwen3.5-9b-local"
+          }
+        ],
+        "output_agent_id": "node_2",
+        "relation_count": 1,
+        "relations": [
+          {
+            "source_id": "node_1",
+            "source_to_target": true,
+            "target_id": "node_2",
+            "target_to_source": false
+          }
+        ],
+        "revision": 6,
+        "snapshot_scope": "last saved Canvas graph_snapshot; not inferred execution topology",
+        "topology": "node_1 → node_2"
+      },
+      "native_metrics": {
+        "overall_score": 1.0,
+        "overall_score_length_adjusted": 0.9133582
+      },
+      "task_id": "healthbench-professional:4f08ae480b16ef825cf098eca6530e68",
+      "terminal_failure": false,
+      "termination_reason": "finish",
+      "tools": {
+        "actual_calls": 3,
+        "by_tool": {
+          "healthbench-knowledge.search": 1,
+          "healthbench-literature.search": 2
+        },
+        "distinct_receipt_events": 3,
+        "duplicate_receipt_occurrences": 6,
+        "error_types": {},
+        "events_without_call_identity": 0,
+        "latency_ms": {
+          "covered": 3,
+          "sum": 3282.5169563293457,
+          "total": 3
+        },
+        "receipt_occurrences": 9
+      },
+      "trajectory_available": true,
+      "trajectory_id": "trajectory_4e5fa6d19f568f055fb92b85",
+      "valid": true
+    },
+    {
+      "agent_model": null,
+      "collection_failure_receipts": 1,
+      "director": null,
+      "explicit_finish": null,
+      "grader": null,
+      "graph": null,
+      "native_metrics": {
+        "overall_score": null,
+        "overall_score_length_adjusted": null
+      },
+      "operational_failure": true,
+      "task_id": "healthbench-professional:dadbebd3dce1b5928cac5a44dde095d3",
+      "terminal_failure": null,
+      "termination_reason": null,
+      "tools": null,
+      "trajectory_available": false,
+      "unavailable_reason": "terminal trajectory not persisted; collection failure supported by current-run task/condition evidence",
+      "valid": null
+    },
+    {
+      "agent_model": null,
+      "collection_failure_receipts": 1,
+      "director": null,
+      "explicit_finish": null,
+      "grader": null,
+      "graph": null,
+      "native_metrics": {
+        "overall_score": null,
+        "overall_score_length_adjusted": null
+      },
+      "operational_failure": true,
+      "task_id": "healthbench-professional:37101607e2947481e85e8fe3597a1acf",
+      "terminal_failure": null,
+      "termination_reason": null,
+      "tools": null,
+      "trajectory_available": false,
+      "unavailable_reason": "terminal trajectory not persisted; collection failure supported by current-run task/condition evidence",
+      "valid": null
+    }
+  ],
+  "terminal_failure_count": 0,
+  "totals": {
+    "actual_tool_calls": null,
+    "agent_recorded_model_calls": 29,
+    "covered_tasks": 3,
+    "director_recorded_phase_calls": 32,
+    "grader_provider_error_receipts": 1,
+    "observed_actual_tool_calls": 11,
+    "runtime_failure_receipts": 8,
+    "scope": "persisted terminal trajectories only; not full-run billing",
+    "selected_tasks": 5
+  },
+  "valid_count": 3
+}

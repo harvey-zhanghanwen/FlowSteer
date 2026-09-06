@@ -95,6 +95,11 @@ seed 和预算不变。按用户最新授权，修复测试完成后只跑 Agent
 
 源码复用与 API 差异详见 `docs/source_map.md`、`docs/adaptation_log.md`。
 官方来源：
+
+运行后更新：同五题尝试已完成，3题FINISH/有效评分、2题collect超时；完整
+五题均分N/A，已完成三题raw33.33%/length-adjusted33.00%。本版未证明整体
+提升，不升级为最佳架构。真实结果和残余问题见本目录 `evaluation_report_zh.md`。
+
 [Bookshelf 协议](https://www.ncbi.nlm.nih.gov/books/NBK45615/)、
 [Books-OAI](https://www.ncbi.nlm.nih.gov/books/about/oai/)、
 [PDQ 集合](https://www.ncbi.nlm.nih.gov/books/NBK82221/)、

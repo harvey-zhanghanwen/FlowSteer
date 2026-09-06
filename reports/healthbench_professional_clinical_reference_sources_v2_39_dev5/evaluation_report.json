@@ -1,0 +1,22 @@
+{
+  "collection_arm": "agentgraph",
+  "collection_arm_completed": false,
+  "completed_at": "2026-09-06T10:35:55.440105+00:00",
+  "condition_id": "healthbench_professional_clinical_reference_sources_v2_39_dev5",
+  "dataset_key": "healthbench_professional",
+  "manifest_path": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v237/artifacts/healthbench_professional_clinical_reference_sources_v2_39_dev5/evaluation/run_manifest.json",
+  "metrics": {
+    "agentgraph": {
+      "completed": 3,
+      "completed_only_overall_score": 0.3333333333333333,
+      "completed_only_overall_score_length_adjusted": 0.3300209333333333,
+      "denominator": 5,
+      "evaluator_valid": 3,
+      "strict_overall_score": null,
+      "strict_overall_score_length_adjusted": null
+    }
+  },
+  "paired_comparison_available": false,
+  "sample_count": 5,
+  "schema_version": "flowsteer.completion_benchmark.collection_arm_report.v1"
+}
