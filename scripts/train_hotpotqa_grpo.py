@@ -255,7 +255,7 @@ def validate_hotpotqa_training_config(config: Mapping[str, Any]) -> None:
         )
         == "tempered_trajectory_balance",
         "experiment.phase": experiment.get("phase") == "hotpotqa_grpo_training",
-        "experiment.training_enabled": experiment.get("training_enabled") is True,
+        "experiment.training_enabled": experiment.get("training_enabled") is False,
         "data.batch.dataset_key": batch.get("dataset_key") == "hotpotqa",
         "data.batch.tasks_per_step": batch.get("tasks_per_step") == 7,
         "data.batch.rollouts_per_task": batch.get("rollouts_per_task") == 4,
@@ -567,6 +567,7 @@ async def run_hotpotqa_training(
     *,
     project_root: Optional[str | Path] = None,
     prepare_only: bool = False,
+    allow_grpo_baseline: bool = False,
     resume: bool = False,
     stop_after_optimizer_steps: Optional[int] = None,
     backend_factory: Optional[BackendFactory] = None,
@@ -583,6 +584,11 @@ async def run_hotpotqa_training(
     )
     config = load_yaml(resolved_config)
     validate_hotpotqa_training_config(config)
+    if not prepare_only and not allow_grpo_baseline:
+        raise HotpotTrainingError(
+            "GRPO is a baseline/ablation only; pass --allow-grpo-baseline "
+            "explicitly and never report it as the SkillFlow TTB main run"
+        )
     paths = _training_paths(config, root)
     paths["root"].mkdir(parents=True, exist_ok=True)
     experiment = _mapping(config["experiment"], "experiment")
@@ -1038,6 +1044,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate and materialize the first task plan without API/GPU/W&B",
     )
     parser.add_argument(
+        "--allow-grpo-baseline",
+        action="store_true",
+        help="explicitly authorize this non-TTB baseline/ablation",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="continue from the last committed optimizer step",
@@ -1060,6 +1071,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 _resolve(PROJECT_ROOT, args.config),
                 project_root=PROJECT_ROOT,
                 prepare_only=bool(args.prepare_only),
+                allow_grpo_baseline=bool(args.allow_grpo_baseline),
                 resume=bool(args.resume),
                 stop_after_optimizer_steps=args.stop_after_optimizer_steps,
             )

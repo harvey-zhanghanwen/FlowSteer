@@ -20,7 +20,7 @@ method_boundary:
 experiment:
   name: "hotpotqa_qwen35_9b_action_masked_grpo_300step"
   phase: "hotpotqa_grpo_training"
-  training_enabled: true
+  training_enabled: false
   seed: 42
   target_optimizer_steps: 300
   # Round-01 already uses theta_smoke_step_000001.  The first new update is

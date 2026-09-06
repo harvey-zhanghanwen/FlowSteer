@@ -30,8 +30,14 @@ method_and_conflict_resolution:
   score_only: "structured_action_tokens"
   reasoning_tokens: "context_only_zero_loss_mask"
   edge_log_probability: "mean_over_action_tokens"
+  residual: "log_Z_theta(question) + sum(log_P_theta_edge_mean) - beta*log(reward+epsilon_min) - sum(log_P_phi_edge_mean)"
+  loss: "square(residual / action_edge_count)"
   rollout_policy: "current_theta_on_policy"
   executor: "frozen"
+  terminal_reward:
+    primary: "official_exact_match"
+    auxiliary_metric: "token_f1"
+    source_conflict: "SkillFlow.pdf Appendix G specifies EM for multi-hop QA, while the inspected release maps multi_hop_qa to token F1; this project selects the paper EM for TTB reward."
 
 paper_hyperparameters:
   optimizer_steps: 250
@@ -82,6 +88,18 @@ project_adaptations:
   weight_publication: "versioned theta LoRA publish, route switch, and canary"
   staleness_policy: "zero; next rollout is admitted only after successful publication and canary"
   provenance_note: "Publication barrier, atomic route handling, staleness policy, W&B extensions, and resolved GPU mapping are project engineering, not statements from SkillFlow.pdf."
+
+source_map:
+  skillflow_root: "/ssd1/iclr/owner/skillflow-iclr/06_GITHUB_RELEASE_20260816"
+  trajectory_contract: "training/trajectory.py"
+  edge_normalization: "training/flow_metrics.py::edge_logprob_tilde"
+  theta_phi_Z_and_TTB_backward: "training/gflownet_trainer.py::_gradient_accumulation_step"
+  backward_policy: "training/backward_policy.py::BackwardPolicy"
+  optimizer_setup: "training/gflownet_trainer.py::_setup_optimizers"
+  lora_transport_only: "training/gflownet_trainer.py::_sync_lora_to_vllm"
+  flowsteer_runtime: "src/interactive/agent_runtime.py"
+  flowsteer_trajectory: "src/interactive/records.py"
+  flowsteer_policy_publication: "src/interactive/policy_sync.py"
 
 resource_admission:
   required_before_launch: true
@@ -150,6 +168,7 @@ wiring_status:
   evsi: "present_unwired"
   paired_intervention: "present_unwired"
   automatic_skill_publication: "present_unwired"
+  skill_phase_status: "disabled_not_integrated"
 
 actual_status:
   launch_allowed: false

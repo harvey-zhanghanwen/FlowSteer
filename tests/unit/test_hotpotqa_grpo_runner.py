@@ -325,6 +325,7 @@ class SequentialRunnerTests(unittest.TestCase):
                     run_hotpotqa_training(
                         config_path,
                         project_root=root,
+                        allow_grpo_baseline=True,
                         stop_after_optimizer_steps=2,
                         backend_factory=factory,
                         tracker=tracker,

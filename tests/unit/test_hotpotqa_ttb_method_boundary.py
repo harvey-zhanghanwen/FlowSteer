@@ -34,6 +34,8 @@ def test_ttb_scoring_and_joint_trainable_contract() -> None:
     assert method["edge_log_probability"] == "mean_over_action_tokens"
     assert method["rollout_policy"] == "current_theta_on_policy"
     assert method["executor"] == "frozen"
+    assert method["terminal_reward"]["primary"] == "official_exact_match"
+    assert method["terminal_reward"]["auxiliary_metric"] == "token_f1"
     assert paper["joint_updates"] == ["theta", "partition_function_Z", "phi"]
     assert paper["partition_function"]["trainable"] is True
 
