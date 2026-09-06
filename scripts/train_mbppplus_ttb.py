@@ -494,6 +494,42 @@ def _select_step_tasks(
     return selected
 
 
+def _wandb_credential_status(auth_env: str) -> Mapping[str, Any]:
+    """Check for a usable W&B credential without creating a W&B run."""
+
+    environment_present = bool(os.environ.get(auth_env, ""))
+    sdk_available = importlib.util.find_spec("wandb") is not None
+    stored_credential_present = False
+    credential_error: Optional[str] = None
+    if sdk_available and not environment_present:
+        try:
+            import wandb
+
+            api = wandb.Api(timeout=10)
+            # W&B resolves this from its existing credential store. Never
+            # persist or include the credential value in a receipt.
+            stored_credential_present = bool(getattr(api, "api_key", None))
+        except Exception as exc:  # pragma: no cover - SDK/environment dependent
+            credential_error = type(exc).__name__
+    ready = sdk_available and (environment_present or stored_credential_present)
+    return {
+        "sdk_available": sdk_available,
+        "credential_ready": ready,
+        "credential_source": (
+            "environment"
+            if environment_present
+            else "wandb_sdk_credential_store"
+            if stored_credential_present
+            else None
+        ),
+        "online_auth_environment_present": environment_present,
+        "stored_credential_present": stored_credential_present,
+        "auth_environment_name": auth_env,
+        "online_run_started": False,
+        "credential_error_type": credential_error,
+    }
+
+
 def _static_preflight(
     config: Mapping[str, Any],
     *,
@@ -610,17 +646,14 @@ def _static_preflight(
             blockers.append(f"training dataset validation failed: {exc}")
 
     auth_env = _non_empty(wandb.get("auth_env"), "wandb.auth_env")
-    wandb_sdk_ready = importlib.util.find_spec("wandb") is not None
-    wandb_auth_present = bool(os.environ.get(auth_env, ""))
-    checks["wandb"] = {
-        "sdk_available": wandb_sdk_ready,
-        "online_auth_environment_present": wandb_auth_present,
-        "auth_environment_name": auth_env,
-    }
-    if not wandb_sdk_ready:
+    wandb_status = _wandb_credential_status(auth_env)
+    checks["wandb"] = dict(wandb_status)
+    if not wandb_status["sdk_available"]:
         blockers.append("the W&B SDK is unavailable in the active Python environment")
-    if not wandb_auth_present:
-        blockers.append(f"required W&B online auth environment is unset: {auth_env}")
+    elif not wandb_status["credential_ready"]:
+        blockers.append(
+            f"no W&B credential is available from {auth_env} or the W&B SDK store"
+        )
 
     resource = gpu_resource_gate(config)
     blockers.extend(str(value) for value in resource["blockers"])

@@ -83,6 +83,19 @@ def test_gpu_resource_gate_requires_free_exclusive_devices(monkeypatch) -> None:
     assert any("rollout_supervisor" in value for value in receipt["blockers"])
 
 
+def test_wandb_credential_status_accepts_environment_without_starting_run(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("WANDB_API_KEY", "unit-test-placeholder")
+    monkeypatch.setattr(runner.importlib.util, "find_spec", lambda name: object())
+
+    receipt = runner._wandb_credential_status("WANDB_API_KEY")
+
+    assert receipt["credential_ready"] is True
+    assert receipt["credential_source"] == "environment"
+    assert receipt["online_run_started"] is False
+
+
 def test_completed_step_receipt_satisfies_wandb_monitor_contract() -> None:
     summary = SimpleNamespace(
         update_step=1,

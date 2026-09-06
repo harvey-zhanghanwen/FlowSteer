@@ -70,7 +70,9 @@ paper claims:
 - discovery of the exact post-switch SGLang `weight_version` from an
   AgentGraph canary followed by a second drained route bind; this exact value
   becomes the next step's behavior-policy admission coordinate;
-- W&B as a mandatory commit barrier;
+- W&B online initialization and per-step logging as a mandatory next-rollout
+  barrier; authentication may come from the configured environment variable
+  or W&B's existing SDK credential store;
 - single-phase unconstrained full-action generation.
 - explicit CUDA allocator peaks for the two in-process training replicas; the
   separately managed SGLang Supervisor GPU is reported by the resource

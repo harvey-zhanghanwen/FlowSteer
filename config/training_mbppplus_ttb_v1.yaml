@@ -237,6 +237,8 @@ gpu:
 wandb:
   enabled: true
   mode: "online"
+  # Preferred explicit source; an existing W&B SDK credential store is also
+  # accepted, and the live runner still requires wandb.init(mode="online").
   auth_env: "WANDB_API_KEY"
   project: "flowsteer-mbppplus"
   run_name: "mbppplus-best-v6-skillflow-ttb-250step"

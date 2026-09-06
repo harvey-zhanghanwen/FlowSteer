@@ -6,7 +6,7 @@
 SGLang processes started by this runner: none.
 
 The current evidence manifest is
-`artifacts/mbppplus_ttb_v1/runs/preflight-20260906-ttb-v3/run_manifest.json`.
+`artifacts/mbppplus_ttb_v1/runs/preflight-20260906-ttb-v4/run_manifest.json`.
 The artifact directory is intentionally not tracked by Git.
 
 ## Ready
@@ -18,19 +18,23 @@ The artifact directory is intentionally not tracked by Git.
 - MBPP project-adaptation training population: 241 tasks;
 - validation population: 62 tasks;
 - SkillFlow public-test reward adapter;
+- W&B SDK and an existing authenticated W&B credential store (no online run
+  was created by prepare-only);
 - θ/φ/Z learner, checkpoint, publication acknowledgement, and next-policy
   admission wiring;
-- 178 targeted offline tests.
+- 179 targeted offline tests.
 
 ## Blocking launch conditions
 
-- online W&B authentication environment `WANDB_API_KEY` is absent;
 - selected GPU 3 has 52,309 MiB free and two existing compute processes;
 - selected GPU 4 has 51,023 MiB free and one existing compute process;
 - selected GPU 5 has 9,767 MiB free and two existing compute processes.
 
 Every local GPU had an existing compute process at the check time, and no three
-devices met the configured exclusive, at-least-71,680-MiB gate. The gate is a
+devices met the configured exclusive, at-least-71,680-MiB gate. The absent
+`WANDB_API_KEY` environment variable is not a blocker because the W&B SDK has
+an existing authenticated credential; the live runner will still fail closed
+unless `wandb.init(mode="online")` succeeds. The GPU gate is a
 project resource-control implementation based on the approximately 70-GB/GPU
 peak reported by SkillFlow; the three-role GPU mapping is not claimed to come
 from the paper.
