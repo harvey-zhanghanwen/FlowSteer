@@ -1,0 +1,121 @@
+{
+  "candidate_skill_evaluation": {
+    "enabled": true,
+    "mode": "candidate_prompt_prior",
+    "profile": {
+      "candidates": [
+        {
+          "action": {
+            "instruction": "Keep the contract short: identify the entity from the original wording and a matching source before explaining it. Match an allowed search resource to the information need. Do not put a guessed identity, population or conclusion in the contract. Ask for source identifiers, relevant findings and unresolved alternatives. A related hit is not identification; no hit is not proof of absence."
+          },
+          "condition": {
+            "graph_stage": "*",
+            "required_tools": [],
+            "task_family": "healthbench_professional"
+          },
+          "condition_id": "resolve_entity_before_explanation_v245",
+          "status": "candidate",
+          "trigger": "Planning work about an unresolved name or factual premise."
+        },
+        {
+          "action": {
+            "instruction": "At the first legal MODIFY opportunity, consider a different admitted model for that same node; do not spend the opportunity expanding its task prose. Change one admitted field or coupled execution profile per action. Preserve and check available receipts. Use a tool-free reasoning profile only when the node already has sufficient evidence; unresolved retrieval still needs a tool-capable profile. If MODIFY is unavailable, any new repair unit must be legal and executable without waiting on the failed prerequisite. Do not add blocked consumers or repeat searches merely to reset a recovery counter."
+          },
+          "condition": {
+            "graph_stage": "*",
+            "required_tools": [],
+            "task_family": "healthbench_professional"
+          },
+          "condition_id": "use_first_admitted_execution_repair_v245",
+          "status": "candidate",
+          "trigger": "One failed invocation already contains repeated parsing or action-protocol errors."
+        },
+        {
+          "action": {
+            "instruction": "When synthesis needs no new Tool observation, consider reasoning mode with the actual routed evidence instead of another ReAct search loop. Require source-grounded claims, contradictions and uncertainty, not agreement with upstream conclusions. If evidence is missing, keep that gap explicit and use a legal retrieval or checking unit only as needed. Preserve required branches and original scope. FINISH when the response addresses the task and the live action is admissible."
+          },
+          "condition": {
+            "graph_stage": "*",
+            "required_tools": [],
+            "task_family": "healthbench_professional"
+          },
+          "condition_id": "synthesize_from_evidence_without_redundant_react_v245",
+          "status": "candidate",
+          "trigger": "Choosing execution mode or final routing for an Agent with existing evidence."
+        }
+      ],
+      "dataset_key": "healthbench_professional",
+      "profile_version": "healthbench.orchestration-candidates.v2.45",
+      "schema_version": "flowsteer.healthbench-candidate-skill-profile.v1",
+      "skill_publication_enabled": false,
+      "status": "candidate",
+      "training_enabled": false
+    },
+    "prompt_priors": [
+      {
+        "action": {
+          "instruction": "Keep the contract short: identify the entity from the original wording and a matching source before explaining it. Match an allowed search resource to the information need. Do not put a guessed identity, population or conclusion in the contract. Ask for source identifiers, relevant findings and unresolved alternatives. A related hit is not identification; no hit is not proof of absence."
+        },
+        "application_mode": "forced_probe_condition",
+        "condition": {
+          "graph_stage": "*",
+          "required_tools": [],
+          "task_family": "healthbench_professional"
+        },
+        "condition_id": "resolve_entity_before_explanation_v245",
+        "content": "Predeclared unvalidated candidate condition, not an ACTIVE Skill. This is an optional, rejectable prompt prior. Applicable graph stage: *. Only when: Planning work about an unresolved name or factual premise. Otherwise ignore this suggestion. Suggested action: Keep the contract short: identify the entity from the original wording and a matching source before explaining it. Match an allowed search resource to the information need. Do not put a guessed identity, population or conclusion in the contract. Ask for source identifiers, relevant findings and unresolved alternatives. A related hit is not identification; no hit is not proof of absence.",
+        "rejectable": true
+      },
+      {
+        "action": {
+          "instruction": "At the first legal MODIFY opportunity, consider a different admitted model for that same node; do not spend the opportunity expanding its task prose. Change one admitted field or coupled execution profile per action. Preserve and check available receipts. Use a tool-free reasoning profile only when the node already has sufficient evidence; unresolved retrieval still needs a tool-capable profile. If MODIFY is unavailable, any new repair unit must be legal and executable without waiting on the failed prerequisite. Do not add blocked consumers or repeat searches merely to reset a recovery counter."
+        },
+        "application_mode": "forced_probe_condition",
+        "condition": {
+          "graph_stage": "*",
+          "required_tools": [],
+          "task_family": "healthbench_professional"
+        },
+        "condition_id": "use_first_admitted_execution_repair_v245",
+        "content": "Predeclared unvalidated candidate condition, not an ACTIVE Skill. This is an optional, rejectable prompt prior. Applicable graph stage: *. Only when: One failed invocation already contains repeated parsing or action-protocol errors. Otherwise ignore this suggestion. Suggested action: At the first legal MODIFY opportunity, consider a different admitted model for that same node; do not spend the opportunity expanding its task prose. Change one admitted field or coupled execution profile per action. Preserve and check available receipts. Use a tool-free reasoning profile only when the node already has sufficient evidence; unresolved retrieval still needs a tool-capable profile. If MODIFY is unavailable, any new repair unit must be legal and executable without waiting on the failed prerequisite. Do not add blocked consumers or repeat searches merely to reset a recovery counter.",
+        "rejectable": true
+      },
+      {
+        "action": {
+          "instruction": "When synthesis needs no new Tool observation, consider reasoning mode with the actual routed evidence instead of another ReAct search loop. Require source-grounded claims, contradictions and uncertainty, not agreement with upstream conclusions. If evidence is missing, keep that gap explicit and use a legal retrieval or checking unit only as needed. Preserve required branches and original scope. FINISH when the response addresses the task and the live action is admissible."
+        },
+        "application_mode": "forced_probe_condition",
+        "condition": {
+          "graph_stage": "*",
+          "required_tools": [],
+          "task_family": "healthbench_professional"
+        },
+        "condition_id": "synthesize_from_evidence_without_redundant_react_v245",
+        "content": "Predeclared unvalidated candidate condition, not an ACTIVE Skill. This is an optional, rejectable prompt prior. Applicable graph stage: *. Only when: Choosing execution mode or final routing for an Agent with existing evidence. Otherwise ignore this suggestion. Suggested action: When synthesis needs no new Tool observation, consider reasoning mode with the actual routed evidence instead of another ReAct search loop. Require source-grounded claims, contradictions and uncertainty, not agreement with upstream conclusions. If evidence is missing, keep that gap explicit and use a legal retrieval or checking unit only as needed. Preserve required branches and original scope. FINISH when the response addresses the task and the live action is admissible.",
+        "rejectable": true
+      }
+    ],
+    "publication_performed": false
+  },
+  "collection_arm": "agentgraph",
+  "collection_arm_completed": true,
+  "completed_at": "2026-09-06T15:34:55.718169+00:00",
+  "condition_id": "healthbench_professional_candidate_skill_v2_45_dev5",
+  "dataset_key": "healthbench_professional",
+  "manifest_path": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v244/artifacts/healthbench_professional_candidate_skill_v2_45_dev5/evaluation/run_manifest.json",
+  "metrics": {
+    "agentgraph": {
+      "completed": 5,
+      "completed_only_overall_score": 0.29333333333333333,
+      "completed_only_overall_score_length_adjusted": 0.24921569333333332,
+      "denominator": 5,
+      "evaluator_valid": 5,
+      "strict_overall_score": 0.29333333333333333,
+      "strict_overall_score_length_adjusted": 0.24921569333333332
+    }
+  },
+  "paired_comparison_available": false,
+  "sample_count": 5,
+  "schema_version": "flowsteer.completion_benchmark.collection_arm_report.v1",
+  "training_performed": false
+}
