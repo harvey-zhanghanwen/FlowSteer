@@ -1,5 +1,22 @@
 # Dataset adaptation log
 
+## 2026-09-06 — HealthBench v2.45 candidate timing and execution-mode selection
+
+v2.44 finished with two valid FINISH cases and three 900-second timeouts;
+strict fixed-five scores remain N/A. WATERFALL raw increased from 0 to 50%,
+while IBD raw stayed 46.6667%. This is not an overall Skill improvement.
+Three stalled cases retained a failing producer while adding consumers; the
+first model/profile repair opportunity was available but not selected, and
+later MODIFY was disallowed by the existing repair-exhaustion gate.
+
+Refine only the candidate profile: act on repeated parser/action errors at
+the first legal repair boundary, preserve receipts, use evidence-aware
+execution-mode selection and shorter contracts. Do not add irrelevant Tool
+calls to reopen recovery or bypass strict completion. Runtime, masks, models,
+sampling, time budgets and evaluator stay unchanged. No new evaluation score
+is implied by preparing this configuration. The fixed five are development
+material, not independent Skill confirmation or a 525-case benchmark.
+
 ## 2026-09-06 — HealthBench v2.44 candidate-only iteration
 
 The completed v2.43 dev5 collection has four valid FINISH trajectories and one

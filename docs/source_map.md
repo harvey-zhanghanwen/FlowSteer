@@ -1,5 +1,25 @@
 # Dataset adaptation source map
 
+## HealthBench v2.45 — first-opportunity protocol recovery candidates
+
+- Upstream reference, not a new import: SkillFlow `SkillEntry`'s
+  trigger/plan/pitfall/constraint and `SkillWorkspace.format_skills_for_prompt`,
+  plus `training/environment.py::_handle_skill_invoke`, express executable
+  procedures rather than medical answers. Their ACTIVE/learned semantics are
+  not copied into this unvalidated profile.
+- Direct project reuse: `healthbench_candidate_skill_profile.py`,
+  `LiveSmokeBackend.collect(prompt_priors=...)`, existing exposure receipts and
+  FlowSteer-derived Canvas edit -> execution -> feedback. No runtime change.
+- Necessary candidate adaptation: v2.44 actual recovery domains admit model or
+  coupled execution-profile changes at the first failed-invocation boundary,
+  then can remove MODIFY after a repair without new Tool receipts. Suggest
+  protocol-specific recovery at the first opportunity; do not manufacture a
+  new Tool call to reset the gate. Synthesis may use the existing reasoning
+  profile only when evidence is already available.
+- MD §§10.1/10.3/11.3: rejectable candidates only, no fixed model/role/topology,
+  no trained or ACTIVE claim. Known core restrictions remain documented in
+  `healthbench_v245_skill_changes.md`. Same five development cases and budgets.
+
 ## HealthBench v2.44 — actionable candidate prompt priors only
 
 - Direct reuse: SkillFlow `src/skills/format.py::SkillEntry`,
