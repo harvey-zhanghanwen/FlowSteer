@@ -84,6 +84,8 @@ def turn(*, receipt: bool = True, policy: str = "policy-v1") -> TurnRecord:
             phase=GenerationPhase.ACTION,
         ),
         receipt_verified=receipt,
+        structured_action_token_start=0,
+        structured_action_token_count=2,
     )
 
 
@@ -107,6 +109,13 @@ def trajectory(task_split: str = "train", **changes: object) -> TrajectoryRecord
 
 
 class RecordTests(unittest.TestCase):
+    def test_ttb_requires_a_persisted_structured_action_span(self) -> None:
+        eligible = trajectory()
+        self.assertTrue(eligible.ttb_eligible)
+        legacy = trajectory(turns=[replace(turn(), structured_action_token_count=0)])
+        self.assertTrue(legacy.grpo_eligible)
+        self.assertFalse(legacy.ttb_eligible)
+
     def test_persisted_trajectory_round_trip_revalidates_derived_fields(self) -> None:
         original = trajectory()
         restored = TrajectoryRecord.from_dict(original.to_dict())

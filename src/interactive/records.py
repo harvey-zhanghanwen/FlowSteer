@@ -211,6 +211,12 @@ class TurnRecord:
     created_at: str = field(default_factory=utc_now)
     retrieved_skill_ids: Sequence[str] = field(default_factory=tuple)
     visible_skill_ids: Sequence[str] = field(default_factory=tuple)
+    # SkillFlow TTB scores only the structured action tokens on each edge.
+    # ``executed_prefix_tokens`` remains the FlowSteer/GRPO prefix boundary;
+    # these two fields persist the strictly narrower TTB target span so
+    # reasoning tokens stay in the conditioning context.
+    structured_action_token_start: int = 0
+    structured_action_token_count: int = 0
 
     def __post_init__(self) -> None:
         if self.round_index < 0:
@@ -219,6 +225,25 @@ class TurnRecord:
             raise ValueError("executed_prefix_tokens must be non-negative")
         if self.executed_prefix_tokens > len(self.output_token_ids):
             raise ValueError("executed prefix exceeds sampled output")
+        if (
+            type(self.structured_action_token_start) is not int
+            or self.structured_action_token_start < 0
+        ):
+            raise ValueError("structured action token start must be non-negative")
+        if (
+            type(self.structured_action_token_count) is not int
+            or self.structured_action_token_count < 0
+        ):
+            raise ValueError("structured action token count must be non-negative")
+        structured_action_end = (
+            self.structured_action_token_start + self.structured_action_token_count
+        )
+        if structured_action_end > self.executed_prefix_tokens:
+            raise ValueError("structured action span exceeds the executed prefix")
+        if self.structured_action_token_count == 0 and (
+            self.structured_action_token_start != 0
+        ):
+            raise ValueError("empty structured action span must start at zero")
         if len(self.behavior_log_probs) != len(self.output_token_ids):
             raise ValueError("behavior log-prob receipt must match output token count")
         if not all(math.isfinite(float(value)) for value in self.behavior_log_probs):
@@ -261,6 +286,14 @@ class TurnRecord:
             )
         object.__setattr__(self, "retrieved_skill_ids", retrieved_skill_ids)
         object.__setattr__(self, "visible_skill_ids", visible_skill_ids)
+
+    @property
+    def structured_action_token_ids(self) -> Tuple[int, ...]:
+        """Return the exact structured action IDs used by SkillFlow TTB."""
+
+        start = self.structured_action_token_start
+        end = start + self.structured_action_token_count
+        return tuple(self.output_token_ids[start:end])
 
     @property
     def snapshot_receipt_verified(self) -> bool:
@@ -333,6 +366,14 @@ class TurnRecord:
             created_at=value.get("created_at", utc_now()),
             retrieved_skill_ids=tuple(value.get("retrieved_skill_ids", ())),
             visible_skill_ids=tuple(value.get("visible_skill_ids", ())),
+            structured_action_token_start=value.get(
+                "structured_action_token_start",
+                0,
+            ),
+            structured_action_token_count=value.get(
+                "structured_action_token_count",
+                0,
+            ),
         )
 
 
@@ -679,6 +720,47 @@ class TrajectoryRecord:
             )
         )
 
+    @property
+    def ttb_eligible(self) -> bool:
+        """Whether the record has the exact on-policy inputs required by TTB.
+
+        This intentionally does not inherit GRPO's same-question advantage
+        semantics.  It reuses the common natural-policy/evaluator/lineage
+        admission boundary and additionally requires a persisted structured
+        action-token span for every Director edge.
+        """
+
+        return bool(
+            self.task.split == "train"
+            and self.natural_policy_terminal
+            and self.evaluation.valid
+            and self.evaluation.reward is not None
+            and (
+                not self.terminal_failure
+                or float(self.evaluation.reward) == 0.0
+            )
+            and self.evaluation.evaluator_version == self.versions.evaluator
+            and self.sampling_receipt_verified
+            and not self.forced_probe
+            and not self.api_fallback_used
+            and not self.manual_repair_used
+            and not self.valid_lineage_fallback_used
+            and self.turns
+            and self._snapshot_chain_valid()
+            and all(
+                turn.receipt_verified
+                and not turn.reconstructed_context
+                and turn.policy_version == self.versions.policy
+                and turn.structured_action_token_count > 0
+                and (
+                    turn.structured_action_token_start
+                    + turn.structured_action_token_count
+                    == turn.executed_prefix_tokens
+                )
+                for turn in self.turns
+            )
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "schema_version": self.schema_version,
@@ -709,6 +791,7 @@ class TrajectoryRecord:
             "invoked_skill_ids": list(self.invoked_skill_ids),
             "skill_receipt_verified": self.skill_receipt_verified,
             "grpo_eligible": self.grpo_eligible,
+            "ttb_eligible": self.ttb_eligible,
             "created_at": self.created_at,
         }
 
@@ -769,6 +852,7 @@ class TrajectoryRecord:
             "sampling_receipt_verified": record.sampling_receipt_verified,
             "skill_receipt_verified": record.skill_receipt_verified,
             "grpo_eligible": record.grpo_eligible,
+            "ttb_eligible": record.ttb_eligible,
         }
         for name, expected in derived.items():
             if name in value and value[name] != expected:

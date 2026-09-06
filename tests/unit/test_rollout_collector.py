@@ -31,6 +31,7 @@ from src.interactive.director import (
     DIRECTOR_SGLANG_SAMPLING_SCHEMA_VERSION,
     DIRECTOR_STATE_CONDITIONED_ACTION_SCHEMA_VERSION,
     DIRECTOR_SYSTEM_PROMPT,
+    DirectorResponse,
     QA_VERIFIED_ANSWER_LINEAGE_PROTOCOL,
     director_actions_from_admissible_schema_branch,
     director_action_json_schema_text,
@@ -384,6 +385,9 @@ def test_native_sglang_receipt_uses_real_input_ids_and_separates_versions():
     consumed = client.executed_prefix_tokens(response, action)
     assert consumed == action.consumed_end
     assert consumed < len(response.metadata["output_token_ids"])
+    action_start, action_count = client.structured_action_token_span(response, action)
+    assert action_start == action.consumed_start
+    assert action_count == action.consumed_end - action.consumed_start
 
 
 def test_native_sglang_receipt_can_enable_qwen_thinking_template():
@@ -414,6 +418,50 @@ def test_native_sglang_receipt_can_enable_qwen_thinking_template():
     assert action.action_type is AgentActionType.FINISH
     assert action.consumed_start > response.text.index("</think>")
     assert client.executed_prefix_tokens(response, action) == action.consumed_end
+    action_start, action_count = client.structured_action_token_span(response, action)
+    assert action_start == action.consumed_start
+    assert action_count == action.consumed_end - action.consumed_start
+    assert action_start > 0
+
+
+def test_ttb_action_span_rejects_token_crossing_action_end_boundary():
+    class BoundaryTokenizer:
+        @staticmethod
+        def apply_chat_template(messages, **kwargs):
+            del messages, kwargs
+            return [101]
+
+        @staticmethod
+        def decode(token_ids, **kwargs):
+            assert kwargs == {
+                "skip_special_tokens": False,
+                "clean_up_tokenization_spaces": False,
+            }
+            pieces = {1: "preface ", 2: '{"action":"finish"}\n'}
+            return "".join(pieces[value] for value in token_ids)
+
+    text = 'preface {"action":"finish"}\n'
+    client = SGLangReceiptDirectorClient(
+        BoundaryTokenizer(),
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    response = DirectorResponse(
+        text=text,
+        metadata={
+            "output_token_ids": (1, 2),
+            "receipt_verified": True,
+            "prompt_text": "ordinary prompt",
+        },
+    )
+    action = AgentActionParser().parse(text)
+
+    assert client.executed_prefix_tokens(response, action) == 2
+    with pytest.raises(
+        ReceiptValidationError,
+        match="not bounded by exact sampled tokens",
+    ):
+        client.structured_action_token_span(response, action)
 
 
 def test_hierarchical_phase_validation_uses_post_reasoning_action_suffix():

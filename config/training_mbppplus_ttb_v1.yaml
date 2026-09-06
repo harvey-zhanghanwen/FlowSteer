@@ -1,0 +1,252 @@
+# SkillFlow-primary TTB condition for the MBPP+ best-v6 project adaptation.
+# This is not a bit-exact reproduction of SkillFlow's seven-task IID run:
+# MBPP+ and the three-GPU/runtime mapping below are project adaptations.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+execution_timeout: 600.0
+
+experiment:
+  name: "mbppplus_best_v6_skillflow_ttb_250step"
+  phase: "mbppplus_ttb_training"
+  training_enabled: true
+  seed: 20260906
+  condition_id: "mbppplus_best_v6_skillflow_ttb_v1"
+  sampling_schedule_purpose: "mbppplus_disjoint_training_ttb_7x4"
+  catalog_order_namespace: "mbppplus_best_v6_skillflow_ttb_v1"
+  prompt_version: "agentgraph.director.minimal-neutral-stepwise-react.v1"
+  tool_version: "skillflow.training-tools.python-exec.v1"
+
+data:
+  catalog_path: "config/datasets_mbppplus_training_v1.yaml"
+  train_path: "data/mbpp_plus/training_v1/train.jsonl"
+  validation_path: "data/mbpp_plus/training_v1/validation.jsonl"
+  heldout_test_path: "data/mbpp_plus/fixed_100_v1/test.jsonl"
+  expected_train_task_count: 241
+  expected_validation_task_count: 62
+  training_population: "flowsteer_mbpp_train"
+  heldout_population: "mbpp-plus-fixed-100@1"
+  enforce_split_isolation: true
+
+mbppplus_tool_runtime:
+  enabled: true
+  condition_id: "mbppplus_best_v6_skillflow_ttb_v1"
+  dataset_scope: [mbpp_plus]
+  mode: "model_driven_public_test_react"
+  max_turns_per_director_step: 1
+  max_tool_calls_per_agent: 4
+  python_timeout_seconds: 30.0
+
+storage:
+  schema_version: "flowsteer.agentgraph.mbppplus-ttb-storage.v1"
+  output_root: "artifacts/mbppplus_ttb_v1"
+  root: "artifacts/mbppplus_ttb_v1/evidence"
+  trajectory_format: "jsonl"
+  persist_exact_policy_receipts: true
+
+director:
+  base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8035}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "qwen35-9b-mbppplus-ttb-theta-step-000000"
+  behavior_adapter_name: null
+  behavior_adapter_checkpoint: null
+  updated_policy_version: "qwen35-9b-mbppplus-ttb-theta-step-000001"
+  expected_server_weight_version: "default"
+  prompt_profile: "minimal"
+  dtype: "bfloat16"
+  max_context_tokens: 32768
+  max_action_tokens: 1152
+  enable_thinking: true
+  action_decoding: "unconstrained"
+  sampling_action_profile: null
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 12
+  execute_on_edit: true
+  history_window: 1
+  lora:
+    enabled: true
+    rank: 64
+    alpha: 128
+    # The paper table does not report dropout. The released SkillFlow trainer
+    # uses 0.05, which is selected here and recorded as a source-code detail.
+    dropout: 0.05
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+agent_graph:
+  max_agents: 8
+  max_agents_per_subgraph: 3
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_subgraph, modify_agent, delete_agent, set_relation, set_output, continue, finish]
+  executor_selection: "director_catalog_choice"
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  require_format_agent: false
+  semantic_protocol_by_source:
+    mbpp_plus: "none"
+  recovery_policy: "preserve_diagnose_repair_augment"
+  terminal_protocol_by_source:
+    mbpp_plus: "none"
+  model_catalog_path: "config/model_catalog_mbppplus_ttb_v1.yaml"
+
+evaluation:
+  healthbench_judge_model: ""
+  max_environment_steps: 12
+  swebench_harness_enabled: false
+  evalplus_enabled: false
+  training_reward: "skillflow.training.reward.code_test_pass_rate"
+  reward_scope: "training_public_tests_only"
+  invalid_evaluator_action: "persist_and_exclude"
+
+ttb:
+  enabled: true
+  objective: "tempered_trajectory_balance"
+  design_document_objective: "action_masked_one_pass_grpo"
+  selected_objective: "tempered_trajectory_balance"
+  losses_mixed: false
+  optimizer_steps: 250
+  questions_per_batch: 7
+  trajectories_per_question: 4
+  effective_batch_size: 28
+  max_trajectory_steps: 12
+  max_rollout_attempts_per_question: 8
+  on_policy_rollouts: true
+  cross_step_rollout_prefetch: false
+  executor_frozen: true
+  beta: 1.0
+  epsilon_min: 0.1
+  edge_logprob_normalization: "per_action_token"
+  reasoning_token_treatment: "context_only"
+  learning_rate: 0.0001
+  # Not stated in the paper table; retained from the released SkillFlow code.
+  weight_decay: 0.01
+  weight_decay_source: "SkillFlow released trainer; absent from paper main table"
+  max_grad_norm: 3.0
+  kl_coefficient: 0.01
+  checkpoint_interval_steps: 10
+  theta_lora:
+    rank: 64
+    alpha: 128
+    dropout: 0.05
+    dropout_source: "SkillFlow released trainer; absent from paper main table"
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+  phi_lora:
+    selected_source: "SkillFlow main configuration table"
+    rank: 16
+    alpha: 32
+    dropout: 0.05
+    dropout_source: "SkillFlow released trainer; absent from paper main table"
+    target_modules: [q_proj, v_proj]
+    appendix_rank_ambiguity: 32
+  z:
+    separate_parameter: true
+    optimized: true
+  project_runtime:
+    implementation_source: "project_implementation"
+    rollout_workers: 28
+    micro_batch_size: 1
+    policy_sync_interval_steps: 1
+    require_updated_theta_before_next_rollout: true
+
+# Compatibility section required by the shared AgentGraph config reader only.
+# It is disabled and is never dispatched by scripts/train_mbppplus_ttb.py.
+grpo:
+  enabled: false
+  objective: "action_masked_one_pass"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 0
+  equal_weight_per_problem: false
+  terminal_task_reward_only: false
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  optimization_passes_per_rollout_batch: 0
+  max_optimizer_updates: 0
+  learning_rate: 0.0
+  gradient_checkpointing: false
+  max_grad_norm: 0.0
+
+policy_sync:
+  enabled: true
+  implementation_source: "project_implementation"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8035}"
+  adapter_name_prefix: "theta_mbppplus_ttb_step_"
+  request_timeout_seconds: 300.0
+  max_retries: 3
+  retry_backoff_seconds: 2.0
+  post_update_canary_count: 1
+
+supervisor:
+  managed_by_runner: true
+  implementation_source: "project_implementation"
+  port: "${FLOWSTEER_SUPERVISOR_PORT:-8035}"
+  api_key: "${SGLANG_API_KEY:-EMPTY}"
+  mem_fraction_static: 0.82
+  ready_timeout_seconds: 600.0
+
+exploration:
+  enabled: false
+  strategy: "none"
+  forced_probe_rollouts: 0
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+  library_version: "none"
+
+mace:
+  enabled: false
+
+bayesian_posterior:
+  enabled: false
+
+skill_evolution:
+  enabled: false
+
+gpu:
+  learner_physical: "${FLOWSTEER_LEARNER_GPU:-3}"
+  rollout_physical: "${FLOWSTEER_ROLLOUT_GPU:-4}"
+  gradient_replica_physical: "${FLOWSTEER_GRADIENT_GPU:-5}"
+  learner_device: "cuda:${FLOWSTEER_LEARNER_GPU:-3}"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:${FLOWSTEER_GRADIENT_GPU:-5}"
+  supervisor_gpu_id: "${FLOWSTEER_ROLLOUT_GPU:-4}"
+  supervisor_api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8035}/v1"
+  training_enabled: true
+  resource_gate:
+    implementation_source: "project_implementation"
+    require_no_compute_processes: true
+    minimum_free_memory_mib_per_gpu: 71680
+    reference: "SkillFlow reports about 70 GB peak per A100-80GB GPU"
+  oom_policy:
+    status: "fail_closed_before_load"
+    micro_batch_size: 1
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [1]
+    retry_on_cuda_oom: false
+    split_items_across_learner_and_replica: true
+    gradient_checkpointing: true
+
+wandb:
+  enabled: true
+  mode: "online"
+  auth_env: "WANDB_API_KEY"
+  project: "flowsteer-mbppplus"
+  run_name: "mbppplus-best-v6-skillflow-ttb-250step"
+  entity: null
+  group: "mbppplus-best-v6-ttb-v1"
+  job_type: "agentgraph-ttb"
+  tags: [mbppplus, agentgraph, ttb, lora, qwen3.5-9b, project-adaptation]
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: false
+  require_version_compatible_skills: true

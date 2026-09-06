@@ -2145,6 +2145,48 @@ class SGLangReceiptDirectorClient:
             "the Canvas-consumed character prefix is not a sampled token prefix"
         )
 
+    def structured_action_token_span(
+        self,
+        response: DirectorResponse,
+        action: AgentAction,
+    ) -> tuple[int, int]:
+        """Return the exact structured-action token span for SkillFlow TTB.
+
+        SkillFlow's Tempered Trajectory Balance objective treats Director
+        reasoning as context and scores only the structured action on each
+        edge.  A tokenizer token that crosses the reasoning/action character
+        boundary cannot be assigned to either side without reconstructing the
+        behavior sequence, so this boundary fails closed instead.
+        """
+
+        metadata = response.metadata
+        output_ids = _token_ids(metadata.get("output_token_ids"), "output_token_ids")
+        if metadata.get("receipt_verified") is not True:
+            raise ReceiptValidationError("Director response is not an exact receipt")
+        if not (0 <= action.consumed_start < action.consumed_end <= len(response.text)):
+            raise ReceiptValidationError("parsed action has an invalid consumed character span")
+        if response.text[action.consumed_start : action.consumed_end] != action.raw_json:
+            raise ReceiptValidationError("parsed action span disagrees with the sampled text")
+        prefix_text = response.text[: action.consumed_start]
+        action_text = response.text[: action.consumed_end]
+        action_start: int | None = None
+        action_end: int | None = None
+        for count in range(len(output_ids) + 1):
+            decoded = self._decode(output_ids[:count])
+            if action_start is None and decoded == prefix_text:
+                action_start = count
+            if decoded == action_text:
+                action_end = count
+                break
+        if action_start is None or action_end is None:
+            raise ReceiptValidationError(
+                "reasoning/action boundary is not bounded by exact sampled tokens"
+            )
+        action_count = action_end - action_start
+        if action_count <= 0:
+            raise ReceiptValidationError("structured action has no sampled tokens")
+        return action_start, action_count
+
 
 def _phase_action_text(receipt: Mapping[str, Any]) -> str:
     """Return a phase's executable suffix while preserving its raw receipt."""
@@ -3636,6 +3678,7 @@ class AgentGraphRolloutCollector:
         api_fallback_used: bool = False,
         manual_repair_used: bool = False,
         expected_task_split: str = "train",
+        require_structured_action_span: bool = False,
     ) -> None:
         if orchestrator.registry is not environment.model_registry:
             raise ValueError("orchestrator and environment must share the model registry")
@@ -3648,6 +3691,14 @@ class AgentGraphRolloutCollector:
         prefix_resolver = getattr(orchestrator.client, "executed_prefix_tokens", None)
         if not callable(prefix_resolver):
             raise TypeError("Director client must expose exact executed_prefix_tokens()")
+        if type(require_structured_action_span) is not bool:
+            raise TypeError("require_structured_action_span must be bool")
+        if require_structured_action_span and not callable(
+            getattr(orchestrator.client, "structured_action_token_span", None)
+        ):
+            raise TypeError(
+                "TTB rollout collection requires exact structured_action_token_span()"
+            )
         for name, value in (
             ("condition_satisfied", condition_satisfied),
             ("forced_probe", forced_probe),
@@ -3674,6 +3725,7 @@ class AgentGraphRolloutCollector:
         self.api_fallback_used = api_fallback_used
         self.manual_repair_used = manual_repair_used
         self.expected_task_split = expected_task_split
+        self.require_structured_action_span = require_structured_action_span
         self._lock = asyncio.Lock()
 
     async def collect(
@@ -4110,10 +4162,26 @@ class AgentGraphRolloutCollector:
                             "hierarchical phase log-prob receipt is incomplete"
                         )
             executed_prefix_tokens = 0
+            structured_action_token_start = 0
+            structured_action_token_count = 0
             if action is not None:
                 executed_prefix_tokens = self.orchestrator.client.executed_prefix_tokens(
                     response, action
                 )
+                span_resolver = getattr(
+                    self.orchestrator.client,
+                    "structured_action_token_span",
+                    None,
+                )
+                if callable(span_resolver):
+                    (
+                        structured_action_token_start,
+                        structured_action_token_count,
+                    ) = span_resolver(response, action)
+                elif self.require_structured_action_span:
+                    raise ReceiptValidationError(
+                        "TTB rollout lacks an exact structured action token span"
+                    )
 
             snapshot = GraphSnapshotEvent.create(
                 canvas.revision,
@@ -4269,6 +4337,8 @@ class AgentGraphRolloutCollector:
                 # Skill prior in ``available_skills``. Forced paired-probe
                 # conditions are rendered separately and excluded above.
                 visible_skill_ids=current_retrieved_skill_ids,
+                structured_action_token_start=structured_action_token_start,
+                structured_action_token_count=structured_action_token_count,
             )
             turns.append(turn)
             snapshots.append(snapshot)

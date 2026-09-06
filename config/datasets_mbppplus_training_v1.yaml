@@ -1,0 +1,53 @@
+# MBPP train/validation populations for the MBPP+ v6 TTB training branch.
+#
+# The complete EvalPlus MBPP+ v0.2.0 population is used only to exclude
+# overlapping FlowSteer MBPP tasks.  The existing fixed-100 evaluation
+# population is referenced, not copied or rewritten.
+#
+# This catalog is a project-level MBPP+ adaptation.  MBPP+ is not one of the
+# seven IID tasks in SkillFlow's reported joint TTB run; this file therefore
+# defines neither a paper reproduction nor a new loss.  The training consumer
+# must use the separately versioned TTB configuration.
+
+schema_version: "flowsteer.agentgraph.mbppplus.training-dataset.v1"
+task_schema_version: "flowsteer.agentgraph.task.v1"
+
+aligned_dir: "data/mbpp_plus/training_v1"
+aligned_files:
+  train: "data/mbpp_plus/training_v1/train.jsonl"
+  validation: "data/mbpp_plus/training_v1/validation.jsonl"
+  test: "data/mbpp_plus/training_v1/test.jsonl"
+  evaluator_private: "data/mbpp_plus/training_v1/evaluator_private.jsonl"
+  manifest: "data/mbpp_plus/training_v1/manifest.json"
+
+sources:
+  flowsteer_public:
+    root: "${FLOWSTEER_DATASET_ROOT:-/ssd1/iclr/owner/skillflow-iclr/resources/datasets/FlowSteer-Dataset}"
+    train_file: "train/train_12k.jsonl"
+    validation_file: "eval/mbpp.jsonl"
+  evalplus_full:
+    dataset_version: "v0.2.0"
+    path: "${MBPPPLUS_SOURCE_PATH:-data/mbpp_plus/source/MbppPlus-v0.2.0.jsonl}"
+  fixed_test_reference:
+    protocol: "mbpp-plus-fixed-100@1"
+    catalog: "config/datasets_mbppplus_v1.yaml"
+    aligned_dir: "data/mbpp_plus/fixed_100_v1"
+    mutable: false
+
+split_policy:
+  mode: "flowsteer_public_mbpp_disjoint_from_evalplus"
+  protocol: "flowsteer-mbpp-no-evalplus-overlap@1"
+  selection: "preserve_source_order_after_deduplication_and_exclusion"
+  overlap_identity_fields: [task_id, problem, entry_point]
+  overlap_match: "any"
+  flowsteer_total_rows: 12000
+  flowsteer_train_mbpp_rows: 2000
+  flowsteer_train_unique_tasks: 374
+  flowsteer_validation_rows: 128
+  evalplus_full_rows: 378
+  expected_train_excluded: 133
+  expected_validation_excluded: 66
+  expected_train_count: 241
+  expected_validation_count: 62
+  training_evaluator: "skillflow.training.reward.code_test_pass_rate"
+  test_population: "external_mbpp-plus-fixed-100@1"
