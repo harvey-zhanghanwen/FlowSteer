@@ -1,0 +1,498 @@
+{
+  "condition_id": "healthbench_professional_external_medical_sources_v2_38_dev5",
+  "code_commit": "a65f9f2",
+  "sample_count": 5,
+  "completed": 5,
+  "metrics": {
+    "completed": 5,
+    "completed_only_overall_score": 0.35356060606060613,
+    "completed_only_overall_score_length_adjusted": 0.38005000606060607,
+    "denominator": 5,
+    "evaluator_valid": 5,
+    "strict_overall_score": 0.35356060606060613,
+    "strict_overall_score_length_adjusted": 0.38005000606060607
+  },
+  "old_v235_same_five": {
+    "overall_score": 0.25356060606060604,
+    "overall_score_length_adjusted": 0.20907840606060607
+  },
+  "topology_counts": {
+    "single_agent": 1,
+    "directed_chain": 3,
+    "reciprocal_and_fan_in": 1
+  },
+  "final_graph_model_counts": {
+    "MiniMax-M3": 1,
+    "qwen3.5-9b-local": 9,
+    "deepseek-v4-flash": 1
+  },
+  "tool_dispatch_counts": {
+    "healthbench-trials.search": 2,
+    "healthbench-medrag.search": 2,
+    "healthbench-literature.search": 1,
+    "healthbench-authoritative.search": 8
+  },
+  "tool_error_counts": {},
+  "recorded_agent_model_calls": 29,
+  "recorded_agent_token_usage": {
+    "prompt_tokens": 146583,
+    "completion_tokens": 31800,
+    "total_tokens": 178619
+  },
+  "agent_usage_scope": "deduplicated model_calls from persisted successful execution records; excludes Director/grader and may exclude failed Agent attempts",
+  "grader_api_calls": 17,
+  "grader_provider_errors": {
+    "500": 4
+  },
+  "grader_token_usage": {
+    "input_cached_tokens": 0,
+    "input_tokens": 12082,
+    "output_reasoning_tokens": 818,
+    "output_tokens": 1805,
+    "total_tokens": 13887
+  },
+  "elapsed_seconds": 699.710734,
+  "completed_at": "2026-09-06T09:31:45.642581+00:00",
+  "cases": [
+    {
+      "task_id": "healthbench-professional:f056cdb489e3636b0b51afb8fd6b3a8a",
+      "metrics": {
+        "overall_score": 0.5,
+        "overall_score_length_adjusted": 0.4434638,
+        "rubric_count": 2
+      },
+      "valid": true,
+      "explicit_finish": true,
+      "termination": "finish",
+      "final_answer_characters": 3923,
+      "final_graph": {
+        "nodes": [
+          {
+            "allowed_tools": [
+              "healthbench-trials.search"
+            ],
+            "artifact_type": "text",
+            "completion_condition": null,
+            "contract": "Node 1 anchor: responsible for acknowledging the user's request about 'waterfall trial', defining what a waterfall trial is, and explicitly stating that while registrations exist forووعداء trials with specific populations or interventions relevant to clinical discussions, no single generic registration encompasses all potential trial configurations. The node must clarify this limitation rather than implying universal coverage.",
+            "execution_mode": "react",
+            "id": "node_1",
+            "model_id": "MiniMax-M3"
+          }
+        ],
+        "output_agent_id": "node_1",
+        "relations": [],
+        "revision": 2
+      },
+      "topology": "single_agent",
+      "executions": [
+        {
+          "round": 1,
+          "agent_id": "node_1",
+          "model_id": "MiniMax-M3",
+          "phase": "single",
+          "output_characters": 3923,
+          "error_type": null
+        }
+      ],
+      "grader_api_calls": 2,
+      "grader_error": null
+    },
+    {
+      "task_id": "healthbench-professional:ed8b3ca0a4dabfd0827c17a08513a181",
+      "metrics": {
+        "overall_score": 0.36363636363636365,
+        "overall_score_length_adjusted": 0.4095297636363636,
+        "rubric_count": 3
+      },
+      "valid": true,
+      "explicit_finish": true,
+      "termination": "finish",
+      "final_answer_characters": 439,
+      "final_graph": {
+        "nodes": [
+          {
+            "allowed_tools": [
+              "healthbench-trials.search"
+            ],
+            "artifact_type": "text",
+            "completion_condition": null,
+            "contract": "Search ClinicalTrials.gov for 'omeprazole astronaut trial'. Retrieve study names, interventions, populations, outcomes. Output: array of evidence with titles, IDs, and excerpts.",
+            "execution_mode": "react",
+            "id": "node_1",
+            "model_id": "qwen3.5-9b-local"
+          },
+          {
+            "allowed_tools": [],
+            "artifact_type": "text",
+            "completion_condition": null,
+            "contract": "Route search results to final output. Verify completeness. If no trials found, state uncertainty clearly without inventing details. Output the complete answer based on retrieved data.",
+            "execution_mode": "reasoning",
+            "id": "node_2",
+            "model_id": "deepseek-v4-flash"
+          }
+        ],
+        "output_agent_id": "node_2",
+        "relations": [
+          {
+            "source_id": "node_1",
+            "source_to_target": true,
+            "target_id": "node_2",
+            "target_to_source": false
+          }
+        ],
+        "revision": 5
+      },
+      "topology": "directed_chain",
+      "executions": [
+        {
+          "round": 1,
+          "agent_id": "node_1",
+          "model_id": "qwen3.5-9b-local",
+          "phase": "single",
+          "output_characters": 638,
+          "error_type": null
+        },
+        {
+          "round": 1,
+          "agent_id": "node_2",
+          "model_id": "deepseek-v4-flash",
+          "phase": "single",
+          "output_characters": 439,
+          "error_type": null
+        }
+      ],
+      "grader_api_calls": 3,
+      "grader_error": null
+    },
+    {
+      "task_id": "healthbench-professional:4f08ae480b16ef825cf098eca6530e68",
+      "metrics": {
+        "overall_score": 0.4375,
+        "overall_score_length_adjusted": 0.4920664,
+        "rubric_count": 2
+      },
+      "valid": true,
+      "explicit_finish": true,
+      "termination": "finish",
+      "final_answer_characters": 144,
+      "final_graph": {
+        "nodes": [
+          {
+            "allowed_tools": [
+              "healthbench-medrag.search"
+            ],
+            "artifact_type": "text",
+            "completion_condition": null,
+            "contract": "Search MedRAG for clinical guidance on preventing and treating esophageal varices in cirrhotic patients (secondary prophylaxis, active surveillance) and managing Barrett's esophagus strategies without anti-platelet therapy.",
+            "execution_mode": "react",
+            "id": "node_1",
+            "model_id": "qwen3.5-9b-local"
+          },
+          {
+            "allowed_tools": [
+              "healthbench-literature.search"
+            ],
+            "artifact_type": "text",
+            "completion_condition": null,
+            "contract": "Search literature PubMed IDs regarding case studies or guidelines addressing the coexistence of esophageal varices and Barrett's esophagus to inform management conflict resolution. Output: evidence array with PMIDs/titles.",
+            "execution_mode": "react",
+            "id": "node_2",
+            "model_id": "qwen3.5-9b-local"
+          },
+          {
+            "allowed_tools": [
+              "healthbench-authoritative.search"
+            ],
+            "artifact_type": "text",
+            "completion_condition": null,
+            "contract": "Search authoritative guidelines and textbooks for specific management conflict resolution between non-selective beta-blockers/variceal prophylaxis in cirrhosis and acid-suppression strategies (PPIs/H2RAs) required for Barrett's esophagus surveillance and maintenance, noting evidentiary gaps where none exist.",
+            "execution_mode": "react",
+            "id": "node_3",
+            "model_id": "qwen3.5-9b-local"
+          }
+        ],
+        "output_agent_id": "node_3",
+        "relations": [
+          {
+            "source_id": "node_1",
+            "source_to_target": true,
+            "target_id": "node_2",
+            "target_to_source": false
+          },
+          {
+            "source_id": "node_2",
+            "source_to_target": true,
+            "target_id": "node_3",
+            "target_to_source": false
+          }
+        ],
+        "revision": 7
+      },
+      "topology": "directed_chain",
+      "executions": [
+        {
+          "round": 1,
+          "agent_id": "node_1",
+          "model_id": "qwen3.5-9b-local",
+          "phase": "single",
+          "output_characters": 2001,
+          "error_type": null
+        },
+        {
+          "round": 1,
+          "agent_id": "node_2",
+          "model_id": "qwen3.5-9b-local",
+          "phase": "single",
+          "output_characters": 878,
+          "error_type": null
+        },
+        {
+          "round": 2,
+          "agent_id": "node_3",
+          "model_id": "qwen3.5-9b-local",
+          "phase": "single",
+          "output_characters": 144,
+          "error_type": null
+        }
+      ],
+      "grader_api_calls": 4,
+      "grader_error": null
+    },
+    {
+      "task_id": "healthbench-professional:dadbebd3dce1b5928cac5a44dde095d3",
+      "metrics": {
+        "overall_score": 0.4666666666666667,
+        "overall_score_length_adjusted": 0.49900666666666665,
+        "rubric_count": 2
+      },
+      "valid": true,
+      "explicit_finish": true,
+      "termination": "finish",
+      "final_answer_characters": 900,
+      "final_graph": {
+        "nodes": [
+          {
+            "allowed_tools": [
+              "healthbench-authoritative.search"
+            ],
+            "artifact_type": "text",
+            "completion_condition": "When sufficient evidence regarding the prevalence of IBD in HIV patients is retrieved (e.g., OR values, percentages from systematic reviews), proceed to construct the final answer summarizing the commonness/epidemiology and cite sources.",
+            "contract": "Search authoritative sources and literature for the epidemiology of inflammatory bowel disease (IBD) specifically within populations infected with Human Immunodeficiency Virus (HIV). Determine prevalence rates, incidence data, or odds ratios where available.",
+            "execution_mode": "react",
+            "id": "node_1",
+            "model_id": "qwen3.5-9b-local"
+          },
+          {
+            "allowed_tools": [
+              "healthbench-authoritative.search"
+            ],
+            "artifact_type": "text",
+            "completion_condition": null,
+            "contract": "Synthesize the received epidemiological evidence from node_1 to directly answer how common IBD is in patients with HIV. Specifically, summarize the reported odds ratio (OR) of 2.68 for developing IBD and the estimated co-prevalence range of 0.1% to 2%. Cite the source documents clearly.",
+            "execution_mode": "react",
+            "id": "node_2",
+            "model_id": "qwen3.5-9b-local"
+          },
+          {
+            "allowed_tools": [
+              "healthbench-authoritative.search"
+            ],
+            "artifact_type": "text",
+            "completion_condition": null,
+            "contract": "Resolve the identified evidence gap by searching for specific literature reporting the prevalence and odds ratio of Inflammatory Bowel Disease in HIV-positive populations. Admit uncertainty if no study confirms a statistically significant association or reports quantitative co-prevalence metrics.",
+            "execution_mode": "react",
+            "id": "node_3",
+            "model_id": "qwen3.5-9b-local"
+          }
+        ],
+        "output_agent_id": "node_3",
+        "relations": [
+          {
+            "source_id": "node_1",
+            "source_to_target": true,
+            "target_id": "node_2",
+            "target_to_source": true
+          },
+          {
+            "source_id": "node_1",
+            "source_to_target": true,
+            "target_id": "node_3",
+            "target_to_source": false
+          },
+          {
+            "source_id": "node_2",
+            "source_to_target": true,
+            "target_id": "node_3",
+            "target_to_source": false
+          }
+        ],
+        "revision": 12
+      },
+      "topology": "reciprocal_and_fan_in",
+      "executions": [
+        {
+          "round": 4,
+          "agent_id": "node_1",
+          "model_id": "qwen3.5-9b-local",
+          "phase": "single",
+          "output_characters": 2137,
+          "error_type": null
+        },
+        {
+          "round": 7,
+          "agent_id": "node_1",
+          "model_id": "qwen3.5-9b-local",
+          "phase": "draft",
+          "output_characters": 477,
+          "error_type": null
+        },
+        {
+          "round": 7,
+          "agent_id": "node_1",
+          "model_id": "qwen3.5-9b-local",
+          "phase": "revision",
+          "output_characters": 825,
+          "error_type": null
+        },
+        {
+          "round": 7,
+          "agent_id": "node_2",
+          "model_id": "qwen3.5-9b-local",
+          "phase": "draft",
+          "output_characters": 781,
+          "error_type": null
+        },
+        {
+          "round": 7,
+          "agent_id": "node_2",
+          "model_id": "qwen3.5-9b-local",
+          "phase": "revision",
+          "output_characters": 672,
+          "error_type": null
+        },
+        {
+          "round": 8,
+          "agent_id": "node_3",
+          "model_id": "qwen3.5-9b-local",
+          "phase": "single",
+          "output_characters": 900,
+          "error_type": null
+        }
+      ],
+      "grader_api_calls": 4,
+      "grader_error": null
+    },
+    {
+      "task_id": "healthbench-professional:37101607e2947481e85e8fe3597a1acf",
+      "metrics": {
+        "overall_score": 0,
+        "overall_score_length_adjusted": 0.0561834,
+        "rubric_count": 4
+      },
+      "valid": true,
+      "explicit_finish": true,
+      "termination": "finish",
+      "final_answer_characters": 89,
+      "final_graph": {
+        "nodes": [
+          {
+            "allowed_tools": [
+              "healthbench-authoritative.search"
+            ],
+            "artifact_type": "text",
+            "completion_condition": null,
+            "contract": "Search authoritative guidelines for induction chemotherapy with TPF (docetaxel, cisplatin, fluorouracil) followed by concurrent chemoradiotherapy in locally advanced laryngeal cancer to support organ preservation strategies. Verify evidence availability and completeness without asserting treatment recommendations or concluding the case.",
+            "execution_mode": "react",
+            "id": "node_1",
+            "model_id": "qwen3.5-9b-local"
+          },
+          {
+            "allowed_tools": [
+              "healthbench-source.read"
+            ],
+            "artifact_type": "text",
+            "completion_condition": null,
+            "contract": "Read evidence from node_1's search results (Pathoma_Husain_65, 30016178, Surgery_Schwartz excerpts) to extract specific text supporting TPF induction followed by concurrent chemoradiotherapy as a guideline-recommended strategy for laryngeal squamous cell carcinoma organ preservation. Output structured evidence items with exact source bindings.",
+            "execution_mode": "react",
+            "id": "node_2",
+            "model_id": "qwen3.5-9b-local"
+          }
+        ],
+        "output_agent_id": "node_2",
+        "relations": [
+          {
+            "source_id": "node_1",
+            "source_to_target": true,
+            "target_id": "node_2",
+            "target_to_source": false
+          }
+        ],
+        "revision": 6
+      },
+      "topology": "directed_chain",
+      "executions": [
+        {
+          "round": 3,
+          "agent_id": "node_1",
+          "model_id": "qwen3.5-9b-local",
+          "phase": "single",
+          "output_characters": 1404,
+          "error_type": null
+        },
+        {
+          "round": 4,
+          "agent_id": "node_2",
+          "model_id": "qwen3.5-9b-local",
+          "phase": "single",
+          "output_characters": 89,
+          "error_type": null
+        }
+      ],
+      "grader_api_calls": 4,
+      "grader_error": null
+    }
+  ],
+  "scope": "five previously observed development regression cases, not the full 525 or untouched held-out set",
+  "failure_categories": [
+    {
+      "category": "incomplete_trial_outcome_coverage",
+      "count": 1,
+      "proportion": 0.2,
+      "task_ids": [
+        "healthbench-professional:f056cdb489e3636b0b51afb8fd6b3a8a"
+      ]
+    },
+    {
+      "category": "named_entity_disambiguation",
+      "count": 1,
+      "proportion": 0.2,
+      "task_ids": [
+        "healthbench-professional:ed8b3ca0a4dabfd0827c17a08513a181"
+      ]
+    },
+    {
+      "category": "heading_only_final_response",
+      "count": 2,
+      "proportion": 0.4,
+      "task_ids": [
+        "healthbench-professional:4f08ae480b16ef825cf098eca6530e68",
+        "healthbench-professional:37101607e2947481e85e8fe3597a1acf"
+      ]
+    },
+    {
+      "category": "evidence_loss_on_reciprocal_phase_transition",
+      "count": 1,
+      "proportion": 0.2,
+      "task_ids": [
+        "healthbench-professional:dadbebd3dce1b5928cac5a44dde095d3"
+      ]
+    }
+  ],
+  "strict_terminal_failures": 0,
+  "task_timeouts": 0,
+  "unresolved_grader_errors": 0,
+  "vs_v235_percentage_points": {
+    "raw": 10.000000000000009,
+    "length_adjusted": 17.09716
+  }
+}

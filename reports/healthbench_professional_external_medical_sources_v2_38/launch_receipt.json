@@ -1,0 +1,23 @@
+{
+  "code_commit": "a65f9f2",
+  "branch": "feature/healthbench-v2.38-external-medical-sources-20260906",
+  "architecture_push": "succeeded",
+  "pid": 61919,
+  "started_at": "2026-09-06T09:20:05.931847+00:00",
+  "run_attempt_id": "run_attempt_82847441fcc8205fae88aa56",
+  "config": "config/evaluation_healthbench_professional_external_medical_sources_v2_38_dev5.yaml",
+  "collection_arm": "agentgraph",
+  "sample_count": 5,
+  "gpu": 6,
+  "port": 8026,
+  "log": "artifacts/healthbench_professional_external_medical_sources_v2_38_dev5/operations/agentgraph_gpu6.log",
+  "offline_tests": {
+    "passed": 118,
+    "subtests_passed": 35,
+    "model_api_calls": 0
+  },
+  "prepare_only": "passed_5_tasks",
+  "new_direct_evaluation": false,
+  "training_enabled": false,
+  "automatic_full_evaluation": false
+}

@@ -1,7 +1,11 @@
 # HealthBench Professional v2.38：扩充外部医学知识源
 
-状态：新增源的客户端与 Agent 接线完成；只做离线定向验证和五题
-prepare-only。没有模型 rollout、grader、训练或新 HealthBench 评分。
+初始状态：新增源的客户端与 Agent 接线完成，先做离线定向验证和五题
+prepare-only。下方第四节保留运行前记录。
+
+最新状态：随后经用户授权完成五题 AgentGraph 评测，5/5 有效且 FINISH，
+raw 35.36%、length-adjusted 38.01%。完整实测与已知问题见
+`evaluation_report_zh.md`；没有训练，也没有继续运行 525 题。
 
 ## 一、这个 benchmark 是由哪些数据库构建的？
 

@@ -1770,3 +1770,11 @@ context overflow HTTP400，1 题 900 秒 TimeoutError；五题 strict 指标 N/A
 随后用户明确授权用最新版评分同一组 5 题。离线 118 项测试、35 个子项通过
 并完成 prepare-only 后，主线单独发起 AgentGraph 五题；无新 Direct、训练或
 525 题运行。代码冻结在启动前备份提交，实测指标以单独结果报告为准。
+
+五题已于 2026-09-06 完成：执行代码 `a65f9f2`，5/5 evaluator-valid、5/5
+显式 FINISH；raw 35.3561%、length-adjusted 38.0050%。同题 v2.35 分别为
+25.3561%、20.9078%，原始分的全部增加来自 WATERFALL。两题最终输出仅标题，
+另有 IBD/HIV 在 SINGLE 转 reciprocal DRAFT 后丢失旧检索证据；本轮只定位，
+没有修改冻结的 runtime。没有 Agent 实际调用全文阅读工具，不将接口可用
+描述成已经利用全文。完整对照、错误分类和调用口径见
+`reports/healthbench_professional_external_medical_sources_v2_38/evaluation_report_zh.md`。
