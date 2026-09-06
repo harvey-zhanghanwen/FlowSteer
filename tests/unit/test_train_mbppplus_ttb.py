@@ -12,6 +12,7 @@ from src.interactive.ttb_monitor import metrics_from_ttb_step_receipt
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "config" / "training_mbppplus_ttb_v1.yaml"
+METHOD_DECISION = ROOT / "config" / "training_mbppplus_method_decision_v1.yaml"
 
 
 def _task(index: int) -> TaskRecord:
@@ -43,6 +44,48 @@ def test_formal_config_rejects_mixed_grpo() -> None:
     config["grpo"]["enabled"] = True
     with pytest.raises(runner.MBPPPlusTTBRunError, match="grpo.enabled"):
         runner.validate_mbppplus_ttb_config(config)
+
+
+def test_unresolved_method_decision_is_reportable_but_blocks_live_step() -> None:
+    decision = load_yaml(METHOD_DECISION)
+
+    receipt = runner.validate_training_method_decision(
+        decision,
+        launch_mode="prepare_only",
+        allow_blocked=True,
+    )
+    assert receipt["status"] == "blocked_method_conflict"
+    assert receipt["live_execution_allowed"] is False
+    assert receipt["selected_objective"] is None
+
+    with pytest.raises(runner.MBPPPlusTTBRunError, match="unresolved method decision"):
+        runner.validate_training_method_decision(decision, launch_mode="step1")
+
+
+def test_long_run_requires_completed_step1_acceptance() -> None:
+    decision = load_yaml(METHOD_DECISION)
+    method = decision["method_decision"]
+    method.update(
+        {
+            "status": "accepted",
+            "selected_objective": "tempered_trajectory_balance",
+            "approved_by_user": True,
+        }
+    )
+    decision["implementation_readiness"]["tempered_trajectory_balance"][
+        "ready_for_step1"
+    ] = True
+    decision["launch"]["one_step_allowed"] = True
+
+    step1 = runner.validate_training_method_decision(
+        decision,
+        launch_mode="step1",
+    )
+    assert step1["status"] == "accepted"
+    assert step1["live_execution_allowed"] is True
+
+    with pytest.raises(runner.MBPPPlusTTBRunError, match="Step-1 acceptance"):
+        runner.validate_training_method_decision(decision, launch_mode="long_run")
 
 
 def test_step_selection_is_distinct_and_rotates() -> None:

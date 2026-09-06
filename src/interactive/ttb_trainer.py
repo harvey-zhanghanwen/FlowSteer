@@ -1,11 +1,12 @@
 """SkillFlow Tempered Trajectory Balance trainer for AgentGraph receipts.
 
-This is a narrow AgentGraph adapter over the referenced SkillFlow training
-boundary, not a new training method.  It follows these upstream components:
+This is a local AgentGraph implementation anchored to the referenced SkillFlow
+training boundary, not a new training method and not a direct import of the
+upstream trainer. Its source anchors are:
 
 * ``training/gflownet_trainer.py``: named theta/phi LoRA adapters,
-  ``PartitionFunctionHead``, TTB regression, AdamW updates, KL regularization,
-  and checkpoint contents;
+  ``PartitionFunctionHead``, TTB regression, AdamW updates, and the released
+  optimizer-step order;
 * ``training/backward_policy.py``: the backward policy scores the same
   structured action after adding the execution observation to its context;
 * ``training/flow_metrics.py``: each edge is normalized by its structured
@@ -16,11 +17,13 @@ The necessary project adaptation is the input contract: FlowSteer's
 structured-action span, Canvas feedback, and policy/version receipts.  No
 GRPO advantage, MACE, Bayesian posterior, or Skill-evolution signal is used.
 
-The two-device gradient sharding, per-step recovery checkpoint, and publication
-adapter are project engineering needed by this runtime; SkillFlow's paper does
-not prescribe a TP/DP/ZeRO layout, an atomic route switch, or a recovery
-transaction.  A caller must resource-gate the concrete devices before model
-loading and must publish ``theta`` before collecting the next on-policy batch.
+The two-device gradient sharding, complete per-step recovery checkpoint, and
+publication adapter are project engineering needed by this runtime; SkillFlow's
+paper does not prescribe a TP/DP/ZeRO layout, an atomic route switch, or a
+recovery transaction. The released trainer also prefetches the next batch
+before the current optimizer update. A caller must therefore disable that
+cross-step ordering, resource-gate the concrete devices, and publish ``theta``
+before collecting the next on-policy batch.
 """
 
 from __future__ import annotations

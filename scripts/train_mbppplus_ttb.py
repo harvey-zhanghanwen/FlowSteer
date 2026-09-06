@@ -10,6 +10,11 @@ Live execution is fail-closed.  No model is loaded until all selected GPUs are
 exclusive and have the configured free-memory reserve, and an online W&B run
 has started successfully.  ``--prepare-only`` performs only configuration,
 dataset, W&B-presence, and read-only GPU inventory checks.
+
+This objective is one of two mutually exclusive candidates.  A separate
+method-decision record must explicitly select TTB before a live Step-1 run, and
+a completed Step-1 acceptance receipt must be approved before a long run.  The
+record is an operational guard; it does not define another training method.
 """
 
 # ruff: noqa: E402 -- executable scripts add the repository root before imports.
@@ -73,6 +78,7 @@ MBPP_TRAINING_EVALUATOR_VERSION = (
     "skillflow.training.reward.code_test_pass_rate"
 )
 DEFAULT_CONFIG = "config/training_mbppplus_ttb_v1.yaml"
+DEFAULT_METHOD_DECISION = "config/training_mbppplus_method_decision_v1.yaml"
 THETA_PREFIX = "qwen35-9b-mbppplus-ttb-theta-step-"
 PHI_PREFIX = "qwen35-9b-mbppplus-ttb-phi-step-"
 Z_PREFIX = "qwen35-9b-mbppplus-ttb-z-step-"
@@ -81,6 +87,110 @@ _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 class MBPPPlusTTBRunError(RuntimeError):
     """The fail-closed MBPP+ TTB transaction could not continue."""
+
+
+def validate_training_method_decision(
+    decision: Mapping[str, Any],
+    *,
+    launch_mode: str,
+    allow_blocked: bool = False,
+) -> Mapping[str, Any]:
+    """Validate the external method choice before entering the live runner.
+
+    ``launch_mode`` is either ``prepare_only``, ``step1``, or ``long_run``.
+    An unresolved record is reportable in prepare-only mode but can never
+    authorize a model load, rollout, W&B run, or optimizer step.
+    """
+
+    if launch_mode not in {"prepare_only", "step1", "long_run"}:
+        raise MBPPPlusTTBRunError(f"unsupported launch mode: {launch_mode}")
+    if decision.get("schema_version") != (
+        "flowsteer.agentgraph.training-method-decision.v1"
+    ):
+        raise MBPPPlusTTBRunError("training method decision schema is invalid")
+
+    method = _mapping(decision.get("method_decision"), "method_decision")
+    readiness = _mapping(
+        decision.get("implementation_readiness"), "implementation_readiness"
+    )
+    acceptance = _mapping(decision.get("step1_acceptance"), "step1_acceptance")
+    launch = _mapping(decision.get("launch"), "launch")
+    blockers: list[str] = []
+
+    if decision.get("benchmark") != "mbpp_plus":
+        blockers.append("the method decision does not belong to MBPP+")
+    candidates = method.get("candidates")
+    if candidates != [
+        "action_masked_one_pass_grpo",
+        "tempered_trajectory_balance",
+    ]:
+        blockers.append("the mutually exclusive objective candidates are invalid")
+
+    if method.get("status") != "accepted":
+        blockers.append("the training objective has not been accepted")
+    if method.get("selected_objective") != "tempered_trajectory_balance":
+        blockers.append("TTB is not the selected training objective")
+    if method.get("approved_by_user") is not True:
+        blockers.append("the selected objective has not been approved by the user")
+    if method.get("losses_mixed") is not False:
+        blockers.append("TTB and GRPO losses must not be mixed")
+
+    ttb_readiness = _mapping(
+        readiness.get("tempered_trajectory_balance"),
+        "implementation_readiness.tempered_trajectory_balance",
+    )
+    if launch_mode == "step1":
+        if ttb_readiness.get("ready_for_step1") is not True:
+            blockers.append("the TTB implementation is not ready for Step-1 acceptance")
+        if launch.get("one_step_allowed") is not True:
+            blockers.append("one-step live execution is not enabled")
+    elif launch_mode == "long_run":
+        if ttb_readiness.get("ready_for_step1") is not True:
+            blockers.append("the TTB implementation is not ready for live execution")
+        if launch.get("long_run_allowed") is not True:
+            blockers.append("long-run execution is not enabled")
+        if acceptance.get("required_before_long_run") is not True:
+            blockers.append("the Step-1 acceptance requirement is missing")
+        if acceptance.get("status") != "accepted" or acceptance.get("accepted") is not True:
+            blockers.append("a Step-1 acceptance receipt has not been approved")
+        if acceptance.get("objective") != "tempered_trajectory_balance":
+            blockers.append("the accepted Step-1 objective does not match TTB")
+        required_evidence = (
+            "rollout_complete",
+            "evaluator_reward_valid",
+            "loss_complete",
+            "backward_complete",
+            "optimizer_step_complete",
+            "nonzero_parameter_update",
+            "adapter_publish_complete",
+            "updated_policy_rollout_verified",
+            "wandb_logged",
+        )
+        missing = [name for name in required_evidence if acceptance.get(name) is not True]
+        if missing:
+            blockers.append(
+                "the Step-1 acceptance receipt is incomplete: " + ", ".join(missing)
+            )
+        if not isinstance(acceptance.get("receipt"), str) or not str(
+            acceptance.get("receipt")
+        ).strip():
+            blockers.append("the Step-1 acceptance receipt path is missing")
+
+    receipt = {
+        "status": "accepted" if not blockers else "blocked_method_conflict",
+        "launch_mode": launch_mode,
+        "selected_objective": method.get("selected_objective"),
+        "losses_mixed": method.get("losses_mixed"),
+        "step1_acceptance_status": acceptance.get("status"),
+        "live_execution_allowed": not blockers and launch_mode != "prepare_only",
+        "blockers": blockers,
+    }
+    if blockers and not allow_blocked:
+        raise MBPPPlusTTBRunError(
+            "live training is blocked by the unresolved method decision: "
+            + "; ".join(blockers)
+        )
+    return receipt
 
 
 def _utc_now() -> str:
@@ -678,11 +788,15 @@ def _manifest(
     start_step: int,
     target_step: int,
     preflight: Mapping[str, Any],
+    method_decision: Mapping[str, Any],
 ) -> dict[str, Any]:
     ttb = _mapping(config["ttb"], "ttb")
+    status = "ready_to_launch" if preflight["ready"] else "blocked_preflight"
+    if method_decision.get("blockers"):
+        status = "blocked_method_conflict"
     return {
         "schema_version": RUN_MANIFEST_SCHEMA,
-        "status": "ready_to_launch" if preflight["ready"] else "blocked_preflight",
+        "status": status,
         "run_id": run_id,
         "created_at": _utc_now(),
         "config_path": str(config_path),
@@ -705,6 +819,7 @@ def _manifest(
             "skill_evolution_enabled": False,
             "executor_frozen": True,
         },
+        "method_decision": dict(method_decision),
         "formal_ttb": {
             "optimizer_steps": int(ttb["optimizer_steps"]),
             "start_step": start_step,
@@ -992,7 +1107,20 @@ async def run_ttb(
     continuation_checkpoint: Optional[Path],
     run_id: str,
     project_root: Path,
+    method_decision_config: Mapping[str, Any],
 ) -> Mapping[str, Any]:
+    launch_mode = (
+        "prepare_only"
+        if prepare_only
+        else "step1"
+        if stop_after_step == 1
+        else "long_run"
+    )
+    method_decision = validate_training_method_decision(
+        method_decision_config,
+        launch_mode=launch_mode,
+        allow_blocked=prepare_only,
+    )
     config = load_yaml(config_path)
     formal = validate_mbppplus_ttb_config(config)
     total_steps = formal.optimizer_steps
@@ -1028,6 +1156,7 @@ async def run_ttb(
         start_step=start_step,
         target_step=target_step,
         preflight=preflight,
+        method_decision=method_decision,
     )
     schedule = [
         {
@@ -1379,6 +1508,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument(
+        "--method-decision",
+        default=DEFAULT_METHOD_DECISION,
+        help="versioned mutually-exclusive training-method decision record",
+    )
+    parser.add_argument(
         "--prepare-only",
         action="store_true",
         help="write a plan and read-only preflight; never start W&B, GPU models, or APIs",
@@ -1400,6 +1534,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         config_path = _resolve(PROJECT_ROOT, args.config)
+        method_decision_path = _resolve(PROJECT_ROOT, args.method_decision)
+        method_decision_config = load_yaml(method_decision_path)
         continuation = (
             _resolve(PROJECT_ROOT, args.continuation_checkpoint)
             if args.continuation_checkpoint
@@ -1414,6 +1550,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 continuation_checkpoint=continuation,
                 run_id=_run_id(args.run_id),
                 project_root=PROJECT_ROOT,
+                method_decision_config=method_decision_config,
             )
         )
     except (ConfigurationError, MBPPPlusTTBRunError, ValueError, RuntimeError) as exc:
@@ -1428,6 +1565,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "last_committed_step": result["last_committed_step"],
                 "run_root": result["run_root"],
                 "preflight_ready": result["preflight"]["ready"],
+                "method_decision_status": result["method_decision"]["status"],
             },
             ensure_ascii=False,
             sort_keys=True,

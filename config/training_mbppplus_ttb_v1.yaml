@@ -1,4 +1,6 @@
-# SkillFlow-primary TTB condition for the MBPP+ best-v6 project adaptation.
+# Candidate-B SkillFlow-primary TTB profile for the MBPP+ best-v6 adaptation.
+# The external method-decision record is authoritative and currently blocks
+# live execution; selected_objective below describes this candidate only.
 # This is not a bit-exact reproduction of SkillFlow's seven-task IID run:
 # MBPP+ and the three-GPU/runtime mapping below are project adaptations.
 

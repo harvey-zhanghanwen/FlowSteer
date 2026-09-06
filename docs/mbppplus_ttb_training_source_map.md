@@ -1,4 +1,9 @@
-# MBPP+ TTB training source map
+# MBPP+ TTB training source map (candidate B, not selected)
+
+> The canonical source map is now
+> `docs/mbppplus_flowsteer_skillflow_training_source_map.md`. This file covers
+> only the SkillFlow-TTB candidate. The method decision is unresolved, so it
+> does not authorize a live Step-1 or a long run.
 
 ## Scope and immutable starting point
 
@@ -11,10 +16,11 @@ bit-exact SkillFlow reproduction.
 
 The project design document specifies Action-Masked One-Pass GRPO. SkillFlow's
 formal primary training method is Tempered Trajectory Balance (TTB); GRPO is a
-baseline/ablation. This branch selects TTB and keeps GRPO disabled. The losses
-are not mixed.
+baseline/ablation. The earlier preparation branch selected TTB and kept GRPO
+disabled. The current branch records it as one mutually exclusive candidate;
+no objective has been accepted.
 
-## Direct reuse
+## Source-anchored boundaries
 
 | Boundary | Reused implementation |
 |---|---|
@@ -22,9 +28,9 @@ are not mixed.
 | Agent execution | Existing `LiveSmokeBackend` runtime with the MBPP public-test ReAct adapter |
 | Trajectory receipts | Existing `AgentGraphRolloutCollector` and exact SGLang token/log-prob receipts |
 | MBPP training reward | SkillFlow `training/reward.py::code_test_pass_rate`, exposed by the thin `mbpp_training_adapter` |
-| TTB learner | SkillFlow `training/gflownet_trainer.py`, `training/flow_metrics.py`, `training/backward_policy.py`, and `training/trajectory.py`, adapted in `src/interactive/ttb_trainer.py` to FlowSteer trajectory receipts |
-| LoRA publication | Existing `SGLangPolicyPublisher`, derived from SkillFlow's external SGLang adapter publication boundary |
-| Supervisor lifecycle | Existing `SGLangSupervisorManager`, adapted from SkillFlow's Supervisor manager |
+| TTB learner | **Necessary/project adaptation**, anchored to SkillFlow `training/gflownet_trainer.py`, `training/flow_metrics.py`, `training/backward_policy.py`, and `training/trajectory.py`; `src/interactive/ttb_trainer.py` is a local implementation over FlowSteer receipts, not a direct upstream import |
+| LoRA publication | **Project engineering adaptation**, anchored to SkillFlow `GFlowNetTrainer._sync_lora_to_vllm` and `training/batch_inference.py`; drain/version/canary/route-switch receipts are not in the released upstream implementation |
+| Supervisor lifecycle | **Necessary thin adaptation** from SkillFlow `training/sglang_manager.py::SGLangSupervisorManager` |
 
 The Executor remains frozen. The trainable state is the Director theta LoRA,
 the backward-policy phi LoRA, and the separate partition-function parameter Z.

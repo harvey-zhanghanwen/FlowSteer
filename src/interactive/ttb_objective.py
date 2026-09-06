@@ -12,10 +12,11 @@ Source map (thin adaptation, objective math only):
   ``_compute_action_logprob_forward`` implement the Tempered Trajectory
   Balance residual used here.
 
-The referenced files are under
-``/home/test/SKILLEV/skillflow-bayesian-improve-deploy/training``.  This module
-does not tokenize model output: callers must score structured action tokens
-only, with any reasoning tokens supplied solely as context.  Likewise,
+The authoritative files audited for this branch are in the released SkillFlow
+repository at revision ``74be52bb6bd9f0e9e68dacb72636b75649197983``. This
+module is a local mathematical adaptation rather than a direct import. It does
+not tokenize model output: callers must score structured action tokens only,
+with any reasoning tokens supplied solely as context. Likewise,
 ``r_tilde`` must already contain the caller's explicit epsilon shift or clip;
 this objective rejects non-positive rewards and applies no hidden clipping.
 

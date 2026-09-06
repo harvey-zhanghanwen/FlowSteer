@@ -2,11 +2,13 @@
 
 ## Status
 
-`blocked_preflight`; optimizer updates: `0`; W&B run: not started; model and
-SGLang processes started by this runner: none.
+The earlier candidate-B preflight was `blocked_preflight`. After the complete
+FlowSteer/SkillFlow source comparison, the authoritative status is now
+`blocked_method_conflict`; optimizer updates: `0`; W&B run: not started; model
+and SGLang processes started by this runner: none.
 
-The current evidence manifest is
-`artifacts/mbppplus_ttb_v1/runs/preflight-20260906-ttb-v4/run_manifest.json`.
+The current method-guard evidence manifest is
+`artifacts/mbppplus_ttb_v1/runs/method-gate-20260906-v2/run_manifest.json`.
 The artifact directory is intentionally not tracked by Git.
 
 ## Ready
@@ -26,6 +28,10 @@ The artifact directory is intentionally not tracked by Git.
 
 ## Blocking launch conditions
 
+- the project has not accepted either Action-Masked One-Pass GRPO or TTB as
+  its mutually exclusive primary objective;
+- neither candidate has passed the required real Step-1 acceptance run;
+
 - selected GPU 3 has 52,309 MiB free and two existing compute processes;
 - selected GPU 4 has 51,023 MiB free and one existing compute process;
 - selected GPU 5 has 9,767 MiB free and two existing compute processes.
@@ -41,8 +47,10 @@ from the paper.
 
 ## Next admissible launch
 
-After online W&B authentication and three non-conflicting GPUs pass the gate,
-the first live invocation must use `--stop-after-step 1`. It must prove one
+If the user accepts candidate B (TTB), its source-mapped implementation is
+ready, online W&B authentication succeeds, and three non-conflicting GPUs pass
+the gate, the first live invocation must use `--stop-after-step 1`. It must
+prove one
 complete on-policy rollout → reward → TTB loss → backward → AdamW step →
 θ/φ/Z non-zero update → θ LoRA publication → exact post-switch AgentGraph
 canary → publication acknowledgement → W&B record. The 250-step invocation is

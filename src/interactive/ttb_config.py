@@ -1,9 +1,10 @@
-"""Strict configuration contract for the SkillFlow primary TTB objective.
+"""Strict configuration contract for the SkillFlow primary TTB candidate.
 
 The project design document specifies Action-Masked One-Pass GRPO, while
 SkillFlow's primary training objective is tempered trajectory balance (TTB).
-This module records that conflict explicitly and prevents the two losses from
-being enabled in the same training condition.
+This module validates candidate B and prevents the two losses from being
+enabled in the same training condition. It does not resolve the project-level
+method decision; the external method-decision record remains authoritative.
 
 MBPP+ is a project dataset adaptation; it is not part of SkillFlow's reported
 seven-IID-task joint training protocol.  GPU assignments, rollout worker count,
@@ -62,7 +63,7 @@ class OptimizerProfile:
 
 @dataclass(frozen=True)
 class ObjectiveSelection:
-    """Explicit resolution of the MD/SkillFlow objective conflict."""
+    """Objective identity inside this TTB candidate, not project approval."""
 
     design_document_objective: str = "action_masked_one_pass_grpo"
     skillflow_primary_objective: str = TTB_ALGORITHM

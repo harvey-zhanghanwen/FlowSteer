@@ -1,0 +1,58 @@
+# Training-method decision record for the MBPP+ best-v6 starting point.
+#
+# This is an operational launch guard, not a third training objective.  The two
+# candidates below remain mutually exclusive.  Live training stays disabled
+# until the user explicitly accepts one candidate and the matching source-mapped
+# implementation is ready for a real Step-1 acceptance run.
+
+schema_version: "flowsteer.agentgraph.training-method-decision.v1"
+benchmark: "mbpp_plus"
+training_base:
+  branch: "backup/mbppplus-best-v6-20260906"
+  commit: "66e66f02c908d16d097ceb75d65745d90a155d29"
+  immutable: true
+
+method_decision:
+  status: "unresolved"
+  selected_objective: null
+  approved_by_user: false
+  losses_mixed: false
+  candidates:
+    - "action_masked_one_pass_grpo"
+    - "tempered_trajectory_balance"
+
+source_map:
+  complete: true
+  report: "docs/mbppplus_flowsteer_skillflow_training_source_map.md"
+  flowsteer_code_revision: "1c9f2abf55cb9b8ea2ca2e3359cdb91acb9964e9"
+  skillflow_code_revision: "74be52bb6bd9f0e9e68dacb72636b75649197983"
+
+implementation_readiness:
+  action_masked_one_pass_grpo:
+    ready_for_step1: false
+    reason: "The exact FlowSteer/MD learner path and SkillFlow publication boundary have not yet passed one live acceptance step."
+  tempered_trajectory_balance:
+    ready_for_step1: false
+    reason: "The project TTB adapter has static tests only; the strict post-update next-policy sequence has not passed one live acceptance step."
+
+step1_acceptance:
+  required_before_long_run: true
+  status: "not_run"
+  accepted: false
+  objective: null
+  receipt: null
+  rollout_complete: false
+  evaluator_reward_valid: false
+  loss_complete: false
+  backward_complete: false
+  optimizer_step_complete: false
+  nonzero_parameter_update: false
+  adapter_publish_complete: false
+  updated_policy_rollout_verified: false
+  wandb_logged: false
+
+launch:
+  one_step_allowed: false
+  long_run_allowed: false
+  cross_step_rollout_prefetch: false
+

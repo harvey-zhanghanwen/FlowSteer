@@ -2,15 +2,19 @@
 
 Source classification for this smoke-training module:
 
-* **Direct reuse** -- request retry, managed-adapter draining, candidate load,
-  ``/v1/models`` verification, chat canary, route/generation switch ordering,
-  old-adapter unload, and failed candidate cleanup follow SkillFlow's
-  ``training/external_sglang.py::publish_external_adapter`` and
-  ``runtime/sglang_gateway.py::_swap_supervisor_adapter_sync``.
-* **Necessary adaptation** -- SkillFlow owns its generation route inside the
-  gateway, while FlowSteer keeps it in ``SGLangReceiptDirectorClient``.  An
-  optional callback bridges that split inside the same pause/drain transaction;
-  receipts also distinguish trained publication from untrained Step0 activation.
+* **Upstream anchor** -- SkillFlow
+  ``training/gflownet_trainer.py::GFlowNetTrainer._sync_lora_to_vllm`` extracts
+  theta, pauses new calls, unloads/loads ``theta_live`` through SGLang, checks
+  ``/v1/models``, and updates its global adapter route.
+* **Project engineering adaptation** -- request retry, active-request drain,
+  unique candidate names, chat canary, version receipt, route-switch ordering,
+  rollback, old-adapter unload, and failed-candidate cleanup are implemented
+  here. They are not present in the released SkillFlow source and must not be
+  described as direct reuse.
+* **Necessary integration** -- FlowSteer keeps its route in
+  ``SGLangReceiptDirectorClient``. An optional callback bridges that split
+  inside the same pause/drain transaction; receipts also distinguish trained
+  publication from untrained Step0 activation.
 * **Project algorithm addition** -- none; this is a runtime publication
   boundary, not a learning algorithm.
 * **Not implemented here** -- distributed worker rendezvous and concurrent
