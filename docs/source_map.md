@@ -925,3 +925,18 @@ Qwen3.5 Flash repeated an already dispatched action and is not promoted to ReAct
 Changing tools makes old Direct receipts a different condition: v2.35 must collect
 its own matched Direct. Tool availability is a project extension, not native
 HealthBench infrastructure and not evidence of a score improvement.
+
+## 2026-09-06 v2.35 parallel evaluation
+
+- **Direct reuse:** `start_qwen35_director_server.sh` / `run_on_gpu_role.sh`
+  retain SkillFlow Qwen3.5 SGLang startup, changing only GPU and port.
+- **Necessary operational adapter:** `evaluate_completion_benchmark_round`
+  adds `collection_arm`, calling the same `_collect_direct` or `_collect_graph`
+  and exact-resume/evaluator. `_finish_collection_arm` projects only its arm
+  into existing `_metrics`/`_aggregate`; no substitute grader or paired zero.
+- **Necessary bug fix:** `_direct_one` compares exact Tool membership rather
+  than declared order against sorted `ToolRegistry.resource_ids`; receipt
+  retains config order for existing identity/resume checks and separately
+  records registry order. No Tool capability is added or removed.
+- FlowSteer/MD free AgentGraph, Canvas, per-node ReAct and all v2.35 sources
+  remain unchanged. This does not include v2.36 databases or training.

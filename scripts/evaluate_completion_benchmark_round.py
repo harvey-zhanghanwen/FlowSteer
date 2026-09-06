@@ -2062,7 +2062,10 @@ async def _direct_one(
                     "HealthBench Direct ReAct Agent has no configured evidence "
                     "ToolRegistry"
                 )
-            if tuple(tool_registry.resource_ids) != expected_tools:
+            # ToolRegistry exposes sorted IDs; configuration order is not a
+            # capability difference. Preserve exact membership/multiplicity,
+            # then retain the frozen configuration order in identity receipts.
+            if tuple(sorted(tool_registry.resource_ids)) != tuple(sorted(expected_tools)):
                 raise CompletionBenchmarkRoundError(
                     "HealthBench Direct ReAct Tool resources differ from config"
                 )
@@ -2131,7 +2134,8 @@ async def _direct_one(
                 "tool_version": str(
                     backend.config["experiment"]["tool_version"]
                 ),
-                "tool_resource_ids": list(tool_registry.resource_ids),
+                "tool_resource_ids": list(expected_tools),
+                "registered_tool_resource_ids": list(tool_registry.resource_ids),
                 "model_id": model_id,
                 "provider_id": provider.provider_id,
                 "provider_model": model.model_name,
@@ -4891,6 +4895,61 @@ def _existing_trajectory_checkpoint(
     return existing
 
 
+def _finish_collection_arm(
+    selected, records, arm, dataset_key, config, failures, manifest, paths,
+):
+    """Operational split only: reuse native receipt metrics and aggregation.
+
+    A GPU worker publishes only its own arm. It cannot invent the other arm's
+    zero scores, paired deltas, or Stable Zero results. Original collectors
+    still own sampling, completion admission, evaluator and exact resume.
+    """
+    projected = []
+    admitted = set()
+    for task in selected:
+        value = records.get(task.task_id)
+        valid, metrics = _metrics(value, dataset_key)
+        row = {"available": value is not None, "valid": valid, **metrics}
+        if value is not None:
+            row.update(explicit_finish=value.get("explicit_finish"),
+                       termination_reason=value.get("termination_reason"))
+        if valid or (arm == "agentgraph" and value is not None
+                     and dataset_key in {"aime_2026", "healthbench_professional"}
+                     and _is_reportable_noninteractive_terminal_failure(row)):
+            admitted.add(task.task_id)
+        projected.append({arm: row})
+    if arm == "direct":
+        _, bounded = _evaluation_section(config)
+        if bounded.get("freeze_direct_react_exhaustion_as_strict_zero") is True:
+            admitted.update(_bounded_direct_react_exhaustion_task_ids(
+                failures, task_ids={task.task_id for task in selected},
+            ))
+    metrics = dict(_aggregate(projected, arm, dataset_key))
+    complete = len(admitted) == len(selected)
+    if not complete:
+        # Missing operational results are not measured zero scores. The
+        # completed-only mean remains labeled with its actual valid count.
+        for key in tuple(metrics):
+            if key.startswith("strict_"):
+                metrics[key] = None
+    manifest.update(
+        status="collection_completed" if complete else "collection_completed_with_operational_failures",
+        collection_arm=arm, collection_arm_completed=complete,
+        collection_admitted_count=len(admitted), metrics={arm: metrics},
+        completed_at=_utc_now(),
+    )
+    _write_json(paths["manifest"], manifest)
+    _write_json(paths["report_json"], {
+        "schema_version": "flowsteer.completion_benchmark.collection_arm_report.v1",
+        "condition_id": config["experiment"]["condition_id"],
+        "dataset_key": dataset_key, "collection_arm": arm,
+        "sample_count": len(selected), "collection_arm_completed": complete,
+        "metrics": {arm: metrics}, "paired_comparison_available": False,
+        "manifest_path": str(paths["manifest"]), "completed_at": manifest["completed_at"],
+    })
+    return manifest
+
+
 async def run_completion_benchmark_round(
     config_path: str | Path,
     *,
@@ -4898,7 +4957,14 @@ async def run_completion_benchmark_round(
     prepare_only: bool = False,
     canary_only: bool = False,
     direct_only: bool = False,
+    collection_arm: str = "both",
 ) -> Mapping[str, Any]:
+    if collection_arm not in {"both", "direct", "agentgraph"}:
+        raise CompletionBenchmarkRoundError("unsupported collection_arm")
+    if collection_arm != "both" and (direct_only or canary_only):
+        raise CompletionBenchmarkRoundError(
+            "collection_arm cannot be combined with direct_only or canary_only"
+        )
     if direct_only and (prepare_only or canary_only):
         raise CompletionBenchmarkRoundError(
             "direct_only cannot be combined with prepare_only or canary_only"
@@ -4969,6 +5035,7 @@ async def run_completion_benchmark_round(
         "training_enabled": False,
         "optimizer_updates": 0,
         "direct_only": direct_only,
+        "collection_arm": collection_arm,
         "direct_reference": direct_reference["receipt"] if direct_reference else None,
         "agentgraph_execution_profile_allowlist": (
             list(
@@ -5128,22 +5195,25 @@ async def run_completion_benchmark_round(
                 backend.judge_model,
             )
         )
-    manifest["status"] = "direct_baseline"
-    _write_json(paths["manifest"], manifest)
-    direct = await _collect_direct(
-        backend,
-        active,
-        config,
-        root,
-        paths["direct"],
-        failures,
-        manifest,
-        paths["manifest"],
-        direct_reference=direct_reference,
-    )
-    _atomic_jsonl(paths["failures"], failures)
+    direct = {}
+    if collection_arm != "agentgraph":
+        manifest["status"] = "direct_baseline"
+        _write_json(paths["manifest"], manifest)
+        direct = await _collect_direct(
+            backend,
+            active,
+            config,
+            root,
+            paths["direct"],
+            failures,
+            manifest,
+            paths["manifest"],
+            direct_reference=direct_reference,
+        )
+        _atomic_jsonl(paths["failures"], failures)
     if (
-        dataset_key == "healthbench_professional"
+        collection_arm != "agentgraph"
+        and dataset_key == "healthbench_professional"
         and bounded.get("direct_execution_mode") == "react"
         and len(direct) != len(active)
     ):
@@ -5177,6 +5247,10 @@ async def run_completion_benchmark_round(
         )
         _write_json(paths["manifest"], manifest)
 
+    if collection_arm == "direct":
+        return _finish_collection_arm(
+            active, direct, "direct", dataset_key, config, failures, manifest, paths,
+        )
     if direct_only:
         manifest["status"] = "paired_report_from_existing_agentgraph"
         trajectories = _existing_trajectory_checkpoint(
@@ -5208,6 +5282,10 @@ async def run_completion_benchmark_round(
         )
         _atomic_jsonl(paths["failures"], failures)
 
+    if collection_arm == "agentgraph":
+        return _finish_collection_arm(
+            active, trajectories, "agentgraph", dataset_key, config, failures, manifest, paths,
+        )
     rows = _paired_rows(active, direct, trajectories, dataset_key)
     _atomic_jsonl(paths["paired"], rows)
     metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
@@ -5306,6 +5384,10 @@ def build_parser() -> argparse.ArgumentParser:
             "existing frozen AgentGraph checkpoint"
         ),
     )
+    parser.add_argument(
+        "--collection-arm", choices=("both", "direct", "agentgraph"), default="both",
+        help="collect only one independent arm; no paired report or other-arm execution",
+    )
     return parser
 
 
@@ -5319,6 +5401,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 prepare_only=bool(args.prepare_only),
                 canary_only=bool(args.canary_only),
                 direct_only=bool(args.direct_only),
+                collection_arm=args.collection_arm,
             )
         )
     except (

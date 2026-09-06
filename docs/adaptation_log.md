@@ -1651,3 +1651,20 @@ change was made during profile selection.
   v2.33 process or SGLang service. New handoff config reuses the tested coordinator
   and launches after old completion and verified/pushed readiness. The public
   test collection has informed development and is reported as reevaluation.
+
+## 2026-09-06 — v2.35 GPU5 Direct / GPU6 AgentGraph
+
+User requested GPU6 AgentGraph alongside GPU5 Direct. An independent worktree
+based on v2.35 a3dd5e6 retains the frozen scientific configuration and adds
+single-arm collection/storage boundaries. Original sequential Direct is stopped
+before Direct-only resumes, so it cannot later schedule a duplicate Graph.
+GPU6 reuses existing SkillFlow SGLang startup and no downloaded model.
+
+The original Direct entry rejected equal Tool sets because registry order was
+sorted but config order was not. Repeated synchronous corpus reads then failed
+before the first model call. Exact sorted-membership comparison plus retaining
+config order in the stored receipt fixes both entry and strict resume; actual
+registry order is additionally recorded. This is an engineering correction,
+not a model/Tool/search-space change. Separate arm reports do not invent the
+other arm or full-population scores for incomplete evaluations. Tests and
+resource/output boundaries are documented in the parallel run report.
