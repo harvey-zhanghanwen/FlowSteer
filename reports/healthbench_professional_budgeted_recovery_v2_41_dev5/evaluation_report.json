@@ -1,0 +1,30 @@
+{
+  "candidate_skill_evaluation": {
+    "enabled": false,
+    "mode": "memory_off",
+    "profile": null,
+    "prompt_priors": [],
+    "publication_performed": false
+  },
+  "collection_arm": "agentgraph",
+  "collection_arm_completed": false,
+  "completed_at": "2026-09-06T13:15:40.313399+00:00",
+  "condition_id": "healthbench_professional_budgeted_recovery_v2_41_dev5",
+  "dataset_key": "healthbench_professional",
+  "manifest_path": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v241/artifacts/healthbench_professional_budgeted_recovery_v2_41_dev5/evaluation/run_manifest.json",
+  "metrics": {
+    "agentgraph": {
+      "completed": 3,
+      "completed_only_overall_score": 0.12121212121212122,
+      "completed_only_overall_score_length_adjusted": 0.12095732121212122,
+      "denominator": 5,
+      "evaluator_valid": 3,
+      "strict_overall_score": null,
+      "strict_overall_score_length_adjusted": null
+    }
+  },
+  "paired_comparison_available": false,
+  "sample_count": 5,
+  "schema_version": "flowsteer.completion_benchmark.collection_arm_report.v1",
+  "training_performed": false
+}
