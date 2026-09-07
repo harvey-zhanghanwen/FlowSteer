@@ -30,7 +30,10 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
-from .agent_runtime import AgentRequest
+from .agent_runtime import (
+    AgentRequest,
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_CONTRACT_ARTIFACT_V4,
+)
 from .healthbench_tool_adapter import (
     HEALTHBENCH_PROFESSIONAL_DATASET_SCOPE,
     FrozenMedRAGBM25Corpus,
@@ -775,7 +778,7 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
 
         maximum = self._max_completion_artifact_characters
         if self._require_structured_evidence_artifact and not request.is_output_agent:
-            return {
+            schema = {
                 "type": "object",
                 "required": ["value"],
                 "properties": {
@@ -904,6 +907,33 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
                 },
                 "additionalProperties": False,
             }
+            if getattr(request, "artifact_communication_profile", None) == (
+                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_CONTRACT_ARTIFACT_V4
+            ):
+                # SkillFlow COMPLETE accepts the contract's actual JsonValue;
+                # FlowSteer routes that product downstream. The legacy medical
+                # schema incorrectly replaced every intermediate task product
+                # with a retrieval summary. Reuse both existing value formats;
+                # an evidence object still passes the unchanged receipt checks.
+                text_value = {
+                    "type": "string", "minLength": 1,
+                    "description": (
+                        "The actual completed artifact required by this Agent's "
+                        "contract, not a plan or a statement that work was completed."
+                    ),
+                }
+                if maximum is not None:
+                    text_value["maxLength"] = maximum
+                schema["properties"]["value"] = {
+                    "description": (
+                        "Return the contract's completed task product as text. "
+                        "Use the structured evidence object only when the product "
+                        "itself is a retrieved-evidence summary. Tool receipts "
+                        "are retained independently; not every task needs retrieval."
+                    ),
+                    "anyOf": [text_value, schema["properties"]["value"]],
+                }
+            return schema
         if maximum is None:
             return super()._completion_arguments_schema(request)
         description = (

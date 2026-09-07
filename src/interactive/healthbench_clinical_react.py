@@ -148,7 +148,11 @@ class HealthBenchClinicalReactExecutionAdapter(
         # The exact same evidence shape also binds source-read and drug-label
         # receipts. Do not suggest that calculation is a literature source.
         value = schema["properties"]["value"]
-        if value.get("type") == "object":
+        evidence_value = next(
+            (branch for branch in value.get("anyOf", [value]) if branch.get("type") == "object"),
+            None,
+        )
+        if evidence_value is not None:
             if not any(
                 tool_id in _SEARCH_TOOLS
                 or tool_id in {"healthbench-source.read", "healthbench-drug.lookup", "healthbench-knowledge.search"}
@@ -165,7 +169,7 @@ class HealthBenchClinicalReactExecutionAdapter(
                     ),
                 }
                 return schema
-            fields = value["properties"]["evidence_items"]["items"]["properties"]
+            fields = evidence_value["properties"]["evidence_items"]["items"]["properties"]
             for name in ("document_id", "source", "title", "date", "url"):
                 fields[name]["description"] = (
                     f"Copy {name} exactly from the same successful retrieval "
@@ -242,4 +246,3 @@ class HealthBenchClinicalReactExecutionAdapter(
             ):
                 return "duplicate_tool_request"
         return None
-

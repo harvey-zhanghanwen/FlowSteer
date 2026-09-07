@@ -956,3 +956,33 @@ answer, medical template, extra judge Agent, training or Skill update is added.
 - **必要报告适配**：现有 `report_healthbench_agentgraph_development.py` 已支持
   `--expected-count 1`，但部分中文标签仍写死“五题”。只将标签改成“本轮固定样本”，
   原始汇总、分母、评分和 receipt 保持不变；实际单题报告生成通过，不重复模型/评分调用。
+
+### 2026-09-07: contract artifact 接口 v4，单题受控重跑
+
+- 上一版源码/证据保留在 `feature/healthbench-deadline-recovery-20260907`；
+  本次由 `619c8347677918a402badef03e88367d8a5cb2ba` 创建独立分支。
+- **复用边界**：SkillFlow
+  `src/skillev/runtime/bounded_agent.py::BoundedAgent._validate_completion/execute_turn`
+  通过 completion `JsonValue` 交付任务产物；本项目
+  `react_execution.ToolReactExecutionAdapter._completion_arguments_schema/execute`
+  已接好同一 COMPLETE/Observation 循环。
+  FlowSteer `workflow_env.InteractiveWorkflowEnv._step_internal` 的编辑→执行→反馈不变。
+  MD §3.1 的自由 contract 与任务产物语义不应被“所有中间节点都必须给医学证据摘要”替代。
+- **必要薄适配**：`healthbench_evidence_adapter._completion_arguments_schema` 仅在
+  新 `producer_context_contract_artifact_v4` 下组合既有文本 schema 与既有证据 schema，
+  允许 non-Output 交付真正的任务文本；structured object 仍由
+  `_structured_evidence_artifact_error` 核对来源及 span，不放宽证据检查。
+  `healthbench_clinical_react._completion_arguments_schema` 继续对 union 内的证据分支应用
+  同一 source-read/drug provenance 描述与无检索工具时的文本边界。
+- **复用通信与必要适配**：`openai_gateway._format_healthbench_upstream_v3`、
+  `_healthbench_v3_artifact/_healthbench_v3_receipts` 原有去重、producer provenance、
+  Tool receipts独立投影和masked condition全部复用。v4将原3600字符的普通任务文本投影
+  提升至现有任务产物上限12000；单条消息包限16000，给原文及metadata/证据留空间；
+  共享通信预算仍24000。不足时仍明确标记截断，完整内容仍留trajectory。
+  原v2/v3 profiles及其默认预算完全保留，不通过重写旧配置冒充可复现。
+- **仅注册接线**：`agent_runtime.py` 与 `config_loader.py` 新增profile allowlist；
+  `train_agentgraph_smoke.LiveSmokeBackend` 仅为evaluation共享工厂登记v4证据能力。
+  没有启动训练、改训练目标或新增执行器/调度层。
+- `tests/unit/test_healthbench_contract_artifact_v4.py` 复用既有临床工具及通信测试fixture：
+  合成约1万字符产物一次ReAct完成并完整传给下游；无必选检索；证据支路仍校验；
+  calculator无医学证据要求；旧v3、mask、去重和通信预算不变。不使用本题术语答案。

@@ -1643,3 +1643,23 @@ change was made during profile selection.
   不兼容：3次 complete 拒绝后只交出说明，下游没有译文可检查；Output后来独立生成译文。
   这个接口问题仍未修复，不宣称所有架构缺口已解决，也未额外启动第二次付费评测。
   完整结果和边界见 `docs/healthbench_deadline_recovery_single_20260907.md`。
+
+### 2026-09-07: 修复 non-Output 任务产物与医学证据 schema 冲突
+
+- 用户授权：解决接口问题，再单独重跑同一题；并强调先备份架构。
+- 上次真实结果：同题raw50%、length-adjusted24.704240%、279.812秒合法FINISH。
+  node_1的3次complete因为缺外部证据被拒绝，随后只有“将完成”的说明；
+  node_2收到说明而不是译文。进一步源码对照确认，即使交出长文本，v3仍固定压到3600字符。
+- 采用版本化v4适配：允许通用文本或原有结构化证据两种已有completion格式；
+  实际文本按contract交付，证据receipt独立保留。仍不接受伪造引用，不删正确evidence，
+  不以“缺文献”判断所有文本任务未完成，也不将ReAct定义成role。
+- 传递长文本时不再固定丢弃中间部分：v4单产物12000字符、单包16000字符，
+  共享预算仍24000；保留明确截断和完整trajectory。这是通信预算适配，
+  不提高模型输出token、900秒上限或其他运行预算。
+- 配置 `config/evaluation_healthbench_contract_artifact_single.yaml`：
+  同一单题ID、同一seed与模型池、Qwen3.5-9B本地Director/GPU6、全thinking，
+  同一900秒预算反馈、语义索引和3条candidate priors、同一官方grader。
+  新condition/artifact目录独立；不改Director提示词，不写翻译答案或固定医学拓扑。
+  Direct/其他题/525全量/训练/MACE/Bayesian/Skill evolution均不启动。
+- 先离线定向测试和prepare-only，再提交推送源码后进行一次真实单题运行；
+  真实评分、是否实际使用中间产物和仍有的问题，必须待receipt落盘后报告。
