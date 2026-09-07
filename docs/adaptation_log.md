@@ -2087,3 +2087,19 @@ tokenizer/假transport和真实既有_context_budget，覆盖预发送拒绝、�
 计数/输出上限、thinking保持、远端不变、真实factory映射及失败receipt；
 没有下载模型或额外API探测。更新flag后的10项finish/config测试也通过。
 下一步重新prepare冻结同五题并实际运行，以真实provider usage核对新增计数。
+
+## 2026-09-07 — v249主动中止、v250修复真实tokenizer类型
+
+真实首个Qwen完成receipt揭示预检input_tokens=2，而server prompt_tokens=3410。
+此前list-only模拟未覆盖本地BatchEncoding类型，立即SIGINT停止本任务37347，
+确认退出并保留所有结果，未动模型服务。中止报告提交3af6cc8；v249不能视为
+有效预算保障，也不续写同目录混合版本。首个真实rubric负分同样保留。
+
+从可恢复v249创建v250分支；唯一代码修复直接复用Director已经使用的_token_ids。
+新目录与config保留同五题及所有模型/工具/候选条件。新增实际本机tokenizer
+CPU测试及mapping/list/tensor-like回归；完成后再冻结并对照真实server usage。
+
+v250定向验证完成：新增返回类型、v249上下文与Gateway回归共112项通过，
+另4参数子例通过。本机真实tokenizer CPU实测返回BatchEncoding（2字段、
+217 tokens），Gateway正确计217；无模型生成、网络或下载。两项新配置
+验证与prepare-only均通过，保持同五题；待冻结后只启动v250本轮一次评测。

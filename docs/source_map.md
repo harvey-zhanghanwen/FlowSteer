@@ -1270,3 +1270,11 @@ Qwen tokenizer计数。计数与有效输出上限进入已有requested_sampling
 Gateway现有HTTPError分支补充有界provider error type/code/message，沿已有
 React model_calls失败记录传递；不记录HTTP headers或完整正文。历史2014…
 请求缺正文/失败payload，因此只能报告上下文超限高度可疑，不能倒填具体原因。
+
+## 2026-09-07 — v2.50：实际Qwen tokenizer容器兼容
+
+**直接复用** `rollout_collector._token_ids`（原本已用于Director聊天模板计数），
+替换新Gateway预检对apply_chat_template返回值直接len的错误假设。真实部署
+返回BatchEncoding而非list，真实3410被误数为2；这与历史v248未知400原因
+是不同证据，不混为一谈。使用延迟import避免既有循环依赖；不改计数算法、
+budget函数或任何医学任务信息。新增本机tokenizer CPU与合成容器回归。

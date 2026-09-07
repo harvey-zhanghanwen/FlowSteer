@@ -2045,13 +2045,18 @@ class OpenAICompatibleGateway:
         input_tokens = None
         stage = "tokenization"
         try:
+            # Lazy import avoids the existing collector -> gateway import
+            # cycle. Reuse its Qwen3.5 BatchEncoding/list/tensor handling.
+            from .rollout_collector import _token_ids
+
             # Direct reuse of the already loaded Director tokenizer and its
             # exact-input budget. Count the actual Agent messages/template,
             # not the Director prompt wrapper; preserve every input byte.
-            input_tokens = len(client.tokenizer.apply_chat_template(
+            encoded = client.tokenizer.apply_chat_template(
                 payload["messages"], tokenize=True, add_generation_prompt=True,
                 **payload.get("chat_template_kwargs", {}),
-            ))
+            )
+            input_tokens = len(_token_ids(encoded, "agent_prompt_token_ids"))
             stage = "budget"
             budget = client._context_budget(configured, input_tokens)
             if budget is None:
