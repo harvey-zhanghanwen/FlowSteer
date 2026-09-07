@@ -46,12 +46,12 @@ FlowSteer 发布源码的 graph 是有序 operator DSL，reward 含结构项，�
 | 同题 advantage | FlowSteer `train_interactive.py::compute_grpo_loss` | `grpo_objective.py::same_condition_advantages` | 必要修正：严格按 `(task_id, condition_id, policy_version)` 分组 | 已实现 |
 | Action-Masked One-Pass GRPO | FlowSteer `compute_grpo_loss` / `grpo_trainer.py::compute_grpo_loss` | `grpo_objective.py::{action_masked_one_pass_loss,torch_action_masked_one_pass_loss}` | 发布代码只提供 policy-gradient 外形；MD 补 exact receipt、真实 action mask、每组/轨迹归一化和一次消费 | 已实现；本分支未运行真实 step |
 | 同一步并行 rollout | SkillFlow `GFlowNetTrainer::_sample_batch_for_step/_collect_episodes` | runner 的同一冻结 policy batch 并发 collect | 仅复用同一步并行；禁止原版跨 optimizer 的 async prefetch | 已实现基础边界 |
-| Qwen3.5 θ-LoRA | SkillFlow `GFlowNetTrainer.setup`、`configs/skillflow.yaml` | `smoke_trainer.py::_load_models` | 复用/薄适配 θ-LoRA r64/α128/q,k,v,o、PEFT、bf16、gradient checkpointing；不创建 φ/Z | 已实现基础层 |
-| SGLang Supervisor | SkillFlow `training/sglang_manager.py::SGLangSupervisorManager` | 项目 SGLang 服务配置 | 薄适配：只管理本任务 child process，并增加资源 admission 与严格 readiness | 未在本分支启动 |
+| Qwen3.5 θ-LoRA | SkillFlow `GFlowNetTrainer.setup`、`configs/skillflow.yaml` | `smoke_trainer.py::_load_models` | 上游对齐 r64/α128/q,k,v,o、PEFT、bf16、gradient checkpointing；`AutoModelForMultimodalLM`、dropout=0、两个独立 θ-only 副本和双副本 continuation 是 Qwen3.5/MD 必要兼容适配；不创建 φ/Z | 已实现基础层 |
+| SGLang Supervisor | SkillFlow `training/sglang_manager.py::SGLangSupervisorManager` | `src/interactive/sglang_manager.py::SGLangSupervisorManager` | 薄适配 child process、ServerArgs 与 readiness；只终止自身 child。正式 Hotpot runner 尚未接入，GPU resource admission 仍由外部门禁完成 | 未接线、未启动 |
 | Exact SGLang sampling | SkillFlow `batch_inference.py::supervisor_call` | `rollout_collector.py::SGLangReceiptDirectorClient` | 必要适配：原函数没有 MD 所需 prompt/output token IDs、逐 token log-prob 与 policy receipt | 代码存在；fresh 实证缺失 |
-| 多卡 backward | SkillFlow `_batched_logprob_backward/_average_replica_grads` | `smoke_trainer.py` | 薄适配：按完整同题 group 的 token cost 分区；原版仅按 item 中点切分 | 代码存在；本分支未运行 |
-| θ checkpoint | SkillFlow `_save_checkpoint/resume` | `smoke_trainer.py::_save_optimizer_state` 与 adapter save | adapter 保存/加载可复用；optimizer、scheduler、RNG、step、version metadata 是 MD 必要工程补全 | θ/optimizer 部分存在；scheduler/RNG 尚缺 |
-| LoRA transport / route | SkillFlow `_sync_lora_to_vllm`；`batch_inference.py::{set_current_adapter_name,_resolve_model}` | `policy_sync.py::SGLangPolicyPublisher` | 薄适配 PEFT tensor/adapter load、pause、model-list verification；版本化 candidate、drain、chat canary、route switch、rollback 是项目工程补全 | 单元层存在；fresh 真实闭环缺失 |
+| 多卡 backward | SkillFlow `_batched_logprob_backward/_average_replica_grads` | `smoke_trainer.py` | 必要适配：只复用双副本并发与 gradient merge 边界；完整同题 group、token-cost 分区、GRPO loss/normalization 与 4→2→1 OOM backoff 均为 MD/项目实现 | 代码存在；本分支未运行 |
+| θ checkpoint | SkillFlow `_save_checkpoint/resume`；FlowSteer `train_interactive.py::run_full_training` 的 optimizer/scheduler/RNG save/restore | `smoke_trainer.py::_save_training_state/_restore_training_state` 与 adapter save | adapter 保存/加载复用 SkillFlow；optimizer、cosine scheduler 与 RNG 边界复用 FlowSteer；两张任务 GPU 的 CUDA RNG、training step 与 frozen version metadata 是 MD 必要适配 | 已接线；待真实单步恢复验收 |
+| LoRA transport / route | SkillFlow `_sync_lora_to_vllm`；`batch_inference.py::{set_current_adapter_name,_resolve_model}` | `policy_sync.py::SGLangPolicyPublisher` | 必要兼容适配：SkillFlow 用 `get_peft_model_state_dict`、`MultiprocessingSerializer` 和 `/load_lora_adapter_from_tensors`；当前服务边界使用已原子落盘的 PEFT adapter 目录和 `/load_lora_adapter`。pause、model-list verification 与 route selector 对齐上游；版本化 candidate、drain、chat canary、route switch、rollback 是项目工程补全 | 单元层存在；fresh 真实闭环缺失 |
 | W&B | FlowSteer `run_full_training`；SkillFlow `GFlowNetTrainer.__init__/_log_step` | `scripts/train_hotpotqa_grpo.py::WandbTracker` | 薄适配为 online fail-closed，并补 reward/loss/gradient/update/policy/publish/canary/checkpoint 字段 | adapter 存在；环境和真实 run 未验收 |
 | MACE baseline | FlowSteer/SkillFlow 无 | `exploration/mace.py`、`features.py` | MD 指定项目算法实现 | primitive 存在，Phase 1 未接线/未验收 |
 | Joint Bayesian posterior / paired probe | FlowSteer/SkillFlow 无 | `posterior.py`、`paired_probe.py`、`records.py::ProbeRecord` | MD 指定项目算法实现 | primitive 存在，Phase 2 未接线/未验收 |
@@ -94,4 +94,3 @@ collect(policy_n, same problem + same condition)
 - model service / GPU / W&B：未启动。
 - 单步训练：未授权。
 - 长训练：未授权。
-

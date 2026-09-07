@@ -17,7 +17,7 @@
 |---|---|---|---|---|---|
 | §0 文档边界 | 普通 QA、FlowSteer、GRPO、MACE、Bayesian、Skill；不得把规划当结果 | `records.py::{TaskRecord,TrajectoryRecord,ProbeRecord,PosteriorSnapshotRecord}` | FlowSteer `workflow_builder.py::{TurnRecord,Trajectory}` | 扩展为版本化 AgentGraph、probe、posterior records 是 MD 必要适配 | schema 已实现；完整闭环未验收 |
 | §1 信号隔离 | 任务学习、探索学习、经验固化三流隔离 | `EvidenceStore::{trajectories,probes,posteriors}`；`TrajectoryRecord.grpo_eligible`；GRPO 配置中的零辅助奖励 | FlowSteer 无三流隔离；SkillFlow reward 会混合 answer/process/skill reward，不能直接复用 | 按 MD 独立存储和 eligibility gate | 基础隔离已实现；跨 Phase 调度未接线 |
-| §2 总体架构 | question→Director→Canvas→AgentGraph→evaluator→GRPO，并旁路 posterior/Skill | `AgentGraphRolloutCollector.collect`、`AgentWorkflowEnv.step`、`evaluate_task`、`HotpotQASmokeTrainer.train` | FlowSteer `run_full_training`、`InteractiveWorkflowEnv.step` | 保留执行反馈闭环；自由 AgentGraph 是 MD 必要适配 | 基础任务学习链存在；探索/Skill 未接入 epoch loop |
+| §2 总体架构 | question→Director→Canvas→AgentGraph→evaluator→GRPO，并旁路 posterior/Skill | `AgentGraphRolloutCollector.collect`、`AgentWorkflowEnv.step`、`evaluate_task`、`Qwen35OnePassSmokeTrainer.train` | FlowSteer `run_full_training`、`InteractiveWorkflowEnv.step` | 保留执行反馈闭环；自由 AgentGraph 是 MD 必要适配 | 基础任务学习链存在；探索/Skill 未接入 epoch loop |
 | §2.2 QA schema | `task_id/question/ground_truth/split/metadata`，train/validation/test 隔离 | `TaskRecord`、`load_hotpotqa_training_pool` | FlowSteer 多数据源 loader；SkillFlow task environment | 统一为 MD TaskRecord；正式 split gate 仍需 Phase 0 实证 | 已实现；Phase 0 未验收 |
 | §3 AgentGraph | 自由 Agent prompt、稳定 model ID、两比特 relation、有限双向语义、唯一 output | `agent_graph.py::{AgentNode,AgentGraph}`；`agent_runtime.py::AgentRuntime`；`agent_workflow_env.py` | FlowSteer `workflow_graph.py` 是有序 operator DSL，不能直接复用 | 原子编辑和 execute-on-edit 语义源自 FlowSteer；自由图结构来自 MD | 已实现并有定向单元测试；真实训练 rollout 待验收 |
 | §4.1 Progressive Canvas | 每轮一个原子图编辑，Canvas 执行并反馈 | `agent_action_parser.py`、`AgentWorkflowEnv.step`、`AgentGraphRolloutCollector.collect` | FlowSteer `_truncate_after_first_action`、`ActionParser.parse`、`InteractiveWorkflowEnv.step` | XML operator action 薄适配为 AgentGraph JSON action | 已实现 |
@@ -25,7 +25,7 @@
 | §4.3 同题优势 | `(task_id, condition_id, policy_version)` 精确分组；零方差组零梯度 | `same_condition_advantages`、`group_eligible_trajectories` | FlowSteer 发布代码按 source 分组，不能直接复用 | 按 MD 修正分组并支持每题等权 | 已实现并有单元测试 |
 | §4.4 One-Pass GRPO | 一批 rollout 只消费一次；不使用 PPO clipping、reference KL、entropy | `action_masked_one_pass_loss`、`torch_action_masked_one_pass_loss`；runner 每 sealed batch 一次 `backend.train` | FlowSteer `compute_grpo_loss` 只提供 policy-gradient 外形；论文 clipped GRPO 与发布代码不一致 | exact same-condition one-pass 是 MD 必要实现，不称 clipped GRPO | loss 已实现；本分支真实 step 未运行 |
 | §4.5 Action mask | 真实 prompt/output IDs；只给 Canvas 消费的首个 action 前缀 credit；feedback 仅作下一轮 context | `TurnRecord::{prompt_token_ids,output_token_ids,executed_prefix_tokens,behavior_log_probs}`；`SGLangReceiptDirectorClient`；`trajectory_to_grpo` | FlowSteer 重新拼接 response+feedback，不可直接复用；SkillFlow `supervisor_call` 不返回所需 exact receipt | `/generate` receipt 和 prefix mask 是必要适配 | 已实现与定向测试；真实 SGLang receipt 待 Phase 0 验收 |
-| §4.6 On-policy | 单一 behavior version、真实条件、无强制 probe/fallback/manual repair/reconstructed context | `RolloutGate`、`TrajectoryRecord.grpo_eligible`、`SmokeTrainerConfig`、`HotpotQASmokeTrainer.train` | SkillFlow 同一步 rollout 并行可复用；其跨 step async prefetch 禁用 | 增加 policy/adapter/server version receipt 与本地 log-prob 容差 gate | 已实现基础 gate；新训练闭环未验收 |
+| §4.6 On-policy | 单一 behavior version、真实条件、无强制 probe/fallback/manual repair/reconstructed context | `RolloutGate`、`TrajectoryRecord.grpo_eligible`、`SmokeTrainerConfig`、`Qwen35OnePassSmokeTrainer.train` | SkillFlow 同一步 rollout 并行可复用；其跨 step async prefetch 禁用 | 增加 policy/adapter/server version receipt 与本地 log-prob 容差 gate | 已实现基础 gate；新训练闭环未验收 |
 | §5 原始 MACE baseline | per-context/model LinUCB；terminal signal；same-budget 对比 random/greedy/uniform | `exploration/mace.py::{DisjointLinUCB,MACE}`；`features.py::MACEFeatureExtractor` | 不属于 FlowSteer/SkillFlow；按 MD 中原始 MACE baseline 实现 | 仅作为探索学习流，不修改 GRPO reward | 组件与单元测试存在；未进入 Phase 1 实验，未验收 regret |
 | §6 条件价值 | 绑定 task/prefix/contract/model/relation/stage 与完整版本 | `VersionBundle`、`SelectionReceipt`、`exploration/records.py` | FlowSteer/SkillFlow 无该联合价值接口 | MD 项目算法数据结构 | 部分实现；候选全集与实际 condition-satisfied 接线未验收 |
 | §7 联合贝叶斯后验 | Bayesian linear head、Cholesky、paired difference、每条普通 trajectory 一次 likelihood | `posterior.py::BayesianLinearPosterior`、`ProbeRecord`、`PosteriorSnapshotRecord` | FlowSteer/SkillFlow 无联合后验 | MD 项目算法新增；不能混入 GRPO optimizer | 数值组件与单元测试存在；低秩表示、真实 evidence ingestion、held-out calibration 未接线/未验收 |
@@ -50,7 +50,7 @@
 
 | Phase | MD 验收 | 当前判定 | 缺口 |
 |---|---|---|---|
-| Phase 0 数据可信性 | 任意 terminal reward 可追溯至完整图、每次真实调用和 evaluator receipt，并可 replay 同一 snapshot | **未通过** | 需要在冻结 HotpotQA train 样本上生成 fresh trajectory；验证完整 snapshot/tool state replay、每轮无缓存调用复制、全版本与 evaluator lineage；补齐正式 checkpoint 所需 scheduler/RNG metadata contract |
+| Phase 0 数据可信性 | 任意 terminal reward 可追溯至完整图、每次真实调用和 evaluator receipt，并可 replay 同一 snapshot | **未通过** | 128 validation / 512 train、base_task_id 隔离及固定 7-task validation monitor 已静态验收；仍需在当前 policy/condition 下生成 fresh train trajectory，并验证完整 snapshot/tool state replay、每轮无缓存调用复制、全版本与 evaluator lineage |
 | Phase 1 原始 MACE baseline | same-budget model/relation simple regret 优于 random | **未开始验收** | MACE 数值组件未接入真实 probe scheduler；无 random/greedy/uniform 对照结果 |
 | Phase 2 联合后验与 paired probe | block-held-out NLL、coverage、top-model regret 优于 Phase 1 | **未开始验收** | snapshot fork/continuation 的完整 tool state、真实 paired repeats、low-rank feature、held-out calibrator 与 cluster-aware statistics 未形成闭环 |
 | Phase 3 EVSI | 相同识别准确率所需额外 LLM probe 更少 | **未开始验收** | top-K scheduler、fantasy observation、ranking-stability 和 stop-rule 实验未接线 |
@@ -62,8 +62,8 @@
 配置已经选择 MD One-Pass GRPO 且 TTB 禁用，但以下项目完成前 `real_step_authorized=false`：
 
 1. Phase 0 fresh trajectory lineage 与 replay 验收；
-2. 训练 checkpoint 除 θ-LoRA 和 optimizer 外，还需保存并恢复 scheduler、Python/NumPy/PyTorch/CUDA RNG、训练 step 与 frozen version bundle；当前 `HotpotQASmokeTrainer` 尚不满足；
-3. W&B online fail-closed 前置与必需字段验证；
+2. 训练 checkpoint 已按 FlowSteer 的边界保存并恢复 θ-LoRA、optimizer、cosine scheduler、Python/NumPy/PyTorch/两张训练 GPU 的 CUDA RNG、training step 与 frozen version fingerprint；需要真实单步验证；
+3. W&B online fail-closed、必需字段、每步 checkpoint Artifact 及 `latest`/`best` alias 已接线；需要真实 run URL 验证；
 4. 不冲突 GPU resource admission；
 5. 一个冻结 behavior-policy batch 的完整 `rollout→terminal reward→one-pass loss→backward→optimizer.step→checkpoint→publish→route switch→canary→new-policy rollout` 验收。
 
@@ -76,8 +76,8 @@
 - mode：`online`。
 - credential source：W&B SDK 默认凭据；代码不要求、读取或记录显式 API key 字段。
 - run URL：尚无，因为当前没有创建 W&B run，也没有启动训练。
-- 每步 required fields、`latest`/`best` checkpoint aliases 和恢复元数据契约已写入主配置。
-- 当前仍阻塞：训练环境需统一到包含 W&B SDK 的环境；per-step validation protocol 尚未冻结；checkpoint 尚缺 scheduler/RNG；checkpoint artifact 上传/引用尚未接入 runner。因此不得将配置绑定描述为 W&B 已连接。
+- 每步 required fields、固定 7-task held-out validation monitor、完整恢复 checkpoint Artifact、`latest`/`best` aliases 已接入 runner；validation trajectory 明确不进入 GRPO/posterior/Skill。
+- 完整运行环境已确认可用：`/ssd1/iclr/gpf/venvs/skillflow/bin/python`。当前仍未创建 W&B run，且本机 GPU 全部被其他项目占用，因此不得描述为 W&B 已连接或训练已启动。
 
 ## Commit-exact 原始代码版本
 

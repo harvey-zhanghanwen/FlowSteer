@@ -83,6 +83,7 @@ class RecordTests(unittest.TestCase):
     def test_test_and_forced_probe_rollouts_are_ineligible(self) -> None:
         self.assertFalse(trajectory("test").grpo_eligible)
         self.assertFalse(trajectory(forced_probe=True).grpo_eligible)
+        self.assertFalse(trajectory(condition_satisfied=False).grpo_eligible)
 
     def test_natural_max_round_failure_with_real_zero_reward_is_eligible(self) -> None:
         failure = trajectory(

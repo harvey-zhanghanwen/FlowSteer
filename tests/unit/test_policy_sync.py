@@ -118,6 +118,13 @@ class PolicySyncTests(unittest.TestCase):
         stale = "theta_smoke_step_999999"
         control = _SGLangControl({previous, stale})
         gate = _Gate()
+        route_events: list[str] = []
+
+        def commit_route(candidate: str) -> None:
+            self.assertIn(previous, control.adapters)
+            self.assertIn(candidate, control.adapters)
+            self.assertEqual(["pause", "drain"], gate.events)
+            route_events.append(f"commit:{candidate}")
 
         receipt = self.publisher(control).publish(
             checkpoint_path=self.checkpoint,
@@ -127,6 +134,7 @@ class PolicySyncTests(unittest.TestCase):
             step=1,
             previous_adapter=previous,
             gate=gate,
+            route_commit=commit_route,
         )
 
         self.assertTrue(receipt.success)
@@ -144,6 +152,7 @@ class PolicySyncTests(unittest.TestCase):
         )
         self.assertEqual(control.adapters, {"theta_smoke_step_000001"})
         self.assertEqual(gate.events, ["pause", "drain", "resume"])
+        self.assertEqual(route_events, ["commit:theta_smoke_step_000001"])
 
         operations = [(method, operation) for method, operation, _ in control.calls]
         canary_index = operations.index(("post", "completions"))
@@ -226,6 +235,7 @@ class PolicySyncTests(unittest.TestCase):
         previous = "theta_smoke_step_000000"
         control = _SGLangControl({previous})
         control.rejected_unloads.add(previous)
+        route_events: list[str] = []
 
         with self.assertRaises(PolicySyncError) as caught:
             self.publisher(control).publish(
@@ -235,6 +245,10 @@ class PolicySyncTests(unittest.TestCase):
                 candidate_policy_version="qwen35-9b-smoke-step-0001",
                 step=1,
                 previous_adapter=previous,
+                route_commit=lambda candidate: route_events.append(
+                    f"commit:{candidate}"
+                ),
+                route_rollback=lambda: route_events.append("rollback"),
             )
 
         receipt = caught.exception.receipt
@@ -242,6 +256,10 @@ class PolicySyncTests(unittest.TestCase):
         self.assertTrue(receipt.rollback_succeeded)
         self.assertIsNone(receipt.new_policy_version)
         self.assertEqual(control.adapters, {previous})
+        self.assertEqual(
+            route_events,
+            ["commit:theta_smoke_step_000001", "rollback"],
+        )
 
     def test_receipt_contains_versions_and_times_but_no_checkpoint_hash(self) -> None:
         control = _SGLangControl(set())

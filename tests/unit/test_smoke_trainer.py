@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import random
 from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
 import sys
 import unittest
 from unittest.mock import MagicMock, call, patch
+
+import numpy as np
 
 from src.interactive.persistence import stable_id
 from src.interactive.records import (
@@ -192,48 +195,75 @@ class ContinuationStateTests(unittest.TestCase):
             )
         )
 
-        status = trainer._restore_optimizer_state(MagicMock(), MagicMock())
+        torch = MagicMock()
+        torch.cuda.is_available.return_value = False
+        status = trainer._restore_training_state(
+            torch,
+            MagicMock(),
+            MagicMock(),
+        )
 
-        self.assertEqual(status, "warm_start_fresh_optimizer")
+        self.assertEqual(
+            status,
+            ("warm_start_fresh_optimizer", "fresh_scheduler_seeded_rng"),
+        )
 
     def test_optimizer_restore_requires_immediately_previous_committed_step(self) -> None:
-        torch = MagicMock()
-        torch.load.return_value = {
-            "format": "flowsteer-smoke-optimizer-v1",
-            "committed_step": 2,
-            "optimizer_state_dict": {"state": {}, "param_groups": []},
-        }
-        optimizer = MagicMock()
         trainer = Qwen35OnePassSmokeTrainer(
             _config(
                 update_step=3,
+                training_step=2,
                 behavior_adapter_checkpoint="/checkpoints/step-2/theta",
                 optimizer_state_checkpoint=(
-                    "/checkpoints/step-2/theta/optimizer_state.pt"
+                    "/checkpoints/step-2/theta/training_state.pt"
                 ),
             )
         )
+        torch = MagicMock()
+        torch.cuda.is_available.return_value = False
+        cpu_rng_state = MagicMock()
+        restored_cpu_rng_state = object()
+        cpu_rng_state.cpu.return_value = restored_cpu_rng_state
+        torch.load.return_value = {
+            "format": "flowsteer-training-state-v3",
+            "committed_step": 2,
+            "committed_training_step": 1,
+            "updated_policy_version": BEHAVIOR_POLICY,
+            "training_contract": trainer._training_contract(),
+            "optimizer_state_dict": {"state": {}, "param_groups": []},
+            "scheduler_state_dict": {"last_epoch": 1},
+            "python_random_state": random.getstate(),
+            "numpy_random_state": np.random.get_state(),
+            "torch_cpu_rng_state": cpu_rng_state,
+            "torch_cuda_rng_state_by_device": {},
+        }
+        optimizer = MagicMock()
+        scheduler = MagicMock()
+        status = trainer._restore_training_state(torch, optimizer, scheduler)
 
-        status = trainer._restore_optimizer_state(torch, optimizer)
-
-        self.assertEqual(status, "restored_optimizer")
+        self.assertEqual(status, ("restored_optimizer", "restored_scheduler_and_rng"))
         torch.load.assert_called_once_with(
-            "/checkpoints/step-2/theta/optimizer_state.pt",
-            map_location="cuda:3",
+            "/checkpoints/step-2/theta/training_state.pt",
+            map_location="cpu",
             weights_only=False,
         )
         optimizer.load_state_dict.assert_called_once_with(
             {"state": {}, "param_groups": []}
         )
+        scheduler.load_state_dict.assert_called_once_with({"last_epoch": 1})
+        torch.set_rng_state.assert_called_once_with(restored_cpu_rng_state)
 
         torch.load.return_value["committed_step"] = 1
         with self.assertRaisesRegex(ValueError, "immediately precede"):
-            trainer._restore_optimizer_state(torch, optimizer)
+            trainer._restore_training_state(torch, optimizer, scheduler)
 
     def test_step_two_saves_optimizer_state_and_committed_step(self) -> None:
         torch = MagicMock()
+        torch.cuda.is_available.return_value = False
         optimizer = MagicMock()
         optimizer.state_dict.return_value = {"state": {}}
+        scheduler = MagicMock()
+        scheduler.state_dict.return_value = {"last_epoch": 1}
         trainer = Qwen35OnePassSmokeTrainer(
             _config(
                 update_step=2,
@@ -241,18 +271,56 @@ class ContinuationStateTests(unittest.TestCase):
             )
         )
         with TemporaryDirectory() as directory:
-            path, saved = trainer._save_optimizer_state(
-                torch,
-                optimizer,
-                Path(directory),
-            )
+            with patch("src.interactive.smoke_trainer.os.replace") as replace_file:
+                path, saved = trainer._save_training_state(
+                    torch,
+                    optimizer,
+                    scheduler,
+                    Path(directory),
+                    (),
+                    learning_rate_used=1.0e-4,
+                    next_learning_rate=9.0e-5,
+                )
 
         self.assertTrue(saved)
-        self.assertTrue(path.endswith("optimizer_state.pt"))
+        self.assertTrue(path.endswith("training_state.pt"))
         payload, saved_path = torch.save.call_args.args
         self.assertEqual(payload["committed_step"], 2)
+        self.assertEqual(payload["committed_training_step"], 1)
         self.assertEqual(payload["optimizer_state_dict"], {"state": {}})
-        self.assertEqual(saved_path.name, "optimizer_state.pt")
+        self.assertEqual(payload["scheduler_state_dict"], {"last_epoch": 1})
+        self.assertEqual(payload["training_contract"], trainer._training_contract())
+        self.assertEqual(payload["learning_rate_used"], 1.0e-4)
+        self.assertEqual(payload["next_learning_rate"], 9.0e-5)
+        self.assertEqual(saved_path.name.startswith(".training_state.pt.tmp-"), True)
+        replace_file.assert_called_once()
+
+    def test_optimizer_restore_rejects_training_contract_drift(self) -> None:
+        trainer = Qwen35OnePassSmokeTrainer(
+            _config(
+                update_step=3,
+                training_step=2,
+                behavior_adapter_checkpoint="/checkpoints/step-2/theta",
+                optimizer_state_checkpoint=(
+                    "/checkpoints/step-2/theta/training_state.pt"
+                ),
+            )
+        )
+        payload = {
+            "format": "flowsteer-training-state-v3",
+            "committed_step": 2,
+            "committed_training_step": 1,
+            "updated_policy_version": BEHAVIOR_POLICY,
+            "training_contract": {
+                **trainer._training_contract(),
+                "warmup_steps": 1,
+            },
+        }
+        torch = MagicMock()
+        torch.load.return_value = payload
+
+        with self.assertRaisesRegex(ValueError, "warmup_steps"):
+            trainer._restore_training_state(torch, MagicMock(), MagicMock())
 
     def test_continuation_loads_same_trainable_theta_on_both_replicas(self) -> None:
         models = [MagicMock(), MagicMock()]

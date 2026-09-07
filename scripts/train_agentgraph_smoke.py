@@ -486,6 +486,15 @@ class LiveSmokeBackend:
                         if director.get("behavior_adapter_checkpoint")
                         else None
                     ),
+                    seed=int(experiment.get("seed", 42)),
+                    training_step=int(experiment.get("training_step", 1)),
+                    total_training_steps=int(
+                        experiment.get("target_optimizer_steps", 1)
+                    ),
+                    warmup_steps=int(grpo.get("warmup_steps", 0)),
+                    scheduler_name=str(
+                        grpo.get("scheduler", "cosine_with_warmup")
+                    ),
                     update_step=int(experiment.get("update_step", 1)),
                     optimizer_state_checkpoint=(
                         str(_resolve(root, str(director["optimizer_state_checkpoint"])))
@@ -501,8 +510,10 @@ class LiveSmokeBackend:
                         str(value) for value in lora["target_modules"]
                     ),
                     learning_rate=float(grpo["learning_rate"]),
+                    weight_decay=float(grpo.get("weight_decay", 0.01)),
                     max_grad_norm=float(grpo["max_grad_norm"]),
                     advantage_epsilon=float(grpo["advantage_epsilon"]),
+                    trajectories_per_group=int(grpo["samples_per_problem"]),
                     gradient_checkpointing=bool(grpo["gradient_checkpointing"]),
                     micro_batch_backoff=tuple(
                         int(value) for value in oom["micro_batch_schedule"]
@@ -682,6 +693,34 @@ class LiveSmokeBackend:
         director = _mapping(self.config["director"], "director")
         experiment = _mapping(self.config["experiment"], "experiment")
         checkpoint_version = f"checkpoint:{summary.updated_policy_version}"
+        def commit_route(adapter_name: str) -> None:
+            self.director_client.update_policy_route(
+                policy_version=str(summary.updated_policy_version),
+                adapter_name=adapter_name,
+                expected_server_weight_version=str(
+                    director["expected_server_weight_version"]
+                ),
+            )
+            if (
+                self.director_client.policy_version
+                != str(summary.updated_policy_version)
+                or self.director_client.adapter_name != adapter_name
+            ):
+                raise RuntimeError("Director route readback differs")
+
+        def rollback_route() -> None:
+            self.director_client.update_policy_route(
+                policy_version=str(summary.behavior_policy_version),
+                adapter_name=(
+                    str(director["behavior_adapter_name"])
+                    if director.get("behavior_adapter_name")
+                    else None
+                ),
+                expected_server_weight_version=str(
+                    director["expected_server_weight_version"]
+                ),
+            )
+
         try:
             receipt = await asyncio.to_thread(
                 self.publisher.publish,
@@ -696,26 +735,31 @@ class LiveSmokeBackend:
                     else None
                 ),
                 gate=self.rollout_gate,
+                route_commit=commit_route,
+                route_rollback=rollback_route,
             )
         except PolicySyncError:
             raise
 
-        # The publisher has proven and committed the adapter. Bind subsequent
-        # native /generate calls to both its registered name and logical policy
-        # version under a second pause/drain boundary before any canary starts.
-        self.rollout_gate.pause()
-        try:
-            self.rollout_gate.drain()
-            self.director_client.update_policy_route(
-                policy_version=str(receipt.new_policy_version),
-                adapter_name=receipt.adapter_name,
-                expected_server_weight_version=str(
-                    director["expected_server_weight_version"]
-                ),
+        route_switch_success = (
+            self.director_client.policy_version == receipt.new_policy_version
+            and self.director_client.adapter_name == receipt.adapter_name
+        )
+        if not route_switch_success:
+            raise PolicySyncError(
+                "Director route readback differs after adapter publication",
+                receipt,
             )
-        finally:
-            self.rollout_gate.resume()
-        return receipt
+        value = receipt.to_dict()
+        value.update(
+            route_switch_success=True,
+            route_policy_version=self.director_client.policy_version,
+            route_adapter_name=self.director_client.adapter_name,
+            route_server_weight_version=(
+                self.director_client.expected_server_weight_version
+            ),
+        )
+        return value
 
 
 def _summary_dict(summary: Any) -> dict[str, Any]:

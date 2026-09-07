@@ -43,7 +43,7 @@ experiment:
   checkpoint_every_steps: 10
   prefetch_next_step: false
   condition_id: "hotpotqa_grpo_natural_v1"
-  output_dir: "artifacts/hotpotqa_grpo_300step"
+  output_dir: "artifacts/hotpotqa_md_grpo_v2_300step"
 
 data:
   # The aligned split remains outside this branch worktree; override with
@@ -51,6 +51,8 @@ data:
   train_path: "${HOTPOTQA_AGENTGRAPH_TRAIN_PATH:-/ssd1/iclr/1/FlowSteer/data/agentgraph_v1/train.jsonl}"
   validation_path: "${HOTPOTQA_AGENTGRAPH_VALIDATION_PATH:-/ssd1/iclr/1/FlowSteer/data/agentgraph_v1/validation.jsonl}"
   enforce_split_isolation: true
+  expected_unique_train_tasks: 512
+  expected_validation_tasks: 128
   task_schema_version: "flowsteer.agentgraph.task.v1"
   batch:
     dataset_key: "hotpotqa"
@@ -62,11 +64,11 @@ data:
 
 storage:
   schema_version: "flowsteer.hotpotqa.grpo_training.v1"
-  root: "artifacts/hotpotqa_grpo_300step/evidence"
+  root: "artifacts/hotpotqa_md_grpo_v2_300step/evidence"
   persist_exact_policy_receipts: true
-  manifest_path: "artifacts/hotpotqa_grpo_300step/run_manifest.json"
-  state_path: "artifacts/hotpotqa_grpo_300step/run_state.json"
-  training_log_path: "artifacts/hotpotqa_grpo_300step/training_log.jsonl"
+  manifest_path: "artifacts/hotpotqa_md_grpo_v2_300step/run_manifest.json"
+  state_path: "artifacts/hotpotqa_md_grpo_v2_300step/run_state.json"
+  training_log_path: "artifacts/hotpotqa_md_grpo_v2_300step/training_log.jsonl"
 
 versions:
   prompt: "agentgraph.director.minimal.v2"
@@ -141,6 +143,12 @@ grpo:
   optimization_passes_per_rollout_batch: 1
   max_optimizer_updates_per_step: 1
   learning_rate: 1.0e-4
+  weight_decay: 0.01
+  scheduler: "cosine_with_warmup"
+  # FlowSteer's cosine scheduler is reused, but zero warmup is a required
+  # adaptation here: every accepted optimizer step must have a non-zero LR
+  # and a demonstrably non-zero theta-LoRA update.
+  warmup_steps: 0
   gradient_accumulation_steps: 1
   gradient_checkpointing: true
   max_grad_norm: 3.0
@@ -193,13 +201,29 @@ tracking:
     - policy/canary_success
   validation_protocol:
     required_each_step: true
-    status: "not_frozen"
+    status: "frozen"
+    split: "validation"
+    expected_validation_pool_size: 128
+    monitor_size: 7
+    rollouts_per_task: 1
+    used_for_optimization: false
+    used_for_posterior: false
+    used_for_skill: false
+    best_metric: "validation/token_f1"
+    monitor_task_ids:
+      - "hotpotqa:5a7a06935542990198eaf050"
+      - "hotpotqa:5a879ab05542996e4f30887e"
+      - "hotpotqa:5a8d7341554299441c6b9fe5"
+      - "hotpotqa:5a82171f5542990a1d231f4a"
+      - "hotpotqa:5a84dd955542997b5ce3ff79"
+      - "hotpotqa:5a7e36045542991319bc9440"
+      - "hotpotqa:5adf44985542993a75d2646d"
   checkpoint_artifact:
     enabled: true
     type: "model"
     aliases: [latest, best]
     recovery_metadata_required: true
-    status: "blocked_incomplete_recovery_checkpoint"
+    status: "ready"
 
 # Separate evidence flows are intentionally excluded from this run.  The MD
 # forbids mixing forced probes/posterior or unvalidated Skills into GRPO.

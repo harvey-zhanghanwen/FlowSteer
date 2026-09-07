@@ -248,6 +248,7 @@ class TrajectoryRecord:
                 or float(self.evaluation.reward) == 0.0
             )
             and self.evaluation.evaluator_version == self.versions.evaluator
+            and self.condition_satisfied
             and not self.forced_probe
             and not self.api_fallback_used
             and not self.manual_repair_used

@@ -2,11 +2,13 @@
 
 Source classification for this smoke-training module:
 
-* **Thin adaptation from SkillFlow** -- PEFT theta transport, rollout pause,
-  adapter unload/load, adapter routing, and ``/v1/models`` verification follow
-  ``training/gflownet_trainer.py::_sync_lora_to_vllm``,
-  ``training/batch_inference.py``, and ``training/sglang_manager.py`` at the
-  frozen SkillFlow revision.
+* **Thin adaptation from FlowSteer and SkillFlow** -- the adapter-directory
+  load/unload boundary follows FlowSteer's LoRA reload path; rollout pause,
+  current-adapter routing, and ``/v1/models`` verification follow SkillFlow's
+  ``training/gflownet_trainer.py::_sync_lora_to_vllm`` and
+  ``training/batch_inference.py`` at the frozen revision.  SkillFlow itself
+  transports serialized tensors through ``/load_lora_adapter_from_tensors``;
+  that transport is not claimed here.
 * **Necessary project engineering** -- explicit behavior/checkpoint/policy
   versions, managed-adapter draining, candidate-version publication, chat
   canary, failed-candidate cleanup/rollback, and the optional external
@@ -193,10 +195,11 @@ class SGLangPolicyPublisher:
     ) -> Mapping[str, Any]:
         """Load and canary an existing inference adapter without a policy update.
 
-        This is the evaluation-only subset of SkillFlow's external SGLang
-        publication boundary: model list, adapter load, model-list verification,
-        and chat canary.  It deliberately does not unload another policy or
-        claim that any weights were trained or published.
+        This is the evaluation-only subset of the project's external SGLang
+        publication boundary.  Model-list verification follows SkillFlow;
+        directory loading follows FlowSteer; the chat canary is project
+        engineering.  It deliberately does not unload another policy or claim
+        that any weights were trained or published.
         """
 
         checkpoint = Path(checkpoint_path).expanduser().resolve()
@@ -279,6 +282,8 @@ class SGLangPolicyPublisher:
         step: int,
         previous_adapter: Optional[str] = None,
         gate: Optional[PolicySyncGate] = None,
+        route_commit: Optional[Callable[[str], None]] = None,
+        route_rollback: Optional[Callable[[], None]] = None,
     ) -> PolicySyncReceipt:
         """Load, verify, canary, and commit one trained adapter.
 
@@ -317,6 +322,7 @@ class SGLangPolicyPublisher:
         rollback_succeeded: Optional[bool] = None
         gate_drained = False
         gate_paused = False
+        route_committed = False
 
         try:
             if gate is not None:
@@ -369,6 +375,13 @@ class SGLangPolicyPublisher:
                 raise _RequestFailure("candidate adapter failed its chat canary")
             canary_succeeded = True
 
+            # Commit the Director's logical route while the same admission
+            # gate is still paused and drained.  The old adapter remains
+            # loaded until this callback and its immediate readback succeed.
+            if route_commit is not None:
+                route_committed = True
+                route_commit(candidate)
+
             # The previous behavior adapter remains available until the new
             # candidate has both appeared in /v1/models and answered canary.
             if previous_adapter is not None and previous_adapter in candidate_models:
@@ -407,6 +420,11 @@ class SGLangPolicyPublisher:
             )
         except Exception as error:
             rollback_error = ""
+            if route_committed and route_rollback is not None:
+                try:
+                    route_rollback()
+                except Exception as route_error:  # pragma: no cover - rare double fault
+                    rollback_error += f"; route rollback failed: {route_error}"
             if loaded:
                 try:
                     self._unload(candidate, attempts, "rollback_candidate", retry=False)

@@ -1,8 +1,9 @@
 """Durable phase journal for one sequential AgentGraph optimizer step.
 
-This is a dependency-light adaptation of SkillFlow's
-``training/step_transaction.py``.  It keeps the same formal step phases and
-the same append/flush/fsync transition boundary.  AgentGraph trajectories are
+SkillFlow does not publish a ``training/step_transaction.py`` module.  This is
+the project transaction journal required by the MD's strict on-policy update
+boundary; its append/flush/fsync persistence is an engineering adaptation, not
+an upstream SkillFlow class.  AgentGraph trajectories are
 already persisted as immutable JSONL by the runner, so the recovery record
 stores their paths and the exact behavior-policy route instead of pickling a
 second copy of the rollout objects.  This module does not define a learning
@@ -21,7 +22,7 @@ import uuid
 
 
 class StepPhase(str, Enum):
-    """SkillFlow formal transaction phases, in commit order."""
+    """Project transaction phases for the MD-required commit order."""
 
     PREPARED = "prepared"
     ROLLOUT_COMPLETE = "rollout_complete"
@@ -29,6 +30,9 @@ class StepPhase(str, Enum):
     GRADIENT_COMPLETE = "gradient_complete"
     OPTIMIZER_COMMITTED = "optimizer_committed"
     SGLANG_SYNCED = "sglang_synced"
+    VALIDATION_COMPLETE = "validation_complete"
+    WANDB_ARTIFACT_LOGGED = "wandb_artifact_logged"
+    WANDB_LOGGED = "wandb_logged"
     COMMITTED = "committed"
 
 

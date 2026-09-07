@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from dataclasses import replace
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import yaml
 
 from src.interactive.persistence import stable_id
+from src.interactive.agent_graph import AgentGraph, AgentNode
+from src.interactive.persistence import GraphSnapshotEvent
 from src.interactive.records import (
     EvaluationReceipt,
+    ExecutionRecord,
     TaskRecord,
     TrajectoryRecord,
     TurnRecord,
@@ -32,6 +36,7 @@ run_hotpotqa_training = _MODULE.run_hotpotqa_training
 sample_hotpotqa_tasks = _MODULE.sample_hotpotqa_tasks
 validate_hotpotqa_training_config = _MODULE.validate_hotpotqa_training_config
 WandbTracker = _MODULE.WandbTracker
+validate_phase0_rollout_batch = _MODULE.validate_phase0_rollout_batch
 
 
 class FakeTracker:
@@ -42,12 +47,24 @@ class FakeTracker:
         self.logs: list[tuple[int, dict]] = []
         self.summary: dict = {}
         self.finished: list[int] = []
+        self.artifacts: list[dict] = []
 
     def log(self, values, *, step: int) -> None:
         self.logs.append((step, dict(values)))
 
     def update_summary(self, values) -> None:
         self.summary.update(values)
+
+    def log_checkpoint(self, checkpoint_dir, *, metadata, aliases):
+        receipt = {
+            "name": "hotpotqa-director-checkpoint",
+            "version": f"v{len(self.artifacts)}",
+            "aliases": list(aliases),
+            "checkpoint_dir": str(checkpoint_dir),
+            "metadata": dict(metadata),
+        }
+        self.artifacts.append(receipt)
+        return receipt
 
     def finish(self, *, exit_code: int) -> None:
         self.finished.append(exit_code)
@@ -116,6 +133,156 @@ def _trajectory(task, rollout_index, versions, *, adapter: str) -> TrajectoryRec
     )
 
 
+def _phase0_trajectory(task, rollout_index, versions, *, adapter: str) -> TrajectoryRecord:
+    graph = AgentGraph()
+    graph.add_agent(AgentNode("solver", "worker-model", "Answer the question."))
+    first_snapshot = GraphSnapshotEvent.create(1, graph.to_dict())
+    graph.set_output("solver")
+    second_snapshot = GraphSnapshotEvent.create(
+        2,
+        graph.to_dict(),
+        first_snapshot.snapshot_id,
+    )
+    third_snapshot = GraphSnapshotEvent.create(
+        2,
+        graph.to_dict(),
+        second_snapshot.snapshot_id,
+    )
+    run_id = f"run:{task.task_id}:{rollout_index}"
+    runtime = {
+        "run_id": run_id,
+        "graph_revision": 2,
+        "output_agent_id": "solver",
+        "final_answer": "answer",
+        "outputs": {"solver": "answer"},
+        "block_completion_order": [["solver"]],
+    }
+    execution = ExecutionRecord(
+        execution_id=f"execution:{task.task_id}:{rollout_index}",
+        experiment_id=run_id,
+        graph_revision=2,
+        agent_id="solver",
+        model_id="worker-model",
+        model_fingerprint="model-fingerprint",
+        provider="provider",
+        request_hash="request-receipt",
+        output="answer",
+        temperature=0.0,
+        top_p=1.0,
+        max_tokens=32,
+        metadata={
+            "request": {
+                "request_id": f"agent-request:{task.task_id}:{rollout_index}",
+                "run_id": run_id,
+                "graph_revision": 2,
+                "problem": task.question,
+                "agent": {
+                    "id": "solver",
+                    "model_id": "worker-model",
+                    "contract": "Answer the question.",
+                },
+                "model": {"model_id": "worker-model"},
+                "provider_id": "provider",
+                "upstream": [],
+            },
+            "response": {
+                "provider_request_id": (
+                    f"provider-request:{task.task_id}:{rollout_index}"
+                ),
+                "attempt_count": 1,
+            },
+        },
+    )
+
+    def turn(
+        index: int,
+        response: str,
+        action: dict,
+        snapshot: GraphSnapshotEvent,
+        feedback: str,
+        *,
+        executions=(),
+        runtime_summary=None,
+        reused=False,
+    ) -> TurnRecord:
+        return TurnRecord(
+            turn_id=f"turn:{task.task_id}:{rollout_index}:{index}",
+            round_index=index,
+            prompt=f"prompt {index}",
+            policy_response=response,
+            prompt_token_ids=(1,),
+            output_token_ids=(2,),
+            behavior_log_probs=(-0.1,),
+            executed_prefix_tokens=1,
+            action=action,
+            canvas_feedback=feedback,
+            graph_revision=snapshot.revision,
+            graph_snapshot=snapshot.to_dict()["graph"],
+            graph_snapshot_id=snapshot.snapshot_id,
+            previous_graph_snapshot_id=snapshot.previous_snapshot_id,
+            executions=executions,
+            runtime_summary=runtime_summary or {},
+            execution_reused=reused,
+            director_request_id=(
+                f"director-request:{task.task_id}:{rollout_index}:{index}"
+            ),
+            director_attempt_count=1,
+            policy_version=versions.policy,
+            policy_adapter=adapter,
+            server_weight_version="default",
+            receipt_verified=True,
+        )
+
+    turns = (
+        turn(
+            0,
+            '{"action":"add_agent","agent_id":"solver","model_id":"worker-model","contract":"Answer the question."}',
+            {
+                "action": "add_agent",
+                "agent_id": "solver",
+                "model_id": "worker-model",
+                "contract": "Answer the question.",
+            },
+            first_snapshot,
+            "accepted add_agent at revision 1",
+        ),
+        turn(
+            1,
+            '{"action":"set_output","agent_id":"solver"}',
+            {"action": "set_output", "agent_id": "solver"},
+            second_snapshot,
+            "accepted set_output at revision 2",
+            executions=(execution,),
+            runtime_summary=runtime,
+        ),
+        turn(
+            2,
+            '{"action":"finish"}',
+            {"action": "finish"},
+            third_snapshot,
+            "workflow finished",
+            runtime_summary=runtime,
+            reused=True,
+        ),
+    )
+    return TrajectoryRecord(
+        trajectory_id=f"trajectory:{task.task_id}:{rollout_index}:{versions.policy}",
+        task=task,
+        group_id=f"{task.task_id}:hotpotqa_grpo_natural_v1:{versions.policy}",
+        condition_id="hotpotqa_grpo_natural_v1",
+        rollout_id=f"rollout:{rollout_index}",
+        versions=versions,
+        turns=turns,
+        final_answer="answer",
+        evaluation=EvaluationReceipt(
+            evaluator_version=versions.evaluator,
+            valid=True,
+            reward=1.0,
+            metrics={"exact_match": 1.0, "token_f1": 1.0},
+        ),
+        termination_reason="finish",
+        explicit_finish=True,
+    )
 class FakeBackend:
     model_catalog_version = "catalog-test-v1"
 
@@ -139,8 +306,11 @@ class FakeBackend:
         *,
         expected_task_split="train",
     ):
-        assert expected_task_split == "train"
-        kind = "canary" if rollout_index >= 1_000_000 else "rollout"
+        assert expected_task_split == task.split
+        if expected_task_split == "validation":
+            kind = "validation"
+        else:
+            kind = "canary" if rollout_index >= 1_000_000 else "rollout"
         self.events.append(
             f"collect:{self.training_step}:{kind}:{versions.policy}:{self.active_adapter}"
         )
@@ -155,8 +325,8 @@ class FakeBackend:
         self.events.append(f"train:{self.training_step}")
         checkpoint = Path(output_dir) / "checkpoint_final" / "supervisor_lora" / "theta"
         checkpoint.mkdir(parents=True)
-        optimizer_state = checkpoint / "optimizer_state.pt"
-        optimizer_state.write_bytes(b"state")
+        training_state = checkpoint / "training_state.pt"
+        training_state.write_bytes(b"state")
         values = {
             "optimizer_updates": 1,
             "input_trajectories": len(trajectories),
@@ -172,8 +342,16 @@ class FakeBackend:
             "micro_batch_size_used": 4,
             "oom_backoff_count": 0,
             "checkpoint_dir": str(checkpoint),
-            "optimizer_state_checkpoint": str(optimizer_state),
+            "optimizer_state_checkpoint": str(training_state),
             "optimizer_state_saved": True,
+            "training_state_checkpoint": str(training_state),
+            "training_state_saved": True,
+            "scheduler_state_saved": True,
+            "rng_state_saved": True,
+            "checkpoint_recoverable": True,
+            "scheduler_resume_status": "restored_scheduler_and_rng",
+            "learning_rate": 1.0e-4,
+            "gpu_memory_allocated_mib": {"cuda:3": 1024.0, "cuda:5": 1024.0},
             "committed_step": self.absolute_step,
         }
         return FakeSummary(values)
@@ -196,27 +374,34 @@ class FakeBackend:
                 "candidate_policy_version": candidate,
                 "new_policy_version": candidate,
                 "adapter_name": adapter,
+                "checkpoint_version": f"checkpoint:{candidate}",
+                "route_switch_success": True,
             }
         )
 
 
-def _task(index: int, *, source: str = "hotpotqa") -> TaskRecord:
+def _task(
+    index: int,
+    *,
+    source: str = "hotpotqa",
+    split: str = "train",
+) -> TaskRecord:
     return TaskRecord(
-        task_id=f"{source}:{index}",
+        task_id=f"{source}:{split}:{index}",
         question=f"Question {source} {index}?",
         ground_truth="answer",
-        split="train",
+        split=split,
         metadata={
             "dataset_key": source,
             "source": "HotpotQA" if source == "hotpotqa" else "TriviaQA",
-            "sampling": {"base_task_id": f"{source}:base:{index}"},
+            "sampling": {"base_task_id": f"{source}:{split}:base:{index}"},
         },
     )
 
 
 def _write_tasks(path: Path) -> None:
     with path.open("w", encoding="utf-8") as stream:
-        for index in range(12):
+        for index in range(512):
             task = _task(index)
             stream.write(
                 json.dumps(
@@ -234,6 +419,21 @@ def _write_tasks(path: Path) -> None:
             )
 
 
+def _write_validation_tasks(path: Path) -> list[str]:
+    task_ids = []
+    with path.open("w", encoding="utf-8") as stream:
+        for index in range(128):
+            task = _task(index, split="validation")
+            task_ids.append(task.task_id)
+            stream.write(
+                json.dumps(
+                    {"schema_version": "flowsteer.agentgraph.task.v1", **task.to_dict()}
+                )
+                + "\n"
+            )
+    return task_ids
+
+
 def _create_project(root: Path) -> Path:
     (root / "config").mkdir(parents=True)
     (root / "data").mkdir()
@@ -244,6 +444,9 @@ def _create_project(root: Path) -> Path:
     config["experiment"]["training_enabled"] = True
     config["gpu"]["training_enabled"] = True
     config["tracking"]["validation_protocol"]["status"] = "frozen"
+    config["tracking"]["validation_protocol"]["monitor_task_ids"] = [
+        f"hotpotqa:validation:{index}" for index in range(7)
+    ]
     config["tracking"]["checkpoint_artifact"]["status"] = "ready"
     config["md_compliance"].update(
         phase_0_status="passed",
@@ -260,6 +463,7 @@ def _create_project(root: Path) -> Path:
     config_path = root / "config" / "training.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     _write_tasks(root / "data" / "train.jsonl")
+    _write_validation_tasks(root / "data" / "validation.jsonl")
     return config_path
 
 
@@ -277,20 +481,41 @@ class ConfigAndSamplingTests(unittest.TestCase):
     def test_wandb_uses_sdk_default_credentials_and_requires_real_url(self) -> None:
         config = yaml.safe_load(_CONFIG.read_text(encoding="utf-8"))
         captured: dict = {}
+        logged_artifact = SimpleNamespace(
+            name="hotpotqa-director-checkpoint:v0",
+            version="v0",
+            wait=MagicMock(),
+        )
+        artifact_calls: list[dict] = []
         run = SimpleNamespace(
             id="run-test",
             url="https://wandb.invalid/run-test",
             summary=SimpleNamespace(update=lambda values: None),
             log=lambda values, step, commit: None,
+            log_artifact=lambda artifact, aliases: (
+                artifact_calls.append(
+                    {"artifact": artifact, "aliases": list(aliases)}
+                )
+                or logged_artifact
+            ),
             finish=lambda exit_code: None,
         )
         module = ModuleType("wandb")
+
+        class Artifact:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.directories = []
+
+            def add_dir(self, path, name):
+                self.directories.append((path, name))
 
         def init(**kwargs):
             captured.update(kwargs)
             return run
 
         module.init = init  # type: ignore[attr-defined]
+        module.Artifact = Artifact  # type: ignore[attr-defined]
         with (
             patch.dict(sys.modules, {"wandb": module}),
             patch.dict(_MODULE.os.environ, {"WANDB_API_KEY": ""}),
@@ -301,6 +526,24 @@ class ConfigAndSamplingTests(unittest.TestCase):
         self.assertEqual("zhanghanwen6660909-dut", captured["entity"])
         self.assertEqual("flowsteer-hotpotqa", captured["project"])
         self.assertEqual("online", captured["mode"])
+        tracker.log(
+            {
+                name: 0.0
+                for name in config["tracking"]["required_step_fields"]
+            },
+            step=1,
+        )
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = tracker.log_checkpoint(
+                Path(directory),
+                metadata={"global_step": 1},
+                aliases=["latest", "best"],
+            )
+        self.assertEqual("v0", receipt["version"])
+        self.assertEqual(["latest", "best"], artifact_calls[0]["aliases"])
+        logged_artifact.wait.assert_called_once_with()
 
     def test_skillflow_seeded_sample_is_repeatable_and_unique(self) -> None:
         pool = tuple(_task(index) for index in range(10))
@@ -336,6 +579,55 @@ class ConfigAndSamplingTests(unittest.TestCase):
                     stop_after_optimizer_steps=1,
                     backend_factory=forbidden_backend,
                     tracker=FakeTracker(),
+                )
+            )
+
+    def test_phase0_gate_accepts_exact_fresh_lineage_and_rejects_condition_drift(self) -> None:
+        import asyncio
+
+        tasks = [_task(index) for index in range(7)]
+        trajectories = []
+        rollout_index = 0
+        for task in tasks:
+            versions = _MODULE.version_bundle_for(
+                task,
+                policy_version="policy-v1",
+                model_catalog_version="catalog-v1",
+                prompt_version="prompt-v1",
+                tool_version="tool-v1",
+            )
+            for _ in range(4):
+                trajectories.append(
+                    _phase0_trajectory(
+                        task,
+                        rollout_index,
+                        versions,
+                        adapter="theta-v1",
+                    )
+                )
+                rollout_index += 1
+
+        receipt = asyncio.run(
+            validate_phase0_rollout_batch(
+                trajectories,
+                expected_task_ids=[task.task_id for task in tasks],
+                expected_count=28,
+                behavior_policy="policy-v1",
+                behavior_adapter="theta-v1",
+            )
+        )
+        self.assertEqual("passed", receipt["status"])
+        self.assertEqual(28, receipt["evaluator_replay_count"])
+
+        trajectories[0] = replace(trajectories[0], condition_satisfied=False)
+        with self.assertRaisesRegex(HotpotTrainingError, "non-GRPO-eligible"):
+            asyncio.run(
+                validate_phase0_rollout_batch(
+                    trajectories,
+                    expected_task_ids=[task.task_id for task in tasks],
+                    expected_count=28,
+                    behavior_policy="policy-v1",
+                    behavior_adapter="theta-v1",
                 )
             )
 
@@ -400,9 +692,14 @@ class SequentialRunnerTests(unittest.TestCase):
             self.assertEqual([0], tracker.finished)
             for _, values in tracker.logs:
                 self.assertGreater(values["train/grad_norm"], 0)
-                self.assertGreater(values["train/update_l2"], 0)
+                self.assertGreater(values["train/lora_update_l2"], 0)
                 self.assertTrue(values["policy/sync_success"])
                 self.assertTrue(values["policy/canary_success"])
+                self.assertEqual(7, values["validation/valid_count"])
+                self.assertTrue(values["checkpoint/saved"])
+            self.assertEqual(2, len(tracker.artifacts))
+            self.assertEqual(["latest", "best"], tracker.artifacts[0]["aliases"])
+            self.assertEqual(["latest"], tracker.artifacts[1]["aliases"])
 
             first_publish = events.index("publish:1")
             first_canary = next(
@@ -417,6 +714,13 @@ class SequentialRunnerTests(unittest.TestCase):
             )
             self.assertLess(first_publish, first_canary)
             self.assertLess(first_canary, second_rollout)
+            first_validation = next(
+                index
+                for index, event in enumerate(events)
+                if event.startswith("collect:1:validation:")
+            )
+            self.assertLess(first_canary, first_validation)
+            self.assertLess(first_validation, second_rollout)
             self.assertEqual(
                 28,
                 sum(event.startswith("collect:1:rollout:") for event in events),
