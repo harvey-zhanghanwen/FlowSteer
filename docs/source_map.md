@@ -1,5 +1,16 @@
 # AIME 2026 initial-adaptation source map
 
+## 2026-09-07: HealthBench public525 corpus and inference repairs
+
+See [question-aware corpus source record](../reports/healthbench_question_corpus_setup_zh.md).
+No new ranker, graph scheduler or medical role template: reuse SkillFlow BM25,
+DocumentPassage/FTS5, existing Tool receipts and KnowledgeStore. The only new
+corpus adapter loops over the 525 public conversations and admits external
+source records, never benchmark answers or Agent summaries.
+Context projection is directly ported from 8359561; FINISH optionality already
+exists in AgentWorkflowEnv. Numbered-list admission is a thin syntax adaptation
+of that same revision for the observed "1) ... 2) ..." form.
+
 ## 2026-09-07: v2.33 + all existing medical sources + candidate Skills
 
 Detailed source/compatibility record: [setup report](../reports/healthbench_v233_all_sources_candidate_setup_zh.md).

@@ -1,8 +1,10 @@
 """Source-separated retrieval using SkillFlow's existing public-document index.
 
 This is a task-specific adapter, not a shared Agent memory or Skill store.
-Each invocation sees only the original conversation, its own retained Tool
-receipts and receipts delivered by declared graph edges. The existing ReAct
+Each invocation sees the original conversation, an explicitly configured frozen
+external library (if selected), its own retained Tool receipts and receipts
+delivered by declared graph edges. Other tasks' answers/Agent state are absent.
+The existing ReAct
 loop, Tool budgets, Canvas scheduling and evaluator remain authoritative.
 """
 from __future__ import annotations
@@ -17,7 +19,7 @@ from typing import Mapping
 from .agent_runtime import AgentRequest, AgentResponse, CommunicationCondition
 from .healthbench_clinical_react import HealthBenchClinicalReactExecutionAdapter
 from .healthbench_clinical_tools import open_healthbench_clinical_tool_registry
-from .healthbench_knowledge_store import HealthBenchKnowledgeStore
+from .healthbench_knowledge_store import HealthBenchKnowledgeStore, load_frozen_public_evidence
 from .healthbench_professional_adapter import parse_model_visible_conversation
 from .openai_gateway import _healthbench_search_candidates
 from .qa_retrieval import DEFAULT_SKILLFLOW_SOURCE
@@ -135,7 +137,7 @@ def build_healthbench_knowledge_tool_registry(original: ToolRegistry) -> ToolReg
         "required": ["database", "query"],
         "properties": {
             "database": {"enum": ["conversation", "medical_references", "drug_labels"],
-                         "description": "Conversation is supplied statements, not verified medical evidence. External databases contain only sources observed by this node or routed by graph edges."},
+                         "description": "Conversation is supplied statements, not verified medical evidence. External databases contain published source records from the explicitly configured frozen library, this node's Tools, or receipts routed by graph edges. No benchmark answers."},
             "query": {"type": "string", "minLength": 1, "maxLength": 160,
                       "description": "Search terms preserving the supplied conversation's entity, requested relation and applicability; do not add unprovided patient details."},
         },
@@ -166,10 +168,15 @@ def open_healthbench_knowledge_tool_registry(**kwargs):
 
 class HealthBenchKnowledgeReactExecutionAdapter(HealthBenchClinicalReactExecutionAdapter):
     def __init__(self, *, knowledge_root: str | Path,
-                 skillflow_source: str | Path = DEFAULT_SKILLFLOW_SOURCE, **kwargs):
+                 skillflow_source: str | Path = DEFAULT_SKILLFLOW_SOURCE,
+                 frozen_corpus_manifest: str | Path | None = None, **kwargs):
         super().__init__(**kwargs)
         self.knowledge_root = Path(knowledge_root)
         self.skillflow_source = Path(skillflow_source)
+        self.frozen_corpus_manifest = None if frozen_corpus_manifest is None else str(frozen_corpus_manifest)
+        self.frozen_evidence = (
+            load_frozen_public_evidence(frozen_corpus_manifest) if frozen_corpus_manifest is not None else ()
+        )
 
     def _contract(self, request, observations):
         value = super()._contract(request, observations)
@@ -179,6 +186,11 @@ class HealthBenchKnowledgeReactExecutionAdapter(HealthBenchClinicalReactExecutio
                       + ". Conversation entries retain the original speaker and are not external medical evidence. "
                       "Use the unchanged full conversation to interpret entities and applicability. "
                       "Empty external indexes mean no indexed evidence, not that no evidence exists.")
+            if self.frozen_evidence:
+                value += (" A frozen external medical evidence library is indexed here. "
+                          "You may query medical_references or drug_labels with the original study title, "
+                          "entities and requested relationship before repeating a remote search. "
+                          "A related paper is not a matched study; an empty search is not proof of nonexistence.")
         return value
 
     def _tool_action_error(self, *, request, action, observations):
@@ -208,6 +220,8 @@ class HealthBenchKnowledgeReactExecutionAdapter(HealthBenchClinicalReactExecutio
         )
         token = _CURRENT_STORE.set(store)
         try:
+            for evidence in self.frozen_evidence:
+                store.ingest_evidence(evidence)
             with (store.directory / "request_receipt.json").open("x", encoding="utf-8") as handle:
                 json.dump({"request_id": request.request_id, "run_id": request.run_id,
                            "agent_id": request.agent.id, "model_id": request.model.model_id,
@@ -217,11 +231,12 @@ class HealthBenchKnowledgeReactExecutionAdapter(HealthBenchClinicalReactExecutio
             if isinstance(response, AgentResponse):
                 return replace(response, metadata={**response.metadata, "knowledge_index": {
                     "directory": str(store.directory), "counts": store.counts(),
-                    "scope": "current_invocation_and_routed_tool_receipts",
+                    "scope": "frozen_external_library_plus_current_invocation_and_routed_tool_receipts",
+                    "frozen_corpus_manifest": self.frozen_corpus_manifest,
+                    "frozen_record_count": len(self.frozen_evidence),
                     "initial_index_error_types": errors,
                 }})
             return response
         finally:
             _CURRENT_STORE.reset(token)
             store.close()
-

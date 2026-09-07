@@ -1044,6 +1044,10 @@ def _healthbench_tool_runtime_settings(
             if not isinstance(value, str) or not value.strip():
                 raise ConfigurationError(f"healthbench_tool_runtime.{key} must be non-empty text")
             settings[key] = value
+        frozen_corpus = section.get("frozen_corpus_manifest")
+        if frozen_corpus is not None and (not isinstance(frozen_corpus, str) or not frozen_corpus.strip()):
+            raise ConfigurationError("healthbench_tool_runtime.frozen_corpus_manifest must be a path")
+        settings["frozen_corpus_manifest"] = frozen_corpus
     raw_profile_allowlist = section.get("execution_profile_allowlist")
     if raw_profile_allowlist is not None:
         if (
@@ -2645,6 +2649,10 @@ class LiveSmokeBackend:
                         adapter_arguments.update(
                             knowledge_root=_resolve(self.project_root, healthbench_settings["knowledge_root"]),
                             skillflow_source=_resolve(self.project_root, healthbench_settings["skillflow_source"]),
+                            frozen_corpus_manifest=(
+                                _resolve(self.project_root, healthbench_settings["frozen_corpus_manifest"])
+                                if healthbench_settings.get("frozen_corpus_manifest") else None
+                            ),
                         )
                     adapter_class = (
                         HealthBenchKnowledgeReactExecutionAdapter
@@ -3914,6 +3922,8 @@ class LiveSmokeBackend:
                 prompt_version=prompt_version,
                 semantic_protocol=semantic_protocol,
                 recovery_policy=recovery_policy,
+                context_projection=director.get("context_projection", False),
+                max_prompt_tokens=director.get("max_prompt_tokens"),
             )
             environment = AgentWorkflowEnv(
                 self.registry,

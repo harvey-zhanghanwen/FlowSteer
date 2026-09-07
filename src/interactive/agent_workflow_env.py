@@ -8066,7 +8066,17 @@ class AgentWorkflowEnv:
                 if source and replacement and is_grounded(source):
                     if not is_grounded(replacement):
                         external_literals.append(replacement)
-            for clause in re.split(r"(?<=[.!?;])\s+|\n+", contract):
+            # Port the existing v249 operational-list exemption. Also accept
+            # the observed "1) ... 2) ..." spelling, not only "(1) ... (2)".
+            # Do not rewrite the stored contract or exempt isolated quantities.
+            literal_contract = contract
+            list_marker = re.compile(r"(?<!\w)\(?(\d+)\)(?=\s+[A-Za-z])")
+            markers = list(list_marker.finditer(literal_contract))
+            if len(markers) >= 2 and [int(m.group(1)) for m in markers] == list(
+                range(1, len(markers) + 1)
+            ):
+                literal_contract = list_marker.sub("", literal_contract)
+            for clause in re.split(r"(?<=[.!?;])\s+|\n+", literal_contract):
                 if decisive_assertion.search(clause) is None:
                     continue
                 # Agent IDs are Canvas references rather than domain facts.

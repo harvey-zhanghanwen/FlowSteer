@@ -8,6 +8,7 @@ from itertools import combinations, product
 import json
 import os
 import random
+import re
 import socket
 import time
 from typing import Any, Mapping, Optional, Protocol, Sequence, Tuple
@@ -4623,11 +4624,25 @@ class AgentGraphOrchestrator:
         prompt_version: str = DIRECTOR_PROMPT_VERSION,
         semantic_protocol: str = "none",
         recovery_policy: str = "default",
+        context_projection: bool = False,
+        max_prompt_tokens: Optional[int] = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
         if isinstance(history_window, bool) or not isinstance(history_window, int) or history_window < 1:
             raise ValueError("history_window must be a positive integer")
+        if type(context_projection) is not bool:
+            raise ValueError("context_projection must be a bool")
+        if max_prompt_tokens is not None and (
+            type(max_prompt_tokens) is not int or max_prompt_tokens <= 0
+        ):
+            raise ValueError("max_prompt_tokens must be a positive integer")
+        if context_projection and (
+            max_prompt_tokens is None or not callable(getattr(client, "prompt_token_ids", None))
+        ):
+            raise ValueError("context_projection requires max_prompt_tokens and an exact tokenizer client")
+        self.context_projection = context_projection
+        self.max_prompt_tokens = max_prompt_tokens
         self.registry = registry
         self.client = client
         self.max_rounds = max_rounds
@@ -5224,7 +5239,7 @@ class AgentGraphOrchestrator:
             include_task_context=True,
             skills=skills,
         )
-        return encode_director_transcript(
+        return self._encode_context_bounded_transcript(
             (
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": self._observation_message(initial)},
@@ -5274,7 +5289,7 @@ class AgentGraphOrchestrator:
                 continuation.append(current_observation)
             continuation = continuation[-2 * self.history_window :]
             redacted.extend(continuation)
-            return encode_director_transcript(
+            return self._encode_context_bounded_transcript(
                 tuple(self._compact_historical_messages(redacted))
             )
         continuation = list(messages[2:])
@@ -5294,7 +5309,171 @@ class AgentGraphOrchestrator:
         messages_to_encode = self._compact_historical_messages(
             (messages[0], messages[1], *continuation)
         )
-        return encode_director_transcript(tuple(messages_to_encode))
+        return self._encode_context_bounded_transcript(tuple(messages_to_encode))
+
+    @staticmethod
+    def _context_feedback_projection(feedback: str, *, historical: bool) -> str:
+        """Keep public execution state, not repeated copies of Agent payloads.
+
+        Necessary adaptation of FlowSteer WorkflowEnv.step's feedback/history
+        separation and SkillFlow BoundedAgent.execute_turn's public Observation.
+        Current artifact/evidence bodies already have one bounded, revision-live
+        source in Env.current_artifact_receipts(); raw feedback remains in turns.
+        """
+        body_keys = {
+            "agent_artifacts", "output_inbox", "task_goal", "topology",
+            "tool_receipts", "input_artifact_provenance", "rendered_messages",
+            "react_trace", "continuation_state", "failure_continuation",
+        }
+        historical_body_keys = {
+            "output", "artifact", "artifact_preview", "producer_artifact",
+            "content", "content_preview", "result", "source_evidence",
+            "retrieval_evidence", "evidence_excerpt", "excerpt", "summary",
+        }
+
+        def project(value: Any, field: str = "") -> Any:
+            if field in body_keys or (historical and field in historical_body_keys):
+                return {"body_location": "trajectory; current bodies in current_artifact_receipts"}
+            if isinstance(value, Mapping):
+                return {key: project(item, key) for key, item in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [project(item) for item in value]
+            return value
+
+        # A partial failure can contain execution_error JSON followed by a
+        # partial_execution_result JSON. Decode each separately, preserving the
+        # real error text and status instead of treating the entire tail as JSON.
+        marker = re.compile(r"(?:partial_execution_result|execution_result|execution_error|recovery_state)=")
+        decoder = json.JSONDecoder()
+        pieces: list[str] = []
+        cursor = 0
+        for match in marker.finditer(feedback):
+            if match.start() < cursor:
+                continue
+            try:
+                value, end = decoder.raw_decode(feedback[match.end():])
+            except (TypeError, ValueError):
+                continue
+            pieces.append(feedback[cursor:match.end()])
+            pieces.append(json.dumps(project(value), ensure_ascii=False, separators=(",", ":")))
+            cursor = match.end() + end
+        pieces.append(feedback[cursor:])
+        return "".join(pieces)
+
+    def _encode_context_bounded_transcript(
+        self, messages: Sequence[Mapping[str, str]],
+    ) -> str:
+        """Opt-in exact-token window over the existing persistent transcript.
+
+        This is an observation projection, not an execution or terminal change.
+        The complete original task, current graph, action domains and available
+        Skills are never cropped. Executor tool schemas and full raw receipts
+        remain untouched. If that immutable minimum cannot fit, fail explicitly.
+        """
+        if not self.context_projection:
+            return encode_director_transcript(messages)
+        projected = [dict(message) for message in messages]
+        for index, message in enumerate(projected):
+            if message["role"] != "user":
+                continue
+            heading, separator, raw = message["content"].partition("\n\n")
+            if not separator:
+                continue
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            historical = index != len(projected) - 1
+            if index == 1 and historical:
+                # Immutable task/catalog context must not retain the first
+                # revision's stale graph or copy its execution receipts forever.
+                payload = {key: value for key, value in payload.items() if key in {
+                    "task", "model_catalog", "tool_catalog", "max_agents",
+                    "available_skills", "exploration_conditions",
+                }}
+            elif historical:
+                payload = self._historical_canvas_observation(payload)
+            catalog = payload.get("tool_catalog")
+            if isinstance(catalog, list):
+                compact_catalog = []
+                for tool in catalog:
+                    if not isinstance(tool, Mapping):
+                        compact_catalog.append(tool)
+                        continue
+                    compact_tool = {key: value for key, value in tool.items() if key not in {
+                        "action_schemas", "input_schema", "output_schema",
+                    }}
+                    schemas = tool.get("action_schemas")
+                    if isinstance(schemas, Mapping):
+                        compact_tool["action_parameters"] = {
+                            name: {"required": schema.get("required", []),
+                                   "properties": list(schema.get("properties", {}))}
+                            for name, schema in schemas.items() if isinstance(schema, Mapping)
+                        }
+                    compact_catalog.append(compact_tool)
+                payload["tool_catalog"] = compact_catalog
+            feedback = payload.get("canvas_feedback")
+            if isinstance(feedback, str):
+                payload["canvas_feedback"] = self._context_feedback_projection(
+                    feedback, historical=historical,
+                )
+            # Non-destructive exact-body deduplication within one Observation.
+            # References never cross messages, so dropping an old turn cannot
+            # leave references to a removed history entry.
+            seen: dict[str, str] = {}
+
+            def deduplicate(value: Any, path: str) -> Any:
+                if isinstance(value, str) and len(value) >= 320:
+                    if value in seen:
+                        return {"same_content_as_json_pointer": seen[value]}
+                    seen[value] = path
+                if isinstance(value, Mapping):
+                    return {key: deduplicate(item, path + "/" + key.replace("~", "~0").replace("/", "~1"))
+                            for key, item in value.items()}
+                if isinstance(value, (list, tuple)):
+                    return [deduplicate(item, path + "/" + str(i)) for i, item in enumerate(value)]
+                return value
+
+            # Protect the original problem and mutation/search-space contracts
+            # from representation changes. Deduplicate only public artifacts.
+            if "current_artifact_receipts" in payload:
+                payload["current_artifact_receipts"] = deduplicate(
+                    payload["current_artifact_receipts"], "/current_artifact_receipts"
+                )
+            payload["context_projection"] = {
+                "profile": "director-public-observation-budget.v1",
+                "original_task_truncated": False,
+                "tool_schema_location": "Executor ToolRegistry; Director retains capability IDs and parameter names",
+                "raw_feedback_location": "trajectory turns.canvas_feedback",
+            }
+            message["content"] = heading + "\n\n" + json.dumps(
+                payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            )
+        removed = 0
+        while True:
+            prompt = encode_director_transcript(projected)
+            measured = len(self.client.prompt_token_ids(prompt))
+            if measured <= self.max_prompt_tokens:
+                return prompt
+            # Retain P0, the most recent action and latest public Observation.
+            # Older sampled actions and raw feedback remain in TurnRecords.
+            if len(projected) <= 4:
+                raise DirectorError(
+                    "Director immutable task/current state exceeds exact prompt budget: "
+                    f"{measured}>{self.max_prompt_tokens}; original task was not truncated"
+                )
+            remove_count = 1 if projected[2]["role"] == "user" else 2
+            del projected[2:2 + remove_count]
+            removed += remove_count
+            last = projected[-1]
+            heading, _, raw = last["content"].partition("\n\n")
+            latest = json.loads(raw)
+            latest["context_projection"]["older_history_messages_removed"] = removed
+            last["content"] = heading + "\n\n" + json.dumps(
+                latest, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            )
 
     @staticmethod
     def consumed_assistant_content(

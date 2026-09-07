@@ -25,6 +25,24 @@ from .qa_tool_adapter import _ThreadAffineRetrievalWorker
 
 
 DATABASES = ("conversation", "medical_references", "drug_labels")
+
+
+def load_frozen_public_evidence(manifest_path: str | Path) -> tuple[dict[str, object], ...]:
+    """Load published evidence from an explicitly selected, frozen library.
+
+    No task-to-answer lookup. Existing ingest_evidence owns source admission
+    and metadata projection; query construction receipts are not loaded.
+    """
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != "flowsteer.healthbench.public-question-evidence-corpus.v1" or manifest.get("status") != "frozen":
+        raise ValueError("incompatible frozen public evidence corpus")
+    records = []
+    for name, receipt in manifest["databases"].items():
+        if name not in ("medical_references", "drug_labels"):
+            raise ValueError("shared corpus may not contain conversations or benchmark answers")
+        with Path(receipt["records_path"]).open(encoding="utf-8") as stream:
+            records.extend(json.loads(line) for line in stream)
+    return tuple(records)
 _SOURCE_DATABASE = {
     "MedRAG/textbooks": "medical_references",
     "NCBI PubMed": "medical_references",
@@ -241,4 +259,3 @@ class HealthBenchKnowledgeStore:
 
 
 __all__ = ["DATABASES", "HealthBenchKnowledgeStore"]
-

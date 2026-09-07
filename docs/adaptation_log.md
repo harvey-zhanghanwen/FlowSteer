@@ -1,5 +1,19 @@
 # AIME 2026 initial-adaptation log
 
+## 2026-09-07: public-question corpus / context / optional FINISH
+
+User requested question-aware retrieval adaptation over all 525 public
+conversations, explicitly excluding standard answers. External source records
+are collected independently of evaluator scores and frozen before five-task
+evaluation. The original sample IDs, seeds, pool, evaluator and candidate v248
+profile remain; see [source and condition record](../reports/healthbench_question_corpus_setup_zh.md).
+The previous finish_only_when_admissible=true exposed only FINISH after a
+syntactically valid Output. Reusing false restores repair actions without
+requiring a role or topology. Existing context projection removes duplicate
+feedback while preserving the original problem and current state, and a
+numbered-list syntax fix prevents the observed admission false positive.
+No optimizer, publication or additional Direct comparison is authorized here.
+
 ## 2026-09-07: HealthBench v2.33 all-source candidate five-task replay
 
 User scope: historical best reproducible architecture, all existing sources,
