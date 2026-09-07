@@ -1048,6 +1048,10 @@ def _healthbench_tool_runtime_settings(
         if frozen_corpus is not None and (not isinstance(frozen_corpus, str) or not frozen_corpus.strip()):
             raise ConfigurationError("healthbench_tool_runtime.frozen_corpus_manifest must be a path")
         settings["frozen_corpus_manifest"] = frozen_corpus
+        semantic_index = section.get("semantic_index_manifest")
+        if semantic_index is not None and (not isinstance(semantic_index, str) or not semantic_index.strip()):
+            raise ConfigurationError("healthbench_tool_runtime.semantic_index_manifest must be a path")
+        settings["semantic_index_manifest"] = semantic_index
     raw_profile_allowlist = section.get("execution_profile_allowlist")
     if raw_profile_allowlist is not None:
         if (
@@ -2652,6 +2656,10 @@ class LiveSmokeBackend:
                             frozen_corpus_manifest=(
                                 _resolve(self.project_root, healthbench_settings["frozen_corpus_manifest"])
                                 if healthbench_settings.get("frozen_corpus_manifest") else None
+                            ),
+                            semantic_index_manifest=(
+                                _resolve(self.project_root, healthbench_settings["semantic_index_manifest"])
+                                if healthbench_settings.get("semantic_index_manifest") else None
                             ),
                         )
                     adapter_class = (

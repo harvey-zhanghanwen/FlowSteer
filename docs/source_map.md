@@ -1,5 +1,15 @@
 # AIME 2026 initial-adaptation source map
 
+## 2026-09-07: HealthBench semantic retrieval and shorter candidate priors
+
+See [semantic source map](../reports/healthbench_semantic_skills_setup_zh.md).
+Directly port SkillFlow GenericTaskEnvironment._extract_query_terms/_bm25_score
+and preserve _search_passages hybrid weights/threshold. SentenceTransformer CPU
+loading, normalized encoding and similarity follow _get_embed_model/_embed_score
+and training/tools.py::_search_context. Necessary adaptations are persistent
+source vectors, token windows and structured Tool receipts. No orchestration
+core or evaluator replacement; existing candidate loader remains authoritative.
+
 ## 2026-09-07: HealthBench public525 corpus and inference repairs
 
 See [question-aware corpus source record](../reports/healthbench_question_corpus_setup_zh.md).

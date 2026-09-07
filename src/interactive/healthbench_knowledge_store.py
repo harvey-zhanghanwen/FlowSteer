@@ -78,6 +78,7 @@ class HealthBenchKnowledgeStore:
         directory: Path,
         conversation: Sequence[Mapping[str, str]],
         skillflow_source: Path = DEFAULT_SKILLFLOW_SOURCE,
+        semantic_index=None,
     ) -> None:
         if isinstance(conversation, (str, bytes, Mapping)):
             raise TypeError("conversation must be a sequence of role/content messages")
@@ -91,6 +92,7 @@ class HealthBenchKnowledgeStore:
             # Complete original content, without claims of external authority.
             turns.append({"role": role, "content": content, "turn_index": index})
         self._module = _load_retrieval_module(Path(skillflow_source))
+        self._semantic_index = semantic_index
         parent = Path(directory)
         parent.mkdir(parents=True, exist_ok=True)
         self.directory = Path(mkdtemp(prefix="request-", dir=parent))
@@ -226,6 +228,11 @@ class HealthBenchKnowledgeStore:
                 "index_receipt": None, "record_count": len(self._records[database]),
             }
             if not self._records[database]:
+                return result
+            if self._semantic_index is not None and database != "conversation":
+                evidence, receipt = self._semantic_index.rank(query, self._records[database], limit)
+                result.update(evidence=evidence, index_receipt=receipt,
+                              status="ok" if evidence else "no_matches")
                 return result
             self._build(database)
             worker = self._workers[database]

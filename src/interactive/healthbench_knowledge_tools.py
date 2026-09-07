@@ -169,7 +169,8 @@ def open_healthbench_knowledge_tool_registry(**kwargs):
 class HealthBenchKnowledgeReactExecutionAdapter(HealthBenchClinicalReactExecutionAdapter):
     def __init__(self, *, knowledge_root: str | Path,
                  skillflow_source: str | Path = DEFAULT_SKILLFLOW_SOURCE,
-                 frozen_corpus_manifest: str | Path | None = None, **kwargs):
+                 frozen_corpus_manifest: str | Path | None = None,
+                 semantic_index_manifest: str | Path | None = None, **kwargs):
         super().__init__(**kwargs)
         self.knowledge_root = Path(knowledge_root)
         self.skillflow_source = Path(skillflow_source)
@@ -177,6 +178,12 @@ class HealthBenchKnowledgeReactExecutionAdapter(HealthBenchClinicalReactExecutio
         self.frozen_evidence = (
             load_frozen_public_evidence(frozen_corpus_manifest) if frozen_corpus_manifest is not None else ()
         )
+        self.semantic_index = None
+        if semantic_index_manifest is not None:
+            if not self.frozen_evidence:
+                raise ValueError("semantic retrieval requires the explicitly selected frozen source library")
+            from .healthbench_semantic_retrieval import load_semantic_index
+            self.semantic_index = load_semantic_index(str(semantic_index_manifest))
 
     def _contract(self, request, observations):
         value = super()._contract(request, observations)
@@ -191,6 +198,10 @@ class HealthBenchKnowledgeReactExecutionAdapter(HealthBenchClinicalReactExecutio
                           "You may query medical_references or drug_labels with the original study title, "
                           "entities and requested relationship before repeating a remote search. "
                           "A related paper is not a matched study; an empty search is not proof of nonexistence.")
+            if self.semantic_index is not None:
+                value += (" knowledge.search combines semantic similarity with lexical matching; "
+                          "use a concise natural-language question preserving entities and relationships. "
+                          "Similarity ranks relevance, not medical correctness or study identity.")
         return value
 
     def _tool_action_error(self, *, request, action, observations):
@@ -217,6 +228,7 @@ class HealthBenchKnowledgeReactExecutionAdapter(HealthBenchClinicalReactExecutio
         store = HealthBenchKnowledgeStore(
             self.knowledge_root, parse_model_visible_conversation(request.problem),
             skillflow_source=self.skillflow_source,
+            semantic_index=self.semantic_index,
         )
         token = _CURRENT_STORE.set(store)
         try:
@@ -234,6 +246,7 @@ class HealthBenchKnowledgeReactExecutionAdapter(HealthBenchClinicalReactExecutio
                     "scope": "frozen_external_library_plus_current_invocation_and_routed_tool_receipts",
                     "frozen_corpus_manifest": self.frozen_corpus_manifest,
                     "frozen_record_count": len(self.frozen_evidence),
+                    "semantic_index_manifest": self.semantic_index.manifest_path if self.semantic_index else None,
                     "initial_index_error_types": errors,
                 }})
             return response

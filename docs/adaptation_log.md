@@ -1,5 +1,18 @@
 # AIME 2026 initial-adaptation log
 
+## 2026-09-07: semantic evidence and candidate replacement, different five
+
+User requested semantic retrieval, useful candidate advice, removal of risky
+old advice, then five different tasks without training. The prior three v248
+candidates are not loaded in this new profile; historical files remain intact.
+Three shorter rejectable priors reuse the existing interface. Their individual
+effects are unproven: no assertion that a particular prior caused old failures.
+Local BGE + SkillFlow hybrid scoring operate over external sources only.
+Five IDs were selected from the original public order with a fixed seed, after
+excluding the previous five and before reading sample contents or labels.
+36 targeted tests pass; old running condition/code/artifacts were not changed.
+Details: [setup and source record](../reports/healthbench_semantic_skills_setup_zh.md).
+
 ## 2026-09-07: public-question corpus / context / optional FINISH
 
 User requested question-aware retrieval adaptation over all 525 public

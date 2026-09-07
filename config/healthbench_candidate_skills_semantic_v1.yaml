@@ -1,0 +1,50 @@
+# Replaces v248 in this condition. Three short, unvalidated, rejectable priors.
+schema_version: flowsteer.healthbench-candidate-skill-profile.v1
+profile_version: healthbench.orchestration-candidates.semantic.v1
+dataset_key: healthbench_professional
+status: candidate
+training_enabled: false
+skill_publication_enabled: false
+candidates:
+  - condition_id: match_sources_preserve_question_semantic_v1
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: A specific fact or source remains unresolved.
+    action:
+      instruction: >-
+        Use a concise semantic query preserving the original entity, relationship
+        and applicability. Distinguish a related hit from the requested source.
+        Reuse received evidence before another retrieval; similarity is not
+        verification. Do not prefill a medical conclusion in a contract.
+  - condition_id: retain_evidence_repair_once_semantic_v1
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: Evidence is handed off or an execution error is reported.
+    action:
+      instruction: >-
+        Preserve supported findings, source IDs, qualifiers and uncertainty in
+        the handoff. Repair the named schema or dependency error, retaining
+        successful work. Avoid repeating an unchanged failed action or adding
+        Agents that merely restate it. Keep ReAct available; it does not require
+        a Tool call when evidence is sufficient. Stay within existing budgets.
+  - condition_id: complete_without_redundant_expansion_semantic_v1
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: An Output is available or the remaining execution budget is small.
+    action:
+      instruction: >-
+        Compare the actual response with requested deliverables and received
+        evidence. Preserve the requested format without suppressing material
+        evidence-based warnings. An access report or promised summary is not
+        the answer. Fix only a concrete gap when feasible; otherwise retain
+        supported content and disclose uncertainty. FINISH when adequate,
+        without a mandatory extra Agent, retrieval or fixed role sequence.

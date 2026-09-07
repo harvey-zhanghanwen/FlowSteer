@@ -1,0 +1,19 @@
+{
+  "seed": 20260907,
+  "method": "random.Random.sample over original public order excluding previous five; selected before reading question/rubric/score",
+  "excluded_previous_five": [
+    "healthbench-professional:3533d9bfd2d32f8c465e7af62aec9781",
+    "healthbench-professional:9a160f86c59743692e46fab89aae42f2",
+    "healthbench-professional:fa30f3f57c7219130345f5c2e6d03d65",
+    "healthbench-professional:2014ab7a9d8865f0da483817843ccbc5",
+    "healthbench-professional:cd132a0c7cde74c0242aa8ef3850c9b9"
+  ],
+  "selected_task_ids": [
+    "healthbench-professional:793b14f48f77c3e6a7a5ab36f8d42b8d",
+    "healthbench-professional:859cd219aec1d40f93259c75ee21d3ba",
+    "healthbench-professional:68ea82a57829bbb36ba708868b818a83",
+    "healthbench-professional:b7c5baa14ffa82acccfce24a9ae0f362",
+    "healthbench-professional:38ed97e78292dfcf0805ac924311fa14"
+  ],
+  "scope": "different from previous five, not claimed historically unseen"
+}
