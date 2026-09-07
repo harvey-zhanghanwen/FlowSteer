@@ -1,0 +1,121 @@
+{
+  "candidate_skill_evaluation": {
+    "enabled": true,
+    "mode": "candidate_prompt_prior",
+    "profile": {
+      "candidates": [
+        {
+          "action": {
+            "instruction": "Assign identification only for the unresolved part of the task. Preserve the original entity, population and identifier namespace; a publisher identifier is not a different database's identifier. Investigate with concise terms, then distinguish a matched source from a related hit. Do not prefill diagnoses, numerical definitions or conclusions in a contract. If a source is unavailable, consider an alternative admitted source while preserving the original question; do not change identity."
+          },
+          "condition": {
+            "graph_stage": "*",
+            "required_tools": [],
+            "task_family": "healthbench_professional"
+          },
+          "condition_id": "preserve_identity_and_task_scope_v247",
+          "status": "candidate",
+          "trigger": "An entity, source or factual premise is unresolved when assigning work."
+        },
+        {
+          "action": {
+            "instruction": "Keep ReAct. Repair the named field against the actual Tool schema, using a short query or exact observed source identifiers and excerpts. Retain successful receipts and do not repeat a rejected query across Tools with the same limit. At a legal repair opportunity consider a different compatible model for the same responsibility. Repair the execution problem, not by prescribing a medical conclusion. Respect the existing turn, Tool and model-repair budgets."
+          },
+          "condition": {
+            "graph_stage": "*",
+            "required_tools": [],
+            "task_family": "healthbench_professional"
+          },
+          "condition_id": "repair_arguments_without_abandoning_react_v247",
+          "status": "candidate",
+          "trigger": "Actual feedback reports parsing, query, source-binding or execution errors."
+        },
+        {
+          "action": {
+            "instruction": "Give each contract a concrete deliverable and actual input dependency. Distinguish retrieval status, observed evidence, inference and remaining uncertainty. An inaccessible source or no-hit search does not establish nonexistence and should not replace the entire response with an access report. Preserve supported parts of the answer and address the original question; prior conversation is context, not a newly verified source. Where useful, assign an independent interpretation or evidence check, then reconcile findings; roles, number, models and topology stay free. Avoid repeated summaries and unsupported certainty. Keep ReAct, but complete without another Tool call when received evidence is sufficient."
+          },
+          "condition": {
+            "graph_stage": "*",
+            "required_tools": [],
+            "task_family": "healthbench_professional"
+          },
+          "condition_id": "separate_evidence_gaps_from_response_coverage_v247",
+          "status": "candidate",
+          "trigger": "Routing evidence or deciding whether the Output answers the whole conversation."
+        }
+      ],
+      "dataset_key": "healthbench_professional",
+      "profile_version": "healthbench.orchestration-candidates.v2.47",
+      "schema_version": "flowsteer.healthbench-candidate-skill-profile.v1",
+      "skill_publication_enabled": false,
+      "status": "candidate",
+      "training_enabled": false
+    },
+    "prompt_priors": [
+      {
+        "action": {
+          "instruction": "Assign identification only for the unresolved part of the task. Preserve the original entity, population and identifier namespace; a publisher identifier is not a different database's identifier. Investigate with concise terms, then distinguish a matched source from a related hit. Do not prefill diagnoses, numerical definitions or conclusions in a contract. If a source is unavailable, consider an alternative admitted source while preserving the original question; do not change identity."
+        },
+        "application_mode": "forced_probe_condition",
+        "condition": {
+          "graph_stage": "*",
+          "required_tools": [],
+          "task_family": "healthbench_professional"
+        },
+        "condition_id": "preserve_identity_and_task_scope_v247",
+        "content": "Predeclared unvalidated candidate condition, not an ACTIVE Skill. This is an optional, rejectable prompt prior. Applicable graph stage: *. Only when: An entity, source or factual premise is unresolved when assigning work. Otherwise ignore this suggestion. Suggested action: Assign identification only for the unresolved part of the task. Preserve the original entity, population and identifier namespace; a publisher identifier is not a different database's identifier. Investigate with concise terms, then distinguish a matched source from a related hit. Do not prefill diagnoses, numerical definitions or conclusions in a contract. If a source is unavailable, consider an alternative admitted source while preserving the original question; do not change identity.",
+        "rejectable": true
+      },
+      {
+        "action": {
+          "instruction": "Keep ReAct. Repair the named field against the actual Tool schema, using a short query or exact observed source identifiers and excerpts. Retain successful receipts and do not repeat a rejected query across Tools with the same limit. At a legal repair opportunity consider a different compatible model for the same responsibility. Repair the execution problem, not by prescribing a medical conclusion. Respect the existing turn, Tool and model-repair budgets."
+        },
+        "application_mode": "forced_probe_condition",
+        "condition": {
+          "graph_stage": "*",
+          "required_tools": [],
+          "task_family": "healthbench_professional"
+        },
+        "condition_id": "repair_arguments_without_abandoning_react_v247",
+        "content": "Predeclared unvalidated candidate condition, not an ACTIVE Skill. This is an optional, rejectable prompt prior. Applicable graph stage: *. Only when: Actual feedback reports parsing, query, source-binding or execution errors. Otherwise ignore this suggestion. Suggested action: Keep ReAct. Repair the named field against the actual Tool schema, using a short query or exact observed source identifiers and excerpts. Retain successful receipts and do not repeat a rejected query across Tools with the same limit. At a legal repair opportunity consider a different compatible model for the same responsibility. Repair the execution problem, not by prescribing a medical conclusion. Respect the existing turn, Tool and model-repair budgets.",
+        "rejectable": true
+      },
+      {
+        "action": {
+          "instruction": "Give each contract a concrete deliverable and actual input dependency. Distinguish retrieval status, observed evidence, inference and remaining uncertainty. An inaccessible source or no-hit search does not establish nonexistence and should not replace the entire response with an access report. Preserve supported parts of the answer and address the original question; prior conversation is context, not a newly verified source. Where useful, assign an independent interpretation or evidence check, then reconcile findings; roles, number, models and topology stay free. Avoid repeated summaries and unsupported certainty. Keep ReAct, but complete without another Tool call when received evidence is sufficient."
+        },
+        "application_mode": "forced_probe_condition",
+        "condition": {
+          "graph_stage": "*",
+          "required_tools": [],
+          "task_family": "healthbench_professional"
+        },
+        "condition_id": "separate_evidence_gaps_from_response_coverage_v247",
+        "content": "Predeclared unvalidated candidate condition, not an ACTIVE Skill. This is an optional, rejectable prompt prior. Applicable graph stage: *. Only when: Routing evidence or deciding whether the Output answers the whole conversation. Otherwise ignore this suggestion. Suggested action: Give each contract a concrete deliverable and actual input dependency. Distinguish retrieval status, observed evidence, inference and remaining uncertainty. An inaccessible source or no-hit search does not establish nonexistence and should not replace the entire response with an access report. Preserve supported parts of the answer and address the original question; prior conversation is context, not a newly verified source. Where useful, assign an independent interpretation or evidence check, then reconcile findings; roles, number, models and topology stay free. Avoid repeated summaries and unsupported certainty. Keep ReAct, but complete without another Tool call when received evidence is sufficient.",
+        "rejectable": true
+      }
+    ],
+    "publication_performed": false
+  },
+  "collection_arm": "agentgraph",
+  "collection_arm_completed": false,
+  "completed_at": "2026-09-07T00:31:48.633882+00:00",
+  "condition_id": "healthbench_professional_candidate_skill_v2_47_dev5",
+  "dataset_key": "healthbench_professional",
+  "manifest_path": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v247/artifacts/healthbench_professional_candidate_skill_v2_47_dev5/evaluation/run_manifest.json",
+  "metrics": {
+    "agentgraph": {
+      "completed": 4,
+      "completed_only_overall_score": 0.8,
+      "completed_only_overall_score_length_adjusted": 0.77670785,
+      "denominator": 5,
+      "evaluator_valid": 4,
+      "strict_overall_score": null,
+      "strict_overall_score_length_adjusted": null
+    }
+  },
+  "paired_comparison_available": false,
+  "sample_count": 5,
+  "schema_version": "flowsteer.completion_benchmark.collection_arm_report.v1",
+  "training_performed": false
+}
