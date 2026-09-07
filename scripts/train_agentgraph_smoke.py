@@ -128,6 +128,11 @@ from src.interactive.task_evaluator import (
     TRIVIAQA_ANSWER_EVALUATOR_VERSION,
     evaluate_task,
 )
+from src.interactive.triviaqa_training_schedule import (
+    FrozenTriviaQATrainingSchedule,
+    TriviaQATrainingCursorState,
+    TriviaQATrainingProgress,
+)
 from src.interactive.versioning import VersionBundle
 from src.interactive.wandb_training import (
     OptimizerStepTelemetry,
@@ -185,8 +190,51 @@ def _is_joint_qa_micro(config: Mapping[str, Any]) -> bool:
     return experiment.get("phase") == "joint_qa_micro_training"
 
 
+def _is_trivia_micro(config: Mapping[str, Any]) -> bool:
+    experiment = _mapping(config.get("experiment"), "experiment")
+    return experiment.get("phase") == "triviaqa_micro_training"
+
+
+def _require_execution_gate(
+    config: Mapping[str, Any],
+    *,
+    prepare_only: bool,
+) -> None:
+    """Keep a declared preparation-only configuration non-executable.
+
+    Existing training configurations predate this gate and retain their
+    current behavior.  When a configuration declares ``execution_gate``, the
+    gate is authoritative: a closed gate permits only the runner's existing
+    metadata-only ``--prepare-only`` path and must fail before constructing a
+    model backend or W&B run.
+    """
+
+    raw = config.get("execution_gate")
+    if raw is None:
+        return
+    gate = _mapping(raw, "execution_gate")
+    enabled = gate.get("execution_enabled")
+    if type(enabled) is not bool:
+        raise ConfigurationError(
+            "execution_gate.execution_enabled must be bool"
+        )
+    allowed_mode = gate.get("allowed_mode")
+    if not isinstance(allowed_mode, str) or not allowed_mode.strip():
+        raise ConfigurationError(
+            "execution_gate.allowed_mode must be non-empty text"
+        )
+    if not enabled and not prepare_only:
+        raise ConfigurationError(
+            "execution gate is closed; only --prepare-only is permitted"
+        )
+
+
 def _is_frozen_micro(config: Mapping[str, Any]) -> bool:
-    return _is_hotpot_micro(config) or _is_joint_qa_micro(config)
+    return (
+        _is_hotpot_micro(config)
+        or _is_joint_qa_micro(config)
+        or _is_trivia_micro(config)
+    )
 
 
 def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
@@ -197,12 +245,15 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
     data = _mapping(config.get("data"), "data")
     hotpot_micro = _is_hotpot_micro(config)
     joint_qa_micro = _is_joint_qa_micro(config)
-    frozen_micro = hotpot_micro or joint_qa_micro
+    trivia_micro = _is_trivia_micro(config)
+    frozen_micro = hotpot_micro or joint_qa_micro or trivia_micro
     selection_key = (
         "hotpot_micro"
         if hotpot_micro
         else "joint_qa_micro"
         if joint_qa_micro
+        else "triviaqa_micro"
+        if trivia_micro
         else "smoke"
     )
     selection_name = f"data.{selection_key}"
@@ -244,6 +295,8 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
             if hotpot_micro
             else "joint_qa_micro_training"
             if joint_qa_micro
+            else "triviaqa_micro_training"
+            if trivia_micro
             else "smoke_training"
         ),
         "experiment.training_enabled": experiment.get("training_enabled") is True,
@@ -254,22 +307,25 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
             if hotpot_micro
             else "frozen_joint_qa_schedule"
             if joint_qa_micro
+            else "frozen_triviaqa_schedule"
+            if trivia_micro
             else "sequential_per_source"
         ),
         f"{selection_name}.expected_total_tasks": selection.get("expected_total_tasks")
-        == (1 if hotpot_micro else 2 if joint_qa_micro else 14),
+        == (1 if hotpot_micro or trivia_micro else 2 if joint_qa_micro else 14),
         "grpo.enabled": grpo.get("enabled") is True,
         "grpo.samples_per_problem": type(grpo.get("samples_per_problem")) is int
         and int(grpo["samples_per_problem"]) >= 2
         and (
             hotpot_micro
+            or (trivia_micro and grpo.get("samples_per_problem") == 4)
             or (joint_qa_micro and grpo.get("samples_per_problem") == 8)
             or (not frozen_micro and grpo.get("samples_per_problem") == 2)
         ),
         "grpo.expected_rollout_count": grpo.get("expected_rollout_count")
         == (
             grpo.get("samples_per_problem")
-            if hotpot_micro
+            if hotpot_micro or trivia_micro
             else 16
             if joint_qa_micro
             else 28
@@ -298,6 +354,7 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
         "grpo.skill_usage_reward": float(grpo.get("skill_usage_reward", -1.0)) == 0.0,
         "skills.enabled": (
             hotpot_micro
+            or (trivia_micro and not skills_enabled)
             or (joint_qa_micro and (not skills_enabled or joint_skill_on))
             or (not frozen_micro and not skills_enabled)
         ),
@@ -310,11 +367,15 @@ def validate_smoke_bounds(config: Mapping[str, Any]) -> None:
 
     if frozen_micro:
         expected_dataset_keys = (
-            ("hotpotqa",) if hotpot_micro else ("hotpotqa", "triviaqa")
+            ("hotpotqa",)
+            if hotpot_micro
+            else ("triviaqa",)
+            if trivia_micro
+            else ("hotpotqa", "triviaqa")
         )
         configured_dataset_keys = (
             (selection.get("dataset_key"),)
-            if hotpot_micro
+            if hotpot_micro or trivia_micro
             else tuple(str(value) for value in selection.get("dataset_keys", ()))
         )
         if configured_dataset_keys != expected_dataset_keys:
@@ -4182,7 +4243,11 @@ def _select_run_scope(
 ) -> tuple[
     tuple[TaskRecord, ...],
     tuple[int, ...],
-    Optional[HotpotTrainingProgress | JointQATrainingProgress],
+    Optional[
+        HotpotTrainingProgress
+        | JointQATrainingProgress
+        | TriviaQATrainingProgress
+    ],
     Optional[Path],
     Mapping[str, Any],
 ]:
@@ -4275,6 +4340,53 @@ def _select_run_scope(
             },
         )
 
+    if _is_trivia_micro(config):
+        trivia = _mapping(data["triviaqa_micro"], "data.triviaqa_micro")
+        schedule_path = _resolve(root, str(trivia["schedule_path"]))
+        cursor_path = _resolve(root, str(trivia["cursor_path"]))
+        next_cursor_path = _resolve(root, str(trivia["next_cursor_path"]))
+        if next_cursor_path.exists():
+            raise FileExistsError(
+                "write-once next TriviaQA cursor already exists: "
+                f"{next_cursor_path}"
+            )
+        schedule = FrozenTriviaQATrainingSchedule.read(schedule_path)
+        cursor = TriviaQATrainingCursorState.read(cursor_path)
+        progress = TriviaQATrainingProgress.from_state(schedule, cursor)
+        resolved = schedule.resolve(
+            train_path=train_path,
+            validation_path=_resolve(root, str(data["validation_path"])),
+            test_path=_resolve(root, str(data["test_path"])),
+        )
+        step = progress.current_step
+        task = resolved[cursor.cursor]
+        if task.task_id != step.task_id:
+            raise SmokeRunError(
+                "current frozen TriviaQA task does not match its cursor"
+            )
+        rollout_ordinals = step.rollout_ordinals
+        grpo = _mapping(config["grpo"], "grpo")
+        if len(rollout_ordinals) != int(grpo["samples_per_problem"]):
+            raise ConfigurationError(
+                "frozen rollout ordinals differ from grpo.samples_per_problem"
+            )
+        return (
+            (task,),
+            rollout_ordinals,
+            progress,
+            next_cursor_path,
+            {
+                "selection": "frozen_triviaqa_schedule",
+                "schedule_path": str(schedule_path),
+                "schedule_id": schedule.content_hash,
+                "cursor_path": str(cursor_path),
+                "cursor_before": cursor.to_value(),
+                "step": step.to_value(),
+                "next_cursor_path": str(next_cursor_path),
+                "static_retrieval_prefetch": False,
+            },
+        )
+
     hotpot = _mapping(data["hotpot_micro"], "data.hotpot_micro")
     schedule_path = _resolve(root, str(hotpot["schedule_path"]))
     cursor_path = _resolve(root, str(hotpot["cursor_path"]))
@@ -4336,6 +4448,7 @@ async def _run_smoke_transaction(
         else resolved_config.parent.parent
     )
     config = load_yaml(resolved_config)
+    _require_execution_gate(config, prepare_only=prepare_only)
     validate_smoke_bounds(config)
     if resume_initial_rollouts and not _is_frozen_micro(config):
         raise ConfigurationError(
@@ -4359,6 +4472,8 @@ async def _run_smoke_transaction(
         if _is_hotpot_micro(config)
         else "joint_qa_micro"
         if _is_joint_qa_micro(config)
+        else "triviaqa_micro"
+        if _is_trivia_micro(config)
         else "smoke"
     )
     selection = _mapping(data[selection_key], "data selection")
@@ -4382,7 +4497,7 @@ async def _run_smoke_transaction(
         "bounds": {
             "tasks_per_dataset": (
                 None
-                if _is_hotpot_micro(config)
+                if _is_hotpot_micro(config) or _is_trivia_micro(config)
                 else 1
                 if _is_joint_qa_micro(config)
                 else 2
@@ -4769,7 +4884,8 @@ async def _run_smoke_transaction(
             manifest["completed_at"] = _utc_now()
             _write_json(paths["manifest"], manifest)
             raise SmokeRunError(
-                "policy was updated but the exact HotpotQA cursor could not commit"
+                "policy was updated but the exact frozen training cursor "
+                "could not commit"
             ) from exc
         progress.commit_step_state(next_state)
         cursor_value = next_state.to_value()
@@ -4935,7 +5051,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume-initial-rollouts",
         action="store_true",
         help=(
-            "strictly reuse the persisted frozen HotpotQA rollout batch; "
+            "strictly reuse the persisted frozen micro-training rollout batch; "
             "never recollect its paid Executor calls"
         ),
     )

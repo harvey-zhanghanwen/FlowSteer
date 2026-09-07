@@ -10,9 +10,15 @@
 - 独立训练分支：`train/triviaqa-v16-md-full-compliance-20260906`
 - 已选主目标：设计 MD 的 terminal-only、same-problem/same-condition、
   Action-Masked One-Pass GRPO
-- 当前状态：`blocked_phase0_and_runtime_preflight`
+- 当前状态：`phase0_preflight_partial_resource_blocked`
 - 已完成 rollout / backward / optimizer.step / adapter publish / post-update
   rollout / W&B run：均为 **0**。
+
+训练数据前置已经物化为 512 条 TriviaQA train 和 128 条 held-out validation；
+两者 `base_task_id` 交集为 0。对应的 train-only fact index 已在 CPU 上构建，
+包含 512 条 `fact_text`，embedding 为 BGE（768 维、L2 normalization），冻结
+`top-k=3`。这些数据与索引子门禁不等于 Phase 0 整体通过，也不表示已经生成
+任何训练 rollout。
 
 不得覆盖起点备份；任何真实 1-step 必须在本独立分支上进行。TriviaQA-only
 训练是项目适配：FlowSteer 论文只把 TriviaQA 用作 OOD 评测，SkillFlow 主实验
@@ -161,6 +167,13 @@ residual，也不得把 SkillFlow 的 GRPO baseline/ablation 当作主训练算�
 | `training_state.pt` 与 formal continuation | FlowSteer 状态边界薄适配 | `Qwen35OnePassSmokeTrainer._save_training_state/_restore_optimizer_state` 保存 optimizer、显式 scheduler contract、训练设备 RNG、step/policy/checkpoint 与 consumed trajectory/group receipt；SkillFlow named `theta` adapter 保存路径保持不变 |
 | policy/adapter version、parameter-delta、transaction/canary receipts | 项目工程新增 | 用户验收要求；非论文算法声明 |
 | required/fail-closed W&B 字段 | SkillFlow/FlowSteer W&B 调用边界薄适配 + 项目工程补全 | `WandbTrainingRun` 与 runner `_WandbLifecycle` 固定 online binding、run ID/URL、逐 step telemetry、可恢复 artifact 及异常 finish；两套发布代码都是 optional/fail-open |
+| TriviaQA 512 train / 128 held-out 对齐 | 项目必要适配 | 复用项目既有统一 split schema 与既定顺序切分；已物化且 `base_task_id` overlap=0 |
+| train-only fact subset | 既有 TriviaQA fact-memory 数据流薄适配 | `scripts/materialize_triviaqa_train_fact_subset.py` 复用既有 `TriviaQAFactMemoryRecord`、load/write 与 atomic-write 原语，仅按冻结 train ID 投影 512 条事实；Agent-facing 字段只有 schema/tool/memory ID 与 `fact_text`，离线 provenance 不由 index 加载 |
+| BGE fact index | 既有 TriviaQA embedding-index 直接复用 | CPU 构建；512 records、768 维、L2 normalization、dot-product、冻结 `top-k=3`；没有产生 rollout 或模型推理 |
+| TriviaQA frozen schedule/cursor | SkillFlow task-sequence/cursor 直接语义复用 + 数据集薄适配 | `triviaqa_training_schedule.py`、冻结脚本与 runner TriviaQA scope 复用既有 HotpotQA/SkillFlow write-once、result-blind、exact-cursor 边界；固定 512 train/128 held-out、1 task × 4 trajectories；不新增训练循环 |
+| TriviaQA 1-task × 4-trajectory one-step contract | FlowSteer group rollout 边界 + MD 必要适配 | `config/training_triviaqa_v16_onepass_grpo_1step_prepare.yaml` 固定 terminal-only same-condition group，TTB/Skill/exploration 关闭；runner `--prepare-only` 已验证只选中 1 个 train task、无静态 retrieval prefetch、next cursor 不存在；`execution_gate.execution_enabled=false` 继续禁止真实执行 |
+| closed execution gate | 项目工程补全 | `scripts/train_agentgraph_smoke.py::_require_execution_gate` 在模型后端与 W&B run 之前拒绝非 prepare-only 启动；不是 FlowSteer/SkillFlow 论文算法 |
+| materialized held-out / GPU evidence provider | FlowSteer evaluator receipt + SkillFlow W&B 调用边界薄适配，项目 fail-closed 补全 | `src/interactive/wandb_evidence.py::MaterializedWandbStepEvidenceProvider` 只消费既有 held-out evaluator receipts 并读取 telemetry；updated-policy held-out evaluation 的外层调度与 CLI provider 注入尚未接通，不能宣称 W&B 训练已可运行 |
 | 原始 MACE、贝叶斯线性头、posterior UCB/Thompson、particle EVSI、paired record、Skill 四状态/gate | 项目算法原语已存在但未通过阶段验收 | 不能把单元原语报告为 Phase 1–4 已运行 |
 | low-rank AgentGraph feature、真正同前缀 whole-rollout intervention、生产 EVSI scheduler/三类关键性、正向 ACTIVE Skill | 尚未完整实现或尚无验收证据 | 设计 MD 必需；不得报告已运行 |
 
@@ -174,10 +187,10 @@ SkillFlow 直接复用。它使用 SkillFlow 的 tensor-load/pause 思路，但�
 ## 8. 真实 1-step 验收门禁
 
 主目标已选择为 B；逐条 Phase 0–5 compliance matrix 位于
-`docs/TRIVIAQA_V16_MD_FULL_COMPLIANCE_MATRIX.md`。必须先依次完成 Phase 0–5 验收，
-并把 loss、token mask、trainable parameters 和超参数冻结到独立 executable
-config。随后还必须
-同时满足：
+`docs/TRIVIAQA_V16_MD_FULL_COMPLIANCE_MATRIX.md`。各 Phase 必须按 MD 顺序验收，
+前一 Phase 未通过时不得宣称后一 Phase 完成。当前 1-step acceptance config 仍是
+fail-closed prepare contract；至少要先完成 Phase 0、冻结 loss/token mask/trainable
+parameters，并同时满足以下运行门禁，才可打开该 config 的 execution gate：
 
 1. 只读核对 GPU 进程并获得不冲突的可见 CUDA allocation；
 2. W&B client 与 online authentication 可用，初始化失败即停止；
@@ -191,7 +204,9 @@ config。随后还必须
    valid/filtered rollout、GPU/throughput/error、gradient/update norm、checkpoint
    与 Skill phase 状态。
 
-当前任务 namespace 没有可见 CUDA device；W&B client 已安装，用户确认标准
-SDK 凭据已配置，但尚未初始化 online run 或取得 run URL。这些是
-方法选择之后仍需解除的资源门禁。未通过上述 1-step 前，250–300 step 长训
-保持禁止。
+当前只读资源核对显示 8 张 GPU 均有其他项目进程占用；现有 learner、rollout
+Supervisor、gradient replica 三卡分工没有安全的不冲突组合。部分占用 GPU 只可在
+新的资源门禁确认显存余量、并发负载、端口和服务所有权后共享，不能据此自动启动。
+W&B client 已安装，用户确认标准 SDK 凭据已配置，但尚未初始化 online run 或取得
+run URL；新 evidence provider 也尚未由外层 updated-policy held-out evaluation/CLI
+实例化。未通过真实 1-step 闭环前，250–300 step 长训保持禁止。

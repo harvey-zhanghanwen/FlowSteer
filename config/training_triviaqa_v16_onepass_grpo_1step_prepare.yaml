@@ -1,0 +1,280 @@
+# TriviaQA-only one-update contract derived from the v16 AgentGraph profile.
+#
+# This file is intentionally fail-closed.  It describes the exact transaction
+# to run after the TriviaQA-only frozen-schedule branch and the GPU allocation
+# receipt are available; it is not evidence that rollout or training started.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+execution_timeout: 600.0
+
+experiment:
+  name: "triviaqa_v16_action_masked_one_pass_grpo_step_0001"
+  phase: "triviaqa_micro_training"
+  status: "prepare_only_resource_blocked"
+  training_enabled: true
+  seed: 20260907
+  update_step: 1
+  output_dir: "artifacts/triviaqa_v16_onepass_grpo/step_0001"
+  starting_branch: "backup/triviaqa-fact-memory-v16-best-82p81-20260906"
+  starting_commit: "114bd8b6378af55fbd1f40cdfdda91c79314a771"
+  architecture_profile: "config/evaluation_triviaqa_fact_memory_unified_v4_v16_4_full_native_transductive_reasoner_only_thinking_fixed128.yaml"
+  condition_id: "triviaqa_v16_onepass_grpo_natural_step_0001"
+  sampling_schedule_purpose: "triviaqa_v16_onepass_grpo_natural_step_0001"
+  catalog_order_namespace: "triviaqa_v16_onepass_grpo_natural_step_0001"
+  prompt_version: "agentgraph.director.qa-semantic-recovery.v6"
+  tool_version: "skillflow.search-read+flowsteer.v79+triviaqa-train-fact-memory-bge.v1"
+
+# The current runner must reject a normal launch while this gate is closed.
+# Only metadata/data selection checks are permitted before every item is true.
+execution_gate:
+  execution_enabled: false
+  allowed_mode: "prepare_only"
+  resource_status: "resource_blocked"
+  runner_support_status: "triviaqa_micro_training_prepare_only_verified"
+  gpu_allocation_frozen: false
+  phase_0_accepted: false
+  selected_loss_and_token_mask_verified: false
+  wandb_online_preflight_verified: false
+  blockers:
+    - "Non-conflicting physical GPU roles and a dedicated SGLang port have not been frozen in an allocation receipt."
+    - "Phase 0 and exact action-token-mask acceptance remain incomplete."
+    - "Updated-policy held-out evaluation and the W&B evidence provider are not yet wired by an outer driver."
+
+method:
+  primary_objective: "action_masked_one_pass_grpo"
+  ttb_enabled: false
+  loss_mixing_allowed: false
+  trainable_parameters: [director_theta_lora]
+  executor_frozen: true
+  rollout_consumption: "one_pass"
+  reward_source: "terminal_task_reward_only"
+  source_map: "docs/TRIVIAQA_V16_UPSTREAM_TRAINING_SOURCE_MAP.md"
+
+data:
+  catalog_path: "config/datasets_agentgraph.yaml"
+  train_path: "data/agentgraph_v1/train.jsonl"
+  validation_path: "data/agentgraph_v1/validation.jsonl"
+  test_path: "data/agentgraph_v1/test.jsonl"
+  split_manifest_path: "data/agentgraph_v1/manifest.json"
+  enforce_split_isolation: true
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+  expected_train_count: 512
+  expected_heldout_validation_count: 128
+  require_disjoint_base_task_ids: true
+  triviaqa_micro:
+    dataset_key: "triviaqa"
+    split: "train"
+    selection: "frozen_triviaqa_schedule"
+    expected_total_tasks: 1
+    require_unique_base_tasks: true
+    schedule_path: "artifacts/triviaqa_v16_onepass_grpo/frozen_schedule.json"
+    cursor_path: "artifacts/triviaqa_v16_onepass_grpo/cursor_step_0000.json"
+    next_cursor_path: "artifacts/triviaqa_v16_onepass_grpo/cursor_step_0001.json"
+    rollout_ordinals: [0, 1, 2, 3]
+
+qa_tool_runtime:
+  enabled: true
+  condition_id: "triviaqa_v16_onepass_grpo_natural_step_0001"
+  mode: "model_driven_search_read"
+  passage_source: "external_corpus"
+  corpus_kind: "fact_memory"
+  dataset_scope: [triviaqa]
+  skillflow_source: "/home/test/SKILLEV/skillflow-bayesian-improve-deploy/src"
+  index_path: "data/triviaqa_fact_memory_train512_v1/train_only/index"
+  index_manifest_path: "data/triviaqa_fact_memory_train512_v1/train_only/index/manifest.json"
+  frozen_top_k: 3
+  max_turns_per_agent_call: 7
+  max_tool_calls_per_agent_call: 4
+  tool_timeout_seconds: 30.0
+  completion_policy: "required_evidence"
+  parametric_fallback_after_coverage_failure: true
+
+storage:
+  schema_version: "flowsteer.agentgraph.v1"
+  root: "artifacts/triviaqa_v16_onepass_grpo/step_0001/evidence"
+  trajectory_format: "jsonl"
+  deduplicate_by_event_id: true
+  persist_exact_policy_receipts: true
+  selected_tasks_path: "artifacts/triviaqa_v16_onepass_grpo/step_0001/selected_tasks.jsonl"
+  trajectories_path: "artifacts/triviaqa_v16_onepass_grpo/step_0001/trajectories.jsonl"
+  grpo_groups_path: "artifacts/triviaqa_v16_onepass_grpo/step_0001/grpo_groups.jsonl"
+  retrieval_receipts_path: "artifacts/triviaqa_v16_onepass_grpo/step_0001/retrieval_receipts.jsonl"
+  manifest_path: "artifacts/triviaqa_v16_onepass_grpo/step_0001/training_manifest.json"
+  sync_receipt_path: "artifacts/triviaqa_v16_onepass_grpo/step_0001/sync_receipt.json"
+  post_update_trajectories_path: "artifacts/triviaqa_v16_onepass_grpo/step_0001/post_update_trajectories.jsonl"
+  behavior_policy_preflight_path: "artifacts/triviaqa_v16_onepass_grpo/step_0001/behavior_policy_preflight.json"
+
+director:
+  base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_TRIVIAQA_SUPERVISOR_PORT:-18015}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "triviaqa-v16-best-82p81-step-0000"
+  behavior_adapter_name: null
+  behavior_adapter_checkpoint: null
+  updated_policy_version: "triviaqa-v16-onepass-grpo-step-0001"
+  expected_server_weight_version: "default"
+  live_adapter_name: "theta_live"
+  prompt_profile: "minimal"
+  dtype: "bfloat16"
+  max_context_tokens: 32768
+  max_action_tokens: 1024
+  action_decoding: "unconstrained"
+  action_schema_version: "agentgraph.canvas-action-json-schema.v1"
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 28
+  execute_on_edit: true
+  history_window: 4
+  lora:
+    enabled: true
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+agent_graph:
+  max_agents: 8
+  max_agents_per_subgraph: 3
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_subgraph, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "director_catalog_choice"
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_format_agent: true
+  require_all_agents_reach_output: true
+  director_feedback_mode: "control_plane"
+  semantic_protocol_by_source:
+    triviaqa: "qa_verified_answer_lineage_v2"
+  recovery_policy: "preserve_diagnose_repair_augment"
+  required_evidence_tool_id: "triviaqa.qa_memory"
+  terminal_protocol_by_source:
+    triviaqa: "exact_single_answer_tag"
+  model_catalog_path: "config/model_catalog_multidataset_tool_v9_reasoner_thinking.yaml"
+
+evaluation:
+  evaluator_version: "triviaqa.official.answer.v1"
+  heldout_split: "validation"
+  heldout_sample_count: 128
+  metrics: [exact_match, token_f1]
+  max_environment_steps: 12
+  healthbench_judge_model: ""
+  swebench_harness_enabled: false
+  invalid_evaluator_action: "persist_and_exclude"
+
+grpo:
+  enabled: true
+  objective: "action_masked_one_pass"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 4
+  expected_rollout_count: 4
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  require_valid_evaluator: true
+  invalid_evaluator_action: "persist_and_exclude"
+  reject_forced_probes: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 1
+  max_optimizer_updates: 1
+  learning_rate: 1.0e-5
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+
+policy_sync:
+  enabled: true
+  api_base: "http://127.0.0.1:${FLOWSTEER_TRIVIAQA_SUPERVISOR_PORT:-18015}"
+  load_endpoint: "/load_lora_adapter"
+  unload_endpoint: "/unload_lora_adapter"
+  adapter_name_prefix: "theta_triviaqa_v16_step_"
+  behavior_policy_version_required: true
+  adapter_checkpoint_version_required: true
+  request_timeout_seconds: 120
+  max_retries: 3
+  retry_backoff_seconds: 2
+  fail_run_on_sync_error: true
+  post_update_canary_count: 1
+  canary:
+    endpoint: "/generate"
+    adapter_selector_field: "lora_path"
+    require_explicit_adapter_name: true
+    persist_full_trajectory: true
+
+exploration:
+  enabled: false
+  strategy: "none"
+  forced_probe_rollouts: 0
+
+skills:
+  enabled: false
+  initial_library: []
+  retrieval_top_k: 0
+  library_version: "none"
+
+# All device identities and the dedicated Supervisor port are required launch
+# inputs.  The preflight must persist and freeze them before this gate opens.
+gpu:
+  learner_physical: "${TRIVIAQA_LEARNER_GPU}"
+  rollout_physical: "${TRIVIAQA_ROLLOUT_GPU}"
+  gradient_replica_physical: "${TRIVIAQA_GRADIENT_REPLICA_GPU}"
+  learner_device: "cuda:${TRIVIAQA_LEARNER_GPU}"
+  rollout_engine: "sglang"
+  gradient_replica_device: "cuda:${TRIVIAQA_GRADIENT_REPLICA_GPU}"
+  supervisor_gpu_id: "${TRIVIAQA_ROLLOUT_GPU}"
+  supervisor_api_base: "http://127.0.0.1:${FLOWSTEER_TRIVIAQA_SUPERVISOR_PORT:-18015}/v1"
+  allocation_receipt_path: "${TRIVIAQA_GPU_ALLOCATION_RECEIPT}"
+  training_enabled: true
+  oom_policy:
+    status: "armed_after_resource_gate"
+    micro_batch_size: 4
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [4, 2, 1]
+    retry_on_cuda_oom: true
+    split_items_across_learner_and_replica: true
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: true
+
+deployment:
+  exploration_beta: 0.0
+  allow_forced_probes: false
+  active_skills_only: false
+  require_version_compatible_skills: true
+
+wandb_binding:
+  schema_version: "flowsteer.wandb.binding.v1"
+  required: true
+  mode: "online"
+  entity: "zhanghanwen6660909-dut"
+  project: "flowsteer-triviaqa"
+  credential_source: "wandb_sdk_standard"
+  resume: "never"
+  run_id: null
+  require_run_url_before_training_started_status: true
+  api_key_in_config_allowed: false
+  checkpoint_artifact:
+    collection_name: "triviaqa-director-lora"
+    type: "model"
+    latest_alias: "latest"
+    best_alias: "best"
+    recovery_metadata_required: true
+
+acceptance_gates:
+  phase_0_accepted: false
+  phase_1_accepted: false
+  phase_2_accepted: false
+  phase_3_accepted: false
+  phase_4_accepted: false
+  phase_5_accepted: false
+  selected_loss_and_token_mask_verified: false
+  gpu_inventory_and_nonconflicting_allocation_verified: false
+  one_real_step_closed_loop_verified: false
+  updated_weight_used_by_next_rollout_verified: false
