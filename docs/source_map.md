@@ -1241,3 +1241,18 @@ metadata达到原192-token启动门槛，真实重复正文仍按原24-token/3�
 | `agent_workflow_env` scope admission | **必要适配**：保留FlowSteer `InteractiveWorkflowEnv.step/_step_internal` 的edit/admission反馈；允许原Tool协议的query term count描述。重复数值按实际出现位置检查，不能让前面的操作预算豁免后面的临床值；不新增临床知识表或角色域。 |
 | `healthbench_candidate_skills_v248.yaml` | **直接复用候选profile/helper**；表达参考SkillFlow `src/skills/format.py::SkillEntry` 的trigger/plan/pitfall/constraint和用户MD §10.3可拒绝prompt/repair prior。仅建议根据公开任务补齐遗漏、修复准确引文及不确定性字段；非自动学习、非ACTIVE Skill、无固定角色/拓扑。 |
 | v248 config/test/protocol | **直接复用既有runner与validator**。按用户最新要求只更换五题ID及版本/路径/候选内容；其余模型、生成/工具预算和官方evaluator不变。选择规则、非独立盲测性质与验收边界见 `docs/healthbench_v248_iteration_protocol.md`。 |
+
+## 2026-09-07 — v2.49：恢复自由编辑，排除操作编号误拒
+
+- **直接复用**：`AgentWorkflowEnv.model_admissible_action_types` 已有
+  `finish_only_when_admissible=False` 路径；对应
+  `test_agent_graph.test_admissible_finish_remains_optional_when_finish_only_is_disabled`。
+  遵守FlowSteer `InteractiveWorkflowEnv.step/_step_internal` 的edit→feedback与
+  显式FINISH边界、MD §§2.1/3自由AgentGraph。终局格式合法不等于医学答案完备；
+  无semantic verifier时不强制唯一下一动作FINISH，不新增验证Agent门槛。
+- **必要薄适配**：`agent_workflow_env` 既有公开contract literal提取，排除
+  连续工作编号和已存在Canvas节点的空格别名；仍将原contract传给后续校验
+  和Runtime。不是新医学知识或答案匹配，不改变graph/dependency语义。
+- **保持原样**：v248候选profile/SkillFlow trigger-plan-pitfall表达、所有ReAct
+  工具/模型/预算、证据completion适配、官方rubric evaluator。只另建版本
+  config/test/protocol；未训练、未发布ACTIVE Skill。

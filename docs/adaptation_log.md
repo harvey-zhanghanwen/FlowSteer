@@ -2058,3 +2058,18 @@ v247完成4/5、一题900秒超时，完整五题原始/长度调整均分N/A；
 prepare-only返回prepared且明确固定新五题ID。没有额外模型/API试跑。
 源码只涉及已有HealthBench证据适配和Canvas admission两处，其他为独立
 版本配置、定向测试与来源/协议说明。此时可冻结v248，再进行真实一次评测。
+
+## 2026-09-07 — v2.49准备：v248实际反馈暴露finish-only和编号误拒
+
+在v248独立工作目录不变的前提下，从其冻结source69af582建立v249分支和
+worktree。只根据已完成公开trajectory定位：3533…漏答后还有19轮，但
+finish_only_when_admissible=true使Director只可FINISH；fa30…的编号/节点
+别名被当作临床数字而误拒。前者用现成false配置恢复自由编辑，后者沿原
+literal提取边界修复。不向候选Skill加入任何rubric或新的医学结论。
+
+根因、来源与五题固定条件见v249协议。scope新增7项+既有回归共56项通过。
+本记录创建时v248整批尚未收束，v249仅离线准备，没有并行付费评测。
+
+v249另通过12项FINISH选择/真实配置定向验证（10新增+2既有），确认有效
+Output时仍可立即FINISH，也能继续合法编辑；无有效Output不提前FINISH；
+旧true配置保持旧行为。不修改v248候选文本，以免把修复动作域误称为Skill学习。

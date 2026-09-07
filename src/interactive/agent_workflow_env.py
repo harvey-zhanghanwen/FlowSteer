@@ -8548,6 +8548,22 @@ class AgentWorkflowEnv:
                 if source and replacement and is_grounded(source):
                     if not is_grounded(replacement):
                         external_literals.append(replacement)
+            # Numbered work items and actual Canvas node references are
+            # operational syntax, not evidence for a clinical numeric value.
+            # Only a complete (1), (2), ... sequence is treated as a list;
+            # an isolated parenthesized measurement remains a literal.
+            list_marker = re.compile(r"(?<!\w)\((\d+)\)(?=\s+[A-Za-z])")
+            markers = list(list_marker.finditer(literal_contract))
+            if len(markers) >= 2 and [int(m.group(1)) for m in markers] == list(
+                range(1, len(markers) + 1)
+            ):
+                literal_contract = list_marker.sub("", literal_contract)
+            for known_id in set(self.graph.nodes) | {key for key, _ in entries}:
+                if known_id.startswith("node_"):
+                    literal_contract = re.sub(
+                        rf"\b{re.escape(known_id.replace('_', ' ', 1))}(?:['’]s)?\b",
+                        "", literal_contract, flags=re.IGNORECASE,
+                    )
             for clause in re.split(r"(?<=[.!?;])\s+|\n+", literal_contract):
                 is_decisive = decisive_assertion.search(clause) is not None
                 # Agent IDs are Canvas references rather than domain facts.
