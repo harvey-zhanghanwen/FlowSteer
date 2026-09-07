@@ -1162,6 +1162,22 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
             properties["status"] = {"const": "insufficient"}
             properties["evidence_items"]["maxItems"] = 0
             properties["uncertainties"]["minItems"] = 1
+        value_schema = constrained["properties"]["value"]
+        status_branches = []
+        for status, required_collection in (
+            (("supported", "evidence_items"), ("insufficient", "uncertainties"))
+            if metadata_rows else (("insufficient", "uncertainties"),)
+        ):
+            # Reuse the complete-object union above: xgrammar must receive
+            # every root field and nested source constraint in each branch.
+            # These are the existing completion validator's status rules,
+            # not a requirement to search, choose a claim, or omit partial
+            # evidence when the overall result is insufficient.
+            branch = deepcopy(value_schema)
+            branch["properties"]["status"] = {"const": status}
+            branch["properties"][required_collection]["minItems"] = 1
+            status_branches.append(branch)
+        value_schema["anyOf"] = status_branches
         return constrained
 
     def _completion_error(
@@ -1456,6 +1472,42 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
     def _normalized_evidence_text(value: object) -> str:
         return " ".join(str(value).split()) if isinstance(value, str) else ""
 
+    @staticmethod
+    def _evidence_repair_excerpt(excerpt: str, submitted_span: str) -> Mapping[str, object]:
+        """Locate a quote discrepancy without correcting or accepting it.
+
+        The longest exact shared block anchors one diagnostic window near
+        its unmatched boundary. All offsets and returned text refer to the
+        raw receipt excerpt, including OCR punctuation and page furniture.
+        This alignment is deliberately separate from span validation.
+        """
+        from difflib import SequenceMatcher
+
+        start = 0
+        alignment = {}
+        if excerpt and submitted_span:
+            match = SequenceMatcher(None, submitted_span, excerpt, autojunk=False).find_longest_match()
+            if match.size:
+                # A nonempty submitted prefix precedes this block: show its
+                # left boundary. Otherwise show the first unmatched suffix.
+                boundary = 0 if match.a else match.size
+                source_offset = match.b + boundary
+                start = max(0, min(source_offset - 200, len(excerpt) - 400))
+                alignment = {"diagnostic_alignment": {
+                    "receipt_excerpt_offset": source_offset,
+                    "submitted_span_offset": match.a + boundary,
+                    "exact_match_characters": match.size,
+                }}
+        end = min(start + 400, len(excerpt))
+        return {
+            "verbatim_excerpt_preview": excerpt[start:end],
+            "preview_is_complete_excerpt": start == 0 and end == len(excerpt),
+            "preview_start_offset": start,
+            "preview_end_offset": end,
+            "preview_offset_basis": "receipt_excerpt_characters_0_based_end_exclusive",
+            **alignment,
+        }
+
     def _action_error_feedback(
         self, *, request, action, public_error_code, tool_receipts, observations,
     ) -> Mapping[str, object]:
@@ -1516,8 +1568,10 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
                         "canonical_metadata": {field: row.get(field) for field in fields},
                         "mismatched_fields": [field for field in fields if row.get(field) != item.get(field)]
                             + (["evidence_span"] if span_invalid else []),
-                        "verbatim_excerpt_preview": str(row.get("excerpt") or "")[:400],
-                        "preview_is_complete_excerpt": len(str(row.get("excerpt") or "")) <= 400,
+                        **self._evidence_repair_excerpt(
+                            str(row.get("excerpt") or ""),
+                            str(item.get("evidence_span") or "") if span_invalid else "",
+                        ),
                         **{field: row[field] for field in ("source_id", "full_text_source_id", "truncated", "next_offset") if field in row},
                     } for row in candidates]
                 return {
@@ -1525,7 +1579,8 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
                     "repair_instruction": (
                         "Repair the indicated evidence item using one actual receipt: copy its metadata exactly "
                         "and one contiguous span from its excerpt; do not join phrases with ellipses or paraphrase a quote. "
-                        "The preview is source text, not a suggested claim. Use source.read with an observed source_id "
+                        "The preview is source text, not a suggested claim. Alignment only locates text; "
+                        "it does not validate or correct the submitted span. Use source.read with an observed source_id "
                         "and next_offset if needed and admitted; metadata-only hits do not establish clinical findings. "
                         "Keep supported content; state unresolved limits instead of inventing evidence."
                     ),

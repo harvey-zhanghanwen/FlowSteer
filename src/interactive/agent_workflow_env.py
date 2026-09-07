@@ -8347,7 +8347,7 @@ class AgentWorkflowEnv:
             r"hypotheses|alternatives?|options?|candidate\s+diagnoses?|"
             r"documents?|records?|fields?|samples?|models?|bullets?|bullet\s+"
             r"points?|paragraphs?|sentences?|sections?|headings?|tables?|rows?|"
-            r"columns?|characters?|words?)\b",
+            r"columns?|characters?|words?|(?:clinical\s+)?terms?)\b",
             flags=re.IGNORECASE,
         )
         clinical_code = re.compile(
@@ -8563,9 +8563,14 @@ class AgentWorkflowEnv:
                 candidates: list[str] = list(
                     clinical_code.findall(literal_clause)
                 )
+                literal_cursor = 0
                 for literal in self._numeric_literals(literal_clause):
-                    literal_start = literal_clause.find(literal)
+                    # An earlier query budget must not exempt a later clinical
+                    # value with the same digits in this free-text contract.
+                    literal_start = literal_clause.find(literal, literal_cursor)
                     literal_end = literal_start + len(literal)
+                    if literal_start >= 0:
+                        literal_cursor = literal_end
                     if (
                         literal_start >= 0
                         and operational_count_suffix.search(

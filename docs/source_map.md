@@ -1231,3 +1231,13 @@ runner真实配置入口另有37项定向测试通过：两份ReAct-only、旧al
 完整字符串匹配；没有下载模型或tokenizer。
 结构化正文重复检测29项新增及6项既有quality回归通过；短正文不会因长
 metadata达到原192-token启动门槛，真实重复正文仍按原24-token/3次拒绝。
+
+## 2026-09-07 — v2.48：证据终局协议、局部错误反馈与可选职责核对
+
+| 修改模块 | 真实来源与必要适配边界 |
+| --- | --- |
+| `healthbench_evidence_adapter._completion_arguments_schema_for_state` | **必要适配**：复用SkillFlow `src/skillev/runtime/bounded_agent.py::BoundedAgent.execute_turn/_validate_completion` 的completion校验与invalid Observation，以及当前v247/Director的自包含JSON Schema分支。把既有 `supported→非空evidence_items`、`insufficient→非空uncertainties` 约束提前编码到采样域，不扩大终局可接受范围、不改变Output自然语言协议。 |
+| `healthbench_evidence_adapter._action_error_feedback` | **必要适配**：继续在SkillFlow式非法Action→公开Observation路径提供实际错误；用已取得且实际路由到Agent的来源定位引文不匹配处，返回有界连续文本。位置匹配仅作诊断，不替Agent写claim、不允许近似引文通过validator、不读取rubric。 |
+| `agent_workflow_env` scope admission | **必要适配**：保留FlowSteer `InteractiveWorkflowEnv.step/_step_internal` 的edit/admission反馈；允许原Tool协议的query term count描述。重复数值按实际出现位置检查，不能让前面的操作预算豁免后面的临床值；不新增临床知识表或角色域。 |
+| `healthbench_candidate_skills_v248.yaml` | **直接复用候选profile/helper**；表达参考SkillFlow `src/skills/format.py::SkillEntry` 的trigger/plan/pitfall/constraint和用户MD §10.3可拒绝prompt/repair prior。仅建议根据公开任务补齐遗漏、修复准确引文及不确定性字段；非自动学习、非ACTIVE Skill、无固定角色/拓扑。 |
+| v248 config/test/protocol | **直接复用既有runner与validator**。按用户最新要求只更换五题ID及版本/路径/候选内容；其余模型、生成/工具预算和官方evaluator不变。选择规则、非独立盲测性质与验收边界见 `docs/healthbench_v248_iteration_protocol.md`。 |
