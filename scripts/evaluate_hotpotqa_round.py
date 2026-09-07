@@ -55,6 +55,7 @@ from src.interactive.graph_diagnostics import (
 from src.interactive.persistence import stable_id
 from src.interactive.records import EvaluationReceipt, TaskRecord, TrajectoryRecord
 from src.interactive.rollout_collector import ProgressCallback, execution_record_from_call
+from src.interactive.director import director_time_budget_scope
 from src.interactive.task_dataset import iter_task_records
 from src.interactive.task_evaluator import evaluate_task
 
@@ -1043,14 +1044,17 @@ async def _collect_graph(
                         versions[task.task_id],
                         **collect_kwargs,
                     )
-                result = (
-                    await invocation
-                    if task_timeout_seconds is None
-                    else await asyncio.wait_for(
-                        invocation,
-                        timeout=task_timeout_seconds,
+                with director_time_budget_scope(
+                    task_timeout_seconds if bounded.get("director_time_budget_feedback", False) else None
+                ):
+                    result = (
+                        await invocation
+                        if task_timeout_seconds is None
+                        else await asyncio.wait_for(
+                            invocation,
+                            timeout=task_timeout_seconds,
+                        )
                     )
-                )
                 return task, mode, result
             except BaseException as exc:
                 return task, mode, exc

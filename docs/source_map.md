@@ -926,3 +926,29 @@ The 525 public tasks have informed development. New runs are explicitly
 post-development diagnostic replays, not untouched held-out generalization
 estimates. Rubrics/reference answers remain evaluator-only; no sample-specific
 answer, medical template, extra judge Agent, training or Skill update is added.
+
+### 2026-09-07: 单题超时恢复，公共时间预算与非评分失败轨迹
+
+- 基线：`b02160efeaa0ffafa057ba31e9b86db1ebebc71a`，保留 semantic.v1 候选 Skill、
+  BGE/BM25 检索、自由 AgentGraph、ReAct、incremental Canvas 和原有 FINISH admission。
+- **必要薄适配**：SkillFlow `src/skillev/runtime/contracts.py::BudgetVector.wall_time_milliseconds`
+  及 `runtime/bounded_agent.py::BoundedAgent.execute_turn` 的预算/动作反馈边界；
+  FlowSteer `src/interactive/workflow_env.py::InteractiveWorkflowEnv.step/_step_internal`。
+  当前共享 runner 的 `asyncio.wait_for` 没有向内部 Director 传递时间。
+  在现有 `director.py` 用任务级 ContextVar 暴露同一 900 秒上限、单调时钟
+  elapsed/remaining 和最近实际 Director/Canvas 耗时；不新建调度器或改写 upstream。
+  `evaluate_hotpotqa_round._collect_graph` 在 semaphore 内开启此作用域，
+  `evaluate_completion_benchmark_round` 原样复用该采集器。默认关闭，单题新配置显式开启。
+- **直接复用项目既有实现**：从
+  `/ssd1/iclr/1/.tmp/FlowSteer-healthbench-v249`（835956125d7d02468ac2ab4745ad77038f8f6f7d）
+  移植 `rollout_collector.partial_trajectory_diagnostic_scope`、
+  `AgentGraphRolloutCollector._emit_partial_trajectory/collect` 的诊断作用域，
+  `evaluate_completion_benchmark_round._PartialTrajectoryJsonlSink/_partial_trajectory_callback`，
+  及其定向单测。只移植诊断 hunks，**不移植**该版本其他 Director phase-error 策略。
+  这是 SkillFlow runtime events 与本项目 TurnRecord/Canvas receipt 的现有适配，不是新评分器。
+- **保持现有保护**：`AgentWorkflowEnv.step` 已拒绝 candidate.revision 未变化的编辑；
+  Runtime 继续复用 unchanged-input execution cache，Director 继续显示最近拒绝动作。
+  SkillFlow `training/environment.py` 的 ALFWorld exact-action/no-progress guard 仅作为边界对照，
+  不将其 task-specific 规则移植为禁止一切 MODIFY 或禁止修复。
+- 本次不引入医学模板、固定角色、样本答案、自动终局答案回收、模型/权重更新。
+  时间反馈是可观察约束，不保证小模型一定据此及时 FINISH；未返回的调用 receipt 仍明确缺失。

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from itertools import combinations, product
 import json
@@ -11,7 +13,7 @@ import random
 import re
 import socket
 import time
-from typing import Any, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import Any, Iterator, Mapping, Optional, Protocol, Sequence, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -26,6 +28,55 @@ from .scientific_sampling import (
     derive_generation_seed,
 )
 
+
+# SkillFlow BudgetVector accounts for wall time as well as turns. The shared
+# completion runner already owns the timeout; this thin adapter exposes that
+# same budget inside the existing Canvas observation, without a second ledger.
+_DIRECTOR_TIME_BUDGET: ContextVar[Optional[dict[str, Any]]] = ContextVar(
+    "director_time_budget", default=None,
+)
+
+
+@contextmanager
+def director_time_budget_scope(timeout_seconds: Optional[float]) -> Iterator[None]:
+    """Scope one task's measured collection/evaluation cap, excluding queue time."""
+    state = None
+    if timeout_seconds is not None:
+        if not 0 < float(timeout_seconds) < float("inf"):
+            raise ValueError("timeout_seconds must be positive and finite")
+        state = {"started": time.monotonic(), "limit_seconds": float(timeout_seconds)}
+    token = _DIRECTOR_TIME_BUDGET.set(state)
+    try:
+        yield
+    finally:
+        _DIRECTOR_TIME_BUDGET.reset(token)
+
+
+def record_director_step_timing(**timing: Any) -> None:
+    state = _DIRECTOR_TIME_BUDGET.get()
+    if state is not None:
+        state["last_completed_step"] = dict(timing)
+
+
+def director_time_budget_observation() -> Optional[dict[str, Any]]:
+    state = _DIRECTOR_TIME_BUDGET.get()
+    if state is None:
+        return None
+    elapsed = max(time.monotonic() - state["started"], 0.0)
+    return {
+        "limit_seconds": state["limit_seconds"],
+        "elapsed_seconds": round(elapsed, 3),
+        "remaining_seconds": round(max(state["limit_seconds"] - elapsed, 0.0), 3),
+        "scope": "task_collection_and_evaluation",
+        "last_completed_step": state.get("last_completed_step"),
+        "planning_constraint": (
+            "Time is a separate limit from remaining rounds and includes evaluation. "
+            "Use measured step costs to plan only necessary edits. Reuse valid artifacts; "
+            "avoid repeating failed or unchanged edits. FINISH when the requested "
+            "response is complete and Canvas permits it. Time pressure does not "
+            "waive required outputs, evidence, or terminal validation."
+        ),
+    }
 
 LEGACY_DIRECTOR_SYSTEM_PROMPT_V8 = """You are the Flow-Director. Incrementally build an executable AgentGraph. Follow the latest Canvas observation and return exactly one JSON object each turn.
 
@@ -4964,6 +5015,9 @@ class AgentGraphOrchestrator:
             },
             "remaining_rounds": remaining_rounds,
         }
+        time_budget = director_time_budget_observation()
+        if time_budget is not None:
+            payload["time_budget"] = time_budget
         current_artifact_receipts = env.current_artifact_receipts()
         if current_artifact_receipts:
             payload["current_artifact_receipts"] = current_artifact_receipts

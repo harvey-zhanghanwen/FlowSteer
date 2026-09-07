@@ -1614,3 +1614,23 @@ change was made during profile selection.
   prepare-only run passed after the isolated worktree registry was pointed at
   the original preparation catalog recorded in the reused data manifest. No
   data, rubric, split or preparation manifest was regenerated or relabeled.
+
+### 2026-09-07: Greek translation 超时单题诊断和最小修复
+
+- 原条件 `healthbench_professional_semantic_skills_new5` 的
+  `healthbench-professional:38ed97e78292dfcf0805ac924311fa14` 在900秒 collection cap取消，
+  尚未进入 evaluator；没有该题完整 trajectory。不能把 N/A 解释成评分为0。
+- 已记录：首次 ADD 被拒绝；第二次 ADD 执行约222.87秒；
+  四次已提交 MODIFY 共558.80秒；第六轮在执行中取消。
+  旧记录没有保留具体 contract/Agent I/O，不能断言四次修改完全相同，
+  也不能把耗时全部归因于工具或模型重复。
+- 共性缺口：外层900秒与内部仅 `remaining_rounds` 的控制信息不一致；
+  取消时丢失已完成的诊断轨迹。补充真实时间预算与已测步骤耗时，复用 v249
+  non-scoreable partial trajectory 保存，评分入口仍要求原有合法终局/evaluator receipt。
+- 新单题配置 `config/evaluation_healthbench_deadline_recovery_single.yaml` 只取同一个失败 ID，
+  保留模型池/本地GPU6、thinking、seed、token/tool/round/900秒限制、同一官方 evaluator、
+  同一4422外部记录语义索引和三条 candidate priors。新 condition/output 独立，不覆盖旧结果。
+  配置 concurrency仍4，但单题仅一个任务，因此实际负载不同；结果不是严格的并发耗时消融。
+- 仍为 public-test development replay，不是未使用过的 held-out 测试；
+  不运行 Direct、其他4题、训练、GRPO、backward、optimizer、MACE/Bayesian 或 Skill publication。
+  修复后的真实完成情况、评分与剩余问题待单题运行落盘后另行记录。

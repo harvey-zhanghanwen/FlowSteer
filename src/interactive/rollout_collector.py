@@ -20,6 +20,8 @@ for those downstream boundaries.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from datetime import UTC, datetime
 import inspect
@@ -28,7 +30,7 @@ import math
 import socket
 import threading
 import time
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Awaitable, Callable, Iterable, Iterator, Mapping, Optional, Sequence, Tuple, Union
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -39,9 +41,10 @@ from .agent_action_parser import (
     AgentActionParseError,
     AgentActionParser,
 )
-from .agent_runtime import AgentCallRecord, AgentRuntimeResult
+from .agent_runtime import AgentCallRecord, AgentRuntimeError, AgentRuntimeResult
 from .agent_workflow_env import AgentWorkflowEnv
 from .director import (
+    record_director_step_timing,
     AgentGraphOrchestrator,
     DIRECTOR_ACTION_TARGET_DOMAIN_SCHEMA_VERSION,
     DIRECTOR_MODEL_ADMISSIBLE_ACTION_SCHEMA_VERSION,
@@ -3775,6 +3778,30 @@ ActiveSkillProvider = Callable[
     Sequence[str],
 ]
 ProgressCallback = Callable[[Mapping[str, object]], None]
+PartialTrajectoryCallback = Callable[[Mapping[str, object]], None]
+_PARTIAL_TRAJECTORY_CALLBACK: ContextVar[Optional[PartialTrajectoryCallback]] = (
+    ContextVar("agentgraph_partial_trajectory_callback", default=None)
+)
+
+
+@contextmanager
+def partial_trajectory_diagnostic_scope(
+    callback: Optional[PartialTrajectoryCallback],
+) -> Iterator[None]:
+    """Opt in for this async evaluation scope, including its child tasks only.
+
+    This is diagnostic routing, not a runtime/evaluator interface. It lets a
+    completion runner reuse the shared backend without enabling partial
+    persistence in training or other concurrent evaluation scopes.
+    """
+
+    if callback is not None and not callable(callback):
+        raise TypeError("partial trajectory callback must be callable")
+    token = _PARTIAL_TRAJECTORY_CALLBACK.set(callback)
+    try:
+        yield
+    finally:
+        _PARTIAL_TRAJECTORY_CALLBACK.reset(token)
 
 
 def _retrieved_skill_ids(
@@ -4330,6 +4357,7 @@ class AgentGraphRolloutCollector:
         manual_repair_used: bool = False,
         expected_task_split: str = "train",
         progress_callback: Optional[ProgressCallback] = None,
+        partial_trajectory_callback: Optional[PartialTrajectoryCallback] = None,
     ) -> None:
         if orchestrator.registry is not environment.model_registry:
             raise ValueError("orchestrator and environment must share the model registry")
@@ -4371,6 +4399,9 @@ class AgentGraphRolloutCollector:
         self.manual_repair_used = manual_repair_used
         self.expected_task_split = expected_task_split
         self.progress_callback = progress_callback
+        if partial_trajectory_callback is not None and not callable(partial_trajectory_callback):
+            raise TypeError("partial_trajectory_callback must be callable")
+        self.partial_trajectory_callback = partial_trajectory_callback
         self._lock = asyncio.Lock()
 
     def _emit_progress(
@@ -4424,6 +4455,101 @@ class AgentGraphRolloutCollector:
             # authoritative Action--Observation/evidence boundary.
             return
 
+    def _emit_partial_trajectory(
+        self,
+        callback: PartialTrajectoryCallback,
+        task: TaskRecord,
+        rollout_id: str,
+        state: Mapping[str, Any],
+        error: BaseException,
+    ) -> None:
+        """Save observed receipts, never invent a terminal TrajectoryRecord.
+
+        Called synchronously while this rollout still owns the environment
+        lock. Like SkillFlow's rejected-rollout event, this is outside the
+        scored artifact boundary. No model/evaluator call is made here.
+        """
+
+        try:
+            turns = [turn.to_dict() for turn in state.get("turns", ())]
+            canvas = state.get("canvas")
+            runtime = None if canvas is None else (
+                canvas.execution or canvas.partial_execution
+            )
+            failures = [
+                record
+                for turn in turns
+                for record in turn["runtime_summary"].get("failure_records", ())
+            ]
+            if canvas is not None:
+                failures.extend(
+                    record.to_dict() for record in canvas.execution_failure_records
+                )
+            if isinstance(error, AgentRuntimeError):
+                failures.extend(record.to_dict() for record in error.failure_records)
+                runtime = error.partial_result or runtime
+            response = state.get("response")
+            pending = None
+            if state.get("pending_prompt") is not None:
+                pending = {
+                    "round_index": state.get("round_index"),
+                    "prompt": state["pending_prompt"],
+                    "director_response_returned": response is not None,
+                    "policy_response": None if response is None else response.text,
+                    "director_metadata": None if response is None else response.metadata,
+                    "canvas_result_returned": canvas is not None,
+                    "missing_receipts": (
+                        ["director_response"] if response is None else
+                        (["canvas_result"] if canvas is None else [])
+                    ),
+                    "runtime_summary": dict(_runtime_summary(runtime)),
+                    "executions": [] if runtime is None else [
+                        _execution_record(call).to_dict() for call in runtime.calls
+                    ],
+                }
+            started = state.get("environment_reset") is True
+            snapshot = self.environment.snapshot() if started else None
+            callback(_json_safe_or_default({
+                "schema_version": "flowsteer.agentgraph.partial-trajectory.v1",
+                "task_id": task.task_id,
+                "condition_id": self.condition_id,
+                "rollout_id": rollout_id,
+                "versions": self.versions.to_dict(),
+                "complete": False,
+                "non_scoreable": True,
+                "evaluation": None,
+                "final_answer": None,
+                "termination_reason": (
+                    "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
+                ),
+                "stage": state.get("stage"),
+                "error": {"type": type(error).__name__, "message": str(error)},
+                "recorded_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "turns": turns,
+                "pending_turn": pending,
+                "public_task_input": None if snapshot is None else snapshot.problem,
+                "public_history": [] if snapshot is None else [
+                    entry.to_dict() for entry in snapshot.history
+                ],
+                "current_graph": None if snapshot is None else self.environment.graph.to_dict(),
+                "canvas_finished": None if snapshot is None else snapshot.finished,
+                "last_feedback": None if snapshot is None else snapshot.last_feedback,
+                "unresolved_dirty_agent_ids": [] if snapshot is None else list(
+                    self.environment.unresolved_dirty_agent_ids
+                ),
+                "runtime_failure_records": failures,
+                "last_known_runtime_failure": failures[-1] if failures else None,
+                "failure_pending_agent_ids": list(error.pending_agent_ids)
+                    if isinstance(error, AgentRuntimeError) else [],
+                "failure_blocked_agent_ids": list(error.blocked_agent_ids)
+                    if isinstance(error, AgentRuntimeError) else [],
+            }, {}))
+        except (asyncio.CancelledError, Exception):
+            # A failed diagnostic writer must never mask the original failure
+            # or turn cancellation into a completed/scored trajectory.
+            return
+
+
     async def collect(
         self,
         task: TaskRecord,
@@ -4466,12 +4592,26 @@ class AgentGraphRolloutCollector:
         )
         try:
             async with self._lock:
-                return await self._collect_locked(
-                    task,
-                    rollout_index,
-                    evaluator_callback,
-                    workflow_problem=workflow_problem,
+                callback = self.partial_trajectory_callback
+                if callback is None:
+                    callback = _PARTIAL_TRAJECTORY_CALLBACK.get()
+                diagnostic_state: Optional[dict[str, Any]] = (
+                    None if callback is None else {}
                 )
+                try:
+                    return await self._collect_locked(
+                        task,
+                        rollout_index,
+                        evaluator_callback,
+                        workflow_problem=workflow_problem,
+                        diagnostic_state=diagnostic_state,
+                    )
+                except (asyncio.CancelledError, Exception) as exc:
+                    if callback is not None and diagnostic_state is not None:
+                        self._emit_partial_trajectory(
+                            callback, task, rollout_id, diagnostic_state, exc
+                        )
+                    raise
         except asyncio.CancelledError:
             history = tuple(getattr(self.environment, "history", ()))
             self._emit_progress(
@@ -4506,6 +4646,7 @@ class AgentGraphRolloutCollector:
         evaluator_callback: EvaluatorCallback,
         *,
         workflow_problem: Optional[str],
+        diagnostic_state: Optional[dict[str, Any]] = None,
     ) -> TrajectoryRecord:
         env = self.environment
         # SkillFlow separates the immutable public task from the execution
@@ -4514,6 +4655,8 @@ class AgentGraphRolloutCollector:
         # adapter to expose a required runtime interface to Flow-Director.
         env.reset(workflow_problem or task.question)
         turns: list[TurnRecord] = []
+        if diagnostic_state is not None:
+            diagnostic_state.update(environment_reset=True, turns=turns, stage="started")
         snapshots: list[GraphSnapshotEvent] = []
         previous_snapshot_id: Optional[str] = None
         final_answer: Optional[str] = None
@@ -4602,6 +4745,12 @@ class AgentGraphRolloutCollector:
                 graph_revision=env.graph.revision,
             )
             generation_seed = self.orchestrator.generation_seed(round_index)
+            step_started = time.monotonic()
+            if diagnostic_state is not None:
+                diagnostic_state.update(
+                    round_index=round_index, stage="director_started",
+                    pending_prompt=prompt, response=None, canvas=None,
+                )
             schema_request = self.orchestrator.action_schema_request(env)
             response = await self.orchestrator.client.propose(
                 prompt,
@@ -4609,6 +4758,9 @@ class AgentGraphRolloutCollector:
                 **schema_request,
             )
             metadata = response.metadata
+            director_completed = time.monotonic()
+            if diagnostic_state is not None:
+                diagnostic_state.update(response=response, stage="canvas_started")
             parse_failure_phase = metadata.get("parse_failure_phase")
             if parse_failure_phase is not None and parse_failure_phase not in {
                 _ADD_ROLE_SELECTION_PARSE_FAILURE_PHASE,
@@ -4637,6 +4789,9 @@ class AgentGraphRolloutCollector:
                         "Canvas action"
                     )
             canvas = await env.step(response.text)
+            canvas_completed = time.monotonic()
+            if diagnostic_state is not None:
+                diagnostic_state.update(canvas=canvas, stage="turn_validation")
 
             if metadata.get("receipt_verified") is not True:
                 raise ReceiptValidationError("Director turn lacks an exact behavior receipt")
@@ -5108,6 +5263,18 @@ class AgentGraphRolloutCollector:
                 visible_skill_ids=current_retrieved_skill_ids,
             )
             turns.append(turn)
+            record_director_step_timing(
+                round_index=round_index,
+                action=None if action is None else action.action_type.value,
+                accepted=canvas.accepted,
+                director_seconds=director_completed - step_started,
+                canvas_seconds=canvas_completed - director_completed,
+                execution_reused=canvas.execution_reused,
+            )
+            if diagnostic_state is not None:
+                diagnostic_state.update(
+                    stage="turn_committed", pending_prompt=None, response=None, canvas=None,
+                )
             snapshots.append(snapshot)
             previous_snapshot_id = snapshot.snapshot_id
             self._emit_progress(
@@ -5189,6 +5356,8 @@ class AgentGraphRolloutCollector:
         if final_graph is None:
             final_graph = env.graph.to_dict()
         final_round_index = turns[-1].round_index if turns else None
+        if diagnostic_state is not None:
+            diagnostic_state["stage"] = "evaluator_started"
         self._emit_progress(
             task_id=task.task_id,
             rollout_id=rollout_id,
@@ -5205,6 +5374,8 @@ class AgentGraphRolloutCollector:
         )
         if inspect.isawaitable(raw_evaluation):
             raw_evaluation = await raw_evaluation
+        if diagnostic_state is not None:
+            diagnostic_state["stage"] = "evaluator_completed"
         evaluation = _evaluation_receipt(raw_evaluation)
         self._emit_progress(
             task_id=task.task_id,
