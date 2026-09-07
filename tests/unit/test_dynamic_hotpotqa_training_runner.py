@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 
 from tests.unit.test_hotpotqa_grpo_runner import (
@@ -135,7 +136,7 @@ class _FakeCoordinator:
                 grpo_eligible=False,
                 evidence_plane="paired_intervention",
             )
-            for index in range(6)
+            for index in range(6 * len(selected_sites))
         )
         self.intervention_ids = tuple(item.trajectory_id for item in interventions)
         return SimpleNamespace(
@@ -154,13 +155,14 @@ class _FakeCoordinator:
                 )
                 for item in interventions
             ),
-            probe_records=(
+            probe_records=tuple(
                 _JsonRecord(
-                    "probe:0",
-                    probe_id="probe:0",
+                    f"probe:{index}",
+                    probe_id=f"probe:{index}",
                     enters_grpo=False,
                     enters_standard_metrics=False,
-                ),
+                )
+                for index in range(len(selected_sites))
             ),
         )
 
@@ -176,7 +178,7 @@ class _CloseResult:
             invalid_trajectories=0,
             baseline_updates=len(natural_ids) + len(intervention_ids),
             sensor_updates=0,
-            contrast_probe_updates=1,
+            contrast_probe_updates=len(intervention_ids) // 6,
         )
         self.transition = SimpleNamespace(next_epoch=next_epoch, summary=summary)
         self.receipt = _JsonRecord(
@@ -400,8 +402,9 @@ def _project(tmp_path: Path):
     return config, config_path, acceptance_path
 
 
+@pytest.mark.parametrize("probe_count", [1, 0], ids=["paired-probe", "zero-probes"])
 def test_first_dynamic_step_is_natural_only_and_commits_next_condition(
-    tmp_path: Path,
+    tmp_path: Path, probe_count: int,
 ) -> None:
     config, config_path, acceptance_path = _project(tmp_path)
     tracker = FakeTracker()
@@ -449,7 +452,7 @@ def test_first_dynamic_step_is_natural_only_and_commits_next_condition(
         site=_JsonRecord("site:0", trajectory_id="natural:0"),
     )
     dynamic_metrics = {
-        "probe_count": 1,
+        "probe_count": probe_count,
         "audit_count": 0,
         "warning_precision": 0.5,
         "warning_recall": 0.25,
@@ -468,7 +471,9 @@ def test_first_dynamic_step_is_natural_only_and_commits_next_condition(
             return_value=sequential_runtime,
         ),
         patch.object(RUNNER, "_dynamic_epoch_coordinator", side_effect=coordinator_factory),
-        patch.object(RUNNER, "select_probe_sites", return_value=(selected_site,)),
+        patch.object(
+            RUNNER, "select_probe_sites", return_value=(selected_site,) * probe_count
+        ),
         patch.object(RUNNER, "dynamic_epoch_metrics", return_value=dynamic_metrics),
         patch.object(RUNNER, "close_dynamic_epoch", side_effect=close_epoch),
         patch.object(
@@ -513,6 +518,19 @@ def test_first_dynamic_step_is_natural_only_and_commits_next_condition(
         for item in coordinators[0].natural_batch.natural_trajectories
     }
     assert trained_ids.isdisjoint(coordinators[0].intervention_ids)
+    assert len(coordinators[0].intervention_ids) == 6 * probe_count
+
+    step_dir = tmp_path / "artifacts/dynamic-training/steps/step_000001"
+    for filename, count in (
+        ("trajectories.jsonl", 28),
+        ("natural_ledger_sidecars.jsonl", 28),
+        ("natural_ledger_records.jsonl", 28),
+        ("selected_probe_sites.jsonl", probe_count),
+        ("intervention_trajectories.jsonl", 6 * probe_count),
+        ("intervention_ledger_records.jsonl", 6 * probe_count),
+        ("probe_records.jsonl", probe_count),
+    ):
+        assert len((step_dir / filename).read_text(encoding="utf-8").splitlines()) == count
 
     next_epoch = close_results[0].next_epoch
     next_condition = next_epoch.condition
@@ -569,6 +587,9 @@ def test_first_dynamic_step_is_natural_only_and_commits_next_condition(
     assert transition["receipt"]["next_epoch_receipt_path"] == str(
         ledger_receipt_path
     )
+    assert transition["summary"]["contrast_probe_updates"] == probe_count
+    assert transition["summary"]["intervention_trajectories"] == 6 * probe_count
+    assert transition["summary"]["baseline_updates"] == 28 + 6 * probe_count
 
     state = json.loads(
         (tmp_path / "artifacts/dynamic-training/run_state.json").read_text(
@@ -594,8 +615,84 @@ def test_first_dynamic_step_is_natural_only_and_commits_next_condition(
     assert set(config["tracking"]["required_step_fields"]) <= set(logged)
     assert logged["ledger/heldout_nll"] is None
     assert logged["ledger/heldout_brier"] is None
+    assert logged["ledger/probe_count"] == probe_count
+    assert logged["checkpoint/saved"] is True
+    assert logged["policy/publish_success"] is True
+    assert logged["policy/route_switch_success"] is True
     assert logged["policy/canary_success"] is True
     assert tracker.finished == [0]
+
+
+def test_probe_selection_failure_preserves_natural_batch_without_optimizer_update(
+    tmp_path: Path,
+) -> None:
+    _, config_path, acceptance_path = _project(tmp_path)
+    tracker = FakeTracker()
+    events: list[dict[str, object]] = []
+    backends: list[_FakeBackend] = []
+    sequential_runtime = _FakeSequentialRuntime()
+
+    def backend_factory(step_config, project_root):
+        assert project_root == tmp_path
+        backend = _FakeBackend(step_config, events)
+        backends.append(backend)
+        return backend
+
+    def coordinator_factory(step_config, backend, epoch, **kwargs):
+        del step_config, backend, kwargs
+        return _FakeCoordinator(epoch)
+
+    with (
+        patch.object(
+            RUNNER, "_single_gpu_sequential_runtime", return_value=sequential_runtime
+        ),
+        patch.object(RUNNER, "_dynamic_epoch_coordinator", side_effect=coordinator_factory),
+        patch.object(
+            RUNNER,
+            "select_probe_sites",
+            side_effect=RUNNER.HotpotTrainingError("probe selection failed"),
+        ),
+        patch.object(
+            RUNNER,
+            "WandbTracker",
+            MagicMock(side_effect=AssertionError("W&B must remain injected/offline")),
+        ),
+        patch.object(RUNNER.os, "fsync"),
+        pytest.raises(RUNNER.HotpotTrainingError, match="probe selection failed"),
+    ):
+        asyncio.run(
+            RUNNER.run_hotpotqa_training(
+                config_path,
+                project_root=tmp_path,
+                allow_md_grpo=True,
+                stop_after_optimizer_steps=1,
+                backend_factory=backend_factory,
+                tracker=tracker,
+                dynamic_acceptance_receipt=acceptance_path,
+            )
+        )
+
+    step_dir = tmp_path / "artifacts/dynamic-training/steps/step_000001"
+    for filename in (
+        "trajectories.jsonl",
+        "natural_ledger_sidecars.jsonl",
+        "natural_ledger_records.jsonl",
+    ):
+        assert len((step_dir / filename).read_text(encoding="utf-8").splitlines()) == 28
+    assert len(backends) == 1
+    assert backends[0].trainer_inputs == ()
+    assert backends[0].checkpoint is None
+    assert all(event["kind"] == "natural" for event in events)
+    assert sequential_runtime.stopped
+    assert tracker.logs == []
+    assert tracker.finished == [1]
+    manifest = json.loads(
+        (tmp_path / "artifacts/dynamic-training/run_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manifest["status"] == "failed"
+    assert manifest["optimizer_updates_completed"] == 0
 
 
 def test_bounded_phase_e_rejects_training_only_flags(

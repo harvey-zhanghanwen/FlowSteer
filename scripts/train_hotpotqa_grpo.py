@@ -3133,6 +3133,12 @@ async def run_hotpotqa_training(
                     rollouts_per_task=int(batch_config["rollouts_per_task"]),
                     start_rollout_index=(training_step - 1) * 1000,
                 )
+                # Preserve completed on-policy sampling before optional paired
+                # exploration can fail. These files are evidence, not an
+                # optimizer commit or authorization to reuse the batch.
+                _write_jsonl(trajectories_path, natural_batch.natural_trajectories)
+                _write_jsonl(natural_sidecar_path, natural_batch.natural_sidecars)
+                _write_jsonl(natural_ledger_path, natural_batch.natural_ledger_records)
                 dynamic_config = _mapping(
                     step_value["dynamic_ledger"], "dynamic_ledger"
                 )
@@ -3158,10 +3164,11 @@ async def run_hotpotqa_training(
                     audit_probability=float(audit_config["probability"]),
                     tau=float(latent_config["tau"]),
                 )
-                if not selected_sites:
-                    raise HotpotTrainingError(
-                        "dynamic training epoch produced no eligible paired probe site"
-                    )
+                # LatentLoss specification §§6.1/6.3/6.4: probe/audit budgets
+                # are conditional, not minimum counts. The existing collector
+                # handles an empty selection without inventing interventions;
+                # natural trajectories still train GRPO independently. Phase E
+                # retains its separate, mandatory paired-probe acceptance gate.
                 dynamic_batch = await coordinator.collect_selected_probes(
                     backend,
                     natural_batch,
@@ -3185,8 +3192,6 @@ async def run_hotpotqa_training(
                     raise HotpotTrainingError(
                         "dynamic evidence routing assertions failed before GRPO"
                     )
-                _write_jsonl(natural_sidecar_path, dynamic_batch.natural_sidecars)
-                _write_jsonl(natural_ledger_path, dynamic_batch.natural_ledger_records)
                 _write_jsonl(
                     selected_probe_path,
                     [
