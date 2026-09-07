@@ -1984,6 +1984,13 @@ non-scoreable partial文件；不改变指标、运行源码、FINISH或官方�
 报告生成不发出模型/Tool/grader请求，没有重新跑失败题或扩大到525题。
 ## 2026-09-07 — v2.46 固定新五题的 ReAct 工程迭代
 
+运行已收尾：固定源码8ca968750b08170c6c935d31e1350dc5e4553727，3/5 FINISH
+且evaluator-valid，2题900秒超时；全五题两项原生均分N/A。3题raw均0，
+有效子集length-adjusted原样均值−3.5917%，不裁负分/不替代固定五题。
+完整过程及错误分类见reports/healthbench_v246_candidate_iteration_zh.md。
+未到60%门槛，未启动525；没有训练或ACTIVE发布。新必要修复在独立v247
+worktree准备，未在运行中修改旧版本。
+
 从 v2.45 最终报告提交 `b8ffb2eba5508ee700475eb1763e044836adcba3` 建立
 `feature/healthbench-v2.46-react-evidence-disambiguation-20260907`。
 用户澄清是另外5道 HealthBench 题，并允许通过候选 Skill 调整职责。按官方
