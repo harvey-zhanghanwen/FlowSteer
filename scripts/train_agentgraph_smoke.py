@@ -76,6 +76,16 @@ from src.interactive.healthbench_evidence_adapter import (
     PubMedEUtilitiesClient,
     open_healthbench_authoritative_tool_registry,
 )
+from src.interactive.healthbench_clinical_tools import (
+    open_healthbench_clinical_tool_registry,
+)
+from src.interactive.healthbench_clinical_react import (
+    HealthBenchClinicalReactExecutionAdapter,
+)
+from src.interactive.healthbench_knowledge_tools import (
+    HealthBenchKnowledgeReactExecutionAdapter,
+    open_healthbench_knowledge_tool_registry,
+)
 from src.interactive.hotpot_training_schedule import (
     FrozenHotpotTrainingSchedule,
     HotpotTrainingCursorState,
@@ -999,6 +1009,41 @@ def _healthbench_tool_runtime_settings(
             enforce_state_conditioned_completion_admission
         ),
     }
+    toolset = section.get("toolset", "default")
+    if toolset not in {"default", "optional_clinical_v1", "source_separated_clinical_v1"}:
+        raise ConfigurationError("healthbench_tool_runtime.toolset is unsupported")
+    if toolset in {"optional_clinical_v1", "source_separated_clinical_v1"} and (
+        runtime_mode != HEALTHBENCH_AUTHORITATIVE_TOOL_RUNTIME_MODE
+        or section.get("require_initial_search") is not False
+        or section.get("require_refinement_on_insufficient_evidence", False)
+    ):
+        raise ConfigurationError(
+            "optional_clinical_v1 requires authoritative mode without mandatory "
+            "initial search or search refinement; each Agent chooses its tools"
+        )
+    settings["toolset"] = toolset
+    external_sources = section.get("external_medical_sources_enabled", False)
+    if type(external_sources) is not bool or (
+        external_sources and toolset != "source_separated_clinical_v1"
+    ):
+        raise ConfigurationError(
+            "external_medical_sources_enabled must be bool and requires source_separated_clinical_v1"
+        )
+    settings["external_medical_sources_enabled"] = external_sources
+    clinical_references = section.get("clinical_reference_sources_enabled", False)
+    if type(clinical_references) is not bool or (
+        clinical_references and toolset != "source_separated_clinical_v1"
+    ):
+        raise ConfigurationError(
+            "clinical_reference_sources_enabled must be bool and requires source_separated_clinical_v1"
+        )
+    settings["clinical_reference_sources_enabled"] = clinical_references
+    if toolset == "source_separated_clinical_v1":
+        for key in ("knowledge_root", "skillflow_source"):
+            value = section.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigurationError(f"healthbench_tool_runtime.{key} must be non-empty text")
+            settings[key] = value
     raw_profile_allowlist = section.get("execution_profile_allowlist")
     if raw_profile_allowlist is not None:
         if (
@@ -2208,6 +2253,47 @@ class SmokeBackend(Protocol):
 JudgeCallback = Callable[[Sequence[Mapping[str, str]], str], Awaitable[Any]]
 
 
+def _local_agent_context_clients(
+    graph_config: Mapping[str, Any], director: Mapping[str, Any],
+    registry: Any, director_client: SGLangReceiptDirectorClient,
+) -> dict[str, SGLangReceiptDirectorClient]:
+    """Bind only the same declared local deployment to its existing tokenizer."""
+    enabled = graph_config.get("local_agent_context_budget", False)
+    if type(enabled) is not bool:
+        raise ConfigurationError("agent_graph.local_agent_context_budget must be boolean")
+    if not enabled:
+        return {}
+    maximum = director.get("max_context_tokens")
+    endpoint = director.get("api_base")
+    served_model = director.get("served_model_name")
+    if (
+        type(maximum) is not int or maximum <= 0
+        or director_client.max_context_tokens != maximum
+        or not isinstance(endpoint, str) or not endpoint.strip()
+        or not isinstance(served_model, str) or not served_model.strip()
+    ):
+        raise ConfigurationError("local Agent context budget requires the configured Director context and deployment")
+    endpoint = endpoint.rstrip("/")
+    native_endpoint = endpoint[:-3] if endpoint.endswith("/v1") else endpoint
+    if director_client.base_url != native_endpoint:
+        raise ConfigurationError("local Agent context client differs from the Director endpoint")
+    clients = {}
+    for model_id in registry.model_ids:
+        model = registry.require_model(model_id)
+        provider = registry.provider_for(model_id)
+        metadata = {**provider.metadata, **model.metadata}
+        if (
+            str(metadata.get("deployment_locality", "")).strip().casefold() != "local"
+            or str(metadata.get("sampling_backend", "")).strip().casefold() != "sglang"
+            or (provider.endpoint or "").rstrip("/") != endpoint
+            or model.model_name != served_model
+        ):
+            continue
+        if model.context_window != maximum:
+            raise ConfigurationError(f"local Agent {model_id!r} context_window differs from its Director deployment")
+        clients[model_id] = director_client
+    return clients
+
 class LiveSmokeBackend:
     """Thin wiring layer over the existing collector, trainer, and publisher."""
 
@@ -2515,9 +2601,20 @@ class LiveSmokeBackend:
                         web["retry_backoff_seconds"]
                     ),
                 )
-                opened = open_healthbench_authoritative_tool_registry(
+                open_registry = (
+                    open_healthbench_knowledge_tool_registry
+                    if healthbench_settings["toolset"] == "source_separated_clinical_v1"
+                    else open_healthbench_clinical_tool_registry
+                    if healthbench_settings["toolset"] == "optional_clinical_v1"
+                    else open_healthbench_authoritative_tool_registry
+                )
+                opened = open_registry(
                     **common_open_arguments,
                     pubmed_client=pubmed_client,
+                    **({"external_medical_sources_enabled": True}
+                       if healthbench_settings["external_medical_sources_enabled"] else {}),
+                    **({"clinical_reference_sources_enabled": True}
+                       if healthbench_settings["clinical_reference_sources_enabled"] else {}),
                     max_query_content_tokens=int(
                         healthbench_settings["max_query_content_tokens"]
                     ),
@@ -2544,7 +2641,19 @@ class LiveSmokeBackend:
                     ),
                 }
                 if authoritative:
-                    adapter = HealthBenchAuthoritativeReactExecutionAdapter(
+                    if healthbench_settings["toolset"] == "source_separated_clinical_v1":
+                        adapter_arguments.update(
+                            knowledge_root=_resolve(self.project_root, healthbench_settings["knowledge_root"]),
+                            skillflow_source=_resolve(self.project_root, healthbench_settings["skillflow_source"]),
+                        )
+                    adapter_class = (
+                        HealthBenchKnowledgeReactExecutionAdapter
+                        if healthbench_settings["toolset"] == "source_separated_clinical_v1"
+                        else HealthBenchClinicalReactExecutionAdapter
+                        if healthbench_settings["toolset"] == "optional_clinical_v1"
+                        else HealthBenchAuthoritativeReactExecutionAdapter
+                    )
+                    adapter = adapter_class(
                         **adapter_arguments,
                         require_structured_evidence_artifact=(
                             self.runtime.artifact_communication_profile
@@ -2864,6 +2973,13 @@ class LiveSmokeBackend:
             raise ConfigurationError(
                 "director.max_action_tokens must be a positive integer"
             )
+        raw_max_context_tokens = director.get("max_context_tokens")
+        if raw_max_context_tokens is not None and (
+            type(raw_max_context_tokens) is not int or raw_max_context_tokens < 1
+        ):
+            raise ConfigurationError(
+                "director.max_context_tokens must be a positive integer when supplied"
+            )
         if two_phase_generation:
             if not chat_template_enable_thinking:
                 raise ConfigurationError(
@@ -2995,11 +3111,15 @@ class LiveSmokeBackend:
                 raw_max_action_tokens if two_phase_generation else None
             ),
             repetition_penalty=float(director_repetition_penalty),
+            max_context_tokens=raw_max_context_tokens,
         )
 
         gateway = OpenAICompatibleGateway(
             timeout_seconds=execution_timeout_seconds,
             default_seed=int(experiment["seed"]),
+            local_context_clients=_local_agent_context_clients(
+                graph_config, director, registry, director_client,
+            ),
         )
         runtime = AgentRuntime(
             registry,

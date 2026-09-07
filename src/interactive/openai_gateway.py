@@ -37,6 +37,27 @@ class OpenAICompatibleGatewayError(RuntimeError):
     request_status: str | None = None
 
 
+def _provider_error_fields(error: HTTPError) -> Dict[str, Any]:
+    """Retain only bounded public error fields, never a response or headers."""
+    try:
+        body = json.loads(error.read(16_384))
+    except (OSError, TypeError, ValueError, AttributeError):
+        return {}
+    detail = body.get("error") if isinstance(body, Mapping) else None
+    if isinstance(detail, str):
+        return {"message": detail[:512]}
+    if not isinstance(detail, Mapping):
+        return {}
+    fields: Dict[str, Any] = {}
+    for key, limit in (("type", 128), ("code", 128), ("message", 512)):
+        value = detail.get(key)
+        if isinstance(value, str):
+            fields[key] = value[:limit]
+        elif key == "code" and type(value) is int:
+            fields[key] = value
+    return fields
+
+
 MASKED_UPSTREAM_CONTENT = "[UPSTREAM CONTENT MASKED FOR COMMUNICATION DIAGNOSTIC]"
 
 
@@ -470,13 +491,64 @@ def _healthbench_structured_evidence_references(
 
 
 def _is_healthbench_search_receipt(receipt: Mapping[str, object]) -> bool:
-    return receipt.get("tool_id") == _HEALTHBENCH_SEARCH_TOOL_ID
+    # NECESSARY_PROJECT_ADAPTATION: these are optional project retrieval
+    # capabilities, not native HealthBench tools. Existing authoritative-only
+    # receipts retain their exact projection; calculation is not literature.
+    return receipt.get("tool_id") in {
+        _HEALTHBENCH_SEARCH_TOOL_ID,
+        "healthbench-medrag.search",
+        "healthbench-source.read",
+        "healthbench-drug.lookup",
+        "healthbench-knowledge.search",
+        "healthbench-literature.search",
+        "healthbench-trials.search",
+        "healthbench-bookshelf.search", "healthbench-pdq.search",
+        "healthbench-ahrq.search", "healthbench-terminology.search",
+    }
+
+
+def _healthbench_medrag_evidence(
+    value: Mapping[str, object],
+) -> tuple[Mapping[str, object], ...]:
+    """Reuse authoritative search's projection of unchanged SkillFlow BM25."""
+
+    chunks = value.get("ranked_chunks")
+    identity = value.get("frozen_corpus")
+    if not isinstance(chunks, list) or not isinstance(identity, Mapping):
+        return ()
+    return tuple(
+        {
+            "source_type": "frozen_medical_textbook",
+            "source": identity.get("source"),
+            "document_id": chunk.get("document_id"),
+            "title": chunk.get("title"),
+            "date": None,
+            "url": None,
+            "excerpt": chunk.get("text"),
+            **{
+                key: chunk[key]
+                for key in (
+                    "score", "matched_terms", "rank", "source_id",
+                    "content_type", "version", "offset", "total_characters",
+                    "truncated", "next_offset",
+                )
+                if key in chunk
+            },
+        }
+        for chunk in chunks
+        if isinstance(chunk, Mapping)
+    )
 
 
 def _healthbench_search_candidates(
     receipts: Sequence[Mapping[str, object]],
 ) -> list[tuple[str, str, Mapping[str, object]]]:
-    """Reuse the v2 successful, public search-Observation admission boundary."""
+    """Reuse the successful public retrieval-Observation admission boundary.
+
+    MedRAG's historical ranked_chunks schema is normalized without changing
+    its backend or receipt. Source reads and label lookups use the same
+    provenance-bearing evidence schema as authoritative search.
+    """
     candidates: list[tuple[str, str, Mapping[str, object]]] = []
     for receipt in receipts:
         if not _is_healthbench_search_receipt(receipt):
@@ -485,25 +557,46 @@ def _healthbench_search_candidates(
             continue
         request = receipt.get("request")
         result = receipt.get("result")
-        if not isinstance(request, Mapping) or request.get("action") != "search":
+        expected_action = {
+            _HEALTHBENCH_SEARCH_TOOL_ID: "search",
+            "healthbench-medrag.search": "search",
+            "healthbench-source.read": "read_source",
+            "healthbench-drug.lookup": "drug_lookup",
+            "healthbench-knowledge.search": "search",
+            "healthbench-literature.search": "search",
+            "healthbench-trials.search": "search",
+            "healthbench-bookshelf.search": "search",
+            "healthbench-pdq.search": "search",
+            "healthbench-ahrq.search": "search",
+            "healthbench-terminology.search": "search",
+        }.get(str(receipt.get("tool_id")))
+        if not isinstance(request, Mapping) or request.get("action") != expected_action:
             continue
         if not isinstance(result, Mapping) or result.get("completed") is not True:
             continue
         value = result.get("value", result)
-        if not isinstance(value, Mapping) or value.get("operation") != "search":
+        if not isinstance(value, Mapping) or value.get("operation") != expected_action:
             continue
         query = value.get("query")
         if not isinstance(query, str) or not query.strip():
             arguments = request.get("arguments")
             query = (
-                arguments.get("query")
+                arguments.get(
+                    {"read_source": "source_id", "drug_lookup": "drug_name"}.get(
+                        str(expected_action), "query"
+                    )
+                )
                 if isinstance(arguments, Mapping)
                 else None
             )
         if not isinstance(query, str) or not query.strip():
             continue
-        evidence = value.get("evidence")
-        if not isinstance(evidence, list):
+        evidence = (
+            _healthbench_medrag_evidence(value)
+            if receipt.get("tool_id") == "healthbench-medrag.search"
+            else value.get("evidence")
+        )
+        if not isinstance(evidence, (list, tuple)):
             continue
         for result_item in evidence:
             if isinstance(result_item, Mapping):
@@ -801,10 +894,28 @@ def _healthbench_v3_receipts(
             if not isinstance(document_id, str) or not document_id.strip() or not isinstance(excerpt, str) or not excerpt.strip():
                 continue
             key = (str(result.get("source") or ""), document_id)
+            result_matches = matches
+            if tool_id in {"healthbench-source.read", "healthbench-drug.lookup", "healthbench-knowledge.search",
+                           "healthbench-literature.search", "healthbench-trials.search",
+                           "healthbench-bookshelf.search", "healthbench-pdq.search",
+                           "healthbench-ahrq.search", "healthbench-terminology.search"}:
+                # Reading a document page is not a repeat of the earlier
+                # search snippet. Distinguish new retrieval pages/versions
+                # while still deduplicating the same page across producers.
+                # Historical authoritative-search keys remain unchanged.
+                key = (key[0], json.dumps([
+                    document_id, tool_id, result.get("version"),
+                    result.get("content_type"), result.get("offset"),
+                ], ensure_ascii=False, separators=(",", ":")))
+                result_matches = [
+                    match for match in matches
+                    if " ".join(str(match["evidence_span"]).split())
+                    in " ".join(excerpt.split())
+                ]
             if key in seen_sources:
                 # Do not replay the same source body, but retain a later
                 # producer's new interpretation/qualifier of that source.
-                for match in matches:
+                for match in result_matches:
                     if match["document_id"] != document_id or match["source"] != result.get("source"):
                         continue
                     for interpretation in _healthbench_v3_interpretations(producer_items, match, producer):
@@ -831,6 +942,25 @@ def _healthbench_v3_receipts(
                     "producer_interpretations": [],
                 }
             document = documents[key]
+            # Source-read pagination and SPL version identify what the
+            # producer actually saw. Keep them beside, not as, clinical
+            # claims; full Tool receipts remain unchanged in the trajectory.
+            source_retrieval = {
+                field: result[field]
+                for field in (
+                    "source_id", "content_type", "version", "truncated",
+                    "offset", "next_offset", "total_characters", "published_date",
+                    "pmid", "pmcid", "doi", "full_text_source_id",
+                    "publication_types", "is_open_access", "is_preprint",
+                    "matched_title", "book_title", "full_text_availability",
+                    "text_scope", "collection", "repository_datestamp",
+                )
+                if field in result
+            }
+            if source_retrieval:
+                retrievals = document.setdefault("source_retrieval", [])
+                if source_retrieval not in retrievals:
+                    retrievals.append(source_retrieval)
             excerpts = document["excerpts"]
             assert isinstance(excerpts, list)
             bounded_excerpt = _healthbench_v3_text(" ".join(excerpt.split()), 1600)
@@ -838,7 +968,7 @@ def _healthbench_v3_receipts(
                 excerpts.append(bounded_excerpt)
             spans = document["artifact_cited_spans"]
             assert isinstance(spans, list)
-            for match in matches:
+            for match in result_matches:
                 if match["document_id"] == document_id and match["source"] == result.get("source"):
                     span = _healthbench_v3_text(match["evidence_span"], 1200)
                     if span not in spans and len(spans) < 2:
@@ -1706,6 +1836,7 @@ class OpenAICompatibleGateway:
         default_top_p: float = 1.0,
         default_max_tokens: int = 4096,
         default_seed: Optional[int] = None,
+        local_context_clients: Optional[Mapping[str, Any]] = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -1717,6 +1848,7 @@ class OpenAICompatibleGateway:
         self.default_top_p = float(default_top_p)
         self.default_max_tokens = int(default_max_tokens)
         self.default_seed = default_seed
+        self._local_context_clients = dict(local_context_clients or {})
         if self.default_temperature < 0:
             raise ValueError("default_temperature must be non-negative")
         if not 0 < self.default_top_p <= 1:
@@ -1851,6 +1983,69 @@ class OpenAICompatibleGateway:
             }
         return payload
 
+    def _apply_local_context_budget(
+        self, request: AgentRequest, payload: Dict[str, Any],
+        requested_sampling: Dict[str, Any],
+    ) -> None:
+        client = self._local_context_clients.get(request.model.model_id)
+        if client is None:
+            return
+        configured = payload["max_tokens"]  # Already includes the thinking allowance.
+        input_tokens = None
+        stage = "tokenization"
+        try:
+            # Lazy import avoids the existing collector -> gateway import
+            # cycle. Reuse its Qwen3.5 BatchEncoding/list/tensor handling.
+            from .rollout_collector import _token_ids
+
+            # Direct reuse of the already loaded Director tokenizer and its
+            # exact-input budget. Count the actual Agent messages/template,
+            # not the Director prompt wrapper; preserve every input byte.
+            encoded = client.tokenizer.apply_chat_template(
+                payload["messages"], tokenize=True, add_generation_prompt=True,
+                **payload.get("chat_template_kwargs", {}),
+            )
+            input_tokens = len(_token_ids(encoded, "agent_prompt_token_ids"))
+            stage = "budget"
+            budget = client._context_budget(configured, input_tokens)
+            if budget is None:
+                raise ValueError("local context client has no context limit")
+        except Exception as exc:
+            requested_sampling["request_sent"] = False
+            limit = client.max_context_tokens
+            exhausted = input_tokens is not None and limit is not None and input_tokens >= limit
+            if exhausted:
+                requested_sampling["context_budget"] = {
+                    "profile": "sglang-exact-input-context-budget.v1",
+                    "max_context_tokens": client.max_context_tokens,
+                    "input_tokens": input_tokens,
+                    "configured_max_new_tokens": configured,
+                    "effective_max_new_tokens": 0,
+                    "context_limited": True,
+                    "input_truncated": False,
+                }
+            else:
+                requested_sampling["context_preflight_error"] = {
+                    "stage": stage, "error_type": type(exc).__name__,
+                    "input_tokens": input_tokens, "context_limit": limit,
+                    "configured_output_tokens": configured,
+                }
+            error = OpenAICompatibleGatewayError(
+                ("local Agent context exhausted" if exhausted else
+                 f"local Agent context {stage} failed ({type(exc).__name__})")
+                + f": input_tokens={input_tokens}, configured_output_tokens={configured}, "
+                f"context_limit={limit}; provider request was not sent"
+            )
+            error.requested_sampling = requested_sampling
+            error.request_status = "failed"
+            error.provider_id = request.provider.provider_id
+            error.model_id = request.model.model_id
+            raise error from exc
+        payload["max_tokens"] = budget["effective_max_new_tokens"]
+        requested_sampling["max_tokens"] = payload["max_tokens"]
+        requested_sampling["context_budget"] = budget
+        requested_sampling["request_sent"] = True
+
     async def generate(self, request: AgentRequest) -> AgentResponse:
         endpoint = request.provider.endpoint
         if not endpoint:
@@ -1893,9 +2088,11 @@ class OpenAICompatibleGateway:
         ):
             requested_sampling["seed"] = scientific_generation_seed
             requested_sampling["backend_seed"] = payload.get("seed")
+        self._apply_local_context_budget(request, payload, requested_sampling)
         url = endpoint.rstrip("/") + "/chat/completions"
 
         last_error: BaseException | None = None
+        last_provider_error: Dict[str, Any] = {}
         started_at = time.monotonic()
         for attempt in range(self.max_retries + 1):
             try:
@@ -1918,6 +2115,7 @@ class OpenAICompatibleGateway:
                 return AgentResponse(parsed.text, metadata)
             except HTTPError as exc:
                 last_error = exc
+                last_provider_error = _provider_error_fields(exc)
                 retryable = exc.code in {408, 409, 425, 429} or exc.code >= 500
                 if not retryable or attempt >= self.max_retries:
                     break
@@ -1939,6 +2137,8 @@ class OpenAICompatibleGateway:
         # provider payload.  It states what was requested, not what a failed
         # server necessarily applied.
         error.requested_sampling = requested_sampling
+        if last_provider_error:
+            requested_sampling["provider_error"] = last_provider_error
         error.request_status = "failed"
         error.provider_id = request.provider.provider_id
         error.model_id = request.model.model_id

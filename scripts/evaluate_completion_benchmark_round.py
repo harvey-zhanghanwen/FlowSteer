@@ -36,6 +36,10 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 import evaluate_hotpotqa_round as hotpot_round
+from healthbench_candidate_skill_profile import (
+    build_candidate_prompt_priors, load_candidate_skill_profile,
+    validate_candidate_skill_run_config,
+)
 from scripts.prompts.prompt import ANSWER_GENERATION_PROMPT
 from scripts.formatter import XmlFormatter
 from scripts.operator_analysis import AnswerGenerateOp
@@ -290,6 +294,15 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
     section_name, bounded = _evaluation_section(config)
     dataset_key = str(bounded["dataset_key"])
     specification = _BENCHMARKS[dataset_key]
+    candidate = config.get("candidate_skill_evaluation", {})
+    if not isinstance(candidate, Mapping) or type(candidate.get("enabled", False)) is not bool:
+        raise ConfigurationError("candidate_skill_evaluation.enabled must be boolean")
+    if candidate.get("enabled", False):
+        if dataset_key != "healthbench_professional":
+            raise ConfigurationError("candidate profile is HealthBench-specific")
+        if not isinstance(candidate.get("profile_path"), str) or not candidate["profile_path"].strip():
+            raise ConfigurationError("candidate evaluation requires profile_path")
+        validate_candidate_skill_run_config(config)
     experiment = _mapping(config.get("experiment"), "experiment")
     data = _mapping(config.get("data"), "data")
     director = _mapping(config.get("director"), "director")
@@ -449,6 +462,26 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                 and bounded.get("direct_allowed_tools")
                 == [expected_healthbench_tool]
             )
+            optional_clinical = bool(
+                isinstance(tool_runtime, Mapping)
+                and tool_runtime.get("toolset") in {"optional_clinical_v1", "source_separated_clinical_v1"}
+            )
+            if optional_clinical:
+                # Necessary adaptation of the existing paired-tool check:
+                # every Direct/Graph arm sees the same optional registry.
+                checks["healthbench.direct_allowed_tools"] = (
+                    bounded.get("direct_allowed_tools") == [
+                        "healthbench-authoritative.search", "healthbench-medrag.search",
+                        "healthbench-source.read", "healthbench-drug.lookup",
+                        "healthbench-computation.calculator",
+                    ] + (["healthbench-knowledge.search"]
+                         if tool_runtime.get("toolset") == "source_separated_clinical_v1" else [])
+                    + (["healthbench-literature.search", "healthbench-trials.search"]
+                       if tool_runtime.get("external_medical_sources_enabled") is True else [])
+                    + (["healthbench-bookshelf.search", "healthbench-pdq.search",
+                        "healthbench-ahrq.search", "healthbench-terminology.search"]
+                       if tool_runtime.get("clinical_reference_sources_enabled") is True else [])
+                )
             checks["healthbench_tool_runtime.enabled"] = bool(
                 isinstance(tool_runtime, Mapping)
                 and tool_runtime.get("enabled") is True
@@ -489,6 +522,22 @@ def validate_completion_benchmark_config(config: Mapping[str, Any]) -> None:
                 checks[
                     "healthbench_tool_runtime.execution_profile_allowlist"
                 ] = raw_execution_profile_allowlist == admitted_profiles
+                if optional_clinical:
+                    optional_profiles = [
+                        {"execution_mode": "reasoning", "allowed_tools": []},
+                        *({"execution_mode": "react", "allowed_tools": [tool_id]}
+                          for tool_id in bounded.get("direct_allowed_tools", ())),
+                        direct_profile,
+                    ]
+                    checks["healthbench_tool_runtime.execution_profile_allowlist"] = (
+                        protocol_equivalent_to_direct is False
+                        # Reuse the existing paired full-toolset profile
+                        # as an alternative to source-specific profiles.
+                        # Both preserve the exact Direct tool condition.
+                        and raw_execution_profile_allowlist in (
+                            optional_profiles, admitted_profiles,
+                        )
+                    )
         else:
             checks["healthbench_tool_runtime.disabled"] = not isinstance(
                 tool_runtime, Mapping
@@ -2037,7 +2086,10 @@ async def _direct_one(
                     "HealthBench Direct ReAct Agent has no configured evidence "
                     "ToolRegistry"
                 )
-            if tuple(tool_registry.resource_ids) != expected_tools:
+            # ToolRegistry exposes sorted IDs; configuration order is not a
+            # capability difference. Preserve exact membership/multiplicity,
+            # then retain the frozen configuration order in identity receipts.
+            if tuple(sorted(tool_registry.resource_ids)) != tuple(sorted(expected_tools)):
                 raise CompletionBenchmarkRoundError(
                     "HealthBench Direct ReAct Tool resources differ from config"
                 )
@@ -2106,7 +2158,8 @@ async def _direct_one(
                 "tool_version": str(
                     backend.config["experiment"]["tool_version"]
                 ),
-                "tool_resource_ids": list(tool_registry.resource_ids),
+                "tool_resource_ids": list(expected_tools),
+                "registered_tool_resource_ids": list(tool_registry.resource_ids),
                 "model_id": model_id,
                 "provider_id": provider.provider_id,
                 "provider_model": model.model_name,
@@ -4866,6 +4919,61 @@ def _existing_trajectory_checkpoint(
     return existing
 
 
+def _finish_collection_arm(
+    selected, records, arm, dataset_key, config, failures, manifest, paths,
+):
+    """Operational split only: reuse native receipt metrics and aggregation.
+
+    A GPU worker publishes only its own arm. It cannot invent the other arm's
+    zero scores, paired deltas, or Stable Zero results. Original collectors
+    still own sampling, completion admission, evaluator and exact resume.
+    """
+    projected = []
+    admitted = set()
+    for task in selected:
+        value = records.get(task.task_id)
+        valid, metrics = _metrics(value, dataset_key)
+        row = {"available": value is not None, "valid": valid, **metrics}
+        if value is not None:
+            row.update(explicit_finish=value.get("explicit_finish"),
+                       termination_reason=value.get("termination_reason"))
+        if valid or (arm == "agentgraph" and value is not None
+                     and dataset_key in {"aime_2026", "healthbench_professional"}
+                     and _is_reportable_noninteractive_terminal_failure(row)):
+            admitted.add(task.task_id)
+        projected.append({arm: row})
+    if arm == "direct":
+        _, bounded = _evaluation_section(config)
+        if bounded.get("freeze_direct_react_exhaustion_as_strict_zero") is True:
+            admitted.update(_bounded_direct_react_exhaustion_task_ids(
+                failures, task_ids={task.task_id for task in selected},
+            ))
+    metrics = dict(_aggregate(projected, arm, dataset_key))
+    complete = len(admitted) == len(selected)
+    if not complete:
+        # Missing operational results are not measured zero scores. The
+        # completed-only mean remains labeled with its actual valid count.
+        for key in tuple(metrics):
+            if key.startswith("strict_"):
+                metrics[key] = None
+    manifest.update(
+        status="collection_completed" if complete else "collection_completed_with_operational_failures",
+        collection_arm=arm, collection_arm_completed=complete,
+        collection_admitted_count=len(admitted), metrics={arm: metrics},
+        completed_at=_utc_now(),
+    )
+    _write_json(paths["manifest"], manifest)
+    _write_json(paths["report_json"], {
+        "schema_version": "flowsteer.completion_benchmark.collection_arm_report.v1",
+        "condition_id": config["experiment"]["condition_id"],
+        "dataset_key": dataset_key, "collection_arm": arm,
+        "sample_count": len(selected), "collection_arm_completed": complete,
+        "metrics": {arm: metrics}, "paired_comparison_available": False,
+        "manifest_path": str(paths["manifest"]), "completed_at": manifest["completed_at"],
+    })
+    return manifest
+
+
 async def run_completion_benchmark_round(
     config_path: str | Path,
     *,
@@ -4873,7 +4981,14 @@ async def run_completion_benchmark_round(
     prepare_only: bool = False,
     canary_only: bool = False,
     direct_only: bool = False,
+    collection_arm: str = "both",
 ) -> Mapping[str, Any]:
+    if collection_arm not in {"both", "direct", "agentgraph"}:
+        raise CompletionBenchmarkRoundError("unsupported collection_arm")
+    if collection_arm != "both" and (direct_only or canary_only):
+        raise CompletionBenchmarkRoundError(
+            "collection_arm cannot be combined with direct_only or canary_only"
+        )
     if direct_only and (prepare_only or canary_only):
         raise CompletionBenchmarkRoundError(
             "direct_only cannot be combined with prepare_only or canary_only"
@@ -4890,6 +5005,25 @@ async def run_completion_benchmark_round(
     dataset_key = str(bounded["dataset_key"])
     dataset_registry_validation = _validate_runtime_dataset_registry(config, root)
     paths = _paths(config, root)
+    candidate_profile = None
+    candidate_priors: tuple[dict[str, Any], ...] = ()
+    if config.get("candidate_skill_evaluation", {}).get("enabled", False):
+        if collection_arm != "agentgraph":
+            raise ConfigurationError("candidate evaluation requires collection_arm=agentgraph")
+        candidate_profile = load_candidate_skill_profile(
+            _resolve(root, config["candidate_skill_evaluation"]["profile_path"]),
+            run_config=config, dataset_key=dataset_key,
+        )
+        candidate_priors = build_candidate_prompt_priors(candidate_profile, dataset_key=dataset_key)
+    # A resumed condition must not silently change or remove suggestions.
+    if paths["manifest"].exists():
+        previous = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+        prior_candidate = previous.get("candidate_skill_evaluation")
+        prior_profile = (
+            prior_candidate.get("profile") if isinstance(prior_candidate, Mapping) else None
+        )
+        if prior_profile != candidate_profile:
+            raise ConfigurationError("candidate profile changed; use a new condition/output directory")
     selected = _select_tasks(config, root, paths["selected"])
     direct_reference = _healthbench_direct_reference(config, root, selected)
     failures = _read_jsonl(paths["failures"])
@@ -4943,7 +5077,15 @@ async def run_completion_benchmark_round(
         },
         "training_enabled": False,
         "optimizer_updates": 0,
+        "candidate_skill_evaluation": {
+            "enabled": bool(candidate_priors),
+            "profile": candidate_profile,
+            "prompt_priors": list(candidate_priors),
+            "publication_performed": False,
+            "mode": "candidate_prompt_prior" if candidate_priors else "memory_off",
+        },
         "direct_only": direct_only,
+        "collection_arm": collection_arm,
         "direct_reference": direct_reference["receipt"] if direct_reference else None,
         "agentgraph_execution_profile_allowlist": (
             list(
@@ -5103,22 +5245,25 @@ async def run_completion_benchmark_round(
                 backend.judge_model,
             )
         )
-    manifest["status"] = "direct_baseline"
-    _write_json(paths["manifest"], manifest)
-    direct = await _collect_direct(
-        backend,
-        active,
-        config,
-        root,
-        paths["direct"],
-        failures,
-        manifest,
-        paths["manifest"],
-        direct_reference=direct_reference,
-    )
-    _atomic_jsonl(paths["failures"], failures)
+    direct = {}
+    if collection_arm != "agentgraph":
+        manifest["status"] = "direct_baseline"
+        _write_json(paths["manifest"], manifest)
+        direct = await _collect_direct(
+            backend,
+            active,
+            config,
+            root,
+            paths["direct"],
+            failures,
+            manifest,
+            paths["manifest"],
+            direct_reference=direct_reference,
+        )
+        _atomic_jsonl(paths["failures"], failures)
     if (
-        dataset_key == "healthbench_professional"
+        collection_arm != "agentgraph"
+        and dataset_key == "healthbench_professional"
         and bounded.get("direct_execution_mode") == "react"
         and len(direct) != len(active)
     ):
@@ -5152,6 +5297,10 @@ async def run_completion_benchmark_round(
         )
         _write_json(paths["manifest"], manifest)
 
+    if collection_arm == "direct":
+        return _finish_collection_arm(
+            active, direct, "direct", dataset_key, config, failures, manifest, paths,
+        )
     if direct_only:
         manifest["status"] = "paired_report_from_existing_agentgraph"
         trajectories = _existing_trajectory_checkpoint(
@@ -5180,9 +5329,14 @@ async def run_completion_benchmark_round(
             additional_trajectory_identity_match=graph_resume_identity_match,
             project_root=root,
             run_attempt_id=run_attempt_id,
+            **({"prompt_priors": candidate_priors} if candidate_priors else {}),
         )
         _atomic_jsonl(paths["failures"], failures)
 
+    if collection_arm == "agentgraph":
+        return _finish_collection_arm(
+            active, trajectories, "agentgraph", dataset_key, config, failures, manifest, paths,
+        )
     rows = _paired_rows(active, direct, trajectories, dataset_key)
     _atomic_jsonl(paths["paired"], rows)
     metric_name = str(_BENCHMARKS[dataset_key]["primary_metric"])
@@ -5281,6 +5435,10 @@ def build_parser() -> argparse.ArgumentParser:
             "existing frozen AgentGraph checkpoint"
         ),
     )
+    parser.add_argument(
+        "--collection-arm", choices=("both", "direct", "agentgraph"), default="both",
+        help="collect only one independent arm; no paired report or other-arm execution",
+    )
     return parser
 
 
@@ -5294,6 +5452,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 prepare_only=bool(args.prepare_only),
                 canary_only=bool(args.canary_only),
                 direct_only=bool(args.direct_only),
+                collection_arm=args.collection_arm,
             )
         )
     except (

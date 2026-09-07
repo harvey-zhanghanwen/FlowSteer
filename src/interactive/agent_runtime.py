@@ -953,7 +953,14 @@ class AgentRuntime:
 
         registered = set(self._registered_execution_profiles_unfiltered())
         unregistered = tuple(
-            profile for profile in normalized if profile not in registered
+            profile for profile in normalized
+            if profile not in registered
+            and not (
+                profile[0] in {"react", "coding"}
+                and len(profile[1]) > 1
+                and all((profile[0], (tool_id,)) in registered
+                        for tool_id in profile[1])
+            )
         )
         if unregistered:
             raise ValueError(
@@ -978,7 +985,16 @@ class AgentRuntime:
         if self._execution_profile_allowlist is None:
             return registered
         allowed = set(self._execution_profile_allowlist)
-        return tuple(profile for profile in registered if profile in allowed)
+        # NECESSARY_ADAPTATION: the upstream bounded Tool executor already
+        # accepts multiple allowed_tools. Expose explicitly configured bundles
+        # of registered resources without enumerating the power set or changing
+        # historical single-Tool action domains. Validation above checks each
+        # member's executor, availability and dataset scope.
+        return (
+            tuple(profile for profile in registered if profile in allowed)
+            + tuple(profile for profile in self._execution_profile_allowlist
+                    if profile not in registered)
+        )
 
     def model_supports_execution_profile(
         self,

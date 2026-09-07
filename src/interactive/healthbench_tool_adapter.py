@@ -251,6 +251,18 @@ class FrozenMedRAGBM25Corpus:
                         "score": float(score),
                         "matched_terms": matched_terms,
                         "text": text[:500],
+                        # SkillFlow's ranking and 500-character search excerpt
+                        # stay unchanged. Reuse the existing read_source page
+                        # fields so a cut sentence is not presented as a full
+                        # source passage. These values come from the actual
+                        # loaded chunk, not an inferred snippet length.
+                        "source_id": f"medrag:{self._document_ids[document_id]}",
+                        "content_type": "frozen_textbook_chunk",
+                        "version": self.source_revision,
+                        "offset": 0,
+                        "total_characters": len(text),
+                        "truncated": len(text) > 500,
+                        "next_offset": 500 if len(text) > 500 else None,
                     }
                 )
             return ranked_chunks
@@ -429,10 +441,13 @@ def build_healthbench_medrag_tool_registry(
                 "minLength": 1,
                 "description": (
                     "Use specific clinical entities and concepts rather than the "
-                    "full conversation. Include a standard medical synonym or "
-                    "expanded abbreviation when useful. If an earlier search "
-                    "returned no ranked chunks, reformulate the query with "
-                    "different medical terminology instead of repeating it."
+                    "full conversation. Preserve the conversation's original names "
+                    "and unresolved abbreviations; use a synonym or expansion only "
+                    "when source evidence supports the equivalence. No ranked chunks "
+                    "means nothing was retrieved, not that the entity does not exist. "
+                    "Search returns bounded excerpts. If a truncated passage lacks "
+                    "the context needed to interpret a relation, use its exact "
+                    "source_id with read_source when that tool is available."
                 ),
             },
         },
@@ -482,6 +497,13 @@ def build_healthbench_medrag_tool_registry(
                                 "items": {"type": "string"},
                             },
                             "text": {"type": "string"},
+                            "source_id": {"type": "string"},
+                            "content_type": {"type": "string"},
+                            "version": {"type": "string"},
+                            "offset": {"type": "integer", "minimum": 0},
+                            "total_characters": {"type": "integer", "minimum": 0},
+                            "truncated": {"type": "boolean"},
+                            "next_offset": {"type": ["integer", "null"]},
                         },
                     },
                 },

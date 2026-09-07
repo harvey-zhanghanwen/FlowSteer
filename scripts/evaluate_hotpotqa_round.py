@@ -872,6 +872,7 @@ async def _collect_graph(
     ] = None,
     project_root: Optional[Path] = None,
     run_attempt_id: Optional[str] = None,
+    prompt_priors: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, dict[str, Any]]:
     bounded = _mapping(config["hotpotqa_evaluation"], "hotpotqa_evaluation")
     experiment = _mapping(config["experiment"], "experiment")
@@ -1033,6 +1034,9 @@ async def _collect_graph(
                     }
                     if progress_callback is not None:
                         collect_kwargs["progress_callback"] = progress_callback
+                    if prompt_priors:
+                        collect_kwargs["prompt_priors"] = prompt_priors
+                        collect_kwargs["forced_probe"] = True
                     invocation = backend.collect(
                         task,
                         0,

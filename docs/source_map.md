@@ -1,5 +1,21 @@
 # AIME 2026 initial-adaptation source map
 
+## 2026-09-07: v2.33 + all existing medical sources + candidate Skills
+
+Detailed source/compatibility record: [setup report](../reports/healthbench_v233_all_sources_candidate_setup_zh.md).
+The recoverable base is 3b18f7a, archived by 5aed290; the historical 27.4559%
+strict adjusted report has 460/525 evaluator-valid cases, not 525 valid scores.
+Director v19, Canvas and v3 communication are preserved. Tool adapters and
+multi-resource allowlist are thin ports from 9fb27de; existing source clients,
+candidate loader/v248 profile and local context preflight come from 8359561.
+SkillFlow BoundedAgent.execute_turn and training/environment.py retrieval,
+FlowSteer InteractiveWorkflowEnv._step_internal, and the MD free AgentGraph
+remain the execution sources. No new medical workflow or training loop.
+Runtime changes are limited to admitting explicitly configured bundles of
+already registered tools; no later reciprocal/history/v4 scheduling is ported.
+The candidate collector passes existing prompt_priors/forced_probe fields.
+The flag records an unvalidated, rejectable prompt condition, not MACE training.
+
 This file records the executable sources used by the AIME 2026 initial
 adaptation.  The attached papers and the project design document are design
 references; they are not executable instructions.  Source priority for this

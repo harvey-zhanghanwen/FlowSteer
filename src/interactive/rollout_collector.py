@@ -483,6 +483,7 @@ class SGLangReceiptDirectorClient:
         max_reasoning_tokens: Optional[int] = None,
         max_action_tokens: Optional[int] = None,
         repetition_penalty: float = 1.0,
+        max_context_tokens: Optional[int] = None,
     ) -> None:
         if not hasattr(tokenizer, "apply_chat_template") or not hasattr(tokenizer, "decode"):
             raise ValueError("tokenizer must expose apply_chat_template() and decode()")
@@ -541,6 +542,10 @@ class SGLangReceiptDirectorClient:
             type(max_action_tokens) is not int or max_action_tokens <= 0
         ):
             raise ValueError("max_action_tokens must be a positive integer")
+        if max_context_tokens is not None and (
+            type(max_context_tokens) is not int or max_context_tokens <= 0
+        ):
+            raise ValueError("max_context_tokens must be a positive integer")
         if not two_phase_generation and (
             max_reasoning_tokens is not None or max_action_tokens is not None
         ):
@@ -579,6 +584,7 @@ class SGLangReceiptDirectorClient:
         self.max_reasoning_tokens = int(max_reasoning_tokens or max_tokens)
         self.max_action_tokens = int(max_action_tokens or max_tokens)
         self.repetition_penalty = float(repetition_penalty)
+        self.max_context_tokens = max_context_tokens
 
     @property
     def generate_url(self) -> str:
@@ -793,7 +799,81 @@ class SGLangReceiptDirectorClient:
             payload["sampling_params"]["json_schema"] = resolved_action_schema
         if adapter_name is not None:
             payload["lora_path"] = adapter_name
+        if not self.two_phase_generation:
+            payload = self._with_context_budget(payload, self.max_tokens)
         return payload
+
+    def _context_budget(
+        self, configured_max_new_tokens: int, input_tokens: int,
+    ) -> Optional[dict[str, Any]]:
+        """Measure generation space without dropping task or receipt tokens.
+
+        NECESSARY_PROJECT_ADAPTATION: SkillFlow's two-phase rollout is reused,
+        but its fixed phase limits do not account for SGLang's served context
+        limit after the ACTION chat template adds generated reasoning. Only
+        the output ceiling changes; the exact submitted input remains intact.
+        """
+        if self.max_context_tokens is None:
+            return None
+        remaining = self.max_context_tokens - input_tokens
+        if remaining <= 0:
+            raise ReceiptValidationError(
+                "Director context exhausted before generation: "
+                f"input_tokens={input_tokens}, "
+                f"max_context_tokens={self.max_context_tokens}, "
+                "remaining_output_tokens<=0; input was not truncated"
+            )
+        effective = min(configured_max_new_tokens, remaining)
+        return {
+            "profile": "sglang-exact-input-context-budget.v1",
+            "max_context_tokens": self.max_context_tokens,
+            "input_tokens": input_tokens,
+            "configured_max_new_tokens": configured_max_new_tokens,
+            "effective_max_new_tokens": effective,
+            "context_limited": effective < configured_max_new_tokens,
+            "input_truncated": False,
+        }
+
+    def _with_context_budget(
+        self, payload: Mapping[str, Any], configured_max_new_tokens: int,
+    ) -> dict[str, Any]:
+        value = dict(payload)
+        budget = self._context_budget(
+            configured_max_new_tokens,
+            len(_token_ids(payload.get("input_ids"), "prompt_token_ids")),
+        )
+        if budget is not None:
+            value["sampling_params"] = {
+                **dict(payload["sampling_params"]),
+                "max_new_tokens": budget["effective_max_new_tokens"],
+            }
+            value["_flowsteer_request_metadata"] = {
+                **dict(payload["_flowsteer_request_metadata"]),
+                "context_budget": budget,
+            }
+        return value
+
+    def _validate_context_budget(
+        self, payload: Mapping[str, Any], configured_max_new_tokens: int,
+    ) -> Optional[dict[str, Any]]:
+        budget = self._context_budget(
+            configured_max_new_tokens,
+            len(_token_ids(payload.get("input_ids"), "prompt_token_ids")),
+        )
+        expected = (
+            configured_max_new_tokens if budget is None
+            else budget["effective_max_new_tokens"]
+        )
+        sampling = payload.get("sampling_params")
+        if not isinstance(sampling, Mapping) or sampling.get("max_new_tokens") != expected:
+            raise ReceiptValidationError("Director phase effective token budget differs from the client")
+        metadata = payload.get("_flowsteer_request_metadata")
+        if budget is not None and (
+            not isinstance(metadata, Mapping)
+            or metadata.get("context_budget") != budget
+        ):
+            raise ReceiptValidationError("Director phase context budget receipt differs from its exact input")
+        return budget
 
     def request_payload(
         self,
@@ -1110,6 +1190,9 @@ class SGLangReceiptDirectorClient:
             ),
             "two_phase_generation": True,
         }
+        reasoning_payload = self._with_context_budget(
+            reasoning_payload, self.max_reasoning_tokens
+        )
         reasoning_value, reasoning_latency_ms, reasoning_attempt_count = (
             await self._post_one_with_retries(reasoning_payload)
         )
@@ -1139,6 +1222,9 @@ class SGLangReceiptDirectorClient:
             "generation_seed": generation_seed,
             "two_phase_generation": True,
         }
+        action_payload = self._with_context_budget(
+            action_payload, self.max_action_tokens
+        )
         action_value, action_latency_ms, action_attempt_count = (
             await self._post_one_with_retries(action_payload)
         )
@@ -1234,10 +1320,7 @@ class SGLangReceiptDirectorClient:
             raise ReceiptValidationError(
                 "REASONING phase must not carry the ACTION JSON Schema"
             )
-        if sampling.get("max_new_tokens") != self.max_reasoning_tokens:
-            raise ReceiptValidationError(
-                "REASONING phase token budget differs from the client"
-            )
+        context_budget = self._validate_context_budget(payload, self.max_reasoning_tokens)
         if sampling.get("repetition_penalty") != self.repetition_penalty:
             raise ReceiptValidationError(
                 "REASONING phase repetition penalty differs from the client"
@@ -1316,13 +1399,16 @@ class SGLangReceiptDirectorClient:
             "generation_seed": request_metadata.get("generation_seed"),
             "backend_sampling_seed": sampling.get("sampling_seed"),
             "chat_template_enable_thinking": True,
-            "max_new_tokens": self.max_reasoning_tokens,
+            "max_new_tokens": sampling["max_new_tokens"],
             "repetition_penalty": self.repetition_penalty,
             "server_weight_version": server_weight_version,
             "adapter_name": adapter_name,
             "requested_lora_path": payload.get("lora_path"),
             "receipt_verified": True,
         }
+        if context_budget is not None:
+            receipt["context_budget"] = context_budget
+            receipt["configured_max_new_tokens"] = self.max_reasoning_tokens
         return receipt, reasoning_text
 
     @staticmethod
@@ -1440,6 +1526,13 @@ class SGLangReceiptDirectorClient:
                 "single_autoregressive_receipt"
             ),
         }
+        for field in (
+            "context_budget", "configured_max_reasoning_tokens",
+            "configured_max_action_tokens", "configured_max_new_tokens",
+            "max_new_tokens",
+        ):
+            if field in metadata:
+                receipt[field] = metadata[field]
         if metadata.get("action_target_domain_version") is not None:
             receipt["action_json_schema_version"] = metadata.get(
                 "action_json_schema_version"
@@ -2371,12 +2464,10 @@ class SGLangReceiptDirectorClient:
             raise ReceiptValidationError(
                 "Director repetition penalty differs from the client"
             )
-        if self.two_phase_generation and sampling.get(
-            "max_new_tokens"
-        ) != self.max_action_tokens:
-            raise ReceiptValidationError(
-                "ACTION phase token budget differs from the client"
-            )
+        context_budget = self._validate_context_budget(
+            receipt_payload,
+            self.max_action_tokens if self.two_phase_generation else self.max_tokens,
+        )
         prompt_count = _exact_count(meta_info.get("prompt_tokens"), "prompt_tokens")
         completion_count = _exact_count(
             meta_info.get("completion_tokens"), "completion_tokens"
@@ -2536,6 +2627,12 @@ class SGLangReceiptDirectorClient:
                 "repetition_penalty": self.repetition_penalty,
                 "receipt_verified": True,
             }
+        if context_budget is not None:
+            metadata.update({
+                "context_budget": context_budget,
+                "max_new_tokens": sampling["max_new_tokens"],
+                "configured_max_new_tokens": context_budget["configured_max_new_tokens"],
+            })
         if self.two_phase_generation:
             assert reasoning_receipt is not None
             action_latency_ms = two_phase_context.get("action_latency_ms")
@@ -2566,7 +2663,7 @@ class SGLangReceiptDirectorClient:
                 "generation_seed": generation_seed,
                 "backend_sampling_seed": sampling.get("sampling_seed"),
                 "chat_template_enable_thinking": False,
-                "max_new_tokens": self.max_action_tokens,
+                "max_new_tokens": sampling["max_new_tokens"],
                 "repetition_penalty": self.repetition_penalty,
                 "server_weight_version": server_weight_version,
                 "adapter_name": adapter_name,
@@ -2575,6 +2672,9 @@ class SGLangReceiptDirectorClient:
                 "action_schema_branch": action_schema_branch,
                 "receipt_verified": True,
             }
+            if context_budget is not None:
+                action_phase_receipt["context_budget"] = context_budget
+                action_phase_receipt["configured_max_new_tokens"] = self.max_action_tokens
             metadata.update(
                 {
                     "action_phase_chat_template_enable_thinking": False,
@@ -2584,8 +2684,8 @@ class SGLangReceiptDirectorClient:
                     },
                     "generation_request_count": 2,
                     "generation_strategy": _TWO_PHASE_GENERATION_STRATEGY,
-                    "max_reasoning_tokens": self.max_reasoning_tokens,
-                    "max_action_tokens": self.max_action_tokens,
+                    "max_reasoning_tokens": reasoning_receipt["max_new_tokens"],
+                    "max_action_tokens": sampling["max_new_tokens"],
                     "phase_logprob_factorization": (
                         "p(reasoning|base_prompt)*"
                         "p(action|base_prompt,reasoning)"
@@ -2601,6 +2701,9 @@ class SGLangReceiptDirectorClient:
                     "two_phase_generation": True,
                 }
             )
+            if context_budget is not None:
+                metadata["configured_max_reasoning_tokens"] = self.max_reasoning_tokens
+                metadata["configured_max_action_tokens"] = self.max_action_tokens
         if action_target_domain_version is not None:
             metadata["action_target_domains_json"] = action_target_domains_json
             metadata["action_target_domain_version"] = action_target_domain_version

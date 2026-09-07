@@ -1,5 +1,22 @@
 # AIME 2026 initial-adaptation log
 
+## 2026-09-07: HealthBench v2.33 all-source candidate five-task replay
+
+User scope: historical best reproducible architecture, all existing sources,
+candidate Skills, the same five HealthBench tasks; no training or full525.
+See [versioned setup and source record](../reports/healthbench_v233_all_sources_candidate_setup_zh.md).
+The original v2.33 search-only adapter is incompatible with optional read,
+drug and calculator actions. We reuse the existing clinical adapter and disable
+mandatory initial search/refinement; tool/turn/time budgets are unchanged.
+All-source metadata is projected through the existing v3 envelope. The original
+model capability boundary remains in force; unsupported remote models are not
+silently promoted to ReAct. Actual-tokenizer context admission is retained.
+Candidate profile v248 is injected through the existing collector interface;
+it contains no task-specific answer or rubric. Output remains a full response.
+Prepare-only passed for the frozen five IDs; offline collector tests verify
+all three rejectable priors reach collect, with no ACTIVE store or optimizer.
+Official scores are pending execution and are not predicted here.
+
 ## Scope
 
 This log covers only the inference/evaluation adaptation needed to make the

@@ -1450,6 +1450,29 @@ def _evidence_schema() -> dict[str, object]:
             "url": {"type": ["string", "null"]},
             "excerpt": {"type": "string"},
             "rank": {"type": "integer", "minimum": 1},
+            "source_id": {"type": "string"},
+            "version": {"type": "string"},
+            "content_type": {"type": "string"},
+            "offset": {"type": "integer", "minimum": 0},
+            "total_characters": {"type": "integer", "minimum": 0},
+            "truncated": {"type": "boolean"},
+            "next_offset": {"type": ["integer", "null"], "minimum": 0},
+            # Optional publication metadata from the new external adapters.
+            "pmid": {"type": ["string", "null"]},
+            "pmcid": {"type": ["string", "null"]},
+            "doi": {"type": ["string", "null"]},
+            "full_text_source_id": {"type": ["string", "null"]},
+            "publication_types": {"type": "array", "items": {"type": "string"}},
+            "is_open_access": {"type": "boolean"},
+            "is_preprint": {"type": "boolean"},
+            # Bookshelf search metadata is not chapter text; source/version
+            # distinctions survive source.read and downstream projections.
+            "matched_title": {"type": "string"},
+            "book_title": {"type": ["string", "null"]},
+            "full_text_availability": {"type": "string"},
+            "text_scope": {"type": "string"},
+            "collection": {"type": "string"},
+            "repository_datestamp": {"type": ["string", "null"]},
             # SkillFlow BM25 fields are present only on frozen-textbook
             # evidence.  PubMed evidence therefore keeps them optional under
             # the shared evidence schema.
