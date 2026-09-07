@@ -1256,3 +1256,17 @@ metadata达到原192-token启动门槛，真实重复正文仍按原24-token/3�
 - **保持原样**：v248候选profile/SkillFlow trigger-plan-pitfall表达、所有ReAct
   工具/模型/预算、证据completion适配、官方rubric evaluator。只另建版本
   config/test/protocol；未训练、未发布ACTIVE Skill。
+
+### v2.49运行前补充：本地Agent上下文预算和400可观测性
+
+`OpenAICompatibleGateway` **直接复用**已存在的
+`SGLangReceiptDirectorClient._context_budget`，由真实factory的同一tokenizer/
+director_client注入，仅匹配同endpoint、served model、local SGLang与context。
+前者算法已按SkillFlow Qwen3.5聊天模板/输出预算实现，此处只做Agent请求入口
+薄接线，不另造tokenizer，不裁输入、引文或ReAct观察。opt-in配置为
+`agent_graph.local_agent_context_budget=true`，默认旧行为不变；API模型不使用
+Qwen tokenizer计数。计数与有效输出上限进入已有requested_sampling receipt。
+
+Gateway现有HTTPError分支补充有界provider error type/code/message，沿已有
+React model_calls失败记录传递；不记录HTTP headers或完整正文。历史2014…
+请求缺正文/失败payload，因此只能报告上下文超限高度可疑，不能倒填具体原因。

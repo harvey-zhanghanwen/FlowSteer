@@ -23,9 +23,23 @@ v249使用已有开关false，FINISH仍合法，只恢复原本合法的ADD/MODI
 ## 固定条件
 
 与v248相同的新五题3533…、9a16…、fa30…、2014…、cd13…；不再换题。
-沿用原模型池、thinking、种子、并发、生成/工具/900秒预算和官方reference
+沿用原模型池、thinking、种子、并发、配置的生成/工具/900秒预算和官方reference
 evaluator；profile仍为healthbench.orchestration-candidates.v2.48，不假装
 它已经自动学习或发布。无训练、LoRA、MACE、Bayesian、Skill evolution。
+
+## 新确认的预算缺口
+
+v248 2014…题最后成功本地调用input24123+requested8192=32315，距离32768
+仅453 tokens；新增大段检索回执后连续出现400。历史失败未保存真实请求/错误
+正文，所以不能宣称已精确还原原因。为避免带着确定的预算/可观测性缺口重跑，
+v249在真实运行前加入显式opt-in local_agent_context_budget：复用已加载的
+同一本地tokenizer和Director既有_context_budget，逐次按真实聊天模板计数，
+只将请求输出上限限制在剩余context内。原问题、已有证据、消息和thinking
+开关都不截断/改变，保留configured/effective/input计数；无剩余空间发送前
+报明确错误。其他API模型不能套本地Qwen tokenizer。
+
+HTTP失败仅记录有界结构化provider error字段，不保存headers/完整HTTP正文。
+这是请求兼容和失败诊断，不是提高模型context容量，也不保证所有400都是长度错误。
 
 先做定向测试和prepare-only，待v248收束再启动一次五题，不重复Direct。
 5/5有效显式FINISH且原生length-adjusted均分严格超过60%后备份，再进入

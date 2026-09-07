@@ -2073,3 +2073,17 @@ literal提取边界修复。不向候选Skill加入任何rubric或新的医学�
 v249另通过12项FINISH选择/真实配置定向验证（10新增+2既有），确认有效
 Output时仍可立即FINISH，也能继续合法编辑；无有效Output不提前FINISH；
 旧true配置保持旧行为。不修改v248候选文本，以免把修复动作域误称为Skill学习。
+
+v248最终4/5有效，2014…三次本地400的错误正文未保留。最后成功请求
+24123输入+8192请求输出，之后增加大段检索回执；与上下文上限高度吻合，
+但没有失败payload，不能精确复原。用户明确要求修复本地400，故在v249首次
+实际运行前增加opt-in精确context预算和有界provider错误receipt，复用现有
+Director client/tokenizer/_context_budget，不更换模型或扩大context/工具预算。
+待定向测试完成后重新冻结；9887fbc是此前prepared-only提交，不作为此修复
+已经运行的证据。v248结果报告提交da76afb保留在独立旧分支。
+
+上下文修复定向验证完成：83项通过，另4个参数子例通过。测试使用合成
+tokenizer/假transport和真实既有_context_budget，覆盖预发送拒绝、同模板
+计数/输出上限、thinking保持、远端不变、真实factory映射及失败receipt；
+没有下载模型或额外API探测。更新flag后的10项finish/config测试也通过。
+下一步重新prepare冻结同五题并实际运行，以真实provider usage核对新增计数。

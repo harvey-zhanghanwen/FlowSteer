@@ -188,6 +188,7 @@ agent_graph:
   require_all_agents_reach_output: true
   require_format_agent: false
   finish_only_when_admissible: false
+  local_agent_context_budget: true
   require_informative_contracts: true
   require_scope_neutral_contracts: true
   require_explicit_safety_scope_preservation: true

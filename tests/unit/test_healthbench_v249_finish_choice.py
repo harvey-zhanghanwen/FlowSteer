@@ -43,6 +43,7 @@ def test_configs_change_only_run_identity_paths_and_finish_choice(suffix):
     new_identity = f"healthbench_professional_candidate_skill_v2_49_{suffix}"
     expected = json.loads(json.dumps(old).replace(old_identity, new_identity))
     expected["agent_graph"]["finish_only_when_admissible"] = False
+    expected["agent_graph"]["local_agent_context_budget"] = True
     assert new == expected  # Includes selected IDs, seed, model pool and every timeout.
     assert old["agent_graph"]["finish_only_when_admissible"] is True
     assert new["agent_graph"]["semantic_protocol_by_source"]["healthbench_professional"] == "none"

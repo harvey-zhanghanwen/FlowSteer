@@ -38,6 +38,27 @@ class OpenAICompatibleGatewayError(RuntimeError):
     request_status: str | None = None
 
 
+def _provider_error_fields(error: HTTPError) -> Dict[str, Any]:
+    """Retain only bounded public error fields, never a response or headers."""
+    try:
+        body = json.loads(error.read(16_384))
+    except (OSError, TypeError, ValueError, AttributeError):
+        return {}
+    detail = body.get("error") if isinstance(body, Mapping) else None
+    if isinstance(detail, str):
+        return {"message": detail[:512]}
+    if not isinstance(detail, Mapping):
+        return {}
+    fields: Dict[str, Any] = {}
+    for key, limit in (("type", 128), ("code", 128), ("message", 512)):
+        value = detail.get(key)
+        if isinstance(value, str):
+            fields[key] = value[:limit]
+        elif key == "code" and type(value) is int:
+            fields[key] = value
+    return fields
+
+
 MASKED_UPSTREAM_CONTENT = "[UPSTREAM CONTENT MASKED FOR COMMUNICATION DIAGNOSTIC]"
 
 
@@ -1864,6 +1885,7 @@ class OpenAICompatibleGateway:
         default_top_p: float = 1.0,
         default_max_tokens: int = 4096,
         default_seed: Optional[int] = None,
+        local_context_clients: Optional[Mapping[str, Any]] = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -1875,6 +1897,9 @@ class OpenAICompatibleGateway:
         self.default_top_p = float(default_top_p)
         self.default_max_tokens = int(default_max_tokens)
         self.default_seed = default_seed
+        # Opt-in model bindings come from the existing factory's exact
+        # endpoint/model/context match, not an endpoint-name heuristic.
+        self._local_context_clients = dict(local_context_clients or {})
         if self.default_temperature < 0:
             raise ValueError("default_temperature must be non-negative")
         if not 0 < self.default_top_p <= 1:
@@ -2009,6 +2034,64 @@ class OpenAICompatibleGateway:
             }
         return payload
 
+    def _apply_local_context_budget(
+        self, request: AgentRequest, payload: Dict[str, Any],
+        requested_sampling: Dict[str, Any],
+    ) -> None:
+        client = self._local_context_clients.get(request.model.model_id)
+        if client is None:
+            return
+        configured = payload["max_tokens"]  # Already includes the thinking allowance.
+        input_tokens = None
+        stage = "tokenization"
+        try:
+            # Direct reuse of the already loaded Director tokenizer and its
+            # exact-input budget. Count the actual Agent messages/template,
+            # not the Director prompt wrapper; preserve every input byte.
+            input_tokens = len(client.tokenizer.apply_chat_template(
+                payload["messages"], tokenize=True, add_generation_prompt=True,
+                **payload.get("chat_template_kwargs", {}),
+            ))
+            stage = "budget"
+            budget = client._context_budget(configured, input_tokens)
+            if budget is None:
+                raise ValueError("local context client has no context limit")
+        except Exception as exc:
+            requested_sampling["request_sent"] = False
+            limit = client.max_context_tokens
+            exhausted = input_tokens is not None and limit is not None and input_tokens >= limit
+            if exhausted:
+                requested_sampling["context_budget"] = {
+                    "profile": "sglang-exact-input-context-budget.v1",
+                    "max_context_tokens": client.max_context_tokens,
+                    "input_tokens": input_tokens,
+                    "configured_max_new_tokens": configured,
+                    "effective_max_new_tokens": 0,
+                    "context_limited": True,
+                    "input_truncated": False,
+                }
+            else:
+                requested_sampling["context_preflight_error"] = {
+                    "stage": stage, "error_type": type(exc).__name__,
+                    "input_tokens": input_tokens, "context_limit": limit,
+                    "configured_output_tokens": configured,
+                }
+            error = OpenAICompatibleGatewayError(
+                ("local Agent context exhausted" if exhausted else
+                 f"local Agent context {stage} failed ({type(exc).__name__})")
+                + f": input_tokens={input_tokens}, configured_output_tokens={configured}, "
+                f"context_limit={limit}; provider request was not sent"
+            )
+            error.requested_sampling = requested_sampling
+            error.request_status = "failed"
+            error.provider_id = request.provider.provider_id
+            error.model_id = request.model.model_id
+            raise error from exc
+        payload["max_tokens"] = budget["effective_max_new_tokens"]
+        requested_sampling["max_tokens"] = payload["max_tokens"]
+        requested_sampling["context_budget"] = budget
+        requested_sampling["request_sent"] = True
+
     async def generate(self, request: AgentRequest) -> AgentResponse:
         endpoint = request.provider.endpoint
         if not endpoint:
@@ -2051,9 +2134,11 @@ class OpenAICompatibleGateway:
         ):
             requested_sampling["seed"] = scientific_generation_seed
             requested_sampling["backend_seed"] = payload.get("seed")
+        self._apply_local_context_budget(request, payload, requested_sampling)
         url = endpoint.rstrip("/") + "/chat/completions"
 
         last_error: BaseException | None = None
+        last_provider_error: Dict[str, Any] = {}
         started_at = time.monotonic()
         for attempt in range(self.max_retries + 1):
             try:
@@ -2077,6 +2162,7 @@ class OpenAICompatibleGateway:
                 return AgentResponse(parsed.text, metadata)
             except HTTPError as exc:
                 last_error = exc
+                last_provider_error = _provider_error_fields(exc)
                 retryable = exc.code in {408, 409, 425, 429} or exc.code >= 500
                 if not retryable or attempt >= self.max_retries:
                     break
@@ -2089,6 +2175,8 @@ class OpenAICompatibleGateway:
 
         if isinstance(last_error, HTTPError):
             detail = f"HTTP {last_error.code}"
+            if last_provider_error:
+                requested_sampling["provider_error"] = last_provider_error
         else:
             detail = type(last_error).__name__ if last_error is not None else "unknown error"
         error = OpenAICompatibleGatewayError(

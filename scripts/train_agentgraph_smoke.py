@@ -2206,6 +2206,48 @@ def _safe_error(error: BaseException) -> str:
     return f"{type(error).__name__}: {message}"
 
 
+def _local_agent_context_clients(
+    graph_config: Mapping[str, Any], director: Mapping[str, Any],
+    registry: Any, director_client: SGLangReceiptDirectorClient,
+) -> dict[str, SGLangReceiptDirectorClient]:
+    """Bind only the same declared local deployment to its existing tokenizer."""
+    enabled = graph_config.get("local_agent_context_budget", False)
+    if type(enabled) is not bool:
+        raise ConfigurationError("agent_graph.local_agent_context_budget must be boolean")
+    if not enabled:
+        return {}
+    maximum = director.get("max_context_tokens")
+    endpoint = director.get("api_base")
+    served_model = director.get("served_model_name")
+    if (
+        type(maximum) is not int or maximum <= 0
+        or director_client.max_context_tokens != maximum
+        or not isinstance(endpoint, str) or not endpoint.strip()
+        or not isinstance(served_model, str) or not served_model.strip()
+    ):
+        raise ConfigurationError("local Agent context budget requires the configured Director context and deployment")
+    endpoint = endpoint.rstrip("/")
+    native_endpoint = endpoint[:-3] if endpoint.endswith("/v1") else endpoint
+    if director_client.base_url != native_endpoint:
+        raise ConfigurationError("local Agent context client differs from the Director endpoint")
+    clients = {}
+    for model_id in registry.model_ids:
+        model = registry.require_model(model_id)
+        provider = registry.provider_for(model_id)
+        metadata = {**provider.metadata, **model.metadata}
+        if (
+            str(metadata.get("deployment_locality", "")).strip().casefold() != "local"
+            or str(metadata.get("sampling_backend", "")).strip().casefold() != "sglang"
+            or (provider.endpoint or "").rstrip("/") != endpoint
+            or model.model_name != served_model
+        ):
+            continue
+        if model.context_window != maximum:
+            raise ConfigurationError(f"local Agent {model_id!r} context_window differs from its Director deployment")
+        clients[model_id] = director_client
+    return clients
+
+
 def _graph_from_mapping(value: Mapping[str, Any]) -> AgentGraph:
     raw_nodes = value.get("nodes", ())
     raw_relations = value.get("relations", ())
@@ -3128,6 +3170,9 @@ class LiveSmokeBackend:
         gateway = OpenAICompatibleGateway(
             timeout_seconds=execution_timeout_seconds,
             default_seed=int(experiment["seed"]),
+            local_context_clients=_local_agent_context_clients(
+                graph_config, director, registry, director_client,
+            ),
         )
         runtime = AgentRuntime(
             registry,
