@@ -2103,3 +2103,15 @@ v250定向验证完成：新增返回类型、v249上下文与Gateway回归共11
 另4参数子例通过。本机真实tokenizer CPU实测返回BatchEncoding（2字段、
 217 tokens），Gateway正确计217；无模型生成、网络或下载。两项新配置
 验证与prepare-only均通过，保持同五题；待冻结后只启动v250本轮一次评测。
+
+## 2026-09-07 — v250中止与v251非空Canvas修复
+
+v250七个真实本地请求的预检token数与server prompt_tokens一致。但v249
+编号适配在非空图迭代AgentNode后调用startswith，造成四题AttributeError。
+已SIGINT停止本任务17875并保留四failed/一cancelled partial；该批分数N/A。
+未停止模型服务。修复只用既有node.id，新增非空图连续ADD/MODIFY测试，
+同五题另建v251路径，不改变候选Skill或模型/工具/生成/evaluator条件。
+
+定向验证：非空Canvas新回归与scope既有回归共68项通过；上下文预算、真实
+tokenizer返回类型和新配置共66项通过。无模型生成或下载；下一步prepare
+核验后冻结，再执行用户已要求的同五题真实验证，不启动完整525。

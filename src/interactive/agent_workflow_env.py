@@ -8558,7 +8558,7 @@ class AgentWorkflowEnv:
                 range(1, len(markers) + 1)
             ):
                 literal_contract = list_marker.sub("", literal_contract)
-            for known_id in set(self.graph.nodes) | {key for key, _ in entries}:
+            for known_id in {node.id for node in self.graph.nodes} | {key for key, _ in entries}:
                 if known_id.startswith("node_"):
                     literal_contract = re.sub(
                         rf"\b{re.escape(known_id.replace('_', ' ', 1))}(?:['’]s)?\b",

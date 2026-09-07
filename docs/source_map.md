@@ -1278,3 +1278,11 @@ React model_calls失败记录传递；不记录HTTP headers或完整正文。历
 返回BatchEncoding而非list，真实3410被误数为2；这与历史v248未知400原因
 是不同证据，不混为一谈。使用延迟import避免既有循环依赖；不改计数算法、
 budget函数或任何医学任务信息。新增本机tokenizer CPU与合成容器回归。
+
+## 2026-09-07 — v2.51：已有Canvas节点类型兼容
+
+**必要兼容修复**：沿用FlowSteer式edit/admission反馈和项目AgentGraph.nodes
+接口，修正v249的literal检查读取方式为node.id；nodes本身是AgentNode对象
+tuple而非ID集合。没有新抽象/图算法/医疗模板，不改变contract或relation。
+新增真实非空Canvas连续ADD/MODIFY定向测试，合成非医学文本且无模型调用。
+本地上下文预算仍直接复用SkillFlow兼容聊天模板、已有_token_ids/_context_budget。
