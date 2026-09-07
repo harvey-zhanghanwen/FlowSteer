@@ -179,8 +179,10 @@ class HealthBenchKnowledgeStore:
                 title = str(record.get("title") or document_id)
                 text = str(record["excerpt"])
             passages.append(self._module.DocumentPassage(
-                passage_id=str(record["passage_id"]), document_id=document_id,
-                title=title, text=text,
+                passage_id=str(record["passage_id"]),
+                document_id=self._module.normalize_json(document_id),
+                title=self._module.normalize_json(title),
+                text=self._module.normalize_json(text),
             ))
         # Upstream builder atomically publishes a NEW path; never replace an
         # index already opened with SkillFlow's read-only immutable connection.
@@ -242,7 +244,8 @@ class HealthBenchKnowledgeStore:
                 if database == "conversation":
                     result["conversation_matches"].append(record)
                 else:
-                    record["excerpt"] = passage.text
+                    # Upstream indices require NFC; the source record retains
+                    # the original excerpt and provenance without rewriting it.
                     result["evidence"].append(record)
             result["status"] = "ok" if hits else "no_matches"
             result["index_receipt"] = dict(self._receipts[database])

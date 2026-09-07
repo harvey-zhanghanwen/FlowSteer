@@ -48,6 +48,22 @@
 不做新训练、GRPO、LoRA、MACE、Bayesian 或 Skill evolution。
 
 ## 冻结配置与复现
+
+### 实际建库与恢复记录
+
+已处理全部 525 条公开对话，保存 4422 条外部证据：MedRAG/textbooks 3917、
+NCBI PubMed 496、Europe PMC 9。共享库没有其他题的对话、参考回答或 Agent 回答。
+本次没有实际收录 DailyMed 药品记录，不能把工具可用说成已经建立药品库。
+索引发布首次遇到非 NFC 字符串，与 SkillFlow DocumentPassage 的输入要求不兼容。
+现复用上游 normalize_json，仅规范索引文本，原始 excerpt/title 保留不变。
+已通过 29 项定向测试（另有 4 个子测试）。恢复只使用已写出的 records.jsonl，
+没有重复 525 题检索，没有新增建库模型调用、grader 或远端请求。
+
+初次运行最终发布失败前，逐题 hit count 尚未写盘；因此恢复后的 query receipts
+是根据公开对话确定性重建的 query 列表，retrieval_result_count=null，
+question_retrieval_nonempty=null。不据此宣称 525 题答案覆盖率。后续建库入口现已
+在每题检索完成后落盘 progress，避免同类发布错误丢失逐题计数。
+
 分支：feature/healthbench-question-corpus-dev5-20260907。
 基点：9c5222366adf2bdace74601cf3e15fa28d1b287d。
 配置：config/evaluation_healthbench_question_corpus_dev5.yaml。

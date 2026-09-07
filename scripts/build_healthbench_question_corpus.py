@@ -46,7 +46,7 @@ def public_queries(question):
     return tuple(dict.fromkeys(value for value in values if value.strip()))
 
 
-def build(config_path, output, receipt_paths):
+def build(config_path, output, receipt_paths, resume_records=None):
     config = load_yaml(config_path)
     tasks = public_questions(ROOT / config["data"]["test_path"])
     ids = {key for key, _ in tasks}
@@ -61,6 +61,8 @@ def build(config_path, output, receipt_paths):
     task_receipts = []
     cache_task_ids = set()
     cache_sources = []
+    if resume_records is not None and receipt_paths:
+        raise ValueError("resume uses saved evidence only; do not reimport receipts")
     def ingest(evidence):
         accepted = store.ingest_evidence(evidence)
         if accepted:
@@ -68,6 +70,25 @@ def build(config_path, output, receipt_paths):
         return accepted
 
     try:
+        if resume_records is not None:
+            # Recover already persisted external records after failed index
+            # publication, without repeating retrieval or any remote request.
+            for name in ("medical_references", "drug_labels"):
+                path = Path(resume_records) / name / "records.jsonl"
+                if not path.exists():
+                    continue
+                count = 0
+                with path.open(encoding="utf-8") as stream:
+                    for line in stream:
+                        count += int(ingest(json.loads(line)))
+                cache_sources.append({"path": str(path.resolve()), "new_evidence_records": count})
+            if not sum(source_counts.values()):
+                raise ValueError("no saved external evidence to resume")
+            task_receipts = [{"task_id": task_id, "public_queries": list(public_queries(question)),
+                "retrieval_result_count": None, "correctness_verified": False,
+                "query_reconstruction": True,
+                "note": "Queries reconstructed without retrieval; original per-task hit counts unavailable after interrupted publication."}
+                for task_id, question in tasks]
         # Reuse only actual external Tool observations, irrespective of scores.
         # No failed/successful-demo selection and no Agent summary ingestion.
         for path in receipt_paths:
@@ -86,12 +107,12 @@ def build(config_path, output, receipt_paths):
             cache_sources.append({"path": str(Path(path).resolve()), "new_evidence_records": count})
             print(json.dumps({"stage": "external_receipts_imported", **cache_sources[-1]}), flush=True)
 
-        corpus = FrozenMedRAGBM25Corpus.open(
+        corpus = None if resume_records is not None else FrozenMedRAGBM25Corpus.open(
             settings["resource_dir"], source_identity=settings["source_identity"],
             expected_source_revision=settings["source_revision"], expected_rows=settings["expected_rows"],
         )
         try:
-            for index, (task_id, question) in enumerate(tasks, 1):
+            for index, (task_id, question) in enumerate(tasks if corpus is not None else (), 1):
                 queries = public_queries(question)
                 returned = 0
                 for query in queries:
@@ -103,11 +124,15 @@ def build(config_path, output, receipt_paths):
                         ingest(evidence)
                 task_receipts.append({"task_id": task_id, "public_queries": list(queries),
                     "retrieval_result_count": returned, "correctness_verified": False})
+                # Persist each completed retrieval before final index publication.
+                with (store.directory / "question_retrieval_progress.jsonl").open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(task_receipts[-1], ensure_ascii=False) + "\n")
                 if index % 50 == 0 or index == len(tasks):
                     print(json.dumps({"stage": "public_question_retrieval", "processed": index,
                                       "total": len(tasks), "records": store.counts()}), flush=True)
         finally:
-            corpus.close()
+            if corpus is not None:
+                corpus.close()
 
         databases = {}
         for name in ("medical_references", "drug_labels"):
@@ -118,10 +143,12 @@ def build(config_path, output, receipt_paths):
             "schema_version": "flowsteer.healthbench.public-question-evidence-corpus.v1",
             "corpus_version": "healthbench-public525-external-evidence-20260907-v1",
             "status": "frozen", "question_count": len(tasks),
-            "question_retrieval_nonempty": sum(r["retrieval_result_count"] > 0 for r in task_receipts),
+            "question_retrieval_nonempty": None if resume_records is not None else sum(r["retrieval_result_count"] > 0 for r in task_receipts),
             "coverage_interpretation": "lexical retrieval returned passages; not verified answer coverage",
             "source_counts": dict(source_counts), "databases": databases,
-            "cached_tool_task_count": len(cache_task_ids), "cached_tool_sources": cache_sources,
+            "cached_tool_task_count": None if resume_records is not None else len(cache_task_ids), "cached_tool_sources": cache_sources,
+            "resumed_records": str(Path(resume_records).resolve()) if resume_records is not None else None,
+            "retrieval_executed_this_invocation": resume_records is None,
             "construction_inputs": "525 public conversations plus external database documents/Tool observations",
             "excluded_from_corpus": ["rubric", "reference_response", "final_answer", "grade",
                                     "agent_summary", "all_other_task_conversations", "task_to_answer_mapping"],
@@ -144,5 +171,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--receipts", type=Path, action="append", default=[])
+    parser.add_argument("--resume-records", type=Path,
+        help="Recover saved source records after index publication failure; no repeated retrieval")
     args = parser.parse_args()
-    build(args.config, args.output, args.receipts)
+    build(args.config, args.output, args.receipts, args.resume_records)

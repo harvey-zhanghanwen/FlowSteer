@@ -13,6 +13,12 @@ requiring a role or topology. Existing context projection removes duplicate
 feedback while preserving the original problem and current state, and a
 numbered-list syntax fix prevents the observed admission false positive.
 No optimizer, publication or additional Direct comparison is authorized here.
+The corpus completed 525 local query tasks and persisted 4,422 external records.
+Final index publication initially failed on non-NFC Unicode text. The existing
+SkillFlow normalization now runs only at the passage-index boundary; 29 focused
+tests pass. Recovery reused saved records without repeating retrieval/API calls.
+Original per-task hit counts were not persisted before that failure; restored
+query receipts explicitly mark counts unavailable, rather than invent coverage.
 
 ## 2026-09-07: HealthBench v2.33 all-source candidate five-task replay
 

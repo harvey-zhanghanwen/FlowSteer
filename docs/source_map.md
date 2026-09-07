@@ -10,6 +10,10 @@ source records, never benchmark answers or Agent summaries.
 Context projection is directly ported from 8359561; FINISH optionality already
 exists in AgentWorkflowEnv. Numbered-list admission is a thin syntax adaptation
 of that same revision for the observed "1) ... 2) ..." form.
+Source text indexing additionally reuses SkillFlow retrieval.normalize_json
+(Unicode NFC) before DocumentPassage admission. Original excerpts remain in
+source records and Tool results. This is an observed interface compatibility
+fix, not a change to retrieval ranking or a rewrite of source content.
 
 ## 2026-09-07: v2.33 + all existing medical sources + candidate Skills
 

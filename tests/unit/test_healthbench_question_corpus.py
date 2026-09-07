@@ -52,6 +52,44 @@ def test_frozen_library_uses_source_records_not_query_to_answer_mapping(tmp_path
         store.close()
 
 
+def test_source_unicode_is_normalized_only_in_upstream_index(tmp_path):
+    raw = evidence(title="Synthetic cafe\u0301 publication", excerpt="magnesium cafe\u0301 observation. ")
+    store = HealthBenchKnowledgeStore(tmp_path, [])
+    try:
+        assert store.ingest_evidence(raw)
+        result = store.search("medical_references", "magnesium")
+        assert result["evidence"][0]["excerpt"] == raw["excerpt"]
+        receipt = result["index_receipt"]
+        saved = json.loads(Path(receipt["records_path"]).read_text())
+        assert saved["title"] == raw["title"] and saved["excerpt"] == raw["excerpt"]
+        with store._module.RetrievalIndex.open(Path(receipt["index_path"])) as index:
+            assert index.read(saved["passage_id"]).text == "magnesium caf\u00e9 observation. "
+    finally:
+        store.close()
+
+
+def test_resume_publishes_saved_sources_without_retrieving_again(tmp_path, monkeypatch):
+    import scripts.build_healthbench_question_corpus as builder
+    config = tmp_path / "config.yaml"
+    from src.interactive.qa_retrieval import DEFAULT_SKILLFLOW_SOURCE
+    config.write_text(json.dumps({"data": {"test_path": "unused"},
+        "healthbench_tool_runtime": {"skillflow_source": str(DEFAULT_SKILLFLOW_SOURCE)}}))
+    question = render_model_visible_conversation([{"role": "user", "content": "magnesium"}])
+    monkeypatch.setattr(builder, "public_questions", lambda path: [(str(i), question) for i in range(525)])
+    def no_retrieval(*args, **kwargs):
+        raise AssertionError("resume must not retrieve again")
+    monkeypatch.setattr(builder.FrozenMedRAGBM25Corpus, "open", no_retrieval)
+    records = tmp_path / "previous" / "medical_references"
+    records.mkdir(parents=True)
+    (records / "records.jsonl").write_text(json.dumps(evidence()) + "\n")
+    manifest = builder.build(config, tmp_path / "published", [], records.parent)
+    assert manifest["question_count"] == 525
+    assert manifest["question_retrieval_nonempty"] is None
+    assert not manifest["retrieval_executed_this_invocation"]
+    assert manifest["source_counts"] == {"NCBI PubMed": 1}
+    assert len(load_frozen_public_evidence(tmp_path / "published/manifest.json")) == 1
+
+
 @pytest.mark.parametrize("contract", [
     "Identify sources and output: 1) list evidence 2) state uncertainty.",
     "Identify sources and output: (1) list evidence (2) state uncertainty.",
