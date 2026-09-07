@@ -360,7 +360,7 @@ def _missing_summary(task_id: str, evidence: Mapping[str, Any]) -> Mapping[str, 
 def _private_operational_demo(evidence: Mapping[str, Any]) -> str:
     return "\n".join([
         f"## {evidence['task_id']} — operational failure / no terminal trajectory", "",
-        "本题仍计入固定五题分母；raw、length-adjusted、valid、FINISH、完整调用/token/latency 均 N/A。",
+        "本题仍计入固定样本分母；raw、length-adjusted、valid、FINISH、完整调用/token/latency 均 N/A。",
         "终局 trajectory 与 evaluator receipt 未落盘，不能评分；progress/collect failure 不能恢复未返回的调用。如存在同目录 partial_trajectories.jsonl，请按本轮 run_attempt_id/task_id 查看已返回的中间调用诊断；这些不是终局轨迹，不计入本报告调用总量。", "",
         _json_details("本轮 selected question、progress 与 collect failure（完整原始证据）", evidence), "",
     ])
@@ -369,14 +369,14 @@ def _private_operational_demo(evidence: Mapping[str, Any]) -> str:
 def _public_report(summary: Mapping[str, Any]) -> str:
     rows = summary["tasks"]
     lines = ["# HealthBench Professional AgentGraph-only development report", "",
-             "仅五题开发观测；不是正式 benchmark 估计，不提供 Direct/paired 比较。",
+             "仅本轮固定样本的开发观测；不是正式 benchmark 估计，不提供 Direct/paired 比较。",
              "分数直接读取 evaluation.metrics；不重评、不裁剪、不做失败置零。完整输入、回答与 evaluator receipt 仅在 evaluator_private。", "",
              f"- selected / persisted terminal trajectories：{summary['sample_count']} / {summary['completed_count']}；operational failures without trajectory：{summary['operational_failure_count']}",
              f"- evaluator valid：{summary['valid_count']}；explicit FINISH：{summary['finish_count']}；terminal failure：{summary['terminal_failure_count']}",
-             f"- 严格全五题 native mean raw：{_display(summary['native_metric_means'][METRICS[0]]['mean'])}；length-adjusted：{_display(summary['native_metric_means'][METRICS[1]]['mean'])}；固定 denominator={summary['sample_count']}，任一缺失则 N/A，绝不置零。",
+             f"- 严格全体固定样本 native mean raw：{_display(summary['native_metric_means'][METRICS[0]]['mean'])}；length-adjusted：{_display(summary['native_metric_means'][METRICS[1]]['mean'])}；固定 denominator={summary['sample_count']}，任一缺失则 N/A，绝不置零。",
              f"- completed-only native mean raw：{_display(summary['completed_only_native_metric_means'][METRICS[0]]['mean'])} ({summary['completed_only_native_metric_means'][METRICS[0]]['observed_count']}/{summary['sample_count']})；length-adjusted：{_display(summary['completed_only_native_metric_means'][METRICS[1]]['mean'])} ({summary['completed_only_native_metric_means'][METRICS[1]]['observed_count']}/{summary['sample_count']})",
-             "- completed-only 是实际已观测子集的描述性均分，不能与旧版本完整五题均分直接当作提升或下降比较。",
-             f"- 已落盘 trajectory 内 Agent recorded model calls：{summary['totals']['agent_recorded_model_calls']}；Director recorded phase calls：{summary['totals']['director_recorded_phase_calls']}；observed Tool calls（题内去重后求和）：{_display(summary['totals']['observed_actual_tool_calls'])}；全五题 actual Tool calls：{_display(summary['totals']['actual_tool_calls'])}", "",
+             "- completed-only 是实际已观测子集的描述性均分，不能与旧版本完整样本均分直接当作提升或下降比较。",
+             f"- 已落盘 trajectory 内 Agent recorded model calls：{summary['totals']['agent_recorded_model_calls']}；Director recorded phase calls：{summary['totals']['director_recorded_phase_calls']}；observed Tool calls（题内去重后求和）：{_display(summary['totals']['observed_actual_tool_calls'])}；全体固定样本 actual Tool calls：{_display(summary['totals']['actual_tool_calls'])}", "",
              "| Task | Raw | Length-adjusted | Valid | FINISH | Terminal failure | Nodes / max | Topology | Agent model receipts | Tool calls (dedup) | Grader provider errors |",
              "|---|---:|---:|---|---|---|---:|---|---:|---:|---:|"]
     for row in rows:

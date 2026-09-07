@@ -1634,3 +1634,12 @@ change was made during profile selection.
 - 仍为 public-test development replay，不是未使用过的 held-out 测试；
   不运行 Direct、其他4题、训练、GRPO、backward、optimizer、MACE/Bayesian 或 Skill publication。
   修复后的真实完成情况、评分与剩余问题待单题运行落盘后另行记录。
+
+- 单题运行已完成：源码 `c5ae00310ca642ab22ac51ee7375f128365ae19b`，
+  attempt `run_attempt_fed4bc6fcde0611887d5e620`，原始分50.000000%，
+  长度调整24.704240%，valid=1/1、FINISH=1/1、timeout/terminal failure=0，
+  采集开始至评分与轨迹完成279.812秒。没有新的训练或候选 Skill 更新。
+- 新轨迹暴露 non-Output ReAct 翻译 contract 与统一 structured-evidence schema
+  不兼容：3次 complete 拒绝后只交出说明，下游没有译文可检查；Output后来独立生成译文。
+  这个接口问题仍未修复，不宣称所有架构缺口已解决，也未额外启动第二次付费评测。
+  完整结果和边界见 `docs/healthbench_deadline_recovery_single_20260907.md`。

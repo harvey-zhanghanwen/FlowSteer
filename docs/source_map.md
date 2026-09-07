@@ -952,3 +952,7 @@ answer, medical template, extra judge Agent, training or Skill update is added.
   不将其 task-specific 规则移植为禁止一切 MODIFY 或禁止修复。
 - 本次不引入医学模板、固定角色、样本答案、自动终局答案回收、模型/权重更新。
   时间反馈是可观察约束，不保证小模型一定据此及时 FINISH；未返回的调用 receipt 仍明确缺失。
+
+- **必要报告适配**：现有 `report_healthbench_agentgraph_development.py` 已支持
+  `--expected-count 1`，但部分中文标签仍写死“五题”。只将标签改成“本轮固定样本”，
+  原始汇总、分母、评分和 receipt 保持不变；实际单题报告生成通过，不重复模型/评分调用。
