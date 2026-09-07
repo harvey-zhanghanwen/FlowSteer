@@ -4,13 +4,13 @@
 providers:
   - provider_id: "local-director"
     kind: "openai-compatible"
-    endpoint: "http://127.0.0.1:8015/v1"
+    endpoint: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8015}/v1"
     max_concurrency: 32
 
   - provider_id: "vectorengine"
     kind: "openai-compatible"
     endpoint: "${VECTOR_ENGINE_BASE_URL:-https://api.vectorengine.ai/v1}"
-    max_concurrency: 64
+    max_concurrency: 4
     api_key_env: "VECTOR_ENGINE_API_KEY"
 
 models:
@@ -40,14 +40,5 @@ models:
     selection_weight: 8.0
     cheap_weight: 8.0
     fast_weight: 9.0
-    metadata:
-      max_tokens: "4096"
-
-  - model_id: "minimax-m2.5"
-    provider_id: "vectorengine"
-    model_name: "MiniMax-M2.5"
-    selection_weight: 7.0
-    cheap_weight: 8.0
-    fast_weight: 8.0
     metadata:
       max_tokens: "4096"

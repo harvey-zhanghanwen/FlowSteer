@@ -66,7 +66,12 @@ from src.interactive.config_loader import (
     load_yaml,
     validate_agent_graph_config,
 )
-from src.interactive.agent_action_parser import AgentAction, AgentActionParser, AgentActionType
+from src.interactive.agent_action_parser import (
+    AgentAction,
+    AgentActionParseError,
+    AgentActionParser,
+    AgentActionType,
+)
 from src.interactive.agent_graph import AgentGraph, AgentNode
 from src.interactive.persistence import GraphSnapshotEvent
 from src.interactive.records import TaskRecord, TrajectoryRecord
@@ -839,7 +844,7 @@ async def validate_phase0_rollout_batch(
                 or not turn.output_token_ids
                 or len(turn.behavior_log_probs) != len(turn.output_token_ids)
                 or not all(math.isfinite(float(value)) for value in turn.behavior_log_probs)
-                or not 0 < turn.executed_prefix_tokens <= len(turn.output_token_ids)
+                or not 0 <= turn.executed_prefix_tokens <= len(turn.output_token_ids)
             ):
                 raise HotpotTrainingError(f"Phase 0 Director receipt is incomplete: {label}")
             if turn.policy_version != behavior_policy or turn.policy_adapter != behavior_adapter:
@@ -851,10 +856,29 @@ async def validate_phase0_rollout_batch(
                 raise HotpotTrainingError(f"Phase 0 Director request ID is absent or reused: {label}")
             director_request_ids.add(request_id)
 
-            parsed = parser.parse(turn.policy_response)
-            if parsed.to_dict() != dict(turn.action):
-                raise HotpotTrainingError(f"Phase 0 parsed action differs from receipt: {label}")
-            last_action = parsed
+            parsed: Optional[AgentAction]
+            try:
+                parsed = parser.parse(turn.policy_response)
+            except AgentActionParseError:
+                parsed = None
+                if (
+                    turn.action
+                    or turn.executed_prefix_tokens != 0
+                    or not turn.canvas_feedback.startswith("invalid action:")
+                ):
+                    raise HotpotTrainingError(
+                        f"Phase 0 invalid Director action receipt differs: {label}"
+                    )
+            else:
+                if parsed.to_dict() != dict(turn.action):
+                    raise HotpotTrainingError(
+                        f"Phase 0 parsed action differs from receipt: {label}"
+                    )
+                if turn.executed_prefix_tokens <= 0:
+                    raise HotpotTrainingError(
+                        f"Phase 0 executed Director action has no token mask: {label}"
+                    )
+                last_action = parsed
 
             if turn.previous_graph_snapshot_id != previous_snapshot_id:
                 raise HotpotTrainingError(f"Phase 0 snapshot predecessor differs: {label}")
@@ -874,10 +898,15 @@ async def validate_phase0_rollout_batch(
             )
             candidate = graph.fork()
             mutation_error: Optional[Exception] = None
-            try:
-                _apply_replayed_action(candidate, parsed)
-            except (TypeError, ValueError) as exc:
-                mutation_error = exc
+            if parsed is not None:
+                try:
+                    _apply_replayed_action(candidate, parsed)
+                except (TypeError, ValueError) as exc:
+                    mutation_error = exc
+            elif accepted:
+                mutation_error = AgentActionParseError(
+                    "an unparsed action cannot be accepted by the Canvas"
+                )
             if accepted:
                 if mutation_error is not None:
                     raise HotpotTrainingError(f"Phase 0 accepted action cannot replay: {label}")

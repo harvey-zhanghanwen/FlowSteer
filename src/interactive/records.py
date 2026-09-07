@@ -258,9 +258,9 @@ class TrajectoryRecord:
                 turn.receipt_verified
                 and not turn.reconstructed_context
                 and turn.policy_version == self.versions.policy
-                and turn.executed_prefix_tokens > 0
                 for turn in self.turns
             )
+            and any(turn.executed_prefix_tokens > 0 for turn in self.turns)
         )
 
     def to_dict(self) -> Dict[str, Any]:

@@ -88,9 +88,9 @@ collect(policy_n, same problem + same condition)
 
 ## 当前门控
 
-- 当前 Phase：Phase 0 数据可信性，未通过。
+- 当前 Phase：Phase 0 数据可信性已通过；真实单步等待 GPU resource admission。
 - optimizer steps：0。
 - TTB training/config launch：禁用；遗留 TTB 文件只作为 disabled method reference。
-- model service / GPU / W&B：未启动。
-- 单步训练：未授权。
+- model service：GPU5 上的 Phase 0 SGLang 已启动；W&B 未启动。
+- 单步训练：数据门禁已授权，GPU resource admission 尚未通过。
 - 长训练：未授权。

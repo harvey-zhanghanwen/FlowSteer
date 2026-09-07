@@ -80,6 +80,34 @@ class RecordTests(unittest.TestCase):
         right = trajectory(versions=versions(prompt="prompt-v2"))
         self.assertNotEqual(left.group_key, right.group_key)
 
+    def test_rejected_invalid_turn_has_zero_mask_without_dropping_trajectory(self) -> None:
+        invalid = replace(
+            turn(),
+            turn_id="turn-invalid",
+            policy_response='{"action","finish"}',
+            executed_prefix_tokens=0,
+            action={},
+            canvas_feedback="invalid action: malformed JSON",
+        )
+        final_snapshot = GraphSnapshotEvent.create(
+            invalid.graph_revision,
+            invalid.graph_snapshot,
+            invalid.graph_snapshot_id,
+        )
+        final = replace(
+            turn(),
+            turn_id="turn-final",
+            round_index=1,
+            graph_snapshot_id=final_snapshot.snapshot_id,
+            previous_graph_snapshot_id=invalid.graph_snapshot_id,
+        )
+        self.assertTrue(trajectory(turns=[invalid, final]).grpo_eligible)
+        self.assertFalse(
+            trajectory(
+                turns=[replace(invalid, turn_id="turn-only-invalid")]
+            ).grpo_eligible
+        )
+
     def test_test_and_forced_probe_rollouts_are_ineligible(self) -> None:
         self.assertFalse(trajectory("test").grpo_eligible)
         self.assertFalse(trajectory(forced_probe=True).grpo_eligible)

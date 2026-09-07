@@ -24,8 +24,9 @@ method_boundary:
 md_compliance:
   marker: "MD_FULL_COMPLIANCE_20260906_V2"
   current_phase: "phase_0_data_trustworthiness"
-  phase_0_status: "incomplete"
-  real_step_authorized: false
+  phase_0_status: "passed"
+  phase_0_receipt: "artifacts/hotpotqa_md_grpo_v2_300step/phase_0/evidence_epoch_000003/phase0_lineage_receipt.json"
+  real_step_authorized: true
   one_step_closure_status: "not_run"
   long_training_authorized: false
   matrix: "docs/MD_FULL_COMPLIANCE_20260906_V2.md"
