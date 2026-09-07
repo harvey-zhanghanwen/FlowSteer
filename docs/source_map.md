@@ -1,5 +1,36 @@
 # AIME 2026 initial-adaptation source map
 
+## 2026-09-07: HealthBench failure-derived candidates, full525 replay
+
+- **Direct reuse:** executable architecture from
+  `c5ae00310ca642ab22ac51ee7375f128365ae19b`, restored non-destructively via
+  report commit `619c8347677918a402badef03e88367d8a5cb2ba`. No Canvas, Director,
+  runtime, model interface, Tool, evaluator or training module is changed here.
+- **Existing project/MD candidate interface:**
+  `scripts/run_joint_qa_mace_skill.py::_prompt_condition` ->
+  `scripts/healthbench_candidate_skill_profile.py::build_candidate_prompt_priors`
+  -> `evaluate_completion_benchmark_round.run_completion_benchmark_round` -> shared `_collect_graph`
+  -> `LiveSmokeBackend.collect(prompt_priors=..., forced_probe=True)`.
+  Reuse the existing bounded, rejectable prompt-prior wire and exposure receipts;
+  do not turn failure summaries into validated ACTIVE Skills. No posterior or
+  independent Skill-effect evidence is manufactured.
+- **Unchanged upstream boundaries:** SkillFlow
+  `runtime/bounded_agent.py::BoundedAgent.execute_turn` Action/Observation;
+  FlowSteer `InteractiveWorkflowEnv.step/_step_internal` incremental Canvas;
+  existing project AgentGraph and per-node execution modes required by MD.
+  The retained `producer_context_structured_evidence_v3` has a known text-task
+  schema limitation. New guidance selects compatible existing modes/protocols;
+  it does not claim to remove that runtime limitation.
+- **New configuration only:** three failure-derived candidate instructions:
+  execution/artifact compatibility, actual dependency handoff, and task-complete
+  termination within the existing budget. Sources are observed rejection,
+  incomplete-artifact and downstream-input receipts in the deadline-recovery
+  and contract-artifact single-task reports, not rubric content or answers.
+  No fixed medical roles, topology, Agent count, sample ID or clinical answer.
+- Population expansion uses the existing sequential official-test loader.
+  Source/condition boundaries and reproducible command:
+  `docs/healthbench_failure_skills_full525_20260907.md`.
+
 ## 2026-09-07: HealthBench semantic retrieval and shorter candidate priors
 
 See [semantic source map](../reports/healthbench_semantic_skills_setup_zh.md).

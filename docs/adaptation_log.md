@@ -1,5 +1,30 @@
 # AIME 2026 initial-adaptation log
 
+## 2026-09-07: failure-derived candidates on the requested 50%-single-task base
+
+The user requested the prior 50%-raw architecture, new candidate advice derived
+from failures, and a complete 525-task AgentGraph replay without training.
+An independent worktree/branch preserves both the selected old implementation
+and later v4 work; no rollback or unrelated modification is performed.
+
+`healthbench_candidate_skills_failure_v1.yaml` replaces, rather than appends to,
+the three semantic.v1 priors. It advises mode/format compatibility, routing the
+actual dependency product instead of a status message, and completion checking
+against the public task with bounded recovery. All three remain optional,
+rejectable and unvalidated. ReAct, retrieval, free-text contracts and graph
+choice remain available; no mandatory roles or workflow are introduced.
+
+`evaluation_healthbench_failure_skills_full525.yaml` retains the prior runtime,
+catalog, generation, tool/corpus, evaluator, timeout and concurrency settings.
+Only population, condition/storage identity and candidate profile change.
+Source core stays at c5ae003 / report-base 619c834, not later v4. Known v3 text
+completion schema limitations are not advertised as fixed by candidate advice.
+
+This is a public-test development replay: earlier public task failures informed
+the candidates and corpus. It is not an untouched held-out estimate, and neither
+this unpaired run nor the old single-task 50% isolates a causal Skill effect.
+No new Direct run, corpus build, model-pool probe, training or Skill publication.
+
 ## 2026-09-07: semantic evidence and candidate replacement, different five
 
 User requested semantic retrieval, useful candidate advice, removal of risky
