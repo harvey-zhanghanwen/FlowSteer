@@ -26,13 +26,13 @@ import math
 import socket
 import threading
 import time
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Protocol, Sequence, Tuple, Union
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .agent_action_parser import AgentAction
 from .agent_runtime import AgentCallRecord, AgentRuntimeResult
-from .agent_workflow_env import AgentWorkflowEnv
+from .agent_workflow_env import AgentWorkflowEnv, AgentWorkflowSnapshot
 from .director import (
     AgentGraphOrchestrator,
     DIRECTOR_SYSTEM_PROMPT,
@@ -665,6 +665,49 @@ EvaluatorCallback = Callable[
 ]
 
 
+class RolloutObservationHook(Protocol):
+    """Optional exploration-plane observer around each natural Canvas edit.
+
+    The hook can append frozen posterior/Skill readouts to the Director state
+    and persist an exploration StepRecord.  It cannot alter the Director
+    action, Canvas result, terminal evaluator receipt, or GRPO reward.
+    """
+
+    def before_turn(
+        self,
+        *,
+        task: TaskRecord,
+        trajectory_id: str,
+        round_index: int,
+        environment: AgentWorkflowEnv,
+    ) -> Union[Mapping[str, Any], Awaitable[Mapping[str, Any]]]:
+        ...
+
+    def after_turn(
+        self,
+        *,
+        task: TaskRecord,
+        trajectory_id: str,
+        round_index: int,
+        pre_snapshot: Any,
+        response: DirectorResponse,
+        canvas: Any,
+        observation: Mapping[str, Any],
+    ) -> Union[Mapping[str, Any], Awaitable[Mapping[str, Any]]]:
+        ...
+
+    def after_trajectory(
+        self,
+        *,
+        trajectory: TrajectoryRecord,
+    ) -> Union[None, Awaitable[None]]:
+        ...
+
+
+async def _await_if_needed(value: Any) -> Any:
+    return await value if inspect.isawaitable(value) else value
+
+
 def _evaluation_receipt(value: EvaluationValue) -> EvaluationReceipt:
     if isinstance(value, EvaluationReceipt):
         return value
@@ -832,6 +875,10 @@ def _execution_record(call: AgentCallRecord) -> ExecutionRecord:
         "finish_reason": metadata.get("finish_reason"),
         "attempt_count": _optional_int(metadata.get("attempt_count")),
         "generation_seed": _optional_int(metadata.get("generation_seed")),
+        # DIRECT_REUSE: preserve the per-attempt provider lineage emitted by
+        # FlowSteer's OpenAI-compatible gateway.  These are control-plane
+        # receipts only; no credential or response body is recorded here.
+        "retry_receipts": metadata.get("retry_receipts", ()),
     }
     return ExecutionRecord(
         execution_id=execution_id,
@@ -893,6 +940,7 @@ class AgentGraphRolloutCollector:
         api_fallback_used: bool = False,
         manual_repair_used: bool = False,
         expected_task_split: str = "train",
+        observation_hook: Optional[RolloutObservationHook] = None,
     ) -> None:
         if orchestrator.registry is not environment.model_registry:
             raise ValueError("orchestrator and environment must share the model registry")
@@ -925,6 +973,7 @@ class AgentGraphRolloutCollector:
         self.api_fallback_used = api_fallback_used
         self.manual_repair_used = manual_repair_used
         self.expected_task_split = expected_task_split
+        self.observation_hook = observation_hook
         self._lock = asyncio.Lock()
 
     async def collect(
@@ -958,14 +1007,70 @@ class AgentGraphRolloutCollector:
         async with self._lock:
             return await self._collect_locked(task, rollout_index, evaluator_callback)
 
+    async def collect_probe_branch(
+        self,
+        task: TaskRecord,
+        rollout_index: int,
+        evaluator_callback: EvaluatorCallback,
+        *,
+        initial_snapshot: AgentWorkflowSnapshot,
+        intervention: AgentAction,
+        branch_id: str,
+    ) -> TrajectoryRecord:
+        """Continue one paired-probe arm from a captured pre-action snapshot.
+
+        The intervention itself is externally assigned and therefore receives
+        no policy-gradient credit.  Every downstream Director action is still
+        sampled afresh from the frozen policy and carries an exact SGLang
+        behavior receipt.  The resulting trajectory is always marked as a
+        forced probe and is excluded by the existing GRPO eligibility gate.
+        """
+
+        if not self.forced_probe:
+            raise ValueError("collect_probe_branch requires forced_probe=True")
+        if task.split != self.expected_task_split:
+            raise ValueError("probe branch task split differs")
+        if not isinstance(initial_snapshot, AgentWorkflowSnapshot):
+            raise TypeError("initial_snapshot must be AgentWorkflowSnapshot")
+        if not isinstance(intervention, AgentAction):
+            raise TypeError("intervention must be AgentAction")
+        if not isinstance(branch_id, str) or not branch_id.strip():
+            raise ValueError("branch_id must be non-empty")
+        if (
+            isinstance(rollout_index, bool)
+            or not isinstance(rollout_index, int)
+            or rollout_index < 0
+        ):
+            raise ValueError("rollout_index must be a non-negative integer")
+        if not callable(evaluator_callback):
+            raise TypeError("evaluator_callback must be callable")
+        async with self._lock:
+            return await self._collect_locked(
+                task,
+                rollout_index,
+                evaluator_callback,
+                initial_snapshot=initial_snapshot,
+                intervention=intervention,
+                branch_id=branch_id.strip(),
+            )
+
     async def _collect_locked(
         self,
         task: TaskRecord,
         rollout_index: int,
         evaluator_callback: EvaluatorCallback,
+        *,
+        initial_snapshot: Optional[AgentWorkflowSnapshot] = None,
+        intervention: Optional[AgentAction] = None,
+        branch_id: Optional[str] = None,
     ) -> TrajectoryRecord:
         env = self.environment
-        env.reset(task.question)
+        if initial_snapshot is None:
+            env.reset(task.question)
+        else:
+            if initial_snapshot.problem != task.question:
+                raise ValueError("probe snapshot problem differs from the task")
+            env.restore(initial_snapshot)
         turns: list[TurnRecord] = []
         snapshots: list[GraphSnapshotEvent] = []
         previous_snapshot_id: Optional[str] = None
@@ -974,24 +1079,90 @@ class AgentGraphRolloutCollector:
         explicit_finish = False
 
         group_id = f"{task.task_id}:{self.condition_id}:{self.versions.policy}"
-        rollout_id = f"{group_id}:rollout:{rollout_index:04d}"
-        trajectory_id = stable_id(
-            "trajectory",
-            {
-                "task_id": task.task_id,
-                "group_id": group_id,
-                "rollout_id": rollout_id,
-                "versions": self.versions.to_dict(),
-            },
+        branch_suffix = "" if branch_id is None else f":branch:{branch_id}"
+        rollout_id = f"{group_id}:rollout:{rollout_index:04d}{branch_suffix}"
+        # The paired-intervention plane assigns both branch identifiers before
+        # either arm is executed.  Preserve that identity as the trajectory ID
+        # so ProbeRecord.branch_order can bind the two exact continuation
+        # receipts without an additional, ambiguous ID translation layer.
+        trajectory_id = (
+            branch_id
+            if branch_id is not None
+            else stable_id(
+                "trajectory",
+                {
+                    "task_id": task.task_id,
+                    "group_id": group_id,
+                    "rollout_id": rollout_id,
+                    "versions": self.versions.to_dict(),
+                },
+            )
         )
 
-        for round_index in range(self.orchestrator.max_rounds):
-            prompt = self.orchestrator.build_prompt(env, round_index, self.skills)
+        intervention_receipt: Mapping[str, Any] = {}
+        if intervention is not None:
+            if initial_snapshot is None or branch_id is None:
+                raise ValueError("probe intervention requires snapshot and branch_id")
+            intervention_result = await env.step(intervention)
+            intervention_snapshot = GraphSnapshotEvent.create(
+                intervention_result.revision,
+                intervention_result.snapshot.graph.to_dict(),
+                None,
+            )
+            snapshots.append(intervention_snapshot)
+            previous_snapshot_id = intervention_snapshot.snapshot_id
+            intervention_receipt = {
+                "branch_id": branch_id,
+                "pre_canvas_snapshot_id": initial_snapshot.snapshot_id,
+                "action": intervention.to_dict(),
+                "accepted": intervention_result.accepted,
+                "feedback": intervention_result.feedback,
+                "post_graph_snapshot_id": intervention_snapshot.snapshot_id,
+                "post_graph_revision": intervention_result.revision,
+            }
+
+        for round_index in range(env.turn_count, self.orchestrator.max_rounds):
+            pre_snapshot = env.snapshot()
+            observation: Mapping[str, Any] = {}
+            if self.observation_hook is not None:
+                raw_observation = await _await_if_needed(
+                    self.observation_hook.before_turn(
+                        task=task,
+                        trajectory_id=trajectory_id,
+                        round_index=round_index,
+                        environment=env,
+                    )
+                )
+                if not isinstance(raw_observation, Mapping):
+                    raise TypeError("rollout observation hook must return a mapping")
+                observation = dict(raw_observation)
+            prompt = self.orchestrator.build_prompt(
+                env,
+                round_index,
+                self.skills,
+                state_annotations=observation,
+            )
             response = await self.orchestrator.client.propose(
                 prompt,
                 seed=self.orchestrator.seed + round_index,
             )
             canvas = await env.step(response.text)
+            exploration_step: Mapping[str, Any] = {}
+            if self.observation_hook is not None:
+                raw_step = await _await_if_needed(
+                    self.observation_hook.after_turn(
+                        task=task,
+                        trajectory_id=trajectory_id,
+                        round_index=round_index,
+                        pre_snapshot=pre_snapshot,
+                        response=response,
+                        canvas=canvas,
+                        observation=observation,
+                    )
+                )
+                if not isinstance(raw_step, Mapping):
+                    raise TypeError("rollout observation hook step must be a mapping")
+                exploration_step = dict(raw_step)
             metadata = response.metadata
 
             if metadata.get("receipt_verified") is not True:
@@ -1087,6 +1258,9 @@ class AgentGraphRolloutCollector:
                 director_generation_seed=_optional_int(
                     metadata.get("generation_seed")
                 ),
+                director_observation=observation,
+                exploration_step=exploration_step,
+                pre_canvas_snapshot_id=pre_snapshot.snapshot_id,
                 policy_version=policy_version,
                 policy_adapter=adapter_name,
                 server_weight_version=server_weight_version,
@@ -1137,7 +1311,13 @@ class AgentGraphRolloutCollector:
             forced_probe=self.forced_probe,
             api_fallback_used=self.api_fallback_used,
             manual_repair_used=self.manual_repair_used,
+            intervention=intervention_receipt,
         )
+
+        if self.observation_hook is not None:
+            await _await_if_needed(
+                self.observation_hook.after_trajectory(trajectory=trajectory)
+            )
 
         if self.evidence_store is not None:
             for snapshot in snapshots:
@@ -1152,6 +1332,7 @@ __all__ = [
     "EvaluatorCallback",
     "ReceiptValidationError",
     "RolloutGate",
+    "RolloutObservationHook",
     "SGLangReceiptDirectorClient",
     "execution_record_from_call",
     "select_balanced_tasks",

@@ -188,10 +188,36 @@ class OpenAICompatibleGateway:
 
         last_error: BaseException | None = None
         started_at = time.monotonic()
+        # DIRECT_REUSE: FlowSteer's current OpenAI-compatible gateway keeps a
+        # receipt for every provider attempt.  The training admission gate
+        # needs these records when a transient provider failure is retried;
+        # ``attempt_count`` alone cannot establish behavior lineage.
+        retry_receipts: list[dict[str, object]] = []
         for attempt in range(self.max_retries + 1):
+            attempt_started_at = time.monotonic()
+            backoff_seconds = 0.0
             try:
                 response = await asyncio.to_thread(self._post_json, url, api_key, payload)
                 parsed = self._parse_response(response, request)
+                retry_receipts.append(
+                    {
+                        "attempt": attempt + 1,
+                        "request_id": request.request_id,
+                        "provider_id": request.provider.provider_id,
+                        "model_id": request.model.model_id,
+                        "provider_request_id": parsed.metadata.get(
+                            "provider_request_id"
+                        ),
+                        "status": "completed",
+                        "http_status": 200,
+                        "retryable": False,
+                        "backoff_seconds": 0.0,
+                        "latency_ms": max(
+                            (time.monotonic() - attempt_started_at) * 1000.0,
+                            0.0,
+                        ),
+                    }
+                )
                 metadata = dict(parsed.metadata)
                 metadata.update(
                     {
@@ -201,28 +227,73 @@ class OpenAICompatibleGateway:
                         ),
                         "attempt_count": attempt + 1,
                         "generation_seed": payload.get("seed"),
+                        "request_status": "completed",
+                        "retry_receipts": retry_receipts,
                     }
                 )
                 return AgentResponse(parsed.text, metadata)
             except HTTPError as exc:
                 last_error = exc
                 retryable = exc.code in {408, 409, 425, 429} or exc.code >= 500
-                if not retryable or attempt >= self.max_retries:
+                will_retry = retryable and attempt < self.max_retries
+                backoff_seconds = min(2.0**attempt, 4.0) if will_retry else 0.0
+                retry_receipts.append(
+                    {
+                        "attempt": attempt + 1,
+                        "request_id": request.request_id,
+                        "provider_id": request.provider.provider_id,
+                        "model_id": request.model.model_id,
+                        "status": "retryable_failure" if will_retry else "failed",
+                        "error_type": type(exc).__name__,
+                        "http_status": exc.code,
+                        "retryable": retryable,
+                        "backoff_seconds": backoff_seconds,
+                        "latency_ms": max(
+                            (time.monotonic() - attempt_started_at) * 1000.0,
+                            0.0,
+                        ),
+                    }
+                )
+                if not will_retry:
                     break
             except (URLError, TimeoutError, socket.timeout) as exc:
                 last_error = exc
-                if attempt >= self.max_retries:
+                will_retry = attempt < self.max_retries
+                backoff_seconds = min(2.0**attempt, 4.0) if will_retry else 0.0
+                retry_receipts.append(
+                    {
+                        "attempt": attempt + 1,
+                        "request_id": request.request_id,
+                        "provider_id": request.provider.provider_id,
+                        "model_id": request.model.model_id,
+                        "status": "retryable_failure" if will_retry else "failed",
+                        "error_type": type(exc).__name__,
+                        "http_status": None,
+                        "retryable": True,
+                        "backoff_seconds": backoff_seconds,
+                        "latency_ms": max(
+                            (time.monotonic() - attempt_started_at) * 1000.0,
+                            0.0,
+                        ),
+                    }
+                )
+                if not will_retry:
                     break
-            if attempt < self.max_retries:
-                await asyncio.sleep(min(2.0**attempt, 4.0))
+            if backoff_seconds > 0:
+                await asyncio.sleep(backoff_seconds)
 
         if isinstance(last_error, HTTPError):
             detail = f"HTTP {last_error.code}"
         else:
             detail = type(last_error).__name__ if last_error is not None else "unknown error"
-        raise OpenAICompatibleGatewayError(
+        error = OpenAICompatibleGatewayError(
             f"provider request failed for {request.provider.provider_id}: {detail}"
-        ) from last_error
+        )
+        error.request_status = "failed"
+        error.retry_receipts = tuple(retry_receipts)
+        error.provider_id = request.provider.provider_id
+        error.model_id = request.model.model_id
+        raise error from last_error
 
     def _post_json(self, url: str, api_key: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

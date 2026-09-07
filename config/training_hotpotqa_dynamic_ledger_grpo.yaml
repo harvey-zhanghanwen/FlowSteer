@@ -1,0 +1,440 @@
+# HotpotQA training profile with the in-loop Combination Posterior and
+# posterior latent-risk readout. LatentLoss_Implementation_Spec.md is
+# authoritative where its exploration/ledger mechanics conflict with the
+# earlier project MD. The task-learning objective is unchanged: terminal-only,
+# same-problem/same-condition, Action-Masked One-Pass GRPO. This checked-in
+# profile is fail-closed until every Phase A-E gate has a runtime receipt.
+
+schema_version: "flowsteer.agentgraph.config.v1"
+
+source:
+  backup_branch: "backup/hotpotqa-compliant-best-round01-20260906"
+  backup_commit: "740e53ec6ccac635ecbe7f1f379b002bfb2574d1"
+  best_profile: "config/best_profiles/hotpotqa_agentgraph_v1.yaml"
+  condition_id: "hotpotqa_round_01_stable_zero"
+  project_design: "/ssd1/iclr/1/.codex/attachments/2ab716b4-c016-4dee-bb50-e96e928e7a8f/FlowSteer_MACE_Bayesian_Skill_Design.md"
+  latent_loss_spec: "/ssd1/iclr/1/.codex/attachments/458cec4d-8bbd-40bd-91c0-e6b90586313a/LatentLoss_Implementation_Spec.md"
+  flowsteer_upstream_commit: "a329b577a8e8c2f2d5492983b492473a06a8e718"
+  skillflow_upstream_commit: "74be52bb6bd9f0e9e68dacb72636b75649197983"
+
+method_boundary:
+  compliance_marker: "MD_FULL_COMPLIANCE_20260906_V2"
+  latent_loss_marker: "LATENT_LOSS_DYNAMIC_LEDGER_V1"
+  precedence: "latent_loss_spec_over_project_md_on_conflicting_ledger_mechanics"
+  decision_status: "selected"
+  role: "primary_task_learning_objective"
+  primary_objective: "action_masked_one_pass_grpo"
+  differentiable_objectives: [action_masked_one_pass_grpo]
+  ttb_enabled: false
+  mixing_losses_allowed: false
+  latent_loss_is_differentiable_objective: false
+  latent_loss_role: "posterior_risk_readout_in_director_observation"
+  combination_posterior_role: "exploration_plane_only"
+  probe_and_skill_reward_contribution: 0.0
+  skillflow_scope: "qwen35_sglang_lora_checkpoint_publication_sync_only"
+  resolution: >-
+    LatentLoss_Implementation_Spec.md replaces conflicting static exploration
+    ledger calculations with the dynamic Combination Posterior, paired probes,
+    latent-risk readout, and calibrated Skill lifecycle. It does not replace
+    or augment the MD terminal-only Action-Masked One-Pass GRPO loss. SkillFlow
+    Tempered Trajectory Balance remains disabled.
+
+md_compliance:
+  marker: "MD_FULL_COMPLIANCE_20260906_V2"
+  phase_0_status: "passed"
+  phase_0_receipt: "artifacts/hotpotqa_md_grpo_v2_300step/phase_0/evidence_epoch_000003/phase0_lineage_receipt.json"
+  one_step_closure_status: "not_run"
+  long_training_authorized: false
+  matrix: "docs/MD_FULL_COMPLIANCE_20260906_V2.md"
+
+latent_loss_compliance:
+  marker: "LATENT_LOSS_DYNAMIC_LEDGER_V1"
+  source_map: "docs/LATENT_LOSS_DYNAMIC_LEDGER_COMPLIANCE.md"
+  fail_closed: true
+  all_required_gates_passed: false
+  optimizer_step_authorized: false
+  gates:
+    phase_a_combination_posterior:
+      required: true
+      status: "pending_formal_gate_run"
+      receipt: null
+    phase_b_latent_risk:
+      required: true
+      status: "pending_formal_gate_run"
+      receipt: null
+    phase_c_paired_probe_and_audit:
+      required: true
+      status: "pending_formal_gate_run"
+      receipt: null
+    phase_d_skill_lifecycle:
+      required: true
+      status: "pending_formal_gate_run"
+      receipt: null
+    phase_e_integration:
+      required: true
+      status: "pending_not_run"
+      required_unique_questions: 50
+      rollouts_per_question: 4
+      expected_natural_trajectories: 200
+      receipt: null
+  activation_rule: >-
+    Training may be enabled only by the runner after all Phase A-E receipts are
+    validated, including the real 50-question by 4-trajectory Phase E epoch.
+
+experiment:
+  name: "hotpotqa_qwen35_9b_dynamic_ledger_grpo_300step"
+  phase: "hotpotqa_dynamic_ledger_grpo_training"
+  training_enabled: false
+  seed: 42
+  target_optimizer_steps: 300
+  initial_update_step: 2
+  checkpoint_every_steps: 10
+  prefetch_next_step: false
+  condition_id: "hotpotqa_dynamic_ledger_grpo_natural_v1"
+  output_dir: "artifacts/hotpotqa_dynamic_ledger_grpo_300step"
+
+data:
+  train_path: "${HOTPOTQA_AGENTGRAPH_TRAIN_PATH:-/ssd1/iclr/1/FlowSteer/data/agentgraph_v1/train.jsonl}"
+  validation_path: "${HOTPOTQA_AGENTGRAPH_VALIDATION_PATH:-/ssd1/iclr/1/FlowSteer/data/agentgraph_v1/validation.jsonl}"
+  enforce_split_isolation: true
+  expected_unique_train_tasks: 512
+  expected_validation_tasks: 128
+  task_schema_version: "flowsteer.agentgraph.task.v1"
+  batch:
+    dataset_key: "hotpotqa"
+    selection: "skillflow_seeded_sample"
+    seed_offset: 0
+    tasks_per_step: 7
+    rollouts_per_task: 4
+    expected_rollouts_per_step: 28
+  heldout_paired_evidence:
+    split: "validation"
+    problem_disjoint_from_discovery: true
+    excluded_from_grpo: true
+    excluded_from_standard_metrics: true
+    frozen_manifest: null
+    status: "pending"
+
+storage:
+  schema_version: "flowsteer.hotpotqa.dynamic_ledger_grpo_training.v1"
+  root: "artifacts/hotpotqa_dynamic_ledger_grpo_300step/evidence"
+  persist_exact_policy_receipts: true
+  manifest_path: "artifacts/hotpotqa_dynamic_ledger_grpo_300step/run_manifest.json"
+  state_path: "artifacts/hotpotqa_dynamic_ledger_grpo_300step/run_state.json"
+  training_log_path: "artifacts/hotpotqa_dynamic_ledger_grpo_300step/training_log.jsonl"
+  natural_trajectory_path: "artifacts/hotpotqa_dynamic_ledger_grpo_300step/evidence/natural_trajectories.jsonl"
+  intervention_trajectory_path: "artifacts/hotpotqa_dynamic_ledger_grpo_300step/evidence/intervention_trajectories.jsonl"
+  probe_record_path: "artifacts/hotpotqa_dynamic_ledger_grpo_300step/evidence/probe_records.jsonl"
+  ledger_snapshot_root: "artifacts/hotpotqa_dynamic_ledger_grpo_300step/ledger"
+  skill_snapshot_root: "artifacts/hotpotqa_dynamic_ledger_grpo_300step/skills"
+
+versions:
+  prompt: "agentgraph.director.minimal.v2"
+  tool: "agentgraph.executor-react.v2"
+  ledger: "combination-posterior-v1"
+  latent_loss: "posterior-latent-risk-v1"
+  feature_schema: "dynamic-combination-decision-key-v1"
+  skill: "ledger-skill-v1"
+  role_classifier: "llm-role-cluster-v1"
+
+director:
+  base_model: "${QWEN35_9B_MODEL_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/model/Qwen3.5-9B-modelscope}"
+  tokenizer_path: "${QWEN35_9B_TOKENIZER_PATH:-/home/test/SKILLEV/skillev-new-b2-temp/tokenizer/Qwen3.5-9B}"
+  backend: "sglang"
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8016}/v1"
+  served_model_name: "supervisor_theta"
+  behavior_policy_version: "qwen35-9b-smoke-step-0001"
+  updated_policy_version: "hotpotqa-dynamic-ledger-grpo-step-runtime"
+  updated_policy_version_prefix: "qwen35-9b-hotpotqa-dynamic-ledger-grpo-step-"
+  expected_server_weight_version: "default"
+  behavior_adapter_name: "theta_smoke_step_000001"
+  behavior_adapter_checkpoint: "${HOTPOTQA_ROUND01_ADAPTER_CHECKPOINT:-/ssd1/iclr/1/FlowSteer/artifacts/agentgraph_smoke/checkpoint_final/supervisor_lora/step_000001_20260815T071303632043Z/theta}"
+  optimizer_state_checkpoint: null
+  prompt_profile: "minimal"
+  dtype: "bfloat16"
+  max_context_tokens: 8192
+  max_action_tokens: 256
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_rounds: 20
+  execute_on_edit: true
+  history_window: 4
+  observation_extensions:
+    ledger_readout: true
+    top_active_skills: true
+    mutate_action_space: false
+  lora:
+    enabled: true
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+agent_graph:
+  max_agents: 10
+  contract_type: "free_text"
+  relation_encoding: "two_bit"
+  actions: [add_agent, modify_agent, delete_agent, set_relation, set_output, finish]
+  executor_selection: "seeded_weighted_random"
+  max_bidirectional_block_size: 2
+  require_unique_output: true
+  require_all_agents_reach_output: true
+  model_catalog_path: "config/model_catalog.yaml"
+
+evaluation:
+  healthbench_judge_model: "gpt-4o-mini"
+  max_environment_steps: 12
+  invalid_evaluator_action: "persist_and_exclude"
+  terminal_metrics: [exact_match, token_f1]
+
+grpo:
+  enabled: true
+  objective: "action_masked_one_pass"
+  ttb_enabled: false
+  terminal_reward_field: "token_f1"
+  group_key: [task_id, condition_id, policy_version]
+  samples_per_problem: 4
+  advantage_epsilon: 1.0e-8
+  equal_weight_per_problem: true
+  terminal_task_reward_only: true
+  structural_reward: 0.0
+  exploration_reward: 0.0
+  skill_usage_reward: 0.0
+  latent_loss_reward: 0.0
+  probe_reward: 0.0
+  require_valid_evaluator: true
+  invalid_evaluator_action: "persist_and_exclude"
+  reject_forced_probes: true
+  reject_audits: true
+  reject_fallback_or_manual_repair: true
+  reject_reconstructed_context: true
+  require_exact_behavior_receipt: true
+  optimization_passes_per_rollout_batch: 1
+  max_optimizer_updates_per_step: 1
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  scheduler: "cosine_with_warmup"
+  warmup_steps: 0
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: true
+  max_grad_norm: 3.0
+
+dynamic_ledger:
+  enabled: true
+  role: "director_observation_and_exploration_plane"
+  differentiable: false
+  contributes_to_grpo_reward: false
+  terminal_binary_outcome: "exact_match"
+  comparison_fit_source: "same_snapshot_paired_probes_only"
+  absolute_baseline_sources: [natural_trajectory, probe_branch, audit_branch]
+  sensor_sources: [natural_trajectory, probe_branch, audit_branch]
+  decision_key:
+    task_family: "dataset_family_or_frozen_question_embedding_cluster"
+    role_clusters: [solve, verify, plan, summarize, arbitrate, retrieve, code, test]
+    role_assignment: "llm_strict_json"
+    keyword_fallback_allowed: false
+    model_id: "stable_model_catalog_version_id"
+    edge_types: [independent, unidirectional, bidirectional]
+    same_model_as_upstream: [false, true]
+    stages: [before_output, other]
+  posterior:
+    family: "gaussian_conjugate"
+    one_hot_factors: [role, model, relation]
+    cholesky_solve: true
+    prior_variance_initial: 0.05
+    interaction_prior_variance_initial: 0.05
+    interaction_activation_probes: 5
+    empirical_bayes_once_per_epoch: true
+    noise_variance_floor: 0.01
+    task_baseline_prior_mean: 0.5
+    task_baseline_prior_count: 4
+    expected_terminal_clip: [0.02, 0.98]
+    sensor_prior: "Beta(1,1)"
+  latent_risk:
+    tau: 0.8
+    delta_min: 0.05
+    candidate_top_k: 5
+    posterior_samples: 200
+    pre_execution_cost: 0.0
+    post_revision_cost: 0.05
+    suppress_warning_when_remaining_rounds_lte: 1
+    director_action_space_unchanged: true
+  policy_refresh:
+    normal_decay: 0.1
+    low_coverage_decay: 0.5
+    sensor_count_multiplier: 0.9
+    task_baseline_epochs_retained: 2
+    reset_after_consecutive_low_coverage_epochs: 2
+
+role_classification:
+  enabled: true
+  method: "llm"
+  response_format: "strict_json"
+  allowed_role_clusters: [solve, verify, plan, summarize, arbitrate, retrieve, code, test]
+  keyword_or_regex_fallback_allowed: false
+  receipt_required: true
+  role_intervention_contract_rewrite: "llm_semantic_preserving"
+
+exploration:
+  enabled: true
+  method: "dynamic_combination_posterior"
+  legacy_mace_enabled: false
+  legacy_joint_bayesian_enabled: false
+  legacy_particle_evsi_enabled: false
+  probe:
+    selection: "highest_straddle_one_step_per_natural_trajectory"
+    budget_fraction_of_natural_trajectories: 0.10
+    repeats_per_arm: 3
+    same_snapshot: true
+    exactly_one_decision_field_changed: true
+    downstream_director_policy: "frozen_epoch_policy_resampled"
+    randomized_branch_order: true
+    isolate_cache_tool_state_and_random_seed_policy: true
+    enters_grpo: false
+    enters_standard_metrics: false
+  audit:
+    trigger: "latent_risk_warning"
+    probability: 0.05
+    repeats_per_arm: 3
+    enters_grpo: false
+    enters_standard_metrics: false
+
+skills:
+  enabled: true
+  source: "dynamic_combination_posterior"
+  statuses: [candidate, active, suspended, retired]
+  initial_visible: []
+  minimum_discovery_pairs: 10
+  minimum_confirmation_problems: 20
+  calibration_alpha: 0.05
+  benjamini_hochberg_fdr: 0.10
+  delta_min: 0.05
+  maximum_active_injected_per_step: 3
+  newly_active_visible_from: "next_epoch"
+  hard_gate_director_action: false
+  reward_contribution: 0.0
+  require_version_revalidation: true
+  suspend_after_negative_mean_epochs: 2
+  retire_after_suspended_epochs: 3
+
+mace:
+  enabled: false
+  status: "superseded_for_this_profile_by_dynamic_combination_posterior"
+
+bayesian_posterior:
+  enabled: false
+  status: "legacy_static_path_disabled_dynamic_combination_posterior_is_separate"
+
+policy_sync:
+  enabled: true
+  api_base: "http://127.0.0.1:${FLOWSTEER_SUPERVISOR_PORT:-8016}"
+  adapter_name_prefix: "theta_hotpotqa_dynamic_ledger_grpo_step_"
+  behavior_policy_version_required: true
+  adapter_checkpoint_version_required: true
+  request_timeout_seconds: 120
+  max_retries: 3
+  retry_backoff_seconds: 2
+  fail_run_on_sync_error: true
+  post_update_canary_count: 1
+
+tracking:
+  binding_marker: "WANDB_BINDING_20260906_V1"
+  enabled: true
+  mode: "online"
+  project: "flowsteer-hotpotqa"
+  entity: "zhanghanwen6660909-dut"
+  credential_source: "wandb_sdk_default"
+  require_run_url: true
+  run_name: "hotpotqa-qwen35-9b-dynamic-ledger-grpo-300step"
+  run_id: "${WANDB_RUN_ID:-}"
+  required_step_fields:
+    - global_step
+    - dataset
+    - policy/behavior_version
+    - policy/updated_version
+    - checkpoint/version
+    - terminal_reward/mean
+    - group_reward/mean
+    - group_reward/std
+    - rollout/valid_count
+    - train/grpo_loss
+    - train/grad_norm
+    - train/lora_update_l2
+    - train/exact_match
+    - train/token_f1
+    - validation/exact_match
+    - validation/token_f1
+    - gpu/memory
+    - timing/step_seconds
+    - checkpoint/saved
+    - policy/publish_success
+    - policy/route_switch_success
+    - policy/canary_success
+    - ledger/probe_count
+    - ledger/audit_count
+    - ledger/heldout_nll
+    - ledger/heldout_brier
+    - ledger/interval_coverage_90
+    - ledger/interval_width_mean
+    - latent_risk/warning_precision
+    - latent_risk/warning_recall
+    - skill/candidate_count
+    - skill/active_count
+    - skill/suspended_count
+    - skill/retired_count
+  validation_protocol:
+    status: "frozen"
+    split: "validation"
+    expected_validation_pool_size: 128
+    monitor_size: 7
+    rollouts_per_task: 1
+    used_for_optimization: false
+    used_for_posterior: false
+    used_for_skill: false
+    best_metric: "validation/token_f1"
+    monitor_task_ids:
+      - "hotpotqa:5a7a06935542990198eaf050"
+      - "hotpotqa:5a879ab05542996e4f30887e"
+      - "hotpotqa:5a8d7341554299441c6b9fe5"
+      - "hotpotqa:5a82171f5542990a1d231f4a"
+      - "hotpotqa:5a84dd955542997b5ce3ff79"
+      - "hotpotqa:5a7e36045542991319bc9440"
+      - "hotpotqa:5adf44985542993a75d2646d"
+  checkpoint_artifact:
+    enabled: true
+    type: "model"
+    aliases: [latest, best]
+    recovery_metadata_required: true
+    status: "ready"
+
+gpu:
+  execution_layout: "single_gpu_sequential"
+  gradient_worker_count: 1
+  learner_physical: 5
+  rollout_physical: 5
+  gradient_replica_physical: 5
+  learner_device: "cuda:5"
+  gradient_replica_device: "cuda:5"
+  rollout_engine: "sglang"
+  supervisor_gpu_id: 5
+  supervisor_port: 8016
+  supervisor:
+    # SkillFlow Qwen3.5 serving uses the PyTorch sampling backend. The manager
+    # also prepends this venv's tools and selects the matching CUDA toolkit,
+    # following SkillFlow's launch_sglang.py::build_environment.
+    sampling_backend: "pytorch"
+    enable_multimodal: true
+  training_enabled: false
+  layout_provenance: "project_single_gpu_time_multiplexing_not_skillflow_paper"
+  lifecycle:
+    sequence: [rollout, pause, drain, stop_sglang, train, restart_sglang, publish, canary, resume]
+    fail_closed: true
+    stop_only_runtime_owned_process: true
+  oom_policy:
+    status: "active"
+    micro_batch_size: 4
+    minimum_micro_batch_size: 1
+    micro_batch_schedule: [4, 2, 1]
+    gradient_accumulation_steps: 1
+    gradient_checkpointing: true

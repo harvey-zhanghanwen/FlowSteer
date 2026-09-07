@@ -104,6 +104,9 @@ class TurnRecord:
     director_latency_ms: Optional[float] = None
     director_attempt_count: Optional[int] = None
     director_generation_seed: Optional[int] = None
+    director_observation: Mapping[str, Any] = field(default_factory=dict)
+    exploration_step: Mapping[str, Any] = field(default_factory=dict)
+    pre_canvas_snapshot_id: str = ""
     reconstructed_context: bool = False
     receipt_verified: bool = False
     created_at: str = field(default_factory=utc_now)
@@ -143,6 +146,12 @@ class TurnRecord:
             raise ValueError("director_generation_seed must be non-negative when supplied")
         if not isinstance(self.runtime_summary, Mapping):
             raise ValueError("runtime_summary must be a mapping")
+        if not isinstance(self.director_observation, Mapping):
+            raise ValueError("director_observation must be a mapping")
+        if not isinstance(self.exploration_step, Mapping):
+            raise ValueError("exploration_step must be a mapping")
+        if self.pre_canvas_snapshot_id and not self.pre_canvas_snapshot_id.strip():
+            raise ValueError("pre_canvas_snapshot_id must be non-empty when supplied")
 
     @property
     def snapshot_receipt_verified(self) -> bool:
@@ -202,8 +211,15 @@ class TrajectoryRecord:
     forced_probe: bool = False
     api_fallback_used: bool = False
     manual_repair_used: bool = False
+    intervention: Mapping[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_now)
     schema_version: str = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.intervention, Mapping):
+            raise ValueError("intervention must be a mapping")
+        if self.intervention and not self.forced_probe:
+            raise ValueError("only a forced-probe trajectory may carry an intervention")
 
     @property
     def group_key(self) -> Tuple[str, str, str]:
@@ -282,6 +298,7 @@ class TrajectoryRecord:
             "forced_probe": self.forced_probe,
             "api_fallback_used": self.api_fallback_used,
             "manual_repair_used": self.manual_repair_used,
+            "intervention": dict(self.intervention),
             "grpo_eligible": self.grpo_eligible,
             "created_at": self.created_at,
         }

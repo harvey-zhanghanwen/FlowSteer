@@ -631,6 +631,113 @@ class ConfigAndSamplingTests(unittest.TestCase):
                 )
             )
 
+    def test_phase0_gate_accepts_complete_agent_retry_lineage_and_rejects_gaps(self) -> None:
+        import asyncio
+
+        tasks = [_task(index) for index in range(7)]
+        trajectories = []
+        rollout_index = 0
+        for task in tasks:
+            versions = _MODULE.version_bundle_for(
+                task,
+                policy_version="policy-v1",
+                model_catalog_version="catalog-v1",
+                prompt_version="prompt-v1",
+                tool_version="tool-v1",
+            )
+            for _ in range(4):
+                trajectories.append(
+                    _phase0_trajectory(
+                        task,
+                        rollout_index,
+                        versions,
+                        adapter="theta-v1",
+                    )
+                )
+                rollout_index += 1
+
+        original = trajectories[0]
+        turns = list(original.turns)
+        execution = turns[1].executions[0]
+        metadata = dict(execution.metadata)
+        response = dict(metadata["response"])
+        request_id = metadata["request"]["request_id"]
+        provider_request_id = response["provider_request_id"]
+        response.update(
+            {
+                "attempt_count": 2,
+                "retry_receipts": [
+                    {
+                        "attempt": 1,
+                        "request_id": request_id,
+                        "provider_id": execution.provider,
+                        "model_id": execution.model_id,
+                        "status": "retryable_failure",
+                        "error_type": "HTTPError",
+                        "http_status": 429,
+                        "retryable": True,
+                        "backoff_seconds": 1.0,
+                        "latency_ms": 2.0,
+                    },
+                    {
+                        "attempt": 2,
+                        "request_id": request_id,
+                        "provider_id": execution.provider,
+                        "model_id": execution.model_id,
+                        "provider_request_id": provider_request_id,
+                        "status": "completed",
+                        "http_status": 200,
+                        "retryable": False,
+                        "backoff_seconds": 0.0,
+                        "latency_ms": 3.0,
+                    },
+                ],
+            }
+        )
+        metadata["response"] = response
+        turns[1] = replace(
+            turns[1],
+            executions=(replace(execution, metadata=metadata),),
+        )
+        trajectories[0] = replace(original, turns=tuple(turns))
+
+        receipt = asyncio.run(
+            validate_phase0_rollout_batch(
+                trajectories,
+                expected_task_ids=[task.task_id for task in tasks],
+                expected_count=28,
+                behavior_policy="policy-v1",
+                behavior_adapter="theta-v1",
+            )
+        )
+        self.assertEqual(1, receipt["agent_provider_retry_count"])
+
+        broken_turns = list(trajectories[0].turns)
+        broken_execution = broken_turns[1].executions[0]
+        broken_metadata = dict(broken_execution.metadata)
+        broken_response = dict(broken_metadata["response"])
+        broken_response["retry_receipts"] = broken_response["retry_receipts"][1:]
+        broken_metadata["response"] = broken_response
+        broken_turns[1] = replace(
+            broken_turns[1],
+            executions=(replace(broken_execution, metadata=broken_metadata),),
+        )
+        broken = list(trajectories)
+        broken[0] = replace(trajectories[0], turns=tuple(broken_turns))
+        with self.assertRaisesRegex(
+            HotpotTrainingError,
+            "retry count differs from lineage",
+        ):
+            asyncio.run(
+                validate_phase0_rollout_batch(
+                    broken,
+                    expected_task_ids=[task.task_id for task in tasks],
+                    expected_count=28,
+                    behavior_policy="policy-v1",
+                    behavior_adapter="theta-v1",
+                )
+            )
+
 
 class StepTransactionTests(unittest.TestCase):
     def test_journal_and_recovery_state_are_durable_and_clearable(self) -> None:

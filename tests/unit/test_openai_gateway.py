@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+from urllib.error import HTTPError
 
 from src.interactive.agent_graph import AgentNode
 from src.interactive.agent_runtime import (
@@ -93,6 +94,51 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(response.metadata["latency_ms"], 0.0)
         self.assertEqual(response.metadata["attempt_count"], 1)
         self.assertEqual(response.metadata["generation_seed"], 17)
+        self.assertEqual(
+            ["completed"],
+            [item["status"] for item in response.metadata["retry_receipts"]],
+        )
+        self.assertEqual(
+            "req-1",
+            response.metadata["retry_receipts"][0]["provider_request_id"],
+        )
+
+    async def test_retry_reuses_request_and_persists_each_attempt(self) -> None:
+        gateway = OpenAICompatibleGateway(max_retries=1)
+        payloads = []
+
+        def fake_post(url, api_key, payload):
+            payloads.append(dict(payload))
+            if len(payloads) == 1:
+                raise HTTPError(url, 429, "rate limited", {}, None)
+            return {
+                "id": "req-after-retry",
+                "model": "remote-model-id",
+                "choices": [
+                    {"message": {"content": "answer"}, "finish_reason": "stop"}
+                ],
+                "usage": {},
+            }
+
+        gateway._post_json = fake_post  # type: ignore[method-assign]
+        with patch(
+            "src.interactive.openai_gateway.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            response = await gateway.generate(request())
+
+        self.assertEqual(payloads[0], payloads[1])
+        receipts = response.metadata["retry_receipts"]
+        self.assertEqual(2, response.metadata["attempt_count"])
+        self.assertEqual(
+            ["retryable_failure", "completed"],
+            [item["status"] for item in receipts],
+        )
+        self.assertEqual([1, 2], [item["attempt"] for item in receipts])
+        self.assertEqual(
+            "req-after-retry",
+            receipts[-1]["provider_request_id"],
+        )
 
     async def test_missing_credential_names_variable_without_printing_key(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

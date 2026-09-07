@@ -105,6 +105,23 @@ class ConfigLoaderTests(unittest.TestCase):
         self.assertFalse(config["exploration"]["enabled"])
         self.assertFalse(config["skills"]["enabled"])
 
+    def test_single_gpu_sequential_layout_requires_one_shared_device(self) -> None:
+        config = load_yaml("config/training_agentgraph_smoke.yaml")
+        config["gpu"].update(
+            execution_layout="single_gpu_sequential",
+            gradient_worker_count=1,
+            learner_physical=5,
+            rollout_physical=5,
+            gradient_replica_physical=5,
+            learner_device="cuda:5",
+            gradient_replica_device="cuda:5",
+        )
+        validate_agent_graph_config(config)
+
+        config["gpu"]["rollout_physical"] = 4
+        with self.assertRaisesRegex(ConfigurationError, "shared physical device"):
+            validate_agent_graph_config(config)
+
     def test_example_catalog_contains_only_verified_smoke_ids(self) -> None:
         registry = load_model_registry("config/model_catalog.yaml.example")
         expected_names = {

@@ -73,6 +73,7 @@ class PolicySyncConfig:
     max_response_bytes: int = 16 * 1024 * 1024
     canary_prompt: str = "Reply with OK."
     canary_max_tokens: int = 1
+    served_model_name: str = "supervisor_theta"
 
     def __post_init__(self) -> None:
         parsed = urlsplit(self.api_base)
@@ -93,8 +94,19 @@ class PolicySyncConfig:
             raise ValueError("max_retries must be a non-negative integer")
         if type(self.max_response_bytes) is not int or self.max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be a positive integer")
-        if not self.canary_prompt.strip() or self.canary_max_tokens <= 0:
+        if (
+            not self.canary_prompt.strip()
+            or self.canary_max_tokens <= 0
+            or not self.served_model_name.strip()
+        ):
             raise ValueError("canary settings must be non-empty and positive")
+
+    def lora_model(self, adapter_name: str) -> str:
+        """Return SGLang 0.5's explicit ``base-model:adapter`` route."""
+
+        if not isinstance(adapter_name, str) or not adapter_name.strip():
+            raise ValueError("adapter_name must be non-empty")
+        return f"{self.served_model_name}:{adapter_name.strip()}"
 
     @property
     def control_root(self) -> str:
@@ -241,7 +253,7 @@ class SGLangPolicyPublisher:
                     "messages": [
                         {"content": self.config.canary_prompt, "role": "user"}
                     ],
-                    "model": adapter_name,
+                    "model": self.config.lora_model(adapter_name),
                     "temperature": 0,
                 },
             )
@@ -365,7 +377,7 @@ class SGLangPolicyPublisher:
                     "messages": [
                         {"content": self.config.canary_prompt, "role": "user"}
                     ],
-                    "model": candidate,
+                    "model": self.config.lora_model(candidate),
                     "temperature": 0,
                 },
             )

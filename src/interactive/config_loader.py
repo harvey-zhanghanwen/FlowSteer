@@ -161,8 +161,22 @@ def validate_agent_graph_config(value: Mapping[str, Any]) -> None:
         int(gpu["rollout_physical"]),
         int(gpu["gradient_replica_physical"]),
     ]
-    if len(set(physical)) != 3:
-        raise ConfigurationError("the three GPU roles must use distinct physical devices")
+    layout = gpu.get("execution_layout", "three_gpu_concurrent")
+    gradient_workers = int(gpu.get("gradient_worker_count", 2))
+    if layout == "three_gpu_concurrent":
+        if gradient_workers != 2 or len(set(physical)) != 3:
+            raise ConfigurationError(
+                "the concurrent layout requires two gradient workers on three "
+                "distinct physical devices"
+            )
+    elif layout == "single_gpu_sequential":
+        if gradient_workers != 1 or len(set(physical)) != 1:
+            raise ConfigurationError(
+                "the sequential layout requires one gradient worker and one "
+                "shared physical device"
+            )
+    else:
+        raise ConfigurationError("gpu.execution_layout is unsupported")
     if gpu.get("rollout_engine") != "sglang":
         raise ConfigurationError("the rollout GPU must use SGLang")
     oom = gpu.get("oom_policy", {})

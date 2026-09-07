@@ -24,6 +24,7 @@ import argparse
 import asyncio
 from collections import Counter
 import copy
+from dataclasses import replace
 from datetime import datetime, timezone
 import importlib.util
 import json
@@ -35,6 +36,7 @@ import signal
 import sys
 import time
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
+from urllib.parse import urlsplit
 import uuid
 
 
@@ -74,7 +76,44 @@ from src.interactive.agent_action_parser import (
 )
 from src.interactive.agent_graph import AgentGraph, AgentNode
 from src.interactive.persistence import GraphSnapshotEvent
-from src.interactive.records import TaskRecord, TrajectoryRecord
+from src.interactive.records import ProbeRecord, TaskRecord, TrajectoryRecord
+from src.interactive.exploration.dynamic_training_runtime import (
+    DynamicEpochCloseResult,
+    DynamicLedgerBatch,
+    DynamicLedgerEpochCoordinator,
+    close_dynamic_epoch,
+    dynamic_epoch_metrics,
+    freeze_initial_epoch,
+    select_probe_sites,
+)
+from src.interactive.exploration.latent_loss import LatentLossConfig
+from src.interactive.exploration.ledger_epoch import LedgerEpoch
+from src.interactive.exploration.long_training_admission import (
+    build_supplemental_long_training_admission,
+    load_supplemental_long_training_admission,
+    save_supplemental_long_training_admission,
+    validate_supplemental_long_training_admission,
+)
+from src.interactive.exploration.phase_acceptance import run_phase_acceptance
+from src.interactive.exploration.role_classifier import (
+    ContractRoleRewriter,
+    OpenAICompatibleRoleCompletionClient,
+    RoleClassifier,
+)
+from src.interactive.exploration.training_bridge import (
+    LEDGER_FEATURE_SCHEMA_VERSION,
+)
+from src.interactive.skills.runtime_producer import (
+    SkillRuntimeProducerConfig,
+    SkillRuntimeUpdate,
+    produce_skill_runtime_update,
+)
+from src.interactive.sequential_gpu_runtime import (
+    SequentialGpuCycleReceipt,
+    SequentialGpuRuntime,
+    SequentialGpuRuntimeError,
+)
+from src.interactive.sglang_manager import SGLangSupervisorManager
 from src.interactive.step_transaction import StepPhase, StepTransaction
 from src.interactive.task_dataset import iter_task_records
 from src.interactive.task_evaluator import evaluate_task
@@ -297,6 +336,13 @@ def _append_jsonl(path: Path, value: Mapping[str, Any]) -> None:
         os.fsync(stream.fileno())
 
 
+def _dynamic_ledger_selected(config: Mapping[str, Any]) -> bool:
+    boundary = config.get("method_boundary", {})
+    return isinstance(boundary, Mapping) and (
+        boundary.get("latent_loss_marker") == "LATENT_LOSS_DYNAMIC_LEDGER_V1"
+    )
+
+
 def validate_hotpotqa_training_config(config: Mapping[str, Any]) -> None:
     """Reject objective drift, disabled tracking, or a non-formal step budget."""
 
@@ -313,6 +359,7 @@ def validate_hotpotqa_training_config(config: Mapping[str, Any]) -> None:
     tracking = _mapping(config.get("tracking"), "tracking")
     exploration = _mapping(config.get("exploration"), "exploration")
     skills = _mapping(config.get("skills"), "skills")
+    dynamic_mode = _dynamic_ledger_selected(config)
 
     checks = {
         "source.backup_branch": source.get("backup_branch")
@@ -338,7 +385,12 @@ def validate_hotpotqa_training_config(config: Mapping[str, Any]) -> None:
         is False,
         "md_compliance.marker": compliance.get("marker")
         == "MD_FULL_COMPLIANCE_20260906_V2",
-        "experiment.phase": experiment.get("phase") == "hotpotqa_grpo_training",
+        "experiment.phase": experiment.get("phase")
+        == (
+            "hotpotqa_dynamic_ledger_grpo_training"
+            if dynamic_mode
+            else "hotpotqa_grpo_training"
+        ),
         "experiment.training_enabled": type(experiment.get("training_enabled"))
         is bool,
         "data.enforce_split_isolation": data.get("enforce_split_isolation") is True,
@@ -392,8 +444,8 @@ def validate_hotpotqa_training_config(config: Mapping[str, Any]) -> None:
         "tracking.credential_source": tracking.get("credential_source")
         == "wandb_sdk_default",
         "tracking.require_run_url": tracking.get("require_run_url") is True,
-        "exploration.enabled": exploration.get("enabled") is False,
-        "skills.enabled": skills.get("enabled") is False,
+        "exploration.enabled": exploration.get("enabled") is dynamic_mode,
+        "skills.enabled": skills.get("enabled") is dynamic_mode,
     }
     failed = [name for name, valid in checks.items() if not valid]
     if failed:
@@ -432,6 +484,99 @@ def validate_hotpotqa_training_config(config: Mapping[str, Any]) -> None:
         raise ConfigurationError(
             "Bayesian posterior updates must remain disabled in this task-learning run"
         )
+    if dynamic_mode:
+        dynamic = _mapping(config.get("dynamic_ledger"), "dynamic_ledger")
+        posterior = _mapping(dynamic.get("posterior"), "dynamic_ledger.posterior")
+        latent = _mapping(dynamic.get("latent_risk"), "dynamic_ledger.latent_risk")
+        probe = _mapping(exploration.get("probe"), "exploration.probe")
+        audit = _mapping(exploration.get("audit"), "exploration.audit")
+        dynamic_checks = {
+            "versions.feature_schema": _mapping(
+                config.get("versions"), "versions"
+            ).get("feature_schema")
+            == LEDGER_FEATURE_SCHEMA_VERSION,
+            "method_boundary.latent_loss_is_differentiable_objective": (
+                method_boundary.get("latent_loss_is_differentiable_objective")
+                is False
+            ),
+            "method_boundary.probe_and_skill_reward_contribution": float(
+                method_boundary.get("probe_and_skill_reward_contribution", -1.0)
+            )
+            == 0.0,
+            "dynamic_ledger.enabled": dynamic.get("enabled") is True,
+            "dynamic_ledger.differentiable": dynamic.get("differentiable") is False,
+            "dynamic_ledger.contributes_to_grpo_reward": (
+                dynamic.get("contributes_to_grpo_reward") is False
+            ),
+            "dynamic_ledger.terminal_binary_outcome": (
+                dynamic.get("terminal_binary_outcome") == "exact_match"
+            ),
+            "dynamic_ledger.posterior.family": (
+                posterior.get("family") == "gaussian_conjugate"
+            ),
+            "dynamic_ledger.posterior.interaction_activation_probes": (
+                posterior.get("interaction_activation_probes") == 5
+            ),
+            "dynamic_ledger.posterior.noise_variance_floor": float(
+                posterior.get("noise_variance_floor", -1.0)
+            )
+            == 0.01,
+            "dynamic_ledger.latent_risk.tau": float(latent.get("tau", -1.0))
+            == 0.8,
+            "dynamic_ledger.latent_risk.delta_min": float(
+                latent.get("delta_min", -1.0)
+            )
+            == 0.05,
+            "dynamic_ledger.latent_risk.candidate_top_k": (
+                latent.get("candidate_top_k") == 5
+            ),
+            "dynamic_ledger.latent_risk.posterior_samples": (
+                latent.get("posterior_samples") == 200
+            ),
+            "exploration.method": (
+                exploration.get("method") == "dynamic_combination_posterior"
+            ),
+            "exploration.legacy_mace_enabled": (
+                exploration.get("legacy_mace_enabled") is False
+            ),
+            "exploration.legacy_joint_bayesian_enabled": (
+                exploration.get("legacy_joint_bayesian_enabled") is False
+            ),
+            "exploration.legacy_particle_evsi_enabled": (
+                exploration.get("legacy_particle_evsi_enabled") is False
+            ),
+            "exploration.probe.budget": float(
+                probe.get("budget_fraction_of_natural_trajectories", -1.0)
+            )
+            == 0.10,
+            "exploration.probe.repeats": probe.get("repeats_per_arm") == 3,
+            "exploration.probe.enters_grpo": probe.get("enters_grpo") is False,
+            "exploration.audit.probability": float(audit.get("probability", -1.0))
+            == 0.05,
+            "exploration.audit.enters_grpo": audit.get("enters_grpo") is False,
+            "skills.minimum_discovery_pairs": (
+                skills.get("minimum_discovery_pairs") == 10
+            ),
+            "skills.minimum_confirmation_problems": (
+                skills.get("minimum_confirmation_problems") == 20
+            ),
+            "skills.benjamini_hochberg_fdr": float(
+                skills.get("benjamini_hochberg_fdr", -1.0)
+            )
+            == 0.10,
+            "skills.reward_contribution": float(
+                skills.get("reward_contribution", -1.0)
+            )
+            == 0.0,
+        }
+        failed_dynamic = [
+            name for name, valid in dynamic_checks.items() if not valid
+        ]
+        if failed_dynamic:
+            raise ConfigurationError(
+                "HotpotQA dynamic-ledger config violates the selected spec: "
+                + ", ".join(failed_dynamic)
+            )
     required_wandb_fields = {
         "global_step",
         "dataset",
@@ -634,11 +779,533 @@ def _training_paths(config: Mapping[str, Any], root: Path) -> dict[str, Path]:
     }
 
 
+def _probe_record_from_mapping(value: Mapping[str, Any]) -> ProbeRecord:
+    """Restore one persisted paired probe without accepting derived fields."""
+
+    payload = dict(value)
+    payload.pop("paired_effect", None)
+    try:
+        return ProbeRecord(**payload)
+    except (TypeError, ValueError) as error:
+        raise HotpotTrainingError("persisted ProbeRecord is malformed") from error
+
+
+def _read_probe_records(path: Path) -> tuple[ProbeRecord, ...]:
+    if not path.is_file():
+        return ()
+    records: list[ProbeRecord] = []
+    with path.open("r", encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise HotpotTrainingError(
+                    f"invalid ProbeRecord JSON at {path}:{line_number}"
+                ) from error
+            if not isinstance(value, Mapping):
+                raise HotpotTrainingError(
+                    f"ProbeRecord JSON is not an object at {path}:{line_number}"
+                )
+            records.append(_probe_record_from_mapping(value))
+    identifiers = [record.probe_id for record in records]
+    if len(identifiers) != len(set(identifiers)):
+        raise HotpotTrainingError(f"duplicate ProbeRecord IDs in {path}")
+    return tuple(records)
+
+
+def _committed_discovery_probes(
+    run_root: Path,
+    *,
+    completed_steps: int,
+) -> tuple[ProbeRecord, ...]:
+    """Load only train probes belonging to already committed optimizer steps."""
+
+    probes: list[ProbeRecord] = []
+    for step in range(1, completed_steps + 1):
+        step_root = run_root / "steps" / f"step_{step:06d}"
+        manifest_path = step_root / "step_manifest.json"
+        if not manifest_path.is_file():
+            raise HotpotTrainingError(
+                f"committed step {step} has no step manifest for Skill discovery"
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, Mapping) or manifest.get("status") != "committed":
+            raise HotpotTrainingError(
+                f"step {step} is not committed Skill discovery evidence"
+            )
+        probe_path = step_root / "probe_records.jsonl"
+        step_probes = _read_probe_records(probe_path)
+        if any(record.task_split != "train" for record in step_probes):
+            raise HotpotTrainingError("Skill discovery evidence is not train-only")
+        probes.extend(step_probes)
+    identifiers = [record.probe_id for record in probes]
+    if len(identifiers) != len(set(identifiers)):
+        raise HotpotTrainingError("cumulative Skill discovery has duplicate probe IDs")
+    return tuple(probes)
+
+
+def _skill_runtime_config(config: Mapping[str, Any]) -> SkillRuntimeProducerConfig:
+    skills = _mapping(config["skills"], "skills")
+    return SkillRuntimeProducerConfig(
+        delta_min=float(skills["delta_min"]),
+        minimum_discovery_pairs=int(skills["minimum_discovery_pairs"]),
+        minimum_confirmation_problems=int(
+            skills["minimum_confirmation_problems"]
+        ),
+        calibration_alpha=float(skills["calibration_alpha"]),
+        benjamini_hochberg_fdr=float(skills["benjamini_hochberg_fdr"]),
+        maximum_harm_probability=float(skills.get("maximum_harm_probability", 0.05)),
+        retire_after_suspended_epochs=int(
+            skills.get("retire_after_suspended_epochs", 3)
+        ),
+    )
+
+
+def _materialize_skill_runtime_update(
+    config: Mapping[str, Any],
+    *,
+    run_root: Path,
+    ledger_epoch: LedgerEpoch,
+    completed_steps: int,
+) -> tuple[SkillRuntimeUpdate, Path]:
+    """Run the MD Skill evidence gate before the next frozen rollout epoch.
+
+    Discovery is restricted to committed train probes.  A policy-bound held-out
+    probe file is consumed only when it has been produced independently; its
+    absence remains an empty confirmation set and therefore fail-closes any
+    discovery-qualified candidate rather than synthesizing validation evidence.
+    """
+
+    epoch = ledger_epoch.condition.epoch
+    if epoch < 1:
+        raise HotpotTrainingError(
+            "Skill runtime production requires at least one completed evidence epoch"
+        )
+    epoch_root = run_root / "skills" / f"epoch_{epoch:06d}"
+    confirmation_path = epoch_root / "heldout_probe_records.jsonl"
+    discovery = _committed_discovery_probes(
+        run_root,
+        completed_steps=completed_steps,
+    )
+    confirmation = _read_probe_records(confirmation_path)
+    update = produce_skill_runtime_update(
+        ledger_epoch.ledger,
+        discovery_probes=discovery,
+        confirmation_probes=confirmation,
+        publication_versions=ledger_epoch.condition.versions,
+        discovery_epoch=epoch - 1,
+        current_skills=ledger_epoch.skills,
+        config=_skill_runtime_config(config),
+    )
+    output_path = epoch_root / "runtime_update.json"
+    _atomic_write_json(
+        output_path,
+        {
+            "schema_version": "flowsteer.skill-runtime-epoch.v1",
+            "condition": ledger_epoch.condition.to_dict(),
+            "discovery_probe_ids": [record.probe_id for record in discovery],
+            "confirmation_probe_ids": [record.probe_id for record in confirmation],
+            "confirmation_probe_path": (
+                str(confirmation_path) if confirmation_path.is_file() else None
+            ),
+            "skills": [skill.to_dict() for skill in update.skills],
+            "evidence_records": {
+                key: dict(value) for key, value in update.evidence_records.items()
+            },
+            "receipt": update.receipt.to_dict(),
+            "grpo_reward_contribution": 0.0,
+            "ttb_enabled": False,
+        },
+    )
+    return update, output_path
+
+
+def _read_json_mapping(path: Path, *, name: str) -> dict[str, Any]:
+    if not path.is_file():
+        raise HotpotTrainingError(f"{name} does not exist: {path}")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise HotpotTrainingError(f"{name} is malformed")
+    return dict(value)
+
+
+def _prepare_or_validate_long_training_admission(
+    config: Mapping[str, Any],
+    *,
+    paths: Mapping[str, Path],
+    state: Mapping[str, Any],
+) -> Path:
+    """Create once, then revalidate, the post-one-step admission receipt.
+
+    The original one-step closure remains immutable.  A frozen copy of its
+    step-1 run state is retained because ``run_state.json`` advances after
+    every later optimizer transaction.
+    """
+
+    run_root = paths["root"]
+    admission_root = run_root / "long_training_admission" / "step_000001"
+    admission_path = admission_root / "admission_receipt.json"
+    frozen_state_path = admission_root / "run_state.json"
+    closure_path = run_root / "one_step_closure_receipt.json"
+    step_manifest_path = run_root / "steps" / "step_000001" / "step_manifest.json"
+
+    if admission_path.is_file():
+        receipt = load_supplemental_long_training_admission(admission_path)
+        references = receipt.evidence_references
+        closure = _read_json_mapping(
+            Path(references["one_step_closure"]), name="one-step closure"
+        )
+        frozen_state = _read_json_mapping(
+            Path(references["run_state"]), name="frozen step-1 run state"
+        )
+        step_manifest = _read_json_mapping(
+            Path(references["step_manifest"]), name="step-1 manifest"
+        )
+        ledger_receipt = _read_json_mapping(
+            Path(references["ledger_epoch_receipt"]), name="ledger epoch receipt"
+        )
+        skill_payload = _read_json_mapping(
+            Path(references["skill_runtime_update"]), name="Skill runtime update"
+        )
+        skill_receipt = _mapping(
+            skill_payload.get("receipt"), "Skill runtime update receipt"
+        )
+        try:
+            validate_supplemental_long_training_admission(
+                receipt,
+                one_step_closure=closure,
+                run_state=frozen_state,
+                step_manifest=step_manifest,
+                ledger_epoch_receipt=ledger_receipt,
+                skill_runtime_receipt=skill_receipt,
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise HotpotTrainingError(
+                "supplemental long-training admission no longer validates"
+            ) from error
+    else:
+        if state.get("optimizer_updates_completed") != 1:
+            raise HotpotTrainingError(
+                "first supplemental admission must be built at the committed step-1 boundary"
+            )
+        closure = _read_json_mapping(closure_path, name="one-step closure")
+        step_manifest = _read_json_mapping(
+            step_manifest_path, name="step-1 manifest"
+        )
+        ledger_receipt_path = Path(
+            str(state.get("ledger_epoch_receipt", ""))
+        ).expanduser().resolve()
+        ledger_epoch = LedgerEpoch.load(ledger_receipt_path)
+        skill_update, skill_update_path = _materialize_skill_runtime_update(
+            config,
+            run_root=run_root,
+            ledger_epoch=ledger_epoch,
+            completed_steps=1,
+        )
+        admission_root.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(frozen_state_path, dict(state))
+        ledger_receipt = _read_json_mapping(
+            ledger_receipt_path, name="ledger epoch receipt"
+        )
+        receipt = build_supplemental_long_training_admission(
+            one_step_closure=closure,
+            run_state=state,
+            step_manifest=step_manifest,
+            ledger_epoch_receipt=ledger_receipt,
+            skill_runtime_receipt=skill_update.receipt,
+            evidence_references={
+                "one_step_closure": str(closure_path.resolve()),
+                "run_state": str(frozen_state_path.resolve()),
+                "step_manifest": str(step_manifest_path.resolve()),
+                "ledger_epoch_receipt": str(ledger_receipt_path),
+                "skill_runtime_update": str(skill_update_path.resolve()),
+            },
+        )
+        save_supplemental_long_training_admission(receipt, admission_path)
+
+    if receipt.long_training_authorized is not True:
+        raise HotpotTrainingError(
+            "supplemental long-training admission is blocked: "
+            + ", ".join(receipt.blockers)
+        )
+    if receipt.scope != "evidence-producing-training-only":
+        raise HotpotTrainingError("supplemental admission has an invalid scope")
+    return admission_path
+
+
+def _validate_dynamic_acceptance_receipt(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate and normalize the immutable Phase-E admission receipt."""
+
+    acceptance = dict(value)
+    phase_e = acceptance.get("phase_e", {})
+    if (
+        not isinstance(phase_e, Mapping)
+        or phase_e.get("status") != "passed"
+        or acceptance.get("all_required_gates_passed") is not True
+        or acceptance.get("optimizer_step_authorized") is not True
+        or acceptance.get("optimizer_updates") != 0
+        or acceptance.get("ttb_enabled") is not False
+    ):
+        raise HotpotTrainingError(
+            "dynamic Phase-E receipt does not authorize an optimizer step"
+        )
+    epoch_snapshot = phase_e.get("epoch_snapshot")
+    if not isinstance(epoch_snapshot, Mapping):
+        raise HotpotTrainingError("dynamic Phase-E receipt has no epoch snapshot")
+    return acceptance
+
+
+def _read_dynamic_acceptance_receipt(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise HotpotTrainingError("dynamic Phase-E receipt does not exist")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise HotpotTrainingError("dynamic Phase-E receipt is malformed")
+    return _validate_dynamic_acceptance_receipt(value)
+
+
+def _dynamic_acceptance_from_state(
+    state: Mapping[str, Any],
+) -> tuple[dict[str, Any], Optional[Path]]:
+    """Recover Phase-E admission from committed state without another CLI flag."""
+
+    embedded = state.get("dynamic_phase_e_acceptance")
+    receipt_value = state.get("dynamic_phase_e_acceptance_receipt")
+    if not isinstance(receipt_value, str) or not receipt_value.strip():
+        # Accept the short-lived pre-portability field if one was produced by a
+        # partially upgraded run, while always writing the canonical name.
+        receipt_value = state.get("dynamic_acceptance_receipt")
+    receipt_path = (
+        Path(receipt_value).expanduser().resolve()
+        if isinstance(receipt_value, str) and receipt_value.strip()
+        else None
+    )
+    if isinstance(embedded, Mapping):
+        return _validate_dynamic_acceptance_receipt(embedded), receipt_path
+    if receipt_path is not None:
+        return _read_dynamic_acceptance_receipt(receipt_path), receipt_path
+    raise HotpotTrainingError(
+        "dynamic committed state has no recoverable Phase-E receipt"
+    )
+
+
+def _checkpoint_recovery_manifest(path: str | Path) -> tuple[Path, Path]:
+    requested = Path(path).expanduser().resolve()
+    candidates: tuple[tuple[Path, Path], ...]
+    if requested.is_file():
+        candidates = ((requested, requested.parent),)
+    else:
+        candidates = (
+            (requested / "recovery_manifest.json", requested),
+            (
+                requested / "checkpoint" / "recovery_manifest.json",
+                requested / "checkpoint",
+            ),
+        )
+    for manifest_path, checkpoint_dir in candidates:
+        if manifest_path.is_file():
+            return manifest_path, checkpoint_dir
+    raise HotpotTrainingError(
+        "explicit checkpoint has no dynamic recovery_manifest.json"
+    )
+
+
+def _checkpoint_relative_path(
+    checkpoint_dir: Path,
+    value: object,
+    *,
+    field: str,
+) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise HotpotTrainingError(f"dynamic recovery manifest has no {field}")
+    relative = Path(value)
+    if relative.is_absolute():
+        raise HotpotTrainingError(
+            f"dynamic recovery manifest {field} must be checkpoint-relative"
+        )
+    resolved = (checkpoint_dir / relative).resolve()
+    try:
+        resolved.relative_to(checkpoint_dir.resolve())
+    except ValueError as error:
+        raise HotpotTrainingError(
+            f"dynamic recovery manifest {field} escapes the checkpoint"
+        ) from error
+    return resolved
+
+
+def _state_from_dynamic_checkpoint(path: str | Path) -> dict[str, Any]:
+    """Construct committed runner state from one portable dynamic checkpoint."""
+
+    manifest_path, checkpoint_dir = _checkpoint_recovery_manifest(path)
+    raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(raw_manifest, Mapping):
+        raise HotpotTrainingError("dynamic recovery manifest is malformed")
+    manifest = dict(raw_manifest)
+    if (
+        manifest.get("schema_version") != "flowsteer.dynamic-grpo-recovery.v1"
+        or manifest.get("status") != "ready"
+        or manifest.get("checkpoint_recoverable") is not True
+        or manifest.get("ttb_enabled") is not False
+        or manifest.get("objective") != "action_masked_one_pass_grpo"
+    ):
+        raise HotpotTrainingError("dynamic recovery manifest is not resumable")
+    optimizer_step = manifest.get("optimizer_step")
+    absolute_update_step = manifest.get("absolute_update_step")
+    if type(optimizer_step) is not int or optimizer_step < 1:
+        raise HotpotTrainingError("dynamic recovery optimizer_step is invalid")
+    if type(absolute_update_step) is not int or absolute_update_step < 1:
+        raise HotpotTrainingError("dynamic recovery absolute_update_step is invalid")
+    policy_version = str(manifest.get("policy_version", "")).strip()
+    adapter_name = str(manifest.get("behavior_adapter_name", "")).strip()
+    if not policy_version or not adapter_name:
+        raise HotpotTrainingError(
+            "dynamic recovery manifest has no policy or adapter route"
+        )
+    training_state = _checkpoint_relative_path(
+        checkpoint_dir,
+        manifest.get("training_state"),
+        field="training_state",
+    )
+    ledger_receipt = _checkpoint_relative_path(
+        checkpoint_dir,
+        manifest.get("ledger_epoch_receipt"),
+        field="ledger_epoch_receipt",
+    )
+    phase_e_receipt = _checkpoint_relative_path(
+        checkpoint_dir,
+        manifest.get("phase_e_acceptance_receipt"),
+        field="phase_e_acceptance_receipt",
+    )
+    if not training_state.is_file():
+        raise HotpotTrainingError("dynamic recovery training state is missing")
+    acceptance = _read_dynamic_acceptance_receipt(phase_e_receipt)
+    try:
+        ledger_epoch = LedgerEpoch.load(ledger_receipt)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        raise HotpotTrainingError("dynamic recovery ledger epoch is invalid") from error
+    condition = manifest.get("condition")
+    if not isinstance(condition, Mapping) or dict(condition) != (
+        ledger_epoch.condition.to_dict()
+    ):
+        raise HotpotTrainingError(
+            "dynamic recovery ledger condition differs from the manifest"
+        )
+    if ledger_epoch.condition.versions.policy != policy_version:
+        raise HotpotTrainingError(
+            "dynamic recovery ledger policy differs from the checkpoint policy"
+        )
+    best_validation = manifest.get("best_validation_token_f1", -1.0)
+    try:
+        best_validation_value = float(best_validation)
+    except (TypeError, ValueError) as error:
+        raise HotpotTrainingError(
+            "dynamic recovery best validation metric is invalid"
+        ) from error
+    return {
+        "schema_version": "flowsteer.hotpotqa.grpo_run_state.v1",
+        "optimizer_updates_completed": optimizer_step,
+        "absolute_update_step": absolute_update_step,
+        "behavior_policy_version": policy_version,
+        "behavior_adapter_name": adapter_name,
+        "behavior_adapter_checkpoint": str(checkpoint_dir),
+        "optimizer_state_checkpoint": str(training_state),
+        "training_state_checkpoint": str(training_state),
+        "best_validation_token_f1": best_validation_value,
+        "wandb_run_id": str(manifest.get("wandb_run_id", "")),
+        "ledger_epoch_receipt": str(ledger_receipt),
+        "ledger_condition_id": ledger_epoch.condition.condition_id,
+        "ledger_snapshot_id": ledger_epoch.condition.ledger_snapshot_id,
+        "skill_snapshot_id": ledger_epoch.condition.skill_snapshot_id,
+        "dynamic_phase_e_acceptance_receipt": str(phase_e_receipt),
+        "dynamic_phase_e_acceptance": acceptance,
+        "recovery_manifest": str(manifest_path),
+        "recovered_from_checkpoint": True,
+    }
+
+
+def _persist_dynamic_epoch_snapshot(
+    transition: DynamicEpochCloseResult,
+    checkpoint_dir: Path,
+) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    """Save an epoch and return a receipt whose nested recovery is persisted."""
+
+    receipt_path = checkpoint_dir / "ledger_epoch" / "receipt.json"
+    snapshot = transition.next_epoch.save(receipt_path.parent)
+    persisted = dict(transition.receipt.to_dict())
+    persisted["next_epoch_snapshot"] = snapshot.to_dict()
+    persisted["next_epoch_receipt_path"] = str(receipt_path)
+    return snapshot.to_dict(), persisted, receipt_path
+
+
 def _candidate_policy(config: Mapping[str, Any], training_step: int) -> str:
     prefix = str(
         _mapping(config["director"], "director")["updated_policy_version_prefix"]
     )
     return f"{prefix}{training_step:06d}"
+
+
+def _single_gpu_sequential_runtime(
+    config: Mapping[str, Any],
+    backend: SmokeBackend,
+) -> Optional[SequentialGpuRuntime]:
+    """Build the project single-GPU lifecycle only for its explicit layout.
+
+    SkillFlow does not prescribe this mapping.  It is a resource-constrained
+    adapter which preserves its stop/train/restart/LoRA-publication boundary
+    while never adopting a service that this run did not start.
+    """
+
+    gpu = _mapping(config["gpu"], "gpu")
+    if gpu.get("execution_layout", "three_gpu_concurrent") != "single_gpu_sequential":
+        return None
+    if not isinstance(backend, LiveSmokeBackend):
+        factory = getattr(backend, "make_sequential_gpu_runtime", None)
+        if not callable(factory):
+            raise HotpotTrainingError(
+                "single_gpu_sequential backend must expose a managed runtime factory"
+            )
+        runtime = factory(config)
+        if not isinstance(runtime, SequentialGpuRuntime):
+            raise HotpotTrainingError("backend returned an invalid sequential GPU runtime")
+        return runtime
+
+    director = _mapping(config["director"], "director")
+    parsed = urlsplit(str(director["api_base"]))
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"} or parsed.port is None:
+        raise HotpotTrainingError("single-GPU Supervisor endpoint must be explicit localhost")
+    lora = _mapping(director["lora"], "director.lora")
+    supervisor = _mapping(gpu.get("supervisor", {}), "gpu.supervisor")
+    manager = SGLangSupervisorManager(
+        model_path=str(director["base_model"]),
+        tokenizer_path=str(director["tokenizer_path"]),
+        host="127.0.0.1",
+        port=int(parsed.port),
+        api_key=os.environ.get("SGLANG_API_KEY", "EMPTY"),
+        gpu_id=int(gpu["supervisor_gpu_id"]),
+        max_lora_rank=int(lora["rank"]),
+        lora_target_modules=[str(value) for value in lora["target_modules"]],
+        max_loras_per_batch=int(supervisor.get("max_loras_per_batch", 1)),
+        max_loaded_loras=int(supervisor.get("max_loaded_loras", 2)),
+        mem_fraction_static=float(supervisor.get("mem_fraction_static", 0.82)),
+        context_length=int(supervisor.get("context_length", director["max_context_tokens"])),
+        served_model_name=str(director["served_model_name"]),
+        reasoning_parser=str(supervisor.get("reasoning_parser", "qwen3")),
+        tool_call_parser=str(supervisor.get("tool_call_parser", "qwen3_coder")),
+        schedule_policy=str(supervisor.get("schedule_policy", "lpm")),
+        sampling_backend=str(supervisor.get("sampling_backend", "pytorch")),
+        enable_multimodal=bool(supervisor.get("enable_multimodal", True)),
+        ready_timeout_seconds=float(supervisor.get("ready_timeout_seconds", 600.0)),
+    )
+    return SequentialGpuRuntime(
+        manager=manager,
+        rollout_gate=backend.rollout_gate,
+        drain_timeout_seconds=float(supervisor.get("drain_timeout_seconds", 300.0)),
+        stop_timeout_seconds=float(supervisor.get("stop_timeout_seconds", 60.0)),
+    )
 
 
 def _step_config(
@@ -760,6 +1427,72 @@ def _apply_replayed_action(graph: AgentGraph, action: AgentAction) -> None:
         raise HotpotTrainingError("unsupported replay action")
 
 
+def _validate_agent_retry_lineage(
+    receipts: object,
+    *,
+    attempt_count: int,
+    request_id: str,
+    provider_id: str,
+    model_id: str,
+    provider_request_id: str,
+    trajectory_id: str,
+) -> None:
+    """Validate FlowSteer's per-attempt provider receipts for one Agent call."""
+
+    if isinstance(receipts, (str, bytes)) or not isinstance(receipts, Sequence):
+        raise HotpotTrainingError(
+            f"Phase 0 Agent retry lacks per-attempt lineage: {trajectory_id}"
+        )
+    if len(receipts) != attempt_count:
+        raise HotpotTrainingError(
+            f"Phase 0 Agent retry count differs from lineage: {trajectory_id}"
+        )
+    for index, raw_receipt in enumerate(receipts, start=1):
+        if not isinstance(raw_receipt, Mapping):
+            raise HotpotTrainingError(
+                f"Phase 0 Agent retry lineage is malformed: {trajectory_id}"
+            )
+        latency_ms = raw_receipt.get("latency_ms")
+        backoff_seconds = raw_receipt.get("backoff_seconds")
+        if (
+            raw_receipt.get("attempt") != index
+            or raw_receipt.get("request_id") != request_id
+            or raw_receipt.get("provider_id") != provider_id
+            or raw_receipt.get("model_id") != model_id
+            or isinstance(latency_ms, bool)
+            or not isinstance(latency_ms, (int, float))
+            or not math.isfinite(float(latency_ms))
+            or float(latency_ms) < 0.0
+            or isinstance(backoff_seconds, bool)
+            or not isinstance(backoff_seconds, (int, float))
+            or not math.isfinite(float(backoff_seconds))
+            or float(backoff_seconds) < 0.0
+        ):
+            raise HotpotTrainingError(
+                f"Phase 0 Agent retry lineage differs: {trajectory_id}"
+            )
+        if index < attempt_count:
+            if (
+                raw_receipt.get("status") != "retryable_failure"
+                or raw_receipt.get("retryable") is not True
+                or not str(raw_receipt.get("error_type", "")).strip()
+                or float(backoff_seconds) <= 0.0
+            ):
+                raise HotpotTrainingError(
+                    f"Phase 0 Agent retry predecessor is invalid: {trajectory_id}"
+                )
+        elif (
+            raw_receipt.get("status") != "completed"
+            or raw_receipt.get("retryable") is not False
+            or raw_receipt.get("http_status") != 200
+            or raw_receipt.get("provider_request_id") != provider_request_id
+            or float(backoff_seconds) != 0.0
+        ):
+            raise HotpotTrainingError(
+                f"Phase 0 Agent retry terminal receipt is invalid: {trajectory_id}"
+            )
+
+
 async def validate_phase0_rollout_batch(
     trajectories: Sequence[TrajectoryRecord],
     *,
@@ -767,6 +1500,7 @@ async def validate_phase0_rollout_batch(
     expected_count: int,
     behavior_policy: str,
     behavior_adapter: str,
+    rollouts_per_task: int = 4,
 ) -> Mapping[str, Any]:
     """Fail closed unless one fresh 7x4 train batch has complete lineage.
 
@@ -784,15 +1518,23 @@ async def validate_phase0_rollout_batch(
     )
     expected_tasks = set(expected_task_ids)
     actual_tasks = {record.task.task_id for record in trajectories}
-    if actual_tasks != expected_tasks or len(expected_tasks) != 7:
-        raise HotpotTrainingError("Phase 0 task set differs from the frozen 7x4 plan")
+    if rollouts_per_task < 1:
+        raise HotpotTrainingError("rollouts_per_task must be positive")
+    if actual_tasks != expected_tasks or not expected_tasks:
+        raise HotpotTrainingError("Phase 0 task set differs from the frozen plan")
+    if expected_count != len(expected_tasks) * rollouts_per_task:
+        raise HotpotTrainingError("Phase 0 expected count differs from the frozen plan")
     if len({record.trajectory_id for record in trajectories}) != expected_count:
         raise HotpotTrainingError("Phase 0 trajectory IDs are not unique")
     if len({record.rollout_id for record in trajectories}) != expected_count:
         raise HotpotTrainingError("Phase 0 rollout IDs are not unique")
     group_counts = Counter(record.group_key for record in trajectories)
-    if len(group_counts) != 7 or set(group_counts.values()) != {4}:
-        raise HotpotTrainingError("Phase 0 requires seven exact same-condition groups")
+    if len(group_counts) != len(expected_tasks) or set(group_counts.values()) != {
+        rollouts_per_task
+    }:
+        raise HotpotTrainingError(
+            "Phase 0 requires one exact same-condition group per frozen task"
+        )
     if len({record.condition_id for record in trajectories}) != 1:
         raise HotpotTrainingError("Phase 0 batch mixes visible conditions")
     if len({record.versions.fingerprint for record in trajectories}) != 1:
@@ -816,6 +1558,7 @@ async def validate_phase0_rollout_batch(
     execution_count = 0
     communication_count = 0
     action_token_count = 0
+    agent_provider_retry_count = 0
 
     for record in trajectories:
         label = record.trajectory_id
@@ -970,8 +1713,6 @@ async def validate_phase0_rollout_batch(
                     raise HotpotTrainingError(f"Phase 0 Agent request ID is absent or reused: {label}")
                 agent_request_ids.add(agent_request_id)
                 provider_request_ids.add(provider_request_id)
-                if response.get("attempt_count") != 1:
-                    raise HotpotTrainingError(f"Phase 0 Agent retry lacks per-attempt lineage: {label}")
                 node = node_by_id.get(execution.agent_id)
                 if (
                     request.get("run_id") != execution.experiment_id
@@ -984,6 +1725,27 @@ async def validate_phase0_rollout_batch(
                     or node.model_id != execution.model_id
                 ):
                     raise HotpotTrainingError(f"Phase 0 Agent execution lineage differs: {label}")
+                attempt_count = response.get("attempt_count")
+                if (
+                    isinstance(attempt_count, bool)
+                    or not isinstance(attempt_count, int)
+                    or attempt_count < 1
+                ):
+                    raise HotpotTrainingError(
+                        f"Phase 0 Agent attempt count is invalid: {label}"
+                    )
+                retry_receipts = response.get("retry_receipts", ())
+                if attempt_count > 1 or retry_receipts:
+                    _validate_agent_retry_lineage(
+                        retry_receipts,
+                        attempt_count=attempt_count,
+                        request_id=agent_request_id,
+                        provider_id=execution.provider,
+                        model_id=execution.model_id,
+                        provider_request_id=provider_request_id,
+                        trajectory_id=label,
+                    )
+                agent_provider_retry_count += attempt_count - 1
                 upstream = request.get("upstream", ())
                 if not isinstance(upstream, Sequence):
                     raise HotpotTrainingError(f"Phase 0 Agent communication is malformed: {label}")
@@ -1038,6 +1800,7 @@ async def validate_phase0_rollout_batch(
         "agent_communication_count": communication_count,
         "director_request_count": len(director_request_ids),
         "agent_request_count": len(agent_request_ids),
+        "agent_provider_retry_count": agent_provider_retry_count,
         "evaluator_replay_count": evaluator_replays,
         "behavior_policy_version": behavior_policy,
         "behavior_adapter_name": behavior_adapter,
@@ -1057,6 +1820,7 @@ def _verify_training_summary(
     behavior_policy: str,
     candidate_policy: str,
     absolute_update_step: int,
+    gradient_worker_count: int = 2,
 ) -> None:
     required_positive = ("grad_norm", "trainable_update_l2")
     if int(summary.get("optimizer_updates", 0)) != 1:
@@ -1096,10 +1860,12 @@ def _verify_training_summary(
     memory = summary.get("gpu_memory_allocated_mib")
     if (
         not isinstance(memory, Mapping)
-        or len(memory) != 2
+        or len(memory) != gradient_worker_count
         or any(float(value) <= 0.0 for value in memory.values())
     ):
-        raise HotpotTrainingError("training summary lacks two-GPU memory evidence")
+        raise HotpotTrainingError(
+            "training summary lacks the configured gradient-worker memory evidence"
+        )
 
 
 def _verify_canaries(
@@ -1154,6 +1920,8 @@ def _step_metrics(
     sync: Mapping[str, Any],
     canaries: Sequence[TrajectoryRecord],
     step_seconds: float,
+    dynamic_metrics: Optional[Mapping[str, Any]] = None,
+    next_ledger_epoch: Optional[LedgerEpoch] = None,
 ) -> dict[str, Any]:
     rewards = [
         float(record.evaluation.reward)
@@ -1205,7 +1973,7 @@ def _step_metrics(
         sync.get("checkpoint_version")
         or f"checkpoint:{summary['updated_policy_version']}"
     )
-    return {
+    values: dict[str, Any] = {
         "global_step": training_step,
         "dataset": "hotpotqa",
         "optimizer_step": training_step,
@@ -1261,6 +2029,48 @@ def _step_metrics(
         "checkpoint/training_state": str(summary["training_state_checkpoint"]),
         "checkpoint/saved": bool(summary["checkpoint_recoverable"]),
     }
+    if dynamic_metrics is not None:
+        if next_ledger_epoch is None:
+            raise HotpotTrainingError(
+                "dynamic step metrics require the frozen next ledger epoch"
+            )
+        skill_counts = {
+            "candidate": 0,
+            "active": 0,
+            "suspended": 0,
+            "retired": 0,
+        }
+        for skill in next_ledger_epoch.skills:
+            skill_counts[skill.status.value] += 1
+        values.update(
+            {
+                "ledger/probe_count": int(dynamic_metrics["probe_count"]),
+                "ledger/audit_count": int(dynamic_metrics["audit_count"]),
+                # The ordinary seven-question validation monitor is not a
+                # held-out paired calibration set.  Preserve the required W&B
+                # fields as explicit missing values until that independent
+                # evidence exists; never substitute or fabricate zeros.
+                "ledger/heldout_nll": None,
+                "ledger/heldout_brier": None,
+                "ledger/interval_coverage_90": None,
+                "ledger/interval_width_mean": None,
+                "ledger/heldout_status": "pending_independent_paired_evidence",
+                "latent_risk/warning_precision": float(
+                    dynamic_metrics["warning_precision"]
+                ),
+                "latent_risk/warning_recall": float(
+                    dynamic_metrics["warning_recall"]
+                ),
+                "ledger/decision_key_explained_variance": float(
+                    dynamic_metrics["decision_key_explained_variance"]
+                ),
+                "skill/candidate_count": skill_counts["candidate"],
+                "skill/active_count": skill_counts["active"],
+                "skill/suspended_count": skill_counts["suspended"],
+                "skill/retired_count": skill_counts["retired"],
+            }
+        )
+    return values
 
 
 async def run_hotpotqa_phase0(
@@ -1362,7 +2172,14 @@ async def run_hotpotqa_phase0(
     backend = (
         backend_factory(step_value, root)
         if backend_factory is not None
-        else LiveSmokeBackend.from_config(step_value, root, evaluation_only=True)
+        else LiveSmokeBackend.from_config(
+            step_value,
+            root,
+            evaluation_only=True,
+            # Phase-0 evidence epochs are independently recoverable and may
+            # intentionally replay the same frozen rollout IDs.
+            evidence_root=phase0_root / "evidence",
+        )
     )
     try:
         readiness = await _ensure_behavior_ready(backend, step_value)
@@ -1436,6 +2253,404 @@ async def run_hotpotqa_phase0(
         raise HotpotTrainingError("HotpotQA Phase 0 failed") from exc
 
 
+def _dynamic_role_boundaries(
+    config: Mapping[str, Any],
+    *,
+    adapter_name: Optional[str] = None,
+) -> tuple[RoleClassifier, ContractRoleRewriter]:
+    """Bind role classification/rewrite to the frozen behavior adapter."""
+
+    director = _mapping(config["director"], "director")
+    route_adapter = (
+        str(adapter_name).strip()
+        if adapter_name is not None
+        else str(director["behavior_adapter_name"]).strip()
+    )
+    if not route_adapter:
+        raise HotpotTrainingError("dynamic role boundary requires a LoRA adapter route")
+    api_key_env = "SGLANG_API_KEY" if os.environ.get("SGLANG_API_KEY") else None
+    completion = OpenAICompatibleRoleCompletionClient(
+        base_url=str(director["api_base"]),
+        model=(
+            f"{director['served_model_name']}:"
+            f"{route_adapter}"
+        ),
+        api_key_env=api_key_env,
+        timeout_seconds=60.0,
+        max_retries=2,
+        max_tokens=96,
+        disable_thinking=True,
+        request_json_object=True,
+    )
+    return RoleClassifier(completion), ContractRoleRewriter(completion)
+
+
+def _backend_model_ids(backend: SmokeBackend) -> tuple[str, ...]:
+    registry = getattr(backend, "registry", None)
+    raw = getattr(registry, "model_ids", None)
+    if raw is None:
+        raw = getattr(backend, "model_ids", None)
+    if not isinstance(raw, (tuple, list)):
+        raise HotpotTrainingError("dynamic ledger backend has no frozen model catalog")
+    values = tuple(dict.fromkeys(str(value).strip() for value in raw))
+    if not values or any(not value for value in values):
+        raise HotpotTrainingError("dynamic ledger backend model catalog is empty")
+    return values
+
+
+def _dynamic_epoch_coordinator(
+    config: Mapping[str, Any],
+    backend: SmokeBackend,
+    epoch: LedgerEpoch,
+    *,
+    adapter_name: str,
+    seed: int,
+) -> DynamicLedgerEpochCoordinator:
+    dynamic = _mapping(config["dynamic_ledger"], "dynamic_ledger")
+    latent = _mapping(dynamic["latent_risk"], "dynamic_ledger.latent_risk")
+    director = _mapping(config["director"], "director")
+    model_ids = _backend_model_ids(backend)
+    if epoch.condition.versions.model_catalog != backend.model_catalog_version:
+        raise HotpotTrainingError(
+            "dynamic epoch model catalog differs from the runtime catalog"
+        )
+    role_classifier, contract_rewriter = _dynamic_role_boundaries(
+        config,
+        adapter_name=adapter_name,
+    )
+    return DynamicLedgerEpochCoordinator(
+        epoch=epoch,
+        role_classifier=role_classifier,
+        contract_rewriter=contract_rewriter,
+        model_catalog=model_ids,
+        model_catalog_version=backend.model_catalog_version,
+        max_rounds=int(director["max_rounds"]),
+        seed=seed,
+        rollout_concurrency=28,
+        probe_concurrency=4,
+        latent_config=LatentLossConfig(
+            tau=float(latent["tau"]),
+            delta_min=float(latent["delta_min"]),
+            top_k_candidates=int(latent["candidate_top_k"]),
+            posterior_samples=int(latent["posterior_samples"]),
+            rollback_cost=float(latent["post_revision_cost"]),
+        ),
+    )
+
+
+def _next_phase_e_root(run_root: Path) -> Path:
+    parent = run_root / "latent_loss_acceptance" / "phase_e"
+    parent.mkdir(parents=True, exist_ok=True)
+    attempt = 1
+    while (parent / f"attempt_{attempt:06d}").exists():
+        attempt += 1
+    destination = parent / f"attempt_{attempt:06d}"
+    destination.mkdir()
+    return destination
+
+
+async def run_hotpotqa_dynamic_phase_e(
+    config_path: str | Path,
+    *,
+    project_root: Optional[str | Path] = None,
+    backend_factory: Optional[BackendFactory] = None,
+) -> Mapping[str, Any]:
+    """Run the real 50-question x 4-trajectory Phase-E acceptance epoch.
+
+    This gate performs no optimizer update and starts no W&B run.  It uses the
+    exact frozen policy/ledger/Skill condition that will be consumed by the
+    first natural GRPO batch, then executes the specified paired probes in a
+    separate evidence plane.
+    """
+
+    resolved_config = Path(config_path).expanduser().resolve()
+    root = (
+        Path(project_root).expanduser().resolve()
+        if project_root is not None
+        else resolved_config.parent.parent
+    )
+    config = load_yaml(resolved_config)
+    validate_hotpotqa_training_config(config)
+    if not _dynamic_ledger_selected(config):
+        raise HotpotTrainingError("Phase E requires the selected dynamic-ledger profile")
+
+    synthetic = run_phase_acceptance(seed=20260907)
+    synthetic.assert_ready_for_phase_e()
+    experiment = _mapping(config["experiment"], "experiment")
+    data = _mapping(config["data"], "data")
+    director = _mapping(config["director"], "director")
+    dynamic = _mapping(config["dynamic_ledger"], "dynamic_ledger")
+    latent = _mapping(dynamic["latent_risk"], "dynamic_ledger.latent_risk")
+    exploration = _mapping(config["exploration"], "exploration")
+    probe_config = _mapping(exploration["probe"], "exploration.probe")
+    audit_config = _mapping(exploration["audit"], "exploration.audit")
+    paths = _training_paths(config, root)
+    phase_root = _next_phase_e_root(paths["root"])
+    manifest_path = phase_root / "manifest.json"
+    receipt_path = phase_root / "acceptance_receipt.json"
+    natural_path = phase_root / "natural_trajectories.jsonl"
+    sidecar_path = phase_root / "natural_ledger_sidecars.jsonl"
+    natural_ledger_path = phase_root / "natural_ledger_records.jsonl"
+    intervention_path = phase_root / "intervention_trajectories.jsonl"
+    intervention_ledger_path = phase_root / "intervention_ledger_records.jsonl"
+    probe_path = phase_root / "probe_records.jsonl"
+    selected_sites_path = phase_root / "selected_probe_sites.jsonl"
+    metrics_path = phase_root / "metrics.json"
+    epoch_root = phase_root / "ledger_epoch_000000"
+
+    train_path = _resolve(root, str(data["train_path"]))
+    validation_path = _resolve(root, str(data["validation_path"]))
+    pool = load_hotpotqa_training_pool(train_path)
+    split_receipt = validate_hotpotqa_split_isolation(
+        pool,
+        validation_path,
+        expected_train_tasks=int(data["expected_unique_train_tasks"]),
+        expected_validation_tasks=int(data["expected_validation_tasks"]),
+    )
+    tasks = sample_hotpotqa_tasks(
+        pool,
+        optimizer_step=1,
+        tasks_per_step=50,
+        seed=int(experiment["seed"]),
+        seed_offset=9173,
+    )
+    step_value = _step_config(
+        config,
+        training_step=1,
+        absolute_update_step=int(experiment["initial_update_step"]),
+        behavior_policy_version=str(director["behavior_policy_version"]),
+        behavior_adapter_name=str(director["behavior_adapter_name"]),
+        behavior_adapter_checkpoint=str(director["behavior_adapter_checkpoint"]),
+        optimizer_state_checkpoint=(
+            str(director["optimizer_state_checkpoint"])
+            if director.get("optimizer_state_checkpoint")
+            else None
+        ),
+    )
+    backend = (
+        backend_factory(step_value, root)
+        if backend_factory is not None
+        else LiveSmokeBackend.from_config(
+            step_value,
+            root,
+            evaluation_only=True,
+            # Each Phase-E attempt is an immutable evidence epoch.  Reusing
+            # the global EvidenceStore would collide with a preserved failed
+            # attempt when the same frozen rollout IDs are replayed.
+            evidence_root=phase_root / "evidence",
+        )
+    )
+    model_ids = _backend_model_ids(backend)
+    base_versions = version_bundle_for(
+        tasks[0],
+        policy_version=str(director["behavior_policy_version"]),
+        model_catalog_version=backend.model_catalog_version,
+        prompt_version=str(_mapping(config["versions"], "versions")["prompt"]),
+        tool_version=str(_mapping(config["versions"], "versions")["tool"]),
+    )
+    base_versions = replace(
+        base_versions,
+        feature_schema=LEDGER_FEATURE_SCHEMA_VERSION,
+    )
+    ledger_epoch = freeze_initial_epoch(
+        versions=base_versions,
+        model_ids=model_ids,
+    )
+    epoch_receipt = ledger_epoch.save(epoch_root)
+    coordinator = _dynamic_epoch_coordinator(
+        step_value,
+        backend,
+        ledger_epoch,
+        adapter_name=str(director["behavior_adapter_name"]),
+        seed=int(experiment["seed"]) + 40_000,
+    )
+    runtime = _single_gpu_sequential_runtime(step_value, backend)
+    if runtime is None:
+        raise HotpotTrainingError("Phase E requires the configured managed GPU runtime")
+    manifest: dict[str, Any] = {
+        "schema_version": "flowsteer.hotpotqa.dynamic_phase_e_manifest.v1",
+        "status": "initializing",
+        "phase": "E",
+        "synthetic_acceptance": synthetic.to_dict(),
+        "expected_unique_questions": 50,
+        "rollouts_per_question": 4,
+        "expected_natural_trajectories": 200,
+        "optimizer_updates": 0,
+        "wandb_started": False,
+        "ttb_enabled": False,
+        "grpo_objective": "action_masked_one_pass",
+        "split_isolation": dict(split_receipt),
+        "task_ids": [task.task_id for task in tasks],
+        "epoch_snapshot": epoch_receipt.to_dict(),
+        "started_at": _utc_now(),
+        "artifacts": {
+            "manifest": str(manifest_path),
+            "acceptance_receipt": str(receipt_path),
+            "natural_trajectories": str(natural_path),
+            "natural_ledger_sidecars": str(sidecar_path),
+            "natural_ledger_records": str(natural_ledger_path),
+            "intervention_trajectories": str(intervention_path),
+            "intervention_ledger_records": str(intervention_ledger_path),
+            "probe_records": str(probe_path),
+            "selected_probe_sites": str(selected_sites_path),
+            "metrics": str(metrics_path),
+            "ledger_epoch": str(epoch_root / "receipt.json"),
+        },
+    }
+    _atomic_write_json(manifest_path, manifest)
+    try:
+        await asyncio.to_thread(runtime.start_rollout_service)
+        readiness = await _ensure_behavior_ready(backend, step_value)
+        manifest.update(status="collecting_natural", behavior_readiness=dict(readiness))
+        _atomic_write_json(manifest_path, manifest)
+        natural = await coordinator.collect_natural(
+            backend,
+            tasks,
+            rollouts_per_task=4,
+            start_rollout_index=4_000_000,
+        )
+        _verify_rollout_batch(
+            natural.natural_trajectories,
+            expected_count=200,
+            behavior_policy=str(director["behavior_policy_version"]),
+            behavior_adapter=str(director["behavior_adapter_name"]),
+        )
+        lineage = await validate_phase0_rollout_batch(
+            natural.natural_trajectories,
+            expected_task_ids=[task.task_id for task in tasks],
+            expected_count=200,
+            behavior_policy=str(director["behavior_policy_version"]),
+            behavior_adapter=str(director["behavior_adapter_name"]),
+        )
+        _write_jsonl(natural_path, natural.natural_trajectories)
+        _write_jsonl(sidecar_path, natural.natural_sidecars)
+        _write_jsonl(natural_ledger_path, natural.natural_ledger_records)
+        selected = select_probe_sites(
+            natural.natural_sidecars,
+            natural_trajectory_count=len(natural.natural_trajectories),
+            seed=int(experiment["seed"]) + 50_000,
+            probe_fraction=float(
+                probe_config["budget_fraction_of_natural_trajectories"]
+            ),
+            audit_probability=float(audit_config["probability"]),
+            tau=float(latent["tau"]),
+        )
+        if not selected:
+            raise HotpotTrainingError("Phase E produced no eligible paired probe site")
+        _write_jsonl(
+            selected_sites_path,
+            [
+                {
+                    "schema_version": "flowsteer.selected-probe-site.v1",
+                    "audit": value.audit,
+                    "sampling_probability": value.sampling_probability,
+                    **value.site.to_dict(),
+                }
+                for value in selected
+            ],
+        )
+        manifest.update(
+            status="collecting_interventions",
+            completed_natural_trajectories=len(natural.natural_trajectories),
+            selected_probe_sites=len(selected),
+        )
+        _atomic_write_json(manifest_path, manifest)
+        batch = await coordinator.collect_selected_probes(
+            backend,
+            natural,
+            selected_sites=selected,
+            start_rollout_index=5_000_000,
+        )
+        _write_jsonl(intervention_path, batch.intervention_trajectories)
+        _write_jsonl(intervention_ledger_path, batch.intervention_ledger_records)
+        _write_jsonl(probe_path, batch.probe_records)
+        metrics = dict(dynamic_epoch_metrics(batch))
+        _atomic_write_json(metrics_path, metrics)
+        routing = _mapping(metrics["routing_assertions"], "routing_assertions")
+        checks = {
+            "natural_trajectory_count": metrics["natural_trajectory_count"] == 200,
+            "unique_question_count": len(
+                {item.task.task_id for item in batch.natural_trajectories}
+            )
+            == 50,
+            "same_condition_groups": len(
+                {item.group_key for item in batch.natural_trajectories}
+            )
+            == 50,
+            "natural_only_grpo": routing.get("natural_only_grpo") is True,
+            "probe_and_audit_excluded_from_grpo": (
+                routing.get("probe_and_audit_excluded_from_grpo") is True
+            ),
+            "probe_and_audit_excluded_from_standard_metrics": (
+                routing.get("probe_and_audit_excluded_from_standard_metrics") is True
+            ),
+            "paired_probe_present": len(batch.probe_records) > 0,
+            "six_branches_per_probe": len(batch.intervention_trajectories)
+            == 6 * len(batch.probe_records),
+            "diagnostics_finite": all(
+                math.isfinite(float(metrics[name]))
+                for name in (
+                    "decision_key_explained_variance",
+                    "warning_precision",
+                    "warning_recall",
+                )
+            ),
+        }
+        passed = all(checks.values())
+        phase_e = {
+            "phase": "E",
+            "execution_boundary": "real_runner",
+            "status": "passed" if passed else "failed",
+            "checks": checks,
+            "metrics": metrics,
+            "lineage_receipt": dict(lineage),
+            "epoch_snapshot": epoch_receipt.to_dict(),
+        }
+        acceptance = {
+            "schema_version": "latent-loss-phase-acceptance-runtime-v1",
+            "synthetic": synthetic.to_dict(),
+            "phase_e": phase_e,
+            "all_required_gates_passed": synthetic.synthetic_gates_passed and passed,
+            "optimizer_step_authorized": synthetic.synthetic_gates_passed and passed,
+            "long_training_authorized": False,
+            "optimizer_updates": 0,
+            "wandb_started": False,
+            "ttb_enabled": False,
+            "created_at": _utc_now(),
+        }
+        _atomic_write_json(receipt_path, acceptance)
+        if not passed:
+            raise HotpotTrainingError("Phase E acceptance assertions failed")
+        manifest.update(
+            status="passed",
+            completed_natural_trajectories=len(batch.natural_trajectories),
+            completed_intervention_trajectories=len(batch.intervention_trajectories),
+            completed_probe_records=len(batch.probe_records),
+            metrics=metrics,
+            acceptance_receipt=str(receipt_path),
+            completed_at=_utc_now(),
+        )
+        _atomic_write_json(manifest_path, manifest)
+        return manifest
+    except Exception as exc:
+        manifest.update(
+            status="failed",
+            error=_safe_error(exc),
+            failed_at=_utc_now(),
+        )
+        _atomic_write_json(manifest_path, manifest)
+        if isinstance(exc, HotpotTrainingError):
+            raise
+        raise HotpotTrainingError("HotpotQA dynamic Phase E failed") from exc
+    finally:
+        try:
+            await asyncio.to_thread(runtime.stop_rollout_service)
+        except Exception:
+            # Preserve the primary failure and keep the runtime's own
+            # fail-closed receipt semantics.  It never adopts external jobs.
+            pass
+
+
 async def run_hotpotqa_training(
     config_path: str | Path,
     *,
@@ -1443,10 +2658,12 @@ async def run_hotpotqa_training(
     prepare_only: bool = False,
     allow_md_grpo: bool = False,
     resume: bool = False,
+    resume_checkpoint: Optional[str | Path] = None,
     stop_after_optimizer_steps: Optional[int] = None,
     backend_factory: Optional[BackendFactory] = None,
     tracker: Optional[TrainingTracker] = None,
     tracker_factory: Optional[TrackerFactory] = None,
+    dynamic_acceptance_receipt: Optional[str | Path] = None,
 ) -> Mapping[str, Any]:
     """Run formal, strictly sequential HotpotQA optimizer transactions."""
 
@@ -1458,15 +2675,76 @@ async def run_hotpotqa_training(
     )
     config = load_yaml(resolved_config)
     validate_hotpotqa_training_config(config)
+    dynamic_mode = _dynamic_ledger_selected(config)
     experiment = _mapping(config["experiment"], "experiment")
     compliance = _mapping(config["md_compliance"], "md_compliance")
     gpu = _mapping(config["gpu"], "gpu")
+    paths = _training_paths(config, root)
+    state: Optional[dict[str, Any]] = None
+    if not prepare_only:
+        if resume and resume_checkpoint is not None:
+            raise ConfigurationError(
+                "--resume and --resume-checkpoint are mutually exclusive"
+            )
+        if resume_checkpoint is not None:
+            if not dynamic_mode:
+                raise HotpotTrainingError(
+                    "--resume-checkpoint currently requires the dynamic-ledger profile"
+                )
+            state = _state_from_dynamic_checkpoint(resume_checkpoint)
+        elif paths["state"].is_file():
+            if not resume:
+                raise HotpotTrainingError(
+                    "a committed run state already exists; pass --resume to continue"
+                )
+            raw_state = json.loads(paths["state"].read_text(encoding="utf-8"))
+            if not isinstance(raw_state, dict):
+                raise HotpotTrainingError("committed run state is malformed")
+            state = raw_state
+        elif resume:
+            raise HotpotTrainingError(
+                "--resume was requested but no committed state exists"
+            )
+    acceptance_path: Optional[Path] = None
+    dynamic_acceptance: Optional[Mapping[str, Any]] = None
+    supplemental_admission_path: Optional[Path] = None
     if not prepare_only:
         if not allow_md_grpo:
             raise HotpotTrainingError(
                 "the selected MD GRPO requires explicit --allow-md-grpo authorization"
             )
-        if experiment.get("training_enabled") is not True or gpu.get(
+        if dynamic_mode:
+            if dynamic_acceptance_receipt is not None:
+                acceptance_path = (
+                    Path(dynamic_acceptance_receipt).expanduser().resolve()
+                )
+                dynamic_acceptance = _read_dynamic_acceptance_receipt(
+                    acceptance_path
+                )
+            elif state is not None:
+                dynamic_acceptance, acceptance_path = (
+                    _dynamic_acceptance_from_state(state)
+                )
+            else:
+                raise HotpotTrainingError(
+                    "initial dynamic training requires an explicit passed Phase-E receipt"
+                )
+            # The checked-in profile remains fail-closed.  Runtime admission is
+            # granted only by this explicit immutable receipt; it is not written
+            # back to source configuration.
+            config = copy.deepcopy(dict(config))
+            config["experiment"]["training_enabled"] = True
+            config["gpu"]["training_enabled"] = True
+            config["md_compliance"]["real_step_authorized"] = True
+            config["latent_loss_compliance"]["all_required_gates_passed"] = True
+            config["latent_loss_compliance"]["optimizer_step_authorized"] = True
+            config["latent_loss_compliance"]["runtime_acceptance_receipt"] = str(
+                acceptance_path or "embedded-in-committed-state"
+            )
+            experiment = _mapping(config["experiment"], "experiment")
+            compliance = _mapping(config["md_compliance"], "md_compliance")
+            gpu = _mapping(config["gpu"], "gpu")
+        elif experiment.get("training_enabled") is not True or gpu.get(
             "training_enabled"
         ) is not True:
             raise HotpotTrainingError(
@@ -1480,13 +2758,25 @@ async def run_hotpotqa_training(
             )
         requested_steps = stop_after_optimizer_steps
         if requested_steps is None or requested_steps > 1:
-            if compliance.get("one_step_closure_status") != "passed" or compliance.get(
-                "long_training_authorized"
-            ) is not True:
+            if dynamic_mode:
+                if state is None:
+                    raise HotpotTrainingError(
+                        "long training requires a committed step-1 state"
+                    )
+                supplemental_admission_path = (
+                    _prepare_or_validate_long_training_admission(
+                        config,
+                        paths=paths,
+                        state=state,
+                    )
+                )
+            elif (
+                compliance.get("one_step_closure_status") != "passed"
+                or compliance.get("long_training_authorized") is not True
+            ):
                 raise HotpotTrainingError(
                     "long training requires a passed real one-step closure"
                 )
-    paths = _training_paths(config, root)
     paths["root"].mkdir(parents=True, exist_ok=True)
     experiment = _mapping(config["experiment"], "experiment")
     data = _mapping(config["data"], "data")
@@ -1541,8 +2831,15 @@ async def run_hotpotqa_training(
         "method_role": "primary_task_learning_objective",
         "ttb_enabled": False,
         "mace_enabled": False,
-        "bayesian_posterior_enabled": False,
-        "skills_enabled": False,
+        "bayesian_posterior_enabled": dynamic_mode,
+        "skills_enabled": dynamic_mode,
+        "dynamic_combination_posterior_enabled": dynamic_mode,
+        "latent_risk_is_differentiable_objective": False,
+        "supplemental_long_training_admission": (
+            str(supplemental_admission_path)
+            if supplemental_admission_path is not None
+            else None
+        ),
         "target_optimizer_steps": target_steps,
         "optimizer_updates_completed": 0,
         "tasks_per_step": int(batch_config["tasks_per_step"]),
@@ -1589,19 +2886,6 @@ async def run_hotpotqa_training(
         manifest["completed_at"] = _utc_now()
         _atomic_write_json(paths["manifest"], manifest)
         return manifest
-
-    state: Optional[dict[str, Any]] = None
-    if paths["state"].is_file():
-        if not resume:
-            raise HotpotTrainingError(
-                "a committed run state already exists; pass --resume to continue"
-            )
-        raw_state = json.loads(paths["state"].read_text(encoding="utf-8"))
-        if not isinstance(raw_state, dict):
-            raise HotpotTrainingError("committed run state is malformed")
-        state = raw_state
-    elif resume:
-        raise HotpotTrainingError("--resume was requested but no committed state exists")
 
     completed = int(state.get("optimizer_updates_completed", 0)) if state else 0
     if completed > target_steps:
@@ -1654,16 +2938,105 @@ async def run_hotpotqa_training(
     best_validation_token_f1 = (
         float(state.get("best_validation_token_f1", -1.0)) if state else -1.0
     )
+    ledger_epoch: Optional[LedgerEpoch] = None
+    if dynamic_mode:
+        if state:
+            ledger_receipt_value = state.get("ledger_epoch_receipt")
+            if not isinstance(ledger_receipt_value, str) or not ledger_receipt_value.strip():
+                raise HotpotTrainingError(
+                    "dynamic resume state has no recoverable ledger epoch receipt"
+                )
+            ledger_receipt_path = Path(ledger_receipt_value).expanduser().resolve()
+        else:
+            if acceptance_path is None or dynamic_acceptance is None:
+                raise HotpotTrainingError("dynamic Phase-E admission was not retained")
+            ledger_receipt_path = acceptance_path.parent / "ledger_epoch_000000" / "receipt.json"
+            expected_epoch_receipt = _mapping(
+                _mapping(dynamic_acceptance["phase_e"], "phase_e")["epoch_snapshot"],
+                "phase_e.epoch_snapshot",
+            )
+            if not ledger_receipt_path.is_file():
+                raise HotpotTrainingError(
+                    "dynamic Phase-E initial ledger epoch receipt is missing"
+                )
+        ledger_epoch = LedgerEpoch.load(ledger_receipt_path)
+        if ledger_epoch.condition.versions.policy != behavior_policy:
+            raise HotpotTrainingError(
+                "dynamic ledger epoch policy differs from the behavior policy"
+            )
+        if ledger_epoch.condition.versions.feature_schema != LEDGER_FEATURE_SCHEMA_VERSION:
+            raise HotpotTrainingError("dynamic ledger epoch feature schema drifted")
+        if state:
+            expected_state_lineage = {
+                "ledger_condition_id": ledger_epoch.condition.condition_id,
+                "ledger_snapshot_id": ledger_epoch.condition.ledger_snapshot_id,
+                "skill_snapshot_id": ledger_epoch.condition.skill_snapshot_id,
+            }
+            differing = [
+                name
+                for name, expected in expected_state_lineage.items()
+                if state.get(name) != expected
+            ]
+            if differing:
+                raise HotpotTrainingError(
+                    "dynamic resume ledger lineage differs: "
+                    + ", ".join(differing)
+                )
+        else:
+            saved_epoch_receipt = json.loads(
+                ledger_receipt_path.read_text(encoding="utf-8")
+            )
+            if expected_epoch_receipt.get("receipt_id") != saved_epoch_receipt.get(
+                "receipt_id"
+            ):
+                raise HotpotTrainingError(
+                    "dynamic Phase-E acceptance points to another ledger epoch"
+                )
 
     backend_builder = backend_factory or (
         lambda value, run_root: LiveSmokeBackend.from_config(value, run_root)
     )
     exit_code = 1
+    active_sequential_runtime: Optional[SequentialGpuRuntime] = None
     try:
         for training_step in range(completed + 1, target_steps + 1):
             if _STOP_REQUESTED or (paths["root"] / "STOP_REQUESTED").is_file():
                 manifest["status"] = "paused_at_safe_boundary"
                 break
+            skill_runtime_update: Optional[SkillRuntimeUpdate] = None
+            skill_runtime_update_path: Optional[Path] = None
+            if dynamic_mode and ledger_epoch is not None and completed > 0:
+                skill_runtime_update, skill_runtime_update_path = (
+                    _materialize_skill_runtime_update(
+                        config,
+                        run_root=paths["root"],
+                        ledger_epoch=ledger_epoch,
+                        completed_steps=completed,
+                    )
+                )
+                skill_receipt = skill_runtime_update.receipt
+                if not skill_receipt.producer_complete:
+                    manifest.update(
+                        status="paused_pending_heldout_confirmation",
+                        optimizer_updates_completed=completed,
+                        pending_skill_runtime_update=str(skill_runtime_update_path),
+                        pending_skill_rule_ids=list(
+                            skill_receipt.pending_confirmation_rule_ids
+                        ),
+                    )
+                    _atomic_write_json(paths["manifest"], manifest)
+                    break
+                # Publication is delayed by one evidence epoch.  Re-freezing
+                # changes only the version-bound Skill snapshot; policy and
+                # posterior state remain those of the committed checkpoint.
+                ledger_epoch = LedgerEpoch.freeze(
+                    ledger_epoch.ledger,
+                    skill_runtime_update.skills,
+                    ledger_epoch.condition.versions,
+                )
+                ledger_epoch.save(
+                    skill_runtime_update_path.parent / "frozen_epoch"
+                )
             step_started = time.monotonic()
             absolute_update_step = int(experiment["initial_update_step"]) + training_step - 1
             candidate_policy = _candidate_policy(config, training_step)
@@ -1679,7 +3052,17 @@ async def run_hotpotqa_training(
             summary_path = step_dir / "training_summary.json"
             sync_path = step_dir / "sync_receipt.json"
             canary_path = step_dir / "post_update_canary.jsonl"
+            canary_ledger_path = step_dir / "post_update_canary_ledger_sidecars.jsonl"
             validation_path_for_step = step_dir / "validation_monitor.jsonl"
+            validation_ledger_path = step_dir / "validation_ledger_sidecars.jsonl"
+            natural_sidecar_path = step_dir / "natural_ledger_sidecars.jsonl"
+            natural_ledger_path = step_dir / "natural_ledger_records.jsonl"
+            selected_probe_path = step_dir / "selected_probe_sites.jsonl"
+            intervention_path = step_dir / "intervention_trajectories.jsonl"
+            intervention_ledger_path = step_dir / "intervention_ledger_records.jsonl"
+            probe_records_path = step_dir / "probe_records.jsonl"
+            dynamic_metrics_path = step_dir / "dynamic_epoch_metrics.json"
+            dynamic_transition_path = step_dir / "dynamic_epoch_transition.json"
             artifact_receipt_path = step_dir / "wandb_checkpoint_artifact.json"
             step_manifest_path = step_dir / "step_manifest.json"
 
@@ -1724,33 +3107,131 @@ async def run_hotpotqa_training(
                 },
             )
             backend = backend_builder(step_value, root)
+            active_sequential_runtime = _single_gpu_sequential_runtime(
+                step_value,
+                backend,
+            )
+            if active_sequential_runtime is not None:
+                await asyncio.to_thread(active_sequential_runtime.start_rollout_service)
             readiness = await _ensure_behavior_ready(backend, step_value)
 
-            rollout_jobs = []
-            rollout_index = 0
-            for task in tasks:
-                versions = version_bundle_for(
-                    task,
-                    policy_version=behavior_policy,
-                    model_catalog_version=backend.model_catalog_version,
-                    prompt_version=str(
-                        _mapping(config["versions"], "versions")["prompt"]
-                    ),
-                    tool_version=str(
-                        _mapping(config["versions"], "versions")["tool"]
-                    ),
+            dynamic_batch: Optional[DynamicLedgerBatch] = None
+            dynamic_metrics: Optional[dict[str, Any]] = None
+            if dynamic_mode:
+                if ledger_epoch is None:
+                    raise HotpotTrainingError("dynamic ledger epoch is not initialized")
+                coordinator = _dynamic_epoch_coordinator(
+                    step_value,
+                    backend,
+                    ledger_epoch,
+                    adapter_name=behavior_adapter,
+                    seed=int(experiment["seed"]) + training_step * 100_000,
                 )
-                for _ in range(int(batch_config["rollouts_per_task"])):
-                    rollout_jobs.append(
-                        backend.collect(
-                            task,
-                            (training_step - 1) * 1000 + rollout_index,
-                            versions,
-                            expected_task_split="train",
-                        )
+                natural_batch = await coordinator.collect_natural(
+                    backend,
+                    tasks,
+                    rollouts_per_task=int(batch_config["rollouts_per_task"]),
+                    start_rollout_index=(training_step - 1) * 1000,
+                )
+                dynamic_config = _mapping(
+                    step_value["dynamic_ledger"], "dynamic_ledger"
+                )
+                latent_config = _mapping(
+                    dynamic_config["latent_risk"], "dynamic_ledger.latent_risk"
+                )
+                exploration_config = _mapping(
+                    step_value["exploration"], "exploration"
+                )
+                probe_config = _mapping(
+                    exploration_config["probe"], "exploration.probe"
+                )
+                audit_config = _mapping(
+                    exploration_config["audit"], "exploration.audit"
+                )
+                selected_sites = select_probe_sites(
+                    natural_batch.natural_sidecars,
+                    natural_trajectory_count=len(natural_batch.natural_trajectories),
+                    seed=int(experiment["seed"]) + training_step * 100_000 + 50_000,
+                    probe_fraction=float(
+                        probe_config["budget_fraction_of_natural_trajectories"]
+                    ),
+                    audit_probability=float(audit_config["probability"]),
+                    tau=float(latent_config["tau"]),
+                )
+                if not selected_sites:
+                    raise HotpotTrainingError(
+                        "dynamic training epoch produced no eligible paired probe site"
                     )
-                    rollout_index += 1
-            trajectories = tuple(await asyncio.gather(*rollout_jobs))
+                dynamic_batch = await coordinator.collect_selected_probes(
+                    backend,
+                    natural_batch,
+                    selected_sites=selected_sites,
+                    start_rollout_index=5_000_000 + training_step * 100_000,
+                )
+                trajectories = dynamic_batch.natural_trajectories
+                dynamic_metrics = dict(dynamic_epoch_metrics(dynamic_batch))
+                routing = _mapping(
+                    dynamic_metrics["routing_assertions"],
+                    "dynamic_epoch_metrics.routing_assertions",
+                )
+                if not all(
+                    routing.get(name) is True
+                    for name in (
+                        "natural_only_grpo",
+                        "probe_and_audit_excluded_from_grpo",
+                        "probe_and_audit_excluded_from_standard_metrics",
+                    )
+                ):
+                    raise HotpotTrainingError(
+                        "dynamic evidence routing assertions failed before GRPO"
+                    )
+                _write_jsonl(natural_sidecar_path, dynamic_batch.natural_sidecars)
+                _write_jsonl(natural_ledger_path, dynamic_batch.natural_ledger_records)
+                _write_jsonl(
+                    selected_probe_path,
+                    [
+                        {
+                            "schema_version": "flowsteer.selected-probe-site.v1",
+                            "audit": value.audit,
+                            "sampling_probability": value.sampling_probability,
+                            **value.site.to_dict(),
+                        }
+                        for value in dynamic_batch.selected_sites
+                    ],
+                )
+                _write_jsonl(intervention_path, dynamic_batch.intervention_trajectories)
+                _write_jsonl(
+                    intervention_ledger_path,
+                    dynamic_batch.intervention_ledger_records,
+                )
+                _write_jsonl(probe_records_path, dynamic_batch.probe_records)
+                _atomic_write_json(dynamic_metrics_path, dynamic_metrics)
+            else:
+                rollout_jobs = []
+                rollout_index = 0
+                for task in tasks:
+                    versions = version_bundle_for(
+                        task,
+                        policy_version=behavior_policy,
+                        model_catalog_version=backend.model_catalog_version,
+                        prompt_version=str(
+                            _mapping(config["versions"], "versions")["prompt"]
+                        ),
+                        tool_version=str(
+                            _mapping(config["versions"], "versions")["tool"]
+                        ),
+                    )
+                    for _ in range(int(batch_config["rollouts_per_task"])):
+                        rollout_jobs.append(
+                            backend.collect(
+                                task,
+                                (training_step - 1) * 1000 + rollout_index,
+                                versions,
+                                expected_task_split="train",
+                            )
+                        )
+                        rollout_index += 1
+                trajectories = tuple(await asyncio.gather(*rollout_jobs))
             _verify_rollout_batch(
                 trajectories,
                 expected_count=int(batch_config["expected_rollouts_per_step"]),
@@ -1759,6 +3240,70 @@ async def run_hotpotqa_training(
             )
             _write_jsonl(trajectories_path, trajectories)
             _write_grpo_groups(groups_path, trajectories)
+            dynamic_transition: Optional[DynamicEpochCloseResult] = None
+            if dynamic_batch is not None:
+                if ledger_epoch is None:
+                    raise HotpotTrainingError("dynamic ledger epoch disappeared")
+                dynamic_transition = close_dynamic_epoch(
+                    dynamic_batch,
+                    next_policy_version=candidate_policy,
+                    # Keep the frozen lifecycle snapshot until the separate
+                    # discovery/held-out confirmation producer supplies a vetted
+                    # next_skills set.  This cannot activate a Skill by itself.
+                    next_skills=ledger_epoch.skills,
+                    natural_grpo_trajectory_ids=tuple(
+                        item.trajectory_id for item in trajectories
+                    ),
+                    intervention_exclusion_trajectory_ids=tuple(
+                        item.trajectory_id
+                        for item in dynamic_batch.intervention_trajectories
+                    ),
+                    heldout_coverage=None,
+                )
+                transition_summary = dynamic_transition.transition.summary.to_dict()
+                natural_ids = {item.trajectory_id for item in trajectories}
+                intervention_ids = {
+                    item.trajectory_id
+                    for item in dynamic_batch.intervention_trajectories
+                }
+                if set(transition_summary["grpo_trajectory_ids"]) != natural_ids:
+                    raise HotpotTrainingError(
+                        "ledger transition GRPO IDs differ from the natural batch"
+                    )
+                if set(transition_summary["excluded_intervention_ids"]) != intervention_ids:
+                    raise HotpotTrainingError(
+                        "ledger transition did not exclude every intervention branch"
+                    )
+                _atomic_write_json(
+                    dynamic_transition_path,
+                    {
+                        "schema_version": "flowsteer.dynamic-epoch-transition.v1",
+                        "current_condition": ledger_epoch.condition.to_dict(),
+                        "next_condition": dynamic_transition.next_epoch.condition.to_dict(),
+                        "summary": transition_summary,
+                        "heldout_calibration_status": (
+                            "not_applicable_no_qualified_candidate"
+                            if skill_runtime_update is not None
+                            and skill_runtime_update.receipt.status
+                            == "complete_no_qualified_candidate"
+                            else "complete"
+                            if skill_runtime_update is not None
+                            and skill_runtime_update.receipt.confirmation_probe_count > 0
+                            else "pending"
+                        ),
+                        "skill_runtime_update": (
+                            skill_runtime_update.receipt.to_dict()
+                            if skill_runtime_update is not None
+                            else None
+                        ),
+                        "skill_runtime_update_path": (
+                            str(skill_runtime_update_path)
+                            if skill_runtime_update_path is not None
+                            else None
+                        ),
+                        "receipt": dynamic_transition.receipt.to_dict(),
+                    },
+                )
             transaction.seal(
                 step=training_step,
                 state={
@@ -1768,6 +3313,12 @@ async def run_hotpotqa_training(
                     "selected_tasks_path": str(selected_path),
                     "trajectories_path": str(trajectories_path),
                     "grpo_groups_path": str(groups_path),
+                    "dynamic_epoch_metrics_path": (
+                        str(dynamic_metrics_path) if dynamic_mode else None
+                    ),
+                    "dynamic_epoch_transition_path": (
+                        str(dynamic_transition_path) if dynamic_mode else None
+                    ),
                 },
             )
             transaction.transition(
@@ -1776,140 +3327,357 @@ async def run_hotpotqa_training(
                 trajectory_count=len(trajectories),
             )
 
-            transaction.transition(
-                step=training_step,
-                phase=StepPhase.GRADIENT_IN_PROGRESS,
-            )
-            summary_object = await asyncio.to_thread(
-                backend.train, trajectories, step_dir / "learner"
-            )
-            summary = _summary_dict(summary_object)
-            _verify_training_summary(
-                summary,
-                behavior_policy=behavior_policy,
-                candidate_policy=candidate_policy,
-                absolute_update_step=absolute_update_step,
-            )
-            _atomic_write_json(summary_path, summary)
-            transaction.transition(
-                step=training_step,
-                phase=StepPhase.GRADIENT_COMPLETE,
-                loss=float(summary["loss"]),
-                grad_norm=float(summary["grad_norm"]),
-            )
-            transaction.transition(
-                step=training_step,
-                phase=StepPhase.OPTIMIZER_COMMITTED,
-                trainable_update_l2=float(summary["trainable_update_l2"]),
-                checkpoint_dir=str(summary["checkpoint_dir"]),
-            )
-            transaction.seal(
-                step=training_step,
-                state={
-                    "phase": StepPhase.OPTIMIZER_COMMITTED.value,
-                    "behavior_policy_version": behavior_policy,
-                    "behavior_adapter_name": behavior_adapter,
-                    "candidate_policy_version": candidate_policy,
-                    "trajectories_path": str(trajectories_path),
-                    "grpo_groups_path": str(groups_path),
-                    "training_summary_path": str(summary_path),
-                    "checkpoint_dir": str(summary["checkpoint_dir"]),
-                    "training_state_checkpoint": str(
-                        summary["training_state_checkpoint"]
-                    ),
-                },
-            )
+            summary_object: Any
+            summary: dict[str, Any]
+            sync: dict[str, Any]
+            adapter_name: str
+            canaries: tuple[TrajectoryRecord, ...]
+            next_epoch_receipt: Optional[Mapping[str, Any]] = None
+            checkpoint_phase_e_receipt_path: Optional[Path] = None
+            recovery_manifest_path: Optional[Path] = None
+            updated_coordinator: Optional[DynamicLedgerEpochCoordinator] = None
 
-            sync_object = await backend.publish(summary_object)
-            sync = _summary_dict(sync_object)
-            if sync.get("success") is not True:
-                raise HotpotTrainingError("SGLang publication receipt is unsuccessful")
-            if sync.get("new_policy_version") != candidate_policy:
-                raise HotpotTrainingError("SGLang published the wrong policy version")
-            if sync.get("route_switch_success") is not True:
-                raise HotpotTrainingError("Director policy route switch was not verified")
-            adapter_name = str(sync.get("adapter_name", ""))
-            if not adapter_name:
-                raise HotpotTrainingError("SGLang publication receipt has no adapter")
-            _atomic_write_json(sync_path, sync)
-            transaction.transition(
-                step=training_step,
-                phase=StepPhase.SGLANG_SYNCED,
-                adapter_name=adapter_name,
-                policy_version=candidate_policy,
-            )
-            transaction.seal(
-                step=training_step,
-                state={
-                    "phase": StepPhase.SGLANG_SYNCED.value,
-                    "behavior_policy_version": behavior_policy,
-                    "candidate_policy_version": candidate_policy,
-                    "training_summary_path": str(summary_path),
-                    "checkpoint_dir": str(summary["checkpoint_dir"]),
-                    "training_state_checkpoint": str(
-                        summary["training_state_checkpoint"]
-                    ),
-                    "sync_receipt_path": str(sync_path),
-                    "adapter_name": adapter_name,
-                },
-            )
-
-            canary_count = int(sync_config["post_update_canary_count"])
-            canary_jobs = []
-            for index in range(canary_count):
-                task = tasks[index % len(tasks)]
-                versions = version_bundle_for(
-                    task,
-                    policy_version=candidate_policy,
-                    model_catalog_version=backend.model_catalog_version,
-                    prompt_version=str(
-                        _mapping(config["versions"], "versions")["prompt"]
-                    ),
-                    tool_version=str(
-                        _mapping(config["versions"], "versions")["tool"]
-                    ),
+            def train_and_commit() -> Any:
+                nonlocal summary_object, summary, next_epoch_receipt
+                nonlocal checkpoint_phase_e_receipt_path, recovery_manifest_path
+                transaction.transition(
+                    step=training_step,
+                    phase=StepPhase.GRADIENT_IN_PROGRESS,
                 )
-                canary_jobs.append(
-                    backend.collect(
-                        task,
-                        1_000_000 + training_step * 10 + index,
-                        versions,
-                        expected_task_split="train",
+                summary_object = backend.train(trajectories, step_dir / "learner")
+                summary = _summary_dict(summary_object)
+                _verify_training_summary(
+                    summary,
+                    behavior_policy=behavior_policy,
+                    candidate_policy=candidate_policy,
+                    absolute_update_step=absolute_update_step,
+                    gradient_worker_count=int(gpu.get("gradient_worker_count", 2)),
+                )
+                if int(summary.get("input_trajectories", -1)) != len(trajectories):
+                    raise HotpotTrainingError(
+                        "trainer input count differs from the sealed natural batch"
                     )
+                if dynamic_transition is not None:
+                    checkpoint_dir = Path(str(summary["checkpoint_dir"]))
+                    (
+                        next_epoch_receipt,
+                        persisted_transition_receipt,
+                        ledger_receipt_path,
+                    ) = _persist_dynamic_epoch_snapshot(
+                        dynamic_transition,
+                        checkpoint_dir,
+                    )
+                    if dynamic_acceptance is None:
+                        raise HotpotTrainingError(
+                            "dynamic checkpoint has no retained Phase-E receipt"
+                        )
+                    checkpoint_phase_e_receipt_path = (
+                        checkpoint_dir / "phase_e_acceptance_receipt.json"
+                    )
+                    _atomic_write_json(
+                        checkpoint_phase_e_receipt_path,
+                        dynamic_acceptance,
+                    )
+                    training_state = Path(str(summary["training_state_checkpoint"]))
+                    try:
+                        training_state_relative = str(
+                            training_state.resolve().relative_to(checkpoint_dir.resolve())
+                        )
+                    except ValueError as error:
+                        raise HotpotTrainingError(
+                            "training state is outside the recoverable checkpoint"
+                        ) from error
+                    recovery_manifest_path = checkpoint_dir / "recovery_manifest.json"
+                    _atomic_write_json(
+                        recovery_manifest_path,
+                        {
+                            "schema_version": "flowsteer.dynamic-grpo-recovery.v1",
+                            "status": "checkpointed_pending_publication",
+                            "checkpoint_recoverable": bool(
+                                summary["checkpoint_recoverable"]
+                            ),
+                            "optimizer_step": training_step,
+                            "absolute_update_step": absolute_update_step,
+                            "policy_version": candidate_policy,
+                            "behavior_policy_version": behavior_policy,
+                            "training_state": training_state_relative,
+                            "ledger_epoch_receipt": "ledger_epoch/receipt.json",
+                            "phase_e_acceptance_receipt": (
+                                "phase_e_acceptance_receipt.json"
+                            ),
+                            "condition": dynamic_transition.next_epoch.condition.to_dict(),
+                            "ttb_enabled": False,
+                            "objective": "action_masked_one_pass_grpo",
+                        },
+                    )
+                    transition_payload = json.loads(
+                        dynamic_transition_path.read_text(encoding="utf-8")
+                    )
+                    transition_payload["next_epoch_receipt"] = next_epoch_receipt
+                    transition_payload["next_epoch_receipt_path"] = str(
+                        ledger_receipt_path
+                    )
+                    transition_payload["receipt"] = persisted_transition_receipt
+                    _atomic_write_json(dynamic_transition_path, transition_payload)
+                _atomic_write_json(summary_path, summary)
+                transaction.transition(
+                    step=training_step,
+                    phase=StepPhase.GRADIENT_COMPLETE,
+                    loss=float(summary["loss"]),
+                    grad_norm=float(summary["grad_norm"]),
                 )
-            # The formal path uses one canary and waits for it directly.  This
-            # leaves no admission window for a next-step rollout while route
-            # verification is pending.
-            canaries = tuple([await job for job in canary_jobs])
-            _verify_canaries(
-                canaries,
-                expected_count=canary_count,
-                policy_version=candidate_policy,
-                adapter_name=adapter_name,
-            )
-            _write_jsonl(canary_path, canaries)
+                transaction.transition(
+                    step=training_step,
+                    phase=StepPhase.OPTIMIZER_COMMITTED,
+                    trainable_update_l2=float(summary["trainable_update_l2"]),
+                    checkpoint_dir=str(summary["checkpoint_dir"]),
+                )
+                transaction.seal(
+                    step=training_step,
+                    state={
+                        "phase": StepPhase.OPTIMIZER_COMMITTED.value,
+                        "behavior_policy_version": behavior_policy,
+                        "behavior_adapter_name": behavior_adapter,
+                        "candidate_policy_version": candidate_policy,
+                        "trajectories_path": str(trajectories_path),
+                        "grpo_groups_path": str(groups_path),
+                        "training_summary_path": str(summary_path),
+                        "checkpoint_dir": str(summary["checkpoint_dir"]),
+                        "training_state_checkpoint": str(
+                            summary["training_state_checkpoint"]
+                        ),
+                    },
+                )
+                return summary_object
+
+            async def publish_and_commit(*, manage_gate: bool) -> Mapping[str, Any]:
+                nonlocal sync, adapter_name
+                if manage_gate:
+                    sync_object = await backend.publish(summary_object)
+                else:
+                    if not isinstance(backend, LiveSmokeBackend):
+                        publish_without_gate = getattr(backend, "publish_without_gate", None)
+                        if not callable(publish_without_gate):
+                            raise HotpotTrainingError(
+                                "single-GPU backend cannot publish under the external gate"
+                            )
+                        sync_object = await publish_without_gate(summary_object)
+                    else:
+                        sync_object = await backend.publish(
+                            summary_object,
+                            manage_gate=False,
+                        )
+                sync = _summary_dict(sync_object)
+                if sync.get("success") is not True:
+                    raise HotpotTrainingError("SGLang publication receipt is unsuccessful")
+                if sync.get("new_policy_version") != candidate_policy:
+                    raise HotpotTrainingError("SGLang published the wrong policy version")
+                if sync.get("route_switch_success") is not True:
+                    raise HotpotTrainingError("Director policy route switch was not verified")
+                adapter_name = str(sync.get("adapter_name", ""))
+                if not adapter_name:
+                    raise HotpotTrainingError("SGLang publication receipt has no adapter")
+                _atomic_write_json(sync_path, sync)
+                transaction.transition(
+                    step=training_step,
+                    phase=StepPhase.SGLANG_SYNCED,
+                    adapter_name=adapter_name,
+                    policy_version=candidate_policy,
+                )
+                transaction.seal(
+                    step=training_step,
+                    state={
+                        "phase": StepPhase.SGLANG_SYNCED.value,
+                        "behavior_policy_version": behavior_policy,
+                        "candidate_policy_version": candidate_policy,
+                        "training_summary_path": str(summary_path),
+                        "checkpoint_dir": str(summary["checkpoint_dir"]),
+                        "training_state_checkpoint": str(
+                            summary["training_state_checkpoint"]
+                        ),
+                        "sync_receipt_path": str(sync_path),
+                        "adapter_name": adapter_name,
+                    },
+                )
+                return sync
+
+            async def collect_update_canaries() -> tuple[TrajectoryRecord, ...]:
+                nonlocal updated_coordinator
+                canary_count = int(sync_config["post_update_canary_count"])
+                jobs = []
+                canary_hooks: list[Any] = []
+                if dynamic_transition is not None:
+                    updated_coordinator = _dynamic_epoch_coordinator(
+                        step_value,
+                        backend,
+                        dynamic_transition.next_epoch,
+                        adapter_name=adapter_name,
+                        seed=int(experiment["seed"])
+                        + training_step * 100_000
+                        + 80_000,
+                    )
+                for index in range(canary_count):
+                    task = tasks[index % len(tasks)]
+                    if updated_coordinator is not None:
+                        versions = dynamic_transition.next_epoch.condition.versions
+                        hook = updated_coordinator.make_hook(
+                            1_000_000 + training_step * 10 + index
+                        )
+                        canary_hooks.append(hook)
+                        condition_id = dynamic_transition.next_epoch.condition.condition_id
+                    else:
+                        versions = version_bundle_for(
+                            task,
+                            policy_version=candidate_policy,
+                            model_catalog_version=backend.model_catalog_version,
+                            prompt_version=str(
+                                _mapping(config["versions"], "versions")["prompt"]
+                            ),
+                            tool_version=str(
+                                _mapping(config["versions"], "versions")["tool"]
+                            ),
+                        )
+                        hook = None
+                        condition_id = None
+                    if hook is None:
+                        jobs.append(
+                            backend.collect(
+                                task,
+                                1_000_000 + training_step * 10 + index,
+                                versions,
+                                expected_task_split="train",
+                            )
+                        )
+                    else:
+                        jobs.append(
+                            backend.collect(
+                                task,
+                                1_000_000 + training_step * 10 + index,
+                                versions,
+                                expected_task_split="train",
+                                observation_hook=hook,
+                                condition_id=condition_id,
+                            )
+                        )
+                values = tuple([await job for job in jobs])
+                _verify_canaries(
+                    values,
+                    expected_count=canary_count,
+                    policy_version=candidate_policy,
+                    adapter_name=adapter_name,
+                )
+                _write_jsonl(canary_path, values)
+                if canary_hooks:
+                    _write_jsonl(
+                        canary_ledger_path,
+                        [
+                            hook.sidecar(record.trajectory_id)
+                            for hook, record in zip(canary_hooks, values)
+                        ],
+                    )
+                return values
+
+            lifecycle_receipt: Optional[SequentialGpuCycleReceipt] = None
+            if active_sequential_runtime is None:
+                summary_object = await asyncio.to_thread(train_and_commit)
+                await publish_and_commit(manage_gate=True)
+                canaries = await collect_update_canaries()
+            else:
+                holder: dict[str, Any] = {}
+                runner_loop = asyncio.get_running_loop()
+
+                def run_on_runner_loop(coroutine: Any) -> Any:
+                    """Execute backend async work on its original event loop.
+
+                    ``run_update_cycle`` is intentionally executed in a worker
+                    thread while the main runner loop stays alive.  Reusing
+                    ``asyncio.run`` in that worker creates a second loop and
+                    can break backend semaphores/clients already bound to the
+                    runner loop.  Submit the coroutine to the owning loop and
+                    synchronously wait for its result from the lifecycle
+                    thread instead.
+                    """
+
+                    future = asyncio.run_coroutine_threadsafe(
+                        coroutine,
+                        runner_loop,
+                    )
+                    return future.result()
+
+                def publication_callback() -> object:
+                    holder["sync"] = run_on_runner_loop(
+                        publish_and_commit(manage_gate=False)
+                    )
+                    return holder["sync"]
+
+                def canary_callback() -> object:
+                    holder["canaries"] = run_on_runner_loop(
+                        collect_update_canaries()
+                    )
+                    return {"canary_succeeded": True}
+
+                lifecycle_receipt = await asyncio.to_thread(
+                    active_sequential_runtime.run_update_cycle,
+                    training_callback=train_and_commit,
+                    publication_callback=publication_callback,
+                    canary_callback=canary_callback,
+                )
+                if not lifecycle_receipt.success:
+                    raise HotpotTrainingError("single-GPU update lifecycle failed")
+                canaries = tuple(holder["canaries"])
+                _atomic_write_json(
+                    step_dir / "single_gpu_lifecycle_receipt.json",
+                    lifecycle_receipt.to_dict(),
+                )
 
             validation_jobs = []
+            validation_hooks: list[Any] = []
             for index, task in enumerate(validation_tasks):
-                versions = version_bundle_for(
-                    task,
-                    policy_version=candidate_policy,
-                    model_catalog_version=backend.model_catalog_version,
-                    prompt_version=str(
-                        _mapping(config["versions"], "versions")["prompt"]
-                    ),
-                    tool_version=str(
-                        _mapping(config["versions"], "versions")["tool"]
-                    ),
-                )
-                validation_jobs.append(
-                    backend.collect(
-                        task,
-                        2_000_000 + training_step * 100 + index,
-                        versions,
-                        expected_task_split="validation",
+                if dynamic_transition is not None:
+                    if updated_coordinator is None:
+                        raise HotpotTrainingError(
+                            "updated dynamic epoch was not used by the canary"
+                        )
+                    versions = dynamic_transition.next_epoch.condition.versions
+                    hook = updated_coordinator.make_hook(
+                        2_000_000 + training_step * 100 + index
                     )
-                )
+                    validation_hooks.append(hook)
+                    condition_id = dynamic_transition.next_epoch.condition.condition_id
+                else:
+                    versions = version_bundle_for(
+                        task,
+                        policy_version=candidate_policy,
+                        model_catalog_version=backend.model_catalog_version,
+                        prompt_version=str(
+                            _mapping(config["versions"], "versions")["prompt"]
+                        ),
+                        tool_version=str(
+                            _mapping(config["versions"], "versions")["tool"]
+                        ),
+                    )
+                    hook = None
+                    condition_id = None
+                if hook is None:
+                    validation_jobs.append(
+                        backend.collect(
+                            task,
+                            2_000_000 + training_step * 100 + index,
+                            versions,
+                            expected_task_split="validation",
+                        )
+                    )
+                else:
+                    validation_jobs.append(
+                        backend.collect(
+                            task,
+                            2_000_000 + training_step * 100 + index,
+                            versions,
+                            expected_task_split="validation",
+                            observation_hook=hook,
+                            condition_id=condition_id,
+                        )
+                    )
             validation_trajectories = tuple(await asyncio.gather(*validation_jobs))
             _verify_validation_batch(
                 validation_trajectories,
@@ -1918,6 +3686,17 @@ async def run_hotpotqa_training(
                 adapter_name=adapter_name,
             )
             _write_jsonl(validation_path_for_step, validation_trajectories)
+            if validation_hooks:
+                _write_jsonl(
+                    validation_ledger_path,
+                    [
+                        hook.sidecar(record.trajectory_id)
+                        for hook, record in zip(
+                            validation_hooks,
+                            validation_trajectories,
+                        )
+                    ],
+                )
             transaction.transition(
                 step=training_step,
                 phase=StepPhase.VALIDATION_COMPLETE,
@@ -1946,11 +3725,58 @@ async def run_hotpotqa_training(
                 sync=sync,
                 canaries=canaries,
                 step_seconds=time.monotonic() - step_started,
+                dynamic_metrics=dynamic_metrics,
+                next_ledger_epoch=(
+                    dynamic_transition.next_epoch
+                    if dynamic_transition is not None
+                    else None
+                ),
             )
+            if skill_runtime_update is not None:
+                skill_receipt = skill_runtime_update.receipt
+                metrics.update(
+                    {
+                        "skill/runtime_status": skill_receipt.status,
+                        "skill/discovery_probe_count": (
+                            skill_receipt.discovery_probe_count
+                        ),
+                        "skill/confirmation_probe_count": (
+                            skill_receipt.confirmation_probe_count
+                        ),
+                        "skill/qualified_rule_count": (
+                            skill_receipt.discovery_qualified_rule_count
+                        ),
+                        "skill/runtime_grpo_reward_contribution": (
+                            skill_receipt.grpo_reward_contribution
+                        ),
+                    }
+                )
             previous_best = best_validation_token_f1
             current_validation_f1 = float(metrics["validation/token_f1"])
             is_best = current_validation_f1 > previous_best
             artifact_aliases = ["latest"] + (["best"] if is_best else [])
+            if dynamic_transition is not None:
+                if (
+                    recovery_manifest_path is None
+                    or checkpoint_phase_e_receipt_path is None
+                ):
+                    raise HotpotTrainingError(
+                        "dynamic checkpoint recovery files were not materialized"
+                    )
+                recovery_payload = json.loads(
+                    recovery_manifest_path.read_text(encoding="utf-8")
+                )
+                recovery_payload.update(
+                    status="ready",
+                    checkpoint_recoverable=True,
+                    behavior_adapter_name=adapter_name,
+                    best_validation_token_f1=(
+                        current_validation_f1 if is_best else previous_best
+                    ),
+                    wandb_run_id=active_tracker.run_id,
+                    finalized_at=_utc_now(),
+                )
+                _atomic_write_json(recovery_manifest_path, recovery_payload)
             artifact_receipt = dict(
                 active_tracker.log_checkpoint(
                     Path(str(summary["checkpoint_dir"])),
@@ -2024,6 +3850,39 @@ async def run_hotpotqa_training(
                 "last_step_manifest": str(step_manifest_path),
                 "updated_at": _utc_now(),
             }
+            if dynamic_transition is not None:
+                if next_epoch_receipt is None:
+                    raise HotpotTrainingError(
+                        "dynamic checkpoint has no ledger epoch receipt"
+                    )
+                next_state.update(
+                    {
+                        "ledger_epoch_receipt": str(
+                            Path(str(summary["checkpoint_dir"]))
+                            / "ledger_epoch"
+                            / "receipt.json"
+                        ),
+                        "ledger_condition_id": (
+                            dynamic_transition.next_epoch.condition.condition_id
+                        ),
+                        "ledger_snapshot_id": (
+                            dynamic_transition.next_epoch.condition.ledger_snapshot_id
+                        ),
+                        "skill_snapshot_id": (
+                            dynamic_transition.next_epoch.condition.skill_snapshot_id
+                        ),
+                        "dynamic_phase_e_acceptance_receipt": str(
+                            checkpoint_phase_e_receipt_path
+                        ),
+                        "dynamic_phase_e_acceptance": dict(dynamic_acceptance or {}),
+                        "recovery_manifest": str(recovery_manifest_path),
+                        "skill_runtime_update_receipt": (
+                            str(skill_runtime_update_path)
+                            if skill_runtime_update_path is not None
+                            else None
+                        ),
+                    }
+                )
             step_manifest = {
                 "schema_version": "flowsteer.hotpotqa.grpo_step_manifest.v1",
                 "status": "committed",
@@ -2042,6 +3901,43 @@ async def run_hotpotqa_training(
                 ],
                 "wandb_checkpoint_artifact": artifact_receipt,
                 "metrics": metrics,
+                "dynamic_epoch": (
+                    {
+                        "current_condition": (
+                            ledger_epoch.condition.to_dict()
+                            if ledger_epoch is not None
+                            else None
+                        ),
+                        "next_condition": (
+                            dynamic_transition.next_epoch.condition.to_dict()
+                            if dynamic_transition is not None
+                            else None
+                        ),
+                        "transition_summary": (
+                            dynamic_transition.transition.summary.to_dict()
+                            if dynamic_transition is not None
+                            else None
+                        ),
+                        "next_epoch_receipt": next_epoch_receipt,
+                        "heldout_calibration_status": (
+                            "not_applicable_no_qualified_candidate"
+                            if skill_runtime_update is not None
+                            and skill_runtime_update.receipt.status
+                            == "complete_no_qualified_candidate"
+                            else "complete"
+                            if skill_runtime_update is not None
+                            and skill_runtime_update.receipt.confirmation_probe_count > 0
+                            else "pending_independent_paired_evidence"
+                        ),
+                        "skill_runtime_update": (
+                            skill_runtime_update.receipt.to_dict()
+                            if skill_runtime_update is not None
+                            else None
+                        ),
+                    }
+                    if dynamic_mode
+                    else None
+                ),
                 "artifacts": {
                     "selected_tasks": str(selected_path),
                     "trajectories": str(trajectories_path),
@@ -2051,6 +3947,41 @@ async def run_hotpotqa_training(
                     "post_update_canary": str(canary_path),
                     "validation_monitor": str(validation_path_for_step),
                     "wandb_checkpoint_artifact": str(artifact_receipt_path),
+                    "natural_ledger_sidecars": (
+                        str(natural_sidecar_path) if dynamic_mode else None
+                    ),
+                    "natural_ledger_records": (
+                        str(natural_ledger_path) if dynamic_mode else None
+                    ),
+                    "selected_probe_sites": (
+                        str(selected_probe_path) if dynamic_mode else None
+                    ),
+                    "intervention_trajectories": (
+                        str(intervention_path) if dynamic_mode else None
+                    ),
+                    "intervention_ledger_records": (
+                        str(intervention_ledger_path) if dynamic_mode else None
+                    ),
+                    "probe_records": (
+                        str(probe_records_path) if dynamic_mode else None
+                    ),
+                    "skill_runtime_update": (
+                        str(skill_runtime_update_path)
+                        if skill_runtime_update_path is not None
+                        else None
+                    ),
+                    "dynamic_epoch_metrics": (
+                        str(dynamic_metrics_path) if dynamic_mode else None
+                    ),
+                    "dynamic_epoch_transition": (
+                        str(dynamic_transition_path) if dynamic_mode else None
+                    ),
+                    "post_update_canary_ledger_sidecars": (
+                        str(canary_ledger_path) if dynamic_mode else None
+                    ),
+                    "validation_ledger_sidecars": (
+                        str(validation_ledger_path) if dynamic_mode else None
+                    ),
                 },
                 "committed_at": _utc_now(),
                 "wandb_logged": False,
@@ -2086,6 +4017,44 @@ async def run_hotpotqa_training(
                 policy_version=candidate_policy,
                 adapter_name=adapter_name,
             )
+            if dynamic_mode and training_step == 1:
+                _atomic_write_json(
+                    paths["root"] / "one_step_closure_receipt.json",
+                    {
+                        "schema_version": "flowsteer.dynamic-grpo-one-step-closure.v1",
+                        "status": "passed",
+                        "optimizer_updates": 1,
+                        "objective": "action_masked_one_pass_grpo",
+                        "ttb_enabled": False,
+                        "behavior_policy_version": behavior_policy,
+                        "updated_policy_version": candidate_policy,
+                        "nonzero_gradient": float(summary["grad_norm"]) > 0.0,
+                        "nonzero_lora_update": (
+                            float(summary["trainable_update_l2"]) > 0.0
+                        ),
+                        "checkpoint_recoverable": bool(
+                            summary["checkpoint_recoverable"]
+                        ),
+                        "publish_success": bool(sync["success"]),
+                        "route_switch_success": bool(
+                            sync["route_switch_success"]
+                        ),
+                        "next_policy_rollout_verified": bool(canaries),
+                        "wandb_logged": True,
+                        "wandb_run_id": active_tracker.run_id,
+                        "ledger_epoch_receipt": next_state.get(
+                            "ledger_epoch_receipt"
+                        ),
+                        "heldout_calibration_status": (
+                            "pending_independent_paired_evidence"
+                        ),
+                        "skill_runtime_update_status": (
+                            "pending_discovery_and_heldout_confirmation_producer"
+                        ),
+                        "long_training_authorized": False,
+                        "created_at": _utc_now(),
+                    },
+                )
             transaction.clear()
 
             completed = training_step
@@ -2093,6 +4062,8 @@ async def run_hotpotqa_training(
             behavior_adapter = adapter_name
             behavior_checkpoint = str(summary["checkpoint_dir"])
             optimizer_checkpoint = str(summary["optimizer_state_checkpoint"])
+            if dynamic_transition is not None:
+                ledger_epoch = dynamic_transition.next_epoch
             best_validation_token_f1 = float(
                 next_state["best_validation_token_f1"]
             )
@@ -2106,6 +4077,12 @@ async def run_hotpotqa_training(
                 last_step_metrics=metrics,
             )
             _atomic_write_json(paths["manifest"], manifest)
+
+            if active_sequential_runtime is not None:
+                await asyncio.to_thread(
+                    active_sequential_runtime.stop_rollout_service
+                )
+                active_sequential_runtime = None
 
             if stop_after_optimizer_steps == completed:
                 manifest["status"] = "paused_at_requested_boundary"
@@ -2132,6 +4109,16 @@ async def run_hotpotqa_training(
         exit_code = 0
         return manifest
     except Exception as exc:
+        if active_sequential_runtime is not None:
+            try:
+                await asyncio.to_thread(
+                    active_sequential_runtime.stop_rollout_service
+                )
+            except Exception:
+                # Preserve the original stage failure; the lifecycle receipt
+                # already records fail-closed cleanup state when available.
+                pass
+            active_sequential_runtime = None
         manifest.update(
             status="failed",
             optimizer_updates_completed=completed,
@@ -2173,6 +4160,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="collect and validate one fresh 7x4 train batch without optimization/W&B",
     )
     parser.add_argument(
+        "--dynamic-phase-e-only",
+        action="store_true",
+        help=(
+            "run the LatentLoss 50x4 real integration gate with paired probes; "
+            "performs no optimizer update and starts no W&B run"
+        ),
+    )
+    parser.add_argument(
         "--allow-md-grpo",
         action="store_true",
         help="explicitly authorize the selected MD Action-Masked One-Pass GRPO",
@@ -2183,22 +4178,78 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue from the last committed optimizer step",
     )
     parser.add_argument(
+        "--resume-checkpoint",
+        help=(
+            "continue a dynamic-ledger run from an explicit checkpoint directory "
+            "containing recovery_manifest.json"
+        ),
+    )
+    parser.add_argument(
         "--stop-after-optimizer-steps",
         type=int,
         help="pause at this committed run step (use 1 for the required closure proof)",
+    )
+    parser.add_argument(
+        "--dynamic-acceptance-receipt",
+        help=(
+            "explicit Phase-E acceptance_receipt.json required before the first "
+            "dynamic-ledger optimizer step"
+        ),
     )
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.prepare_only and args.phase0_rollout_only:
-        print("--prepare-only and --phase0-rollout-only are mutually exclusive", file=sys.stderr)
+    bounded_modes = sum(
+        bool(value)
+        for value in (
+            args.prepare_only,
+            args.phase0_rollout_only,
+            args.dynamic_phase_e_only,
+        )
+    )
+    if bounded_modes > 1:
+        print(
+            "--prepare-only, --phase0-rollout-only and --dynamic-phase-e-only "
+            "are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
+    training_only = {
+        "--allow-md-grpo": bool(args.allow_md_grpo),
+        "--resume": bool(args.resume),
+        "--resume-checkpoint": bool(args.resume_checkpoint),
+        "--stop-after-optimizer-steps": args.stop_after_optimizer_steps is not None,
+        "--dynamic-acceptance-receipt": bool(args.dynamic_acceptance_receipt),
+    }
+    invalid_training_flags = [
+        name for name, selected in training_only.items() if selected
+    ]
+    if bounded_modes and invalid_training_flags:
+        print(
+            "bounded modes cannot be combined with training-only flags: "
+            + ", ".join(invalid_training_flags),
+            file=sys.stderr,
+        )
+        return 2
+    if args.resume and args.resume_checkpoint:
+        print(
+            "--resume and --resume-checkpoint are mutually exclusive",
+            file=sys.stderr,
+        )
         return 2
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
     try:
-        if args.phase0_rollout_only:
+        if args.dynamic_phase_e_only:
+            manifest = asyncio.run(
+                run_hotpotqa_dynamic_phase_e(
+                    _resolve(PROJECT_ROOT, args.config),
+                    project_root=PROJECT_ROOT,
+                )
+            )
+        elif args.phase0_rollout_only:
             manifest = asyncio.run(
                 run_hotpotqa_phase0(
                     _resolve(PROJECT_ROOT, args.config),
@@ -2213,7 +4264,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     prepare_only=bool(args.prepare_only),
                     allow_md_grpo=bool(args.allow_md_grpo),
                     resume=bool(args.resume),
+                    resume_checkpoint=args.resume_checkpoint,
                     stop_after_optimizer_steps=args.stop_after_optimizer_steps,
+                    dynamic_acceptance_receipt=args.dynamic_acceptance_receipt,
                 )
             )
     except (ConfigurationError, HotpotTrainingError, ValueError, RuntimeError) as exc:

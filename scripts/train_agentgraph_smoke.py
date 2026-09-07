@@ -21,9 +21,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.interactive.agent_action_parser import AgentAction
 from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
 from src.interactive.agent_runtime import AgentRuntime
-from src.interactive.agent_workflow_env import AgentWorkflowEnv
+from src.interactive.agent_workflow_env import AgentWorkflowEnv, AgentWorkflowSnapshot
 from src.interactive.config_loader import (
     ConfigurationError,
     load_model_registry,
@@ -43,6 +44,7 @@ from src.interactive.records import TaskRecord, TrajectoryRecord
 from src.interactive.rollout_collector import (
     AgentGraphRolloutCollector,
     RolloutGate,
+    RolloutObservationHook,
     SGLangReceiptDirectorClient,
 )
 from src.interactive.smoke_trainer import (
@@ -355,6 +357,9 @@ class SmokeBackend(Protocol):
         versions: VersionBundle,
         *,
         expected_task_split: str = "train",
+        observation_hook: Optional[RolloutObservationHook] = None,
+        skills: Sequence[Mapping[str, Any]] = (),
+        condition_id: Optional[str] = None,
     ) -> TrajectoryRecord:
         ...
 
@@ -411,6 +416,7 @@ class LiveSmokeBackend:
         root: Path,
         *,
         evaluation_only: bool = False,
+        evidence_root: Optional[Path] = None,
     ) -> "LiveSmokeBackend":
         secret = os.environ.get("VECTOR_ENGINE_API_KEY", "")
         if not secret:
@@ -466,7 +472,11 @@ class LiveSmokeBackend:
 
         gateway = OpenAICompatibleGateway(default_seed=int(experiment["seed"]))
         runtime = AgentRuntime(registry, gateway)
-        evidence_store = EvidenceStore(_resolve(root, str(storage["root"])))
+        evidence_store = EvidenceStore(
+            evidence_root.resolve()
+            if evidence_root is not None
+            else _resolve(root, str(storage["root"]))
+        )
 
         trainer: Optional[Qwen35OnePassSmokeTrainer] = None
         if not evaluation_only:
@@ -503,6 +513,7 @@ class LiveSmokeBackend:
                     ),
                     learner_device=str(gpu["learner_device"]),
                     gradient_replica_device=str(gpu["gradient_replica_device"]),
+                    gradient_worker_count=int(gpu.get("gradient_worker_count", 2)),
                     lora_rank=int(lora["rank"]),
                     lora_alpha=int(lora["alpha"]),
                     lora_dropout=float(lora["dropout"]),
@@ -528,6 +539,7 @@ class LiveSmokeBackend:
                 request_timeout_seconds=float(sync["request_timeout_seconds"]),
                 max_retries=int(sync["max_retries"]),
                 retry_backoff_seconds=float(sync["retry_backoff_seconds"]),
+                served_model_name=str(director["served_model_name"]),
             )
         )
         judge: Optional[JudgeCallback] = None
@@ -593,6 +605,9 @@ class LiveSmokeBackend:
         versions: VersionBundle,
         *,
         expected_task_split: str = "train",
+        observation_hook: Optional[RolloutObservationHook] = None,
+        skills: Sequence[Mapping[str, Any]] = (),
+        condition_id: Optional[str] = None,
     ) -> TrajectoryRecord:
         director = _mapping(self.config["director"], "director")
         graph_config = _mapping(self.config["agent_graph"], "agent_graph")
@@ -615,12 +630,24 @@ class LiveSmokeBackend:
             environment,
             versions,
             self.evidence_store,
-            condition_id=str(experiment.get("condition_id", "natural_smoke")),
-            skills=(),
+            condition_id=(
+                str(condition_id)
+                if condition_id is not None
+                else str(experiment.get("condition_id", "natural_smoke"))
+            ),
+            skills=skills,
             forced_probe=False,
             expected_task_split=expected_task_split,
+            observation_hook=observation_hook,
         )
 
+        return await collector.collect(
+            task,
+            rollout_index,
+            self._evaluator_callback(rollout_index),
+        )
+
+    def _evaluator_callback(self, rollout_index: int):
         async def evaluator_callback(
             evaluated_task: TaskRecord,
             final_answer: Optional[str],
@@ -678,7 +705,63 @@ class LiveSmokeBackend:
                 ),
             )
 
-        return await collector.collect(task, rollout_index, evaluator_callback)
+        return evaluator_callback
+
+    async def collect_probe_branch(
+        self,
+        task: TaskRecord,
+        rollout_index: int,
+        versions: VersionBundle,
+        *,
+        initial_snapshot: AgentWorkflowSnapshot,
+        intervention: AgentAction,
+        branch_id: str,
+        expected_task_split: str = "train",
+        observation_hook: Optional[RolloutObservationHook] = None,
+        skills: Sequence[Mapping[str, Any]] = (),
+        condition_id: Optional[str] = None,
+    ) -> TrajectoryRecord:
+        """Run one forced paired-intervention continuation on the existing runtime."""
+
+        director = _mapping(self.config["director"], "director")
+        graph_config = _mapping(self.config["agent_graph"], "agent_graph")
+        experiment = _mapping(self.config["experiment"], "experiment")
+        orchestrator = AgentGraphOrchestrator(
+            self.registry,
+            self.director_client,
+            max_rounds=int(director["max_rounds"]),
+            seed=int(experiment["seed"]) + rollout_index,
+            history_window=int(director["history_window"]),
+        )
+        environment = AgentWorkflowEnv(
+            self.registry,
+            runtime=self.runtime,
+            execute_on_edit=bool(director["execute_on_edit"]),
+            max_agents=int(graph_config["max_agents"]),
+        )
+        collector = AgentGraphRolloutCollector(
+            orchestrator,
+            environment,
+            versions,
+            self.evidence_store,
+            condition_id=(
+                str(condition_id)
+                if condition_id is not None
+                else str(experiment.get("condition_id", "natural_smoke"))
+            ),
+            skills=skills,
+            forced_probe=True,
+            expected_task_split=expected_task_split,
+            observation_hook=observation_hook,
+        )
+        return await collector.collect_probe_branch(
+            task,
+            rollout_index,
+            self._evaluator_callback(rollout_index),
+            initial_snapshot=initial_snapshot,
+            intervention=intervention,
+            branch_id=branch_id,
+        )
 
     def train(
         self,
@@ -689,7 +772,7 @@ class LiveSmokeBackend:
             raise RuntimeError("training is disabled for this evaluation-only backend")
         return self.trainer.train(trajectories, output_dir)
 
-    async def publish(self, summary: Any) -> Any:
+    async def publish(self, summary: Any, *, manage_gate: bool = True) -> Any:
         director = _mapping(self.config["director"], "director")
         experiment = _mapping(self.config["experiment"], "experiment")
         checkpoint_version = f"checkpoint:{summary.updated_policy_version}"
@@ -734,7 +817,7 @@ class LiveSmokeBackend:
                     if director.get("behavior_adapter_name")
                     else None
                 ),
-                gate=self.rollout_gate,
+                gate=self.rollout_gate if manage_gate else None,
                 route_commit=commit_route,
                 route_rollback=rollback_route,
             )

@@ -2,13 +2,15 @@
 
 Source boundary: Qwen3.5/PEFT loading, trainable adapter continuation, gradient
 checkpointing, and the adapter-directory convention are adapted from
-SkillFlow.  The two-physical-GPU layout, group-preserving token-cost split,
-optimizer-state persistence, exact behavior receipt checks, and recoverable
-step metadata are project engineering required by the MD; SkillFlow's released
-checkpoint does not provide those contracts.  Terminal-only, action-masked
-one-pass GRPO is the MD algorithm implemented from FlowSteer's policy-gradient
-boundary.  SkillFlow's TTB backward policy/partition head is disabled, and the
-MACE, Bayesian, and Skill flows are not wired into this trainer.
+SkillFlow.  The one-or-two-physical-GPU gradient layout, group-preserving
+token-cost split, optimizer-state persistence, exact behavior receipt checks,
+and recoverable step metadata are project engineering required by the MD;
+SkillFlow's released checkpoint does not provide those contracts.  The
+single-worker option preserves the same objective and is used only when one
+physical GPU is available and rollout/training are time-multiplexed.
+Terminal-only, action-masked one-pass GRPO is the MD algorithm implemented
+from FlowSteer's policy-gradient boundary.  SkillFlow's TTB backward
+policy/partition head is disabled.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ class SmokeTrainerConfig:
     behavior_server_weight_version: str = "default"
     learner_device: str = "cuda:3"
     gradient_replica_device: str = "cuda:5"
+    gradient_worker_count: int = 2
     lora_rank: int = 64
     lora_alpha: int = 128
     lora_dropout: float = 0.0
@@ -89,7 +92,12 @@ class SmokeTrainerConfig:
                 "model/tokenizer paths, policy/server versions, and devices "
                 "must be non-empty strings"
             )
-        if self.learner_device == self.gradient_replica_device:
+        if self.gradient_worker_count not in {1, 2}:
+            raise ValueError("gradient_worker_count must be one or two")
+        if (
+            self.gradient_worker_count == 2
+            and self.learner_device == self.gradient_replica_device
+        ):
             raise ValueError("learner and gradient replica devices must differ")
         if not self.lora_target_modules or any(
             not isinstance(value, str) or not value.strip()
@@ -236,7 +244,7 @@ class SmokeTrainingSummary:
     learning_rate: float = 0.0
     next_learning_rate: float = 0.0
     gpu_memory_allocated_mib: Mapping[str, float] = field(default_factory=dict)
-    gradient_partition_token_costs: Tuple[int, int] = (0, 0)
+    gradient_partition_token_costs: Tuple[int, ...] = (0, 0)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -460,13 +468,15 @@ class Qwen35OnePassSmokeTrainer:
             return summary
 
         torch, learner, replica = self._load_models()
+        models = [learner] if replica is None else [learner, replica]
+        devices = [self.config.learner_device]
+        if replica is not None:
+            devices.append(self.config.gradient_replica_device)
         group_partitions, _ = _partition_groups_by_token_cost(
             informative,
             records_by_id,
-            worker_count=2,
+            worker_count=len(models),
         )
-        models = [learner, replica]
-        devices = [self.config.learner_device, self.config.gradient_replica_device]
         if torch.cuda.is_available():
             for device in devices:
                 torch.cuda.reset_peak_memory_stats(device)
@@ -505,7 +515,7 @@ class Qwen35OnePassSmokeTrainer:
         )
 
         try:
-            with ThreadPoolExecutor(max_workers=2) as pool:
+            with ThreadPoolExecutor(max_workers=len(models)) as pool:
                 futures = [
                     pool.submit(
                         self._preflight_partition,
@@ -540,7 +550,7 @@ class Qwen35OnePassSmokeTrainer:
                 _partition_groups_by_token_cost(
                     accepted_groups,
                     records_by_id,
-                    worker_count=2,
+                    worker_count=len(models),
                 )
             )
             trained_group_count = sum(len(partition) for partition in accepted_partitions)
@@ -585,14 +595,15 @@ class Qwen35OnePassSmokeTrainer:
                 return summary
 
             learner.train()
-            replica.train()
+            if replica is not None:
+                replica.train()
             partition_stats = None
             micro_batch_size_used = 0
             oom_backoff_count = 0
             for micro_batch_size in self.config.micro_batch_backoff:
                 for model in models:
                     model.zero_grad(set_to_none=True)
-                with ThreadPoolExecutor(max_workers=2) as pool:
+                with ThreadPoolExecutor(max_workers=len(models)) as pool:
                     futures = [
                         pool.submit(
                             self._backward_partition,
@@ -638,7 +649,8 @@ class Qwen35OnePassSmokeTrainer:
                     "micro-batch schedule"
                 )
 
-            self._merge_replica_grads(learner, replica)
+            if replica is not None:
+                self._merge_replica_grads(learner, replica)
             grad_norm_tensor = torch.nn.utils.clip_grad_norm_(
                 trainable, self.config.max_grad_norm
             )
@@ -791,11 +803,10 @@ class Qwen35OnePassSmokeTrainer:
             self._write_summary(output_path, summary)
             return summary
         finally:
-            del learner, replica
-            self._empty_device_caches(
-                torch,
-                (self.config.learner_device, self.config.gradient_replica_device),
-            )
+            del learner
+            if replica is not None:
+                del replica
+            self._empty_device_caches(torch, tuple(dict.fromkeys(devices)))
 
     def _load_models(self):
         try:
@@ -852,8 +863,10 @@ class Qwen35OnePassSmokeTrainer:
             return model
 
         learner = load(self.config.learner_device)
-        replica = load(self.config.gradient_replica_device)
-        self._sync_lora_weights(learner, replica)
+        replica = None
+        if self.config.gradient_worker_count == 2:
+            replica = load(self.config.gradient_replica_device)
+            self._sync_lora_weights(learner, replica)
         return torch, learner, replica
 
     def _restore_training_state(self, torch, optimizer, scheduler) -> tuple[str, str]:
@@ -926,10 +939,7 @@ class Qwen35OnePassSmokeTrainer:
         np.random.seed(self.config.seed)
         torch.manual_seed(self.config.seed)
         if torch.cuda.is_available():
-            for device in (
-                self.config.learner_device,
-                self.config.gradient_replica_device,
-            ):
+            for device in self._training_devices():
                 with torch.cuda.device(device):
                     torch.cuda.manual_seed(self.config.seed)
 
@@ -955,10 +965,7 @@ class Qwen35OnePassSmokeTrainer:
         if not isinstance(cuda_states, Mapping):
             raise ValueError("training checkpoint CUDA RNG state must be a mapping")
         if torch.cuda.is_available():
-            expected_devices = {
-                self.config.learner_device,
-                self.config.gradient_replica_device,
-            }
+            expected_devices = set(self._training_devices())
             if set(cuda_states) != expected_devices:
                 raise ValueError("training checkpoint CUDA RNG devices differ")
             for device, state in cuda_states.items():
@@ -988,10 +995,7 @@ class Qwen35OnePassSmokeTrainer:
 
         cuda_states: dict[str, Any] = {}
         if torch.cuda.is_available():
-            for device in (
-                self.config.learner_device,
-                self.config.gradient_replica_device,
-            ):
+            for device in self._training_devices():
                 cuda_states[device] = torch.cuda.get_rng_state(device)
         state_path = checkpoint / "training_state.pt"
         temporary = checkpoint / f".training_state.pt.tmp-{uuid.uuid4().hex}"
@@ -1048,7 +1052,16 @@ class Qwen35OnePassSmokeTrainer:
             "lora_alpha": self.config.lora_alpha,
             "lora_dropout": self.config.lora_dropout,
             "lora_target_modules": list(self.config.lora_target_modules),
+            "gradient_worker_count": self.config.gradient_worker_count,
         }
+
+    def _training_devices(self) -> tuple[str, ...]:
+        if self.config.gradient_worker_count == 1:
+            return (self.config.learner_device,)
+        return (
+            self.config.learner_device,
+            self.config.gradient_replica_device,
+        )
 
     @staticmethod
     def _is_cuda_oom(torch, error: RuntimeError) -> bool:

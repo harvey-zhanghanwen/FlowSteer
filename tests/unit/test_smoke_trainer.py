@@ -133,6 +133,22 @@ class SmokeTrainerConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "devices must differ"):
             _config(learner_device="cuda:3", gradient_replica_device="cuda:3")
 
+    def test_single_gradient_worker_uses_one_physical_device(self) -> None:
+        config = _config(
+            learner_device="cuda:5",
+            gradient_replica_device="cuda:5",
+            gradient_worker_count=1,
+        )
+
+        self.assertEqual(config.gradient_worker_count, 1)
+        self.assertEqual(config.learner_device, "cuda:5")
+
+    def test_gradient_worker_count_is_bounded(self) -> None:
+        for value in (0, 3):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "gradient_worker_count"):
+                    _config(gradient_worker_count=value)
+
     def test_step_two_requires_the_behavior_adapter_checkpoint(self) -> None:
         with self.assertRaisesRegex(ValueError, r"step 2\+"):
             _config(update_step=2)
@@ -382,6 +398,56 @@ class ContinuationStateTests(unittest.TestCase):
         for model in models:
             model.set_adapter.assert_called_once_with("theta")
             self.assertFalse(model.config.use_cache)
+
+    def test_single_gradient_worker_loads_only_the_learner(self) -> None:
+        model = MagicMock()
+        model.config = SimpleNamespace(use_cache=True)
+        model.named_parameters.return_value = ()
+        base = object()
+        auto_model = MagicMock()
+        auto_model.from_pretrained.return_value = base
+        peft_model = MagicMock()
+        peft_model.from_pretrained.return_value = model
+
+        torch_module = ModuleType("torch")
+        torch_module.bfloat16 = object()
+        peft_module = ModuleType("peft")
+        peft_module.LoraConfig = MagicMock()
+        peft_module.PeftModel = peft_model
+        peft_module.get_peft_model = MagicMock()
+        transformers_module = ModuleType("transformers")
+        transformers_module.AutoModelForMultimodalLM = auto_model
+        trainer = Qwen35OnePassSmokeTrainer(
+            _config(
+                update_step=2,
+                behavior_adapter_checkpoint="/checkpoints/step-1/theta",
+                learner_device="cuda:5",
+                gradient_replica_device="cuda:5",
+                gradient_worker_count=1,
+                gradient_checkpointing=False,
+            )
+        )
+
+        with patch.dict(
+            sys.modules,
+            {
+                "torch": torch_module,
+                "peft": peft_module,
+                "transformers": transformers_module,
+            },
+        ):
+            loaded_torch, learner, replica = trainer._load_models()
+
+        self.assertIs(loaded_torch, torch_module)
+        self.assertIs(learner, model)
+        self.assertIsNone(replica)
+        auto_model.from_pretrained.assert_called_once()
+        peft_model.from_pretrained.assert_called_once_with(
+            base,
+            "/checkpoints/step-1/theta",
+            adapter_name="theta",
+            is_trainable=True,
+        )
 
 
 class BehaviorRouteGateTests(unittest.TestCase):

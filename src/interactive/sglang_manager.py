@@ -14,11 +14,41 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 from pathlib import Path
+import sys
 import tempfile
 import time
 from typing import Any, Dict, Optional
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+
+def _configure_worker_environment(
+    *,
+    cuda_version: Optional[str],
+    executable: Optional[str] = None,
+    cuda_root: Path = Path("/usr/local"),
+) -> None:
+    """Apply SkillFlow's SGLang launcher environment inside the child.
+
+    This is the same environment boundary as
+    ``SkillFlow/scripts/launch_sglang.py::build_environment``: make the
+    selected Python environment's tools (notably ``ninja``) discoverable and
+    select the CUDA toolkit matching ``torch.version.cuda`` when available.
+    """
+
+    executable_directory = str(Path(executable or sys.executable).parent)
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    os.environ["PATH"] = os.pathsep.join(
+        [
+            executable_directory,
+            *[entry for entry in path_entries if entry != executable_directory],
+        ]
+    )
+    os.environ.setdefault("SGLANG_ENABLE_JIT_DEEPGEMM", "0")
+    if "CUDA_HOME" not in os.environ and cuda_version is not None:
+        candidate = cuda_root / f"cuda-{cuda_version}"
+        if (candidate / "bin" / "nvcc").is_file():
+            os.environ["CUDA_HOME"] = str(candidate)
 
 
 def _sglang_worker_entry(server_args: Dict[str, Any]) -> None:
@@ -27,6 +57,10 @@ def _sglang_worker_entry(server_args: Dict[str, Any]) -> None:
     os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")
     os.environ.setdefault("SGLANG_DISABLE_CUDNN_CHECK", "1")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+    import torch
+
+    _configure_worker_environment(cuda_version=torch.version.cuda)
 
     from sglang.srt.entrypoints.http_server import launch_server
     from sglang.srt.server_args import ServerArgs
@@ -46,6 +80,7 @@ class SGLangSupervisorManager:
         self,
         *,
         model_path: str = "Qwen/Qwen3.5-9B",
+        tokenizer_path: Optional[str] = None,
         port: int = 8015,
         api_key: str = "EMPTY",
         gpu_id: int = 4,
@@ -58,18 +93,27 @@ class SGLangSupervisorManager:
         served_model_name: str = "supervisor_theta",
         reasoning_parser: str = "qwen3",
         tool_call_parser: str = "qwen3_coder",
+        host: str = "127.0.0.1",
+        schedule_policy: str = "lpm",
+        sampling_backend: str = "pytorch",
+        enable_multimodal: bool = True,
         ready_timeout_seconds: float = 300.0,
     ) -> None:
-        if not model_path.strip() or not served_model_name.strip():
+        if not model_path.strip() or not served_model_name.strip() or not host.strip():
             raise ValueError("model_path and served_model_name must be non-empty")
+        if tokenizer_path is not None and not tokenizer_path.strip():
+            raise ValueError("tokenizer_path must be non-empty when provided")
         if port <= 0 or gpu_id < 0 or max_lora_rank <= 0:
             raise ValueError("port, gpu_id, and max_lora_rank are invalid")
         if not 0.0 < mem_fraction_static < 1.0:
             raise ValueError("mem_fraction_static must be between zero and one")
         if context_length <= 0 or ready_timeout_seconds <= 0:
             raise ValueError("context and readiness limits must be positive")
+        if not sampling_backend.strip():
+            raise ValueError("sampling_backend must be non-empty")
 
         self.model_path = model_path
+        self.tokenizer_path = tokenizer_path
         self.port = int(port)
         self.api_key = api_key
         self.gpu_id = int(gpu_id)
@@ -87,6 +131,10 @@ class SGLangSupervisorManager:
         self.served_model_name = served_model_name
         self.reasoning_parser = reasoning_parser
         self.tool_call_parser = tool_call_parser
+        self.host = host.strip()
+        self.schedule_policy = schedule_policy
+        self.sampling_backend = sampling_backend.strip()
+        self.enable_multimodal = bool(enable_multimodal)
         self.ready_timeout_seconds = float(ready_timeout_seconds)
 
         self._context = mp.get_context("spawn")
@@ -95,13 +143,14 @@ class SGLangSupervisorManager:
 
     @property
     def api_base(self) -> str:
-        return f"http://127.0.0.1:{self.port}/v1"
+        return f"http://{self.host}:{self.port}/v1"
 
     def server_args(self) -> Dict[str, Any]:
         """Return SkillFlow-compatible ``ServerArgs`` without starting SGLang."""
 
-        return {
+        arguments = {
             "model_path": self.model_path,
+            "host": self.host,
             "port": self.port,
             "api_key": self.api_key,
             "reasoning_parser": self.reasoning_parser,
@@ -115,7 +164,13 @@ class SGLangSupervisorManager:
             "lora_target_modules": list(self.lora_target_modules),
             "max_loras_per_batch": self.max_loras_per_batch,
             "max_loaded_loras": self.max_loaded_loras,
+            "schedule_policy": self.schedule_policy,
+            "sampling_backend": self.sampling_backend,
+            "enable_multimodal": self.enable_multimodal,
         }
+        if self.tokenizer_path is not None:
+            arguments["tokenizer_path"] = self.tokenizer_path
+        return arguments
 
     def start(self) -> None:
         if self.is_alive():

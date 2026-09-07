@@ -165,7 +165,10 @@ class PolicySyncTests(unittest.TestCase):
         )
         self.assertLess(canary_index, previous_unload_index)
         canary_payload = control.calls[canary_index][2]["json"]
-        self.assertEqual(canary_payload["model"], "theta_smoke_step_000001")
+        self.assertEqual(
+            canary_payload["model"],
+            "supervisor_theta:theta_smoke_step_000001",
+        )
 
     def test_existing_evaluation_adapter_load_has_no_policy_publication(self) -> None:
         control = _SGLangControl(set())

@@ -81,12 +81,28 @@ class MismatchedTokenClient(ScriptedSGLangClient):
 
 class FakeGateway:
     async def generate(self, request):
+        provider_request_id = request.request_id + ":provider"
         return AgentResponse(
             "final answer",
             {
-                "provider_request_id": request.request_id + ":provider",
+                "provider_request_id": provider_request_id,
                 "provider_model": request.model.model_name,
                 "finish_reason": "stop",
+                "attempt_count": 1,
+                "retry_receipts": [
+                    {
+                        "attempt": 1,
+                        "request_id": request.request_id,
+                        "provider_id": request.provider.provider_id,
+                        "model_id": request.model.model_id,
+                        "provider_request_id": provider_request_id,
+                        "status": "completed",
+                        "http_status": 200,
+                        "retryable": False,
+                        "backoff_seconds": 0.0,
+                        "latency_ms": 1.0,
+                    }
+                ],
                 "prompt_tokens": 11,
                 "completion_tokens": 2,
                 "temperature": 0.0,
@@ -304,8 +320,13 @@ def test_collector_materializes_exact_finish_trajectory_and_evidence(tmp_path):
         ["solver"]
     ]
     request_receipt = trajectory.turns[-1].executions[0].metadata["request"]
+    response_receipt = trajectory.turns[-1].executions[0].metadata["response"]
     assert request_receipt["rendered_messages"][0]["role"] == "system"
     assert request_receipt["rendered_messages"][1]["role"] == "user"
+    assert response_receipt["retry_receipts"][0]["status"] == "completed"
+    assert response_receipt["retry_receipts"][0]["provider_request_id"].endswith(
+        ":provider"
+    )
     assert len(evidence.snapshots) == 3
     assert len(evidence.trajectories) == 1
 
@@ -433,3 +454,117 @@ def test_collector_allows_explicit_heldout_split_without_grpo_admission():
     assert trajectory.task.split == "validation"
     assert trajectory.explicit_finish is True
     assert trajectory.grpo_eligible is False
+
+
+def test_observation_hook_is_persisted_without_changing_task_reward():
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"add_agent","agent_id":"solver","model_id":"cheap-model",'
+            '"contract":"solve"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+
+    class Hook:
+        def __init__(self):
+            self.finished = []
+
+        async def before_turn(self, **values):
+            assert values["environment"].revision == 0
+            return {"ledger": {"text": "[Ledger] unknown"}}
+
+        async def after_turn(self, **values):
+            return {
+                "step_id": values["round_index"],
+                "snapshot_id": values["pre_snapshot"].snapshot_id,
+            }
+
+        async def after_trajectory(self, *, trajectory):
+            self.finished.append(trajectory.trajectory_id)
+
+    hook = Hook()
+    collector = AgentGraphRolloutCollector(
+        AgentGraphOrchestrator(registry, client, max_rounds=1),
+        AgentWorkflowEnv(registry, gateway=FakeGateway()),
+        _versions(),
+        observation_hook=hook,
+    )
+
+    trajectory = asyncio.run(
+        collector.collect(
+            _task(),
+            0,
+            lambda *_: {
+                "evaluator_version": EVALUATOR_VERSION,
+                "valid": True,
+                "reward": 0.0,
+                "metrics": {"f1": 0.0},
+                "reason": "maximum rounds",
+            },
+        )
+    )
+
+    turn = trajectory.turns[0]
+    assert turn.director_observation == {"ledger": {"text": "[Ledger] unknown"}}
+    assert turn.exploration_step["snapshot_id"] == turn.pre_canvas_snapshot_id
+    assert '"decision_support"' in turn.prompt
+    assert trajectory.evaluation.reward == 0.0
+    assert hook.finished == [trajectory.trajectory_id]
+
+
+def test_probe_branch_restores_snapshot_and_resamples_downstream_policy():
+    registry = _registry()
+    client = ScriptedSGLangClient(
+        [
+            '{"action":"set_output","agent_id":"solver"}',
+            '{"action":"finish"}',
+        ],
+        policy_version=POLICY_VERSION,
+        expected_server_weight_version="default",
+    )
+    environment = AgentWorkflowEnv(registry, gateway=FakeGateway())
+    initial_snapshot = environment.reset(_task().question)
+    collector = AgentGraphRolloutCollector(
+        AgentGraphOrchestrator(registry, client, max_rounds=3, seed=11),
+        environment,
+        _versions(),
+        condition_id="ledger-probe-v1",
+        forced_probe=True,
+    )
+    intervention = AgentActionParser().parse(
+        '{"action":"add_agent","agent_id":"solver",'
+        '"model_id":"cheap-model","contract":"solve"}'
+    )
+
+    trajectory = asyncio.run(
+        collector.collect_probe_branch(
+            _task(),
+            101,
+            lambda *_: {
+                "evaluator_version": EVALUATOR_VERSION,
+                "valid": True,
+                "reward": 1.0,
+                "metrics": {"exact_match": 1.0},
+                "reason": "exact",
+            },
+            initial_snapshot=initial_snapshot,
+            intervention=intervention,
+            branch_id="probe-1:keep:0",
+        )
+    )
+
+    assert trajectory.forced_probe is True
+    assert trajectory.grpo_eligible is False
+    assert trajectory.trajectory_id == "probe-1:keep:0"
+    assert trajectory.intervention["accepted"] is True
+    assert trajectory.intervention["pre_canvas_snapshot_id"] == initial_snapshot.snapshot_id
+    assert trajectory.intervention["action"]["action"] == "add_agent"
+    assert trajectory.explicit_finish is True
+    assert len(trajectory.turns) == 2
+    assert trajectory.turns[0].round_index == 1
+    assert (
+        trajectory.turns[0].previous_graph_snapshot_id
+        == trajectory.intervention["post_graph_snapshot_id"]
+    )

@@ -225,6 +225,7 @@ class AgentGraphOrchestrator:
         env: AgentWorkflowEnv,
         turn_index: int,
         skills: Sequence[Mapping[str, Any]],
+        state_annotations: Optional[Mapping[str, Any]] = None,
     ) -> str:
         preferred = self.registry.select_weighted(
             seed=self.seed + turn_index,
@@ -274,6 +275,10 @@ class AgentGraphOrchestrator:
             payload["max_agents"] = env.max_agents
         if skills:
             payload["available_skills"] = list(skills)
+        if state_annotations:
+            # Posterior/Skill readouts are state observations only.  They do
+            # not expand the action grammar or become reward terms.
+            payload["decision_support"] = dict(state_annotations)
         return (
             "Choose one next edit. The preferred model is only a cheap/fast suggestion.\n\n"
             + json.dumps(payload, ensure_ascii=False, sort_keys=True)
