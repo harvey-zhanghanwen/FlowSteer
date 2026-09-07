@@ -75,11 +75,77 @@ _ARTIFACT_QUALITY_PROFILES = frozenset(
 _PUBLIC_TEXT_MAX_CHARACTERS_V1 = 12_000
 
 
+def _completed_structured_evidence_prose(
+    text: str,
+    metadata: Mapping[str, object],
+) -> str | None:
+    """Project the known evidence protocol only after its completed Action.
+
+    The caller must have used the adapter's structured-evidence validator.
+    Reuse its public completion trace to bind this projection to the exact
+    returned object; a version label on arbitrary JSON is not sufficient.
+    This measures prose without rewriting an Artifact or revalidating sources.
+    """
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "status", "summary", "evidence_items", "uncertainties"}
+        or value.get("schema_version") != "healthbench.structured-evidence.v1"
+        or value.get("status") not in {"supported", "insufficient"}
+        or not isinstance(value.get("summary"), str)
+        or not value["summary"].strip()
+    ):
+        return None
+    trace = metadata.get("react_trace")
+    if metadata.get("execution_mode") != "react" or not isinstance(trace, (list, tuple)) or not trace:
+        return None
+    last = trace[-1]
+    if not isinstance(last, Mapping) or last.get("observation_status") != "completed":
+        return None
+    action = last.get("structured_action")
+    if (
+        not isinstance(action, Mapping)
+        or action.get("kind") != "complete"
+        or action.get("name") != "complete"
+        or not isinstance(action.get("arguments"), Mapping)
+        or action["arguments"].get("value") != value
+    ):
+        return None
+    items, uncertainties = value["evidence_items"], value["uncertainties"]
+    if (
+        not isinstance(items, list) or len(items) > 6
+        or not isinstance(uncertainties, list) or len(uncertainties) > 6
+        or any(not isinstance(item, str) or not item.strip() for item in uncertainties)
+        or (value["status"] == "supported" and not items)
+        or (value["status"] == "insufficient" and not uncertainties)
+    ):
+        return None
+    prose = [value["summary"]]
+    text_fields = ("supported_claim", "conditions_or_qualifiers", "evidence_span")
+    for item in items:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {*text_fields, "document_id", "source", "title", "date", "url"}
+            or any(not isinstance(item.get(key), str) or not item[key].strip()
+                   for key in ("supported_claim", "evidence_span", "document_id", "source", "title"))
+            or not isinstance(item.get("conditions_or_qualifiers"), str)
+            or any(item.get(key) is not None and not isinstance(item[key], str) for key in ("date", "url"))
+        ):
+            return None
+        prose.extend(item[key] for key in text_fields)
+    prose.extend(uncertainties)
+    return "\n\n".join(prose)
+
+
 def _public_text_quality_receipt(
     text: str,
     metadata: Mapping[str, object],
     *,
     profile: str,
+    validated_structured_evidence: bool = False,
 ) -> Mapping[str, object]:
     """Measure truncation and lexical degeneration on a public Artifact.
 
@@ -129,9 +195,21 @@ def _public_text_quality_receipt(
         if heading_only or incomplete_leadin:
             error_codes.append("incomplete_heading_or_leadin")
 
+    # NECESSARY_PROJECT_ADAPTATION: the HealthBench ReAct validator binds
+    # evidence fields to receipts before execute() returns a completed Action.
+    # Count degeneration in those prose fields, not repeated JSON syntax and
+    # source metadata. Keep the existing profile, thresholds, raw-text metrics,
+    # provider checks and SkillFlow-style typed failure path unchanged.
+    repetition_text = (
+        _completed_structured_evidence_prose(text, metadata)
+        if validated_structured_evidence
+        else None
+    )
+    if repetition_text is None:
+        repetition_text = text
     normalized_paragraphs = [
         " ".join(paragraph.split()).casefold()
-        for paragraph in re.split(r"\n\s*\n", text)
+        for paragraph in re.split(r"\n\s*\n", repetition_text)
         if len(" ".join(paragraph.split())) >= 80
     ]
     paragraph_counts: dict[str, int] = {}
@@ -142,11 +220,15 @@ def _public_text_quality_receipt(
         error_codes.append("repeated_paragraph")
 
     tokens = re.findall(r"[\w'-]+|[^\w\s]", text.casefold())
+    repetition_tokens = (
+        tokens if repetition_text == text
+        else re.findall(r"[\w'-]+|[^\w\s]", repetition_text.casefold())
+    )
     window_size = 24
     window_counts: dict[Tuple[str, ...], int] = {}
-    if len(tokens) >= 192:
-        for index in range(0, len(tokens) - window_size + 1):
-            window = tuple(tokens[index : index + window_size])
+    if len(repetition_tokens) >= 192:
+        for index in range(0, len(repetition_tokens) - window_size + 1):
+            window = tuple(repetition_tokens[index : index + window_size])
             window_counts[window] = window_counts.get(window, 0) + 1
     maximum_ngram_repetitions = max(window_counts.values(), default=0)
     if maximum_ngram_repetitions >= 3:
@@ -3288,10 +3370,20 @@ class AgentRuntime:
             ARTIFACT_QUALITY_PUBLIC_TEXT_V1,
             ARTIFACT_QUALITY_PUBLIC_TEXT_V2,
         }:
+            quality_adapter = self.execution_adapters.get(getattr(
+                request.agent.execution_mode, "value", request.agent.execution_mode,
+            ))
             artifact_quality_receipt = _public_text_quality_receipt(
                 response.text,
                 response.metadata,
                 profile=self.artifact_quality_profile,
+                # This is the selected Runtime adapter's existing validation
+                # setting, not a model-supplied schema or metadata assertion.
+                # Its successful completed trace is checked again above;
+                # failed validation never returns from adapter.execute().
+                validated_structured_evidence=getattr(
+                    quality_adapter, "_require_structured_evidence_artifact", False,
+                ) is True,
             )
             response = AgentResponse(
                 response.text,

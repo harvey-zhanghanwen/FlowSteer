@@ -2013,3 +2013,26 @@ Reasoner→Verifier→Formatter，没有 sample/rubric/答案写入提示词。
 或grader，尚无新分数；无训练、权重更新、ACTIVE发布或自动Skill evolution。
 完整525只有在同一固定五题5/5 FINISH且evaluator-valid、length-adjusted
 均分严格超过60%后，先备份接受版本再启动；不能将缺失计零或回收中间答案。
+## 2026-09-07 — v2.47 同五题的第二轮准备
+
+v246固定五题3/5有效、2超时，原生全五题均分N/A，未到启动525门槛。
+从8ca968750b08170c6c935d31e1350dc5e4553727在独立worktree建立
+`feature/healthbench-v2.47-tool-feedback-skills-20260907`，旧运行未中途修改。
+
+本轮沿既有源码修Unicode词面保真、跨工具参数预检，以及scope guard把
+操作性不确定性措辞误当临床答案/检索动词掩盖数值预设的问题。候选Skill
+同时区分检索职责与完整回答职责，明确identifier namespace；不植入任何
+具体临床答案。没有改模型池/预算/分母/evaluator，没有固定医疗workflow。
+
+现有相关定向测试通过；这一记录写入时尚未进行v247模型或grader调用。
+另在核对已合法complete的结构化artifact是否被JSON语法/重复来源元数据
+误判为正文退化，必须保留普通正文真实重复的原拒绝规则。
+
+另已CPU复现xgrammar组合schema错误：完整八字段对象被拒，只有来源元数据
+的非法对象却被采样grammar接受。沿项目Director已有的自包含anyOf分支
+兼容方案修复，JSON Schema语义与原严格validator不变；35项定向测试通过。
+这提供了c19反复缺字段的确定协议解释，不能将其只归因于小模型能力。
+
+结构化重复误拒也已修复并通过29新增+6既有定向测试；只测真实完成的既有
+结构化证据正文字段，JSON键/来源元数据不当成正文。普通终答真实重复仍拒绝。
+v247 prepare-only已通过5题；此记录完成时待冻结源码后运行一次同题评测。

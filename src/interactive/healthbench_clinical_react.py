@@ -18,11 +18,13 @@ from typing import Any, Mapping
 from .agent_runtime import AgentRequest
 from .healthbench_evidence_adapter import (
     AUTHORITATIVE_QUERY_MAX_CHARACTERS,
+    AUTHORITATIVE_QUERY_MAX_CONTENT_TOKENS,
     HealthBenchAuthoritativeReactExecutionAdapter,
     _COMPLETION_REQUEST,
     _evidence_preserves_query_anchors,
     _normalized_query_tokens,
     _query_preserves_task_surface,
+    _required_query,
     _routed_evidence_receipts,
 )
 from .healthbench_professional_adapter import parse_model_visible_conversation
@@ -38,6 +40,16 @@ _SEARCH_TOOLS = frozenset({
     "healthbench-literature.search", "healthbench-trials.search",
     "healthbench-bookshelf.search", "healthbench-pdq.search",
     "healthbench-ahrq.search", "healthbench-terminology.search",
+})
+
+# These clients already call _required_query before their external request:
+# EuropePMCClient, BookshelfClient (all three collections), and MeSHClient.
+# ClinicalTrialsClient, MedRAG and the per-request knowledge index do not use
+# that content-term cap and must retain their existing query domains.
+_REQUIRED_QUERY_SEARCH_TOOLS = frozenset({
+    "healthbench-literature.search", "healthbench-bookshelf.search",
+    "healthbench-pdq.search", "healthbench-ahrq.search",
+    "healthbench-terminology.search",
 })
 
 
@@ -252,6 +264,31 @@ class HealthBenchClinicalReactExecutionAdapter(
         )
         if inherited is not None:
             return inherited
+        if (
+            action.resource_id in _REQUIRED_QUERY_SEARCH_TOOLS
+            and action.name == "search"
+            and isinstance(action.arguments, Mapping)
+        ):
+            query = action.arguments.get("query")
+            try:
+                # Directly reuse the client's validation, including its
+                # default cap (not the separately configurable authoritative
+                # cap). Return through the existing invalid-action Observation
+                # before dispatch so a local ValueError spends no Tool budget.
+                # The sampled query is never rewritten or sent to another Tool.
+                _required_query(query)
+            except ValueError:
+                if isinstance(query, str) and len(query.strip()) > AUTHORITATIVE_QUERY_MAX_CHARACTERS:
+                    return (
+                        "query_too_long_use_at_most_"
+                        f"{AUTHORITATIVE_QUERY_MAX_CHARACTERS}_characters"
+                    )
+                if not _normalized_query_tokens(query):
+                    return "query_must_include_clinical_content_term"
+                return (
+                    "query_too_broad_use_at_most_"
+                    f"{AUTHORITATIVE_QUERY_MAX_CONTENT_TOKENS}_clinical_terms"
+                )
         if (
             self._enable_evidence_repair_feedback
             and action.resource_id == "healthbench-source.read"

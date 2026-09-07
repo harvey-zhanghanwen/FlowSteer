@@ -467,6 +467,17 @@ def build_healthbench_clinical_tool_registry(
              "Label matching is not clinical evidence or an exhaustive synonym/trial-acronym lookup."),
         ))
     for tool_id, client, description in source_registrations:
+        if tool_id in {
+            HEALTHBENCH_LITERATURE_SEARCH_TOOL_ID, HEALTHBENCH_BOOKSHELF_SEARCH_TOOL_ID,
+            HEALTHBENCH_PDQ_SEARCH_TOOL_ID, HEALTHBENCH_AHRQ_SEARCH_TOOL_ID,
+            HEALTHBENCH_TERMINOLOGY_SEARCH_TOOL_ID,
+        }:
+            # Publish the _required_query limit already enforced by these
+            # clients; ClinicalTrials.gov retains its existing broader domain.
+            description += (
+                f" Use at most {AUTHORITATIVE_QUERY_MAX_CONTENT_TOKENS} clinical content terms "
+                "(common function words do not count)."
+            )
         arguments = {
             "type": "object", "additionalProperties": False,
             "required": ["query"], "properties": {

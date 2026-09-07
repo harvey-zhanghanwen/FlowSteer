@@ -1212,3 +1212,22 @@ relevance排序，未发现确定排序bug，因此未改其客户端。
 全套测试或调用模型，不能以单测通过代替真实完成率和官方评分。
 runner真实配置入口另有37项定向测试通过：两份ReAct-only、旧allowlist兼容，
 以及缺少工具/错误execution mode/错误协议声明的拒绝边界。
+## 2026-09-07 — v2.47：错误反馈、自由职责和原始证据语义
+
+| 位置 | 真实来源 / 必要适配 |
+| --- | --- |
+| `healthbench_evidence_adapter._query_preserves_task_surface` | 复用既有公开task anchor边界、SkillFlow Action–Observation；只加Unicode完整词精确交集/NFC，修复共同非英文词被ASCII切碎后拒绝。未改变BM25、近重复计数、检索排序、医学实体解释。 |
+| `healthbench_evidence_adapter._completion_arguments_schema_for_state` | **直接复用既有Director兼容方案** `director_state_conditioned_sampling_json_schema_text`：deployed xgrammar不保留object层required/properties与anyOf的交集。每个观察来源分支携带完整原八字段object约束，再合并原来源const。CPU实测旧schema会接受metadata-only、拒完整对象；修复后JSON Schema语义等价且grammar行为正确。没有放宽completion/receipt/span validator，没有替模型写claim。 |
+| `healthbench_clinical_react._tool_action_error` / `healthbench_clinical_tools` | 直接复用EuropePMC、Bookshelf/PDQ/AHRQ、MeSH客户端已有`_required_query`及SkillFlow-derived schema_invalid Observation。5类外部search在dispatch前校验既有12词/160字符限制，schema说明同一限制；不收窄Trials/MedRAG/knowledge原协议。 |
+| `agent_workflow_env` 的既有scope admission | FlowSteer edit/admission反馈边界和MD §3自由contract的必要适配；不把不确定性产物标签当临床实体。数值检查不再仅由回答动词触发，检索职责也不能注入无来源的范围/分母；操作预算数和原始公开事实仍允许。无医学答案词表。 |
+| `agent_runtime._public_text_quality_receipt` | 复用既有质量profile、typed failure与HealthBench adapter成功complete trace。必要适配：仅对真实通过结构化证据validator、与返回对象一致的v1 artifact，用summary/claim/qualifier/span/uncertainties作正文重复检测，排除JSON语法和来源元数据。原正文阈值、截断规则与raw token计数不变；普通文本、其他JSON、无成功trace均不豁免。 |
+| `healthbench_candidate_skills_v247.yaml` | 直接复用现有candidate profile/helper/receipt和SkillFlow trigger/plan/pitfall表达，新增的只是用户授权的可拒绝职责建议。区分局部来源失败与完整回应，保留实体/identifier namespace，不预设医疗角色或拓扑。 |
+
+固定条件与门槛见`docs/healthbench_v247_iteration_protocol.md`。真实v246失败
+用于定位通用接口，不将rubric/参考回答写入执行提示词。配置2项、scope8新增
+及21既有回归通过；Unicode相关39项和25参数子例、外部search相关217项与
+138参数子例通过（可能有重合，不合计为唯一测试数）。没有模型/API调用。
+新证据schema与既有v242回归35项通过，其中包含本机xgrammar CPU编译与
+完整字符串匹配；没有下载模型或tokenizer。
+结构化正文重复检测29项新增及6项既有quality回归通过；短正文不会因长
+metadata达到原192-token启动门槛，真实重复正文仍按原24-token/3次拒绝。

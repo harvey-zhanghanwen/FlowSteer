@@ -8380,6 +8380,10 @@ class AgentWorkflowEnv:
             "StructuredAction",
             "Tool Observation",
             "Tool Receipt",
+            # Evidence-status labels describe a deliverable, not a clinical
+            # entity/answer. Keep the exact contract; no claim is endorsed.
+            "unresolved alternatives",
+            "insufficient evidence",
         }
         # A free-text contract can change task scope without asserting an
         # answer literal, for example by silently replacing an unresolved
@@ -8545,8 +8549,7 @@ class AgentWorkflowEnv:
                     if not is_grounded(replacement):
                         external_literals.append(replacement)
             for clause in re.split(r"(?<=[.!?;])\s+|\n+", literal_contract):
-                if decisive_assertion.search(clause) is None:
-                    continue
+                is_decisive = decisive_assertion.search(clause) is not None
                 # Agent IDs are Canvas references rather than domain facts.
                 # Remove them only for literal extraction so ``node_1`` cannot
                 # be misread as an unsupported clinical value while the exact
@@ -8576,8 +8579,13 @@ class AgentWorkflowEnv:
                         not in grounded_numeric_keys
                     ):
                         candidates.append(literal)
-                candidates.extend(quoted_candidate.findall(literal_clause))
-                candidates.extend(named_candidate.findall(literal_clause))
+                # A search contract can prefill an unsupported numerical
+                # attribute just as an answer contract can. Validate those
+                # literals at the same boundary, without interpreting a free
+                # query's ordinary quoted text as an asserted answer.
+                if is_decisive:
+                    candidates.extend(quoted_candidate.findall(literal_clause))
+                    candidates.extend(named_candidate.findall(literal_clause))
                 for literal in candidates:
                     normalized_literal = " ".join(literal.split()).strip(" .,:;")
                     if not normalized_literal:

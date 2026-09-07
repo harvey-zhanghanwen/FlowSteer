@@ -576,6 +576,28 @@ def _query_preserves_task_surface(problem: object, query: object) -> bool:
     if problem_tokens & query_tokens:
         return True
 
+    # NECESSARY_PROJECT_ADAPTATION: preserve a verbatim public Unicode word
+    # when the existing ASCII path splits it into discarded short fragments.
+    # Reuse the same query-admission boundary; do not alter SkillFlow-derived
+    # retrieval, budget/duplicate tokenization, or add translations/aliases.
+    # NFC handles canonical combining accents without removing diacritics.
+    from unicodedata import normalize
+
+    def unicode_words(value: object) -> set[str]:
+        if not isinstance(value, str):
+            return set()
+        return {
+            word
+            for word in re.findall(
+                r"(?<![\w–—-])[^\W\d_]+(?![\w–—-])",
+                normalize("NFC", value.casefold()),
+            )
+            if len(word) >= 3 and not word.isascii()
+        }
+
+    if unicode_words(problem) & unicode_words(query):
+        return True
+
     # NECESSARY_PROJECT_ADAPTATION: SkillFlow's lower-case lexical retrieval
     # has no task-surface admission rule. Our exact-only guard can reject a
     # corrected spelling before retrieval. Keep its original exact path and
@@ -1113,8 +1135,24 @@ class HealthBenchAuthoritativeReactExecutionAdapter(ToolReactExecutionAdapter):
         constrained = deepcopy(dict(schema))
         properties = constrained["properties"]["value"]["properties"]
         if metadata_rows:
+            item_schema = deepcopy(properties["evidence_items"]["items"])
+            # Direct reuse of director_state_conditioned_sampling_json_schema_text:
+            # deployed xgrammar drops object siblings beside anyOf rather than
+            # intersecting them. Each alternative must therefore carry the
+            # complete original eight-field object, not just copied metadata.
+            # This is equivalent under JSON Schema and leaves the receipt/span
+            # validator, model-authored claims and source tuple binding intact.
             properties["evidence_items"]["items"]["anyOf"] = [
-                {"properties": {key: {"const": row[key]} for key in fields}}
+                {
+                    **deepcopy(item_schema),
+                    "properties": {
+                        **deepcopy(item_schema["properties"]),
+                        **{
+                            key: {**deepcopy(item_schema["properties"][key]), "const": row[key]}
+                            for key in fields
+                        },
+                    },
+                }
                 for row in metadata_rows
             ]
         else:
