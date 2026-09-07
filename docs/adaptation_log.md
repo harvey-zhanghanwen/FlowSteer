@@ -1663,3 +1663,11 @@ change was made during profile selection.
   Direct/其他题/525全量/训练/MACE/Bayesian/Skill evolution均不启动。
 - 先离线定向测试和prepare-only，再提交推送源码后进行一次真实单题运行；
   真实评分、是否实际使用中间产物和仍有的问题，必须待receipt落盘后报告。
+
+- 真实单题已完成：源码 `46a61ae78fdab4f5310ca2654c19eee8c07a813c`，
+  attempt `run_attempt_0c597f1790e2790421dfb44d`，valid=1/1、FINISH=1/1，
+  raw=0%、length-adjusted=5.5272%，601.809秒，无超时，结果低于上一版同题。
+- 文本接口实际生效，node_1第一次complete即交出1185字符，node_2确实逐字收到；
+  但译文质量/覆盖不够，node_2又只返回状态说明。node_3缺node_1直接输入，最终只有120字符标题，
+  原有终局检查仍放行。不能宣称接口修复已带来分数提升，也未将本版设为最佳版本。
+  真实结果及剩余问题见 `docs/healthbench_contract_artifact_single_20260907.md`；本次未启动第二次评测。
