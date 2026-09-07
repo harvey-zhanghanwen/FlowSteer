@@ -12,9 +12,11 @@ rubric access, patient simulator or clinical scoring rule.
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+import re
 from typing import Any, Mapping
 
-from .agent_runtime import AgentRequest
+from .agent_runtime import AgentRequest, CommunicationCondition
 from .healthbench_evidence_adapter import (
     HealthBenchAuthoritativeReactExecutionAdapter,
     _evidence_preserves_query_anchors,
@@ -25,6 +27,7 @@ from .openai_gateway import (
     _healthbench_search_candidates,
 )
 from .tool_runtime import StructuredAction
+from .healthbench_professional_adapter import parse_model_visible_conversation
 
 
 _SEARCH_TOOLS = frozenset({
@@ -40,7 +43,10 @@ class HealthBenchClinicalReactExecutionAdapter(
 ):
     """Admit optional declared tools, never require a medical role or search."""
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, *, public_task_validation: bool = False, **kwargs: Any) -> None:
+        if type(public_task_validation) is not bool:
+            raise ValueError("public_task_validation must be boolean")
+        self._public_task_validation = public_task_validation
         for flag in (
             "require_initial_search", "require_refinement_on_insufficient_evidence",
         ):
@@ -50,6 +56,25 @@ class HealthBenchClinicalReactExecutionAdapter(
 
     def _contract(self, request, observations):
         value = super()._contract(request, observations)
+        if self._public_task_validation:
+            value += (
+                "\nAn Agent contract is a proposed assignment, not verified evidence. "
+                "Check the original conversation for contradictory patient attributes "
+                "and unsupported premises before accepting an upstream conclusion. "
+                "A status=insufficient artifact is not a verified finding. Preserve "
+                "its uncertainty and distinguish the task product from a status report. "
+                "A completed answer must contain the requested material, not just a "
+                "title, patient background, promise, or statement of completion. "
+                "Limited search results cannot prove that evidence does not exist."
+            )
+            literal = self._literal_initial_query(request, observations)
+            if literal is not None:
+                value += (
+                    " First identify the short study request without an inferred "
+                    "expansion. If searching, use this literal query first: "
+                    + json.dumps(literal, ensure_ascii=False)
+                    + ". Subsequent queries may refine it using the observations."
+                )
         if "healthbench-bookshelf.search" in request.agent.allowed_tools:
             # Necessary task adaptation on the existing ReAct contract, not a
             # role or a question-specific answer/routing rule. Older profiles
@@ -63,6 +88,103 @@ class HealthBenchClinicalReactExecutionAdapter(
                 "proposed conclusion is established by the sources."
             )
         return value
+
+    def _literal_initial_query(self, request, observations):
+        """Public-name lookup on the existing admission boundary, not aliases.
+
+        Only a short standalone study request receives this first-query rule.
+        Clinical conversations, source reads and calculations are unaffected.
+        A completed literal lookup, even empty, unlocks ordinary refinement.
+        """
+        if not self._public_task_validation:
+            return None
+        try:
+            messages = parse_model_visible_conversation(request.problem)
+        except ValueError:
+            return None
+        users = [message["content"].strip() for message in messages if message["role"] == "user"]
+        if len(users) != 1:
+            return None
+        query = users[0]
+        words = re.findall(r"\w+", query, flags=re.UNICODE)
+        if not (2 <= len(words) <= min(12, self._max_query_content_tokens)) or len(query) > 160 or "\n" in query:
+            return None
+        if not re.search(r"\b(?:trial|study)\b", query, flags=re.IGNORECASE):
+            return None
+        normalize = lambda text: " ".join(str(text).casefold().split())
+        search_tools = _SEARCH_TOOLS | {"healthbench-knowledge.search"}
+        for observation in observations:
+            action = observation.get("executed_action", {})
+            if (observation.get("observation_status") == "success"
+                    and isinstance(action, Mapping) and action.get("name") == "search"
+                    and action.get("resource_id") in search_tools
+                    and action.get("arguments", {}).get("database") != "conversation"
+                    and normalize(action.get("arguments", {}).get("query", "")) == normalize(query)):
+                return None
+        # Reuse an actual upstream lookup; graph ancestry or a status message
+        # alone cannot demonstrate that the literal query was executed.
+        receipts = list(request.prior_tool_receipts)
+        for message in (() if request.communication_condition is CommunicationCondition.UPSTREAM_MASKED else request.upstream):
+            receipts.extend(message.tool_receipts)
+        for receipt in receipts:
+            result = receipt.get("result", {})
+            arguments = receipt.get("request", {}).get("arguments", {})
+            if (receipt.get("tool_id") in search_tools and not receipt.get("error_type")
+                    and isinstance(result, Mapping) and result.get("completed") is True
+                    and arguments.get("database") != "conversation"
+                    and normalize(arguments.get("query", "")) == normalize(query)):
+                return None
+        return query
+
+    def _public_search_action_error(self, request, action, observations):
+        search_tools = _SEARCH_TOOLS | {"healthbench-knowledge.search"}
+        if action.name != "search" or action.resource_id not in search_tools:
+            return None
+        if action.arguments.get("database") == "conversation":
+            return None
+        literal = self._literal_initial_query(request, observations)
+        if literal is not None and (
+            " ".join(str(action.arguments.get("query", "")).casefold().split())
+            != " ".join(literal.casefold().split())
+        ):
+            return "initial_study_lookup_must_preserve_literal_public_request"
+        if (self._public_task_validation and self._require_task_query_anchor
+                and not _query_preserves_task_surface(request.problem, action.arguments.get("query"))):
+            return "query_does_not_preserve_public_task_anchor"
+        return None
+
+    def _completion_error(self, *, action, artifact, tool_receipts):
+        inherited = super()._completion_error(
+            action=action, artifact=artifact, tool_receipts=tool_receipts,
+        )
+        if inherited is not None or not self._public_task_validation:
+            return inherited
+        value = action.arguments.get("value")
+        text = value.get("summary", "") if isinstance(value, Mapping) else artifact
+        normalized = " ".join(str(text).split())
+        # Conservative surface checks, not a semantic grader. No medical
+        # answer dictionary or minimum response length is introduced.
+        if re.fullmatch(
+            r"(?:translation|summary|review|verification|assessment|task|work|output)"
+            r"(?:\s+[\w-]+){0,7}\s+(?:complete[d]?|finished|ready)"
+            r"(?:\s*[-:—]\s*(?:[\w-]+\s+){0,5}(?:required|pending)"
+            r"(?:\s+[\w-]+){0,6})?[.!]?", normalized, flags=re.IGNORECASE,
+        ):
+            return "completion_artifact_is_status_only_provide_actual_task_product"
+        unqualified_absence = re.search(
+            r"\b(?:no\s+(?:(?:randomized|controlled|clinical|relevant|published)\s+){0,3}"
+            r"(?:trials?|studies)\s+(?:exists?|is\s+available|was\s+found|were\s+found|was\s+identified|were\s+identified))\b",
+            normalized, flags=re.IGNORECASE,
+        )
+        bounded_scope = re.search(
+            r"\b(?:(?:our|my|this|these|the\s+limited)\s+(?:search|searches|retrieval)"
+            r"|(?:searched|consulted|accessible|retrieved)\s+(?:sources|records|results|databases)"
+            r"|(?:does\s+not|cannot)\s+(?:prove|establish|rule\s+out))\b",
+            normalized, flags=re.IGNORECASE,
+        )
+        if unqualified_absence and not bounded_scope:
+            return "limited_search_cannot_establish_absence_state_retrieval_scope_or_supported_finding"
+        return None
 
     def _state_conditioned_action_domain(
         self,
@@ -130,6 +252,7 @@ class HealthBenchClinicalReactExecutionAdapter(
         # Reuse the authoritative adapter's strict mutually exclusive action
         # schema; generalize the number of branches, not the wire contract.
         admitted, _ = self._state_conditioned_action_domain(request, observations)
+        literal = self._literal_initial_query(request, observations)
         branches = [
             self._action_schema(
                 arguments_schema=self._tool_registry.require_capability(tool_id).action_schemas[name],
@@ -137,6 +260,24 @@ class HealthBenchClinicalReactExecutionAdapter(
             )
             for tool_id, name in sorted(admitted)
         ]
+        if literal is not None:
+            conversation_branches = []
+            for branch in branches:
+                properties = branch["properties"]
+                if (properties["name"].get("const") == "search"
+                        and properties["resource_id"].get("const")
+                        in _SEARCH_TOOLS | {"healthbench-knowledge.search"}):
+                    arguments = deepcopy(properties["arguments"])
+                    if properties["resource_id"].get("const") == "healthbench-knowledge.search":
+                        conversation_branch = deepcopy(branch)
+                        conversation_branch["properties"]["arguments"]["properties"]["database"] = {"const": "conversation"}
+                        conversation_branches.append(conversation_branch)
+                        arguments["properties"]["database"] = {"enum": ["medical_references", "drug_labels"]}
+                    # The provider sees the same constraint admission enforces;
+                    # do not spend a model turn discovering a hidden rule.
+                    arguments["properties"]["query"]["const"] = literal
+                    properties["arguments"] = arguments
+            branches.extend(conversation_branches)
         branches.append(self._action_schema(
             arguments_schema=self._completion_arguments_schema(request),
             kind="complete", name="complete", resource_id=None,
@@ -148,7 +289,11 @@ class HealthBenchClinicalReactExecutionAdapter(
         # The exact same evidence shape also binds source-read and drug-label
         # receipts. Do not suggest that calculation is a literature source.
         value = schema["properties"]["value"]
-        if value.get("type") == "object":
+        evidence_value = next(
+            (branch for branch in value.get("anyOf", [value]) if branch.get("type") == "object"),
+            None,
+        )
+        if evidence_value is not None:
             if not any(
                 tool_id in _SEARCH_TOOLS
                 or tool_id in {"healthbench-source.read", "healthbench-drug.lookup", "healthbench-knowledge.search"}
@@ -165,7 +310,7 @@ class HealthBenchClinicalReactExecutionAdapter(
                     ),
                 }
                 return schema
-            fields = value["properties"]["evidence_items"]["items"]["properties"]
+            fields = evidence_value["properties"]["evidence_items"]["items"]["properties"]
             for name in ("document_id", "source", "title", "date", "url"):
                 fields[name]["description"] = (
                     f"Copy {name} exactly from the same successful retrieval "
@@ -208,6 +353,9 @@ class HealthBenchClinicalReactExecutionAdapter(
         action: StructuredAction,
         observations: list[Mapping[str, object]],
     ) -> str | None:
+        public_error = self._public_search_action_error(request, action, observations)
+        if public_error is not None:
+            return public_error
         inherited = super()._tool_action_error(
             request=request, action=action, observations=observations,
         )
@@ -242,4 +390,3 @@ class HealthBenchClinicalReactExecutionAdapter(
             ):
                 return "duplicate_tool_request"
         return None
-

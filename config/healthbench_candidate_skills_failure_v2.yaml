@@ -1,0 +1,58 @@
+# Failure-derived, unvalidated prompt priors. No ACTIVE publication or training.
+schema_version: flowsteer.healthbench-candidate-skill-profile.v1
+profile_version: healthbench.orchestration-candidates.failure.v2
+dataset_key: healthbench_professional
+status: candidate
+training_enabled: false
+skill_publication_enabled: false
+candidates:
+  - condition_id: match_execution_to_deliverable_failure_v2
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: A node is created or its completion is rejected by the execution protocol.
+    action:
+      instruction: >-
+        Match the execution mode and artifact format to the deliverable. A
+        contract's proposed conclusion is not evidence. Keep ambiguous names
+        unchanged for the first lookup; use source context to resolve identity,
+        not an inferred expansion. Preserve the original scope and applicability. If an
+        evidence schema cannot express a text deliverable, retain useful evidence
+        and modify or add a compatible text-producing node, using reasoning mode
+        or an admissible Output protocol. A schema rejection is not evidence
+        that the task is impossible. Do not repeat the same failed completion.
+  - condition_id: deliver_actual_dependency_artifacts_failure_v2
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: A consumer depends on another Agent's artifact or a review reports a gap.
+    action:
+      instruction: >-
+        Check the actual incoming artifacts, not merely the graph ancestry.
+        Route each needed producer artifact to the consumer; a status statement
+        about that artifact is not a substitute. Preserve supported content,
+        source identifiers, qualifiers and uncertainty without redundant copies.
+        Reviews should provide concrete corrections and retain the material
+        needed downstream. If both the original artifact and corrections are
+        needed, route both. Do not add a role or relation without a dependency.
+  - condition_id: verify_deliverable_before_finish_failure_v2
+    status: candidate
+    condition:
+      task_family: healthbench_professional
+      graph_stage: '*'
+      required_tools: []
+    trigger: Output is available, a repair repeats, or remaining task time is limited.
+    action:
+      instruction: >-
+        Compare the actual Output with the original conversation's requested
+        content and format, including conflicting patient attributes or unsafe
+        premises that must not be endorsed merely to follow a formatting request. A title, promise or completion status is not the
+        requested response. A review of an earlier draft does not verify a later
+        answer. Repair a specific observable gap while preserving valid work;
+        consider remaining seconds and recent action cost before another edit.
+        Avoid unchanged retries and redundant expansion, not necessary content.
+        FINISH when adequate, without a mandatory reviewer or fixed role order.

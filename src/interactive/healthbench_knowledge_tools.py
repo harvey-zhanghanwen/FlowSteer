@@ -170,8 +170,12 @@ class HealthBenchKnowledgeReactExecutionAdapter(HealthBenchClinicalReactExecutio
     def __init__(self, *, knowledge_root: str | Path,
                  skillflow_source: str | Path = DEFAULT_SKILLFLOW_SOURCE,
                  frozen_corpus_manifest: str | Path | None = None,
-                 semantic_index_manifest: str | Path | None = None, **kwargs):
+                 semantic_index_manifest: str | Path | None = None,
+                 metadata_aware_retrieval: bool = False, **kwargs):
         super().__init__(**kwargs)
+        if type(metadata_aware_retrieval) is not bool:
+            raise ValueError("metadata_aware_retrieval must be boolean")
+        self.metadata_aware_retrieval = metadata_aware_retrieval
         self.knowledge_root = Path(knowledge_root)
         self.skillflow_source = Path(skillflow_source)
         self.frozen_corpus_manifest = None if frozen_corpus_manifest is None else str(frozen_corpus_manifest)
@@ -207,6 +211,9 @@ class HealthBenchKnowledgeReactExecutionAdapter(HealthBenchClinicalReactExecutio
     def _tool_action_error(self, *, request, action, observations):
         if action.resource_id != HEALTHBENCH_KNOWLEDGE_TOOL_ID:
             return super()._tool_action_error(request=request, action=action, observations=observations)
+        public_error = self._public_search_action_error(request, action, observations)
+        if public_error is not None:
+            return public_error
         # This local index changes after a real retrieval. A previously empty
         # query may therefore be retried, unlike immutable source API requests.
         store = _CURRENT_STORE.get()
@@ -229,6 +236,7 @@ class HealthBenchKnowledgeReactExecutionAdapter(HealthBenchClinicalReactExecutio
             self.knowledge_root, parse_model_visible_conversation(request.problem),
             skillflow_source=self.skillflow_source,
             semantic_index=self.semantic_index,
+            metadata_aware_retrieval=self.metadata_aware_retrieval,
         )
         token = _CURRENT_STORE.set(store)
         try:

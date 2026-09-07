@@ -1,5 +1,33 @@
 # AIME 2026 initial-adaptation log
 
+## 2026-09-07: user pause and evidence-library refinement
+
+At the user's request, SIGINT was sent only to the verified HealthBench full525
+process 62827. It exited with cancellation diagnostics persisted; the GPU6
+SGLang service and other projects were not stopped. Preserve the 25 scored
+trajectories, two timeout records, original manifest and frozen v1 config.
+The manifest records its last collector stage, not current process liveness;
+`evaluation/pause_receipt.json` records the user-requested stop explicitly.
+
+New branch `feature/healthbench-public-task-repair-20260907` keeps the frozen
+run commit 1385368013eeb9f7f78ee868a0be9f086bea488b recoverable. Public-task
+checks, the previously implemented text-artifact union and source-metadata
+lookup are opted into only by the new public-task-repair config. No full525
+rerun, paid canary, training or service restart was performed.
+
+The user's subsequent database request adds offline corpus refinement:
+4505 external records (3966 MedRAG, 511 PubMed, 26 Europe PMC, 2 DailyMed),
+3446 source records expanded from actual local original passages, 511 PMID
+fields completed from existing source IDs. No new network calls, generated
+clinical answers, rubric-dependent filtering or per-task answer mapping.
+
+The public source index and general source-metadata checks do not implement
+clinical adjudication. A correctly routed full artifact can still be wrong;
+status-only checks do not certify every requested obligation, and cautious
+wording does not demonstrate correct retrieval. Remaining entity/contradiction
+and clinical-completeness errors require later model-backed verification,
+which remains paused. Candidate failure.v2 is unvalidated and rejectable.
+
 ## 2026-09-07: failure-derived candidates on the requested 50%-single-task base
 
 The user requested the prior 50%-raw architecture, new candidate advice derived

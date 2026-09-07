@@ -21,7 +21,7 @@ from src.interactive.config_loader import load_yaml
 from build_healthbench_question_corpus import public_questions, public_queries
 
 
-def build(source_manifest, output, model_path, config_path):
+def build(source_manifest, output, model_path, config_path, *, skip_query_probes=False):
     started = time.monotonic()
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -57,6 +57,10 @@ def build(source_manifest, output, model_path, config_path):
         "training_performed": False, "paid_model_calls": 0, "grader_calls": 0}
     with (output / "manifest.json").open("x", encoding="utf-8") as stream:
         json.dump(manifest, stream, ensure_ascii=False, indent=2)
+    if skip_query_probes:
+        print(json.dumps({"stage": "complete", **manifest, "public_query_probes_executed": False,
+                          "elapsed_seconds": round(time.monotonic()-started, 1)}), flush=True)
+        return
     index = SemanticEvidenceIndex(output / "manifest.json")
     config = load_yaml(config_path)
     tasks = public_questions(ROOT / config["data"]["test_path"])
@@ -80,5 +84,8 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--skip-query-probes", action="store_true",
+                        help="Build only the local source index; do not replay 525 public queries")
     args = parser.parse_args()
-    build(args.source_manifest, args.output, args.model_path, args.config)
+    build(args.source_manifest, args.output, args.model_path, args.config,
+          skip_query_probes=args.skip_query_probes)

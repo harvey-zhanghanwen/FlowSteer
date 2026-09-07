@@ -16,6 +16,7 @@ from scripts.prompts.prompt import FORMAT_PROMPT
 from .agent_runtime import (
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_CONTRACT_ARTIFACT_V4,
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
     AgentRequest,
     AgentResponse,
@@ -420,6 +421,7 @@ _PRODUCER_CONTEXT_PROFILES = frozenset(
         ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_V1,
         ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
         ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+        ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_CONTRACT_ARTIFACT_V4,
     }
 )
 
@@ -787,6 +789,8 @@ def _compact_healthbench_input_provenance(
 # v3 fixes that projection gap without changing execution, roles or topology.
 _HEALTHBENCH_V3_UPSTREAM_CHARS = 12000
 _HEALTHBENCH_V3_PROMPT_CHARS = 24000
+_HEALTHBENCH_V4_UPSTREAM_CHARS = 16000
+_HEALTHBENCH_V4_CONTRACT_TEXT_CHARS = 12000
 _HEALTHBENCH_V3_TRUNCATED = "[projection truncated; full receipt retained in trajectory]"
 _HEALTHBENCH_V3_EXECUTION_SUPPLEMENT = (
     " Retrieved excerpts are not automatically endorsed facts. Compare their "
@@ -812,7 +816,7 @@ def _healthbench_v3_text(value: object, limit: int) -> str:
     return text[:head] + _HEALTHBENCH_V3_TRUNCATED + (text[-tail:] if tail else "")
 
 
-def _healthbench_v3_artifact(artifact: str) -> object:
+def _healthbench_v3_artifact(artifact: str, *, text_limit: int = 3600) -> object:
     # Citation text is projected once, from matching receipts, below. Keep
     # producer conclusions (including a mistaken rejection) visibly separate.
     if _healthbench_structured_evidence_references(artifact) is not None:
@@ -835,7 +839,7 @@ def _healthbench_v3_artifact(artifact: str) -> object:
             "projection_status": "partial" if partial else "complete",
             "omitted_uncertainties_count": max(0, len(uncertainties) - 4),
         }
-    return _healthbench_v3_text(artifact, 3600)
+    return _healthbench_v3_text(artifact, text_limit)
 
 
 def _healthbench_v3_interpretations(
@@ -1036,6 +1040,7 @@ def _format_healthbench_upstream_v3(
     *,
     include_dependency: bool,
     state: dict[str, Any],
+    preserve_contract_artifact: bool = False,
 ) -> str:
     rendered: list[str] = []
     for item in messages:
@@ -1043,7 +1048,10 @@ def _format_healthbench_upstream_v3(
         if identity in state["envelopes"]:
             continue
         state["envelopes"].add(identity)
-        allowance = min(_HEALTHBENCH_V3_UPSTREAM_CHARS, state["remaining"] - 100)
+        allowance = min(
+            _HEALTHBENCH_V4_UPSTREAM_CHARS if preserve_contract_artifact else _HEALTHBENCH_V3_UPSTREAM_CHARS,
+            state["remaining"] - 100,
+        )
         if allowance < 512:
             marker = _HEALTHBENCH_V3_TRUNCATED[:max(0, state["remaining"] - 2)]
             if marker:
@@ -1063,7 +1071,10 @@ def _format_healthbench_upstream_v3(
             envelope["source_contract_provenance"] = _healthbench_v3_text(item.source_contract, 700)
             if include_dependency:
                 envelope["request_or_dependency"] = _healthbench_v3_text(item.request_or_dependency, 500)
-            envelope["producer_artifact"] = _healthbench_v3_artifact(item.artifact)
+            envelope["producer_artifact"] = _healthbench_v3_artifact(
+                item.artifact,
+                text_limit=_HEALTHBENCH_V4_CONTRACT_TEXT_CHARS if preserve_contract_artifact else 3600,
+            )
             base_chars = len(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")))
             if allowance - base_chars > 800:
                 envelope["retrieval_evidence"] = _healthbench_v3_receipts(
@@ -1091,10 +1102,14 @@ def _format_upstream(
     if (
         project_healthbench_structured_evidence
         and artifact_communication_profile
-        == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3
+        in {
+            ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+            ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_CONTRACT_ARTIFACT_V4,
+        }
     ):
         return _format_healthbench_upstream_v3(
             messages, condition, include_dependency=include_dependency,
+            preserve_contract_artifact=(artifact_communication_profile == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_CONTRACT_ARTIFACT_V4),
             state=healthbench_projection_state if healthbench_projection_state is not None else {
                 "remaining": _HEALTHBENCH_V3_PROMPT_CHARS,
                 "sources": set(), "envelopes": set(),
@@ -1632,7 +1647,10 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             "(takes precedence over an Agent contract):\n"
             + _healthbench_execution_protocol(request)
         )
-        if request.artifact_communication_profile == ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3:
+        if request.artifact_communication_profile in {
+            ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+            ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_CONTRACT_ARTIFACT_V4,
+        }:
             system += _HEALTHBENCH_V3_EXECUTION_SUPPLEMENT
     healthbench_projection_state: dict[str, Any] = {
         "remaining": _HEALTHBENCH_V3_PROMPT_CHARS,
@@ -1652,6 +1670,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
             in {
                 ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
                 ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_CONTRACT_ARTIFACT_V4,
             }
         ),
         artifact_communication_profile=(
@@ -1761,6 +1780,7 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                     in {
                         ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
                         ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+                        ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_CONTRACT_ARTIFACT_V4,
                     }
                 ),
                 artifact_communication_profile=(

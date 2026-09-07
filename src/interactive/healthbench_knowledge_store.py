@@ -20,7 +20,7 @@ from tempfile import mkdtemp
 from threading import RLock
 from typing import Any, Mapping, Sequence
 
-from .qa_retrieval import DEFAULT_SKILLFLOW_SOURCE, _load_retrieval_module
+from .qa_retrieval import DEFAULT_SKILLFLOW_SOURCE, _load_retrieval_module, build_keyword_query, _QUERY_TOKEN
 from .qa_tool_adapter import _ThreadAffineRetrievalWorker
 
 
@@ -79,6 +79,7 @@ class HealthBenchKnowledgeStore:
         conversation: Sequence[Mapping[str, str]],
         skillflow_source: Path = DEFAULT_SKILLFLOW_SOURCE,
         semantic_index=None,
+        metadata_aware_retrieval: bool = False,
     ) -> None:
         if isinstance(conversation, (str, bytes, Mapping)):
             raise TypeError("conversation must be a sequence of role/content messages")
@@ -93,6 +94,9 @@ class HealthBenchKnowledgeStore:
             turns.append({"role": role, "content": content, "turn_index": index})
         self._module = _load_retrieval_module(Path(skillflow_source))
         self._semantic_index = semantic_index
+        if type(metadata_aware_retrieval) is not bool:
+            raise TypeError("metadata_aware_retrieval must be boolean")
+        self._metadata_aware_retrieval = metadata_aware_retrieval
         parent = Path(directory)
         parent.mkdir(parents=True, exist_ok=True)
         self.directory = Path(mkdtemp(prefix="request-", dir=parent))
@@ -180,6 +184,12 @@ class HealthBenchKnowledgeStore:
                 document_id = str(record["document_id"])
                 title = str(record.get("title") or document_id)
                 text = str(record["excerpt"])
+                if self._metadata_aware_retrieval:
+                    # SkillFlow FTS5 already weights title 5:1 over body. Index
+                    # observed identifiers there; return the original title.
+                    title += " " + " ".join(str(record.get(key) or "") for key in (
+                        "pmid", "pmcid", "doi", "source_id", "document_id",
+                    ))
             passages.append(self._module.DocumentPassage(
                 passage_id=str(record["passage_id"]),
                 document_id=self._module.normalize_json(document_id),
@@ -229,8 +239,19 @@ class HealthBenchKnowledgeStore:
             }
             if not self._records[database]:
                 return result
+            metadata_hits = []
+            if self._metadata_aware_retrieval and database != "conversation":
+                metadata_hits = self._metadata_matches(database, query, limit)
             if self._semantic_index is not None and database != "conversation":
                 evidence, receipt = self._semantic_index.rank(query, self._records[database], limit)
+                if self._metadata_aware_retrieval:
+                    evidence = self._merge_metadata_matches(metadata_hits, evidence, limit)
+                    receipt = {**receipt, "metadata_lookup": {
+                        "backend": "skillflow-fts5-title-weight-5-body-weight-1",
+                        "metadata_match_count": len(metadata_hits),
+                        "clinical_correctness_verified": False,
+                        "corpus_is_exhaustive": False,
+                    }}
                 result.update(evidence=evidence, index_receipt=receipt,
                               status="ok" if evidence else "no_matches")
                 return result
@@ -256,7 +277,57 @@ class HealthBenchKnowledgeStore:
                     result["evidence"].append(record)
             result["status"] = "ok" if hits else "no_matches"
             result["index_receipt"] = dict(self._receipts[database])
+            if self._metadata_aware_retrieval and database != "conversation":
+                result["evidence"] = self._merge_metadata_matches(metadata_hits, result["evidence"], limit)
+                result["index_receipt"]["metadata_match_count"] = len(metadata_hits)
+                result["index_receipt"]["clinical_correctness_verified"] = False
             return result
+
+    def _metadata_matches(self, database: str, query: str, limit: int):
+        """Exact public metadata candidate match; not clinical verification.
+
+        Reuse SkillFlow title-weighted FTS5 and QA keyword normalization. The
+        default hybrid remains the fallback, with unchanged weights/threshold.
+        No study aliases, task IDs, evaluator vocabulary or learned ranker.
+        """
+        terms = {token.casefold() for token in _QUERY_TOKEN.findall(build_keyword_query(query, max_terms=24))}
+        if not terms:
+            return []
+        self._build(database)
+        worker = self._workers[database]
+        hits = worker._executor.submit(
+            lambda: worker._index.search(query, limit=len(self._records[database]))
+        ).result()
+        records = {row["passage_id"]: row for row in self._records[database]}
+        matches = []
+        for hit in hits:
+            row = records[hit.passage_id]
+            identifiers = [str(row.get(key) or "").casefold() for key in ("pmid", "pmcid", "doi", "source_id", "document_id")]
+            metadata = " ".join([str(row.get("title") or ""), *identifiers])
+            metadata_terms = {token.casefold() for token in _QUERY_TOKEN.findall(metadata)}
+            identifier_match = query.strip().casefold() in identifiers
+            if not (identifier_match or (len(terms) >= 2 and terms <= metadata_terms)):
+                continue
+            matches.append({**row, "retrieval_match": {
+                "type": "exact_identifier" if identifier_match else "all_query_terms_in_metadata",
+                "matched_terms": sorted(terms), "clinical_correctness_verified": False,
+            }})
+            if len(matches) == limit:
+                break
+        return matches
+
+    @staticmethod
+    def _merge_metadata_matches(metadata, fallback, limit):
+        result, seen = [], set()
+        for row in [*metadata, *fallback]:
+            identity = row["passage_id"]
+            if identity in seen:
+                continue
+            seen.add(identity)
+            result.append({**row, "rank": len(result) + 1})
+            if len(result) == limit:
+                break
+        return result
 
     def close(self) -> None:
         with self._lock:

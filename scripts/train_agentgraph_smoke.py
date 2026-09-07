@@ -26,6 +26,7 @@ from src.interactive.agent_graph import AgentGraph, AgentNode, AgentRelation
 from src.interactive.agent_runtime import (
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
     ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+    ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_CONTRACT_ARTIFACT_V4,
     AgentRuntime,
 )
 from src.interactive.agent_workflow_env import AgentWorkflowEnv
@@ -987,6 +988,18 @@ def _healthbench_tool_runtime_settings(
         raise ConfigurationError(
             "healthbench_tool_runtime.completion_quality_profile is unsupported"
         )
+    public_task_validation = section.get("public_task_validation", False)
+    metadata_aware_retrieval = section.get("metadata_aware_retrieval", False)
+    if type(metadata_aware_retrieval) is not bool:
+        raise ConfigurationError("healthbench_tool_runtime.metadata_aware_retrieval must be bool")
+    if metadata_aware_retrieval and section.get("toolset") != "source_separated_clinical_v1":
+        raise ConfigurationError("metadata_aware_retrieval requires the knowledge Tool adapter")
+    if type(public_task_validation) is not bool:
+        raise ConfigurationError("healthbench_tool_runtime.public_task_validation must be bool")
+    if public_task_validation and section.get("toolset", "default") not in {
+        "optional_clinical_v1", "source_separated_clinical_v1",
+    }:
+        raise ConfigurationError("public_task_validation requires the clinical Tool adapter")
     settings = {
         "source_key": source_key,
         "mode": runtime_mode,
@@ -1005,6 +1018,8 @@ def _healthbench_tool_runtime_settings(
             require_complete_natural_language_artifact
         ),
         "completion_quality_profile": completion_quality_profile,
+        "public_task_validation": public_task_validation,
+        "metadata_aware_retrieval": metadata_aware_retrieval,
         "enforce_state_conditioned_completion_admission": (
             enforce_state_conditioned_completion_admission
         ),
@@ -2649,8 +2664,11 @@ class LiveSmokeBackend:
                     ),
                 }
                 if authoritative:
+                    if healthbench_settings["toolset"] in {"optional_clinical_v1", "source_separated_clinical_v1"}:
+                        adapter_arguments["public_task_validation"] = healthbench_settings["public_task_validation"]
                     if healthbench_settings["toolset"] == "source_separated_clinical_v1":
                         adapter_arguments.update(
+                            metadata_aware_retrieval=healthbench_settings["metadata_aware_retrieval"],
                             knowledge_root=_resolve(self.project_root, healthbench_settings["knowledge_root"]),
                             skillflow_source=_resolve(self.project_root, healthbench_settings["skillflow_source"]),
                             frozen_corpus_manifest=(
@@ -2676,6 +2694,7 @@ class LiveSmokeBackend:
                             in {
                                 ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V2,
                                 ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_STRUCTURED_EVIDENCE_V3,
+                                ARTIFACT_COMMUNICATION_PRODUCER_CONTEXT_CONTRACT_ARTIFACT_V4,
                             }
                         ),
                         require_complete_natural_language_artifact=bool(

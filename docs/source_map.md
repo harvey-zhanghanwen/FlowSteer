@@ -1,5 +1,18 @@
 # AIME 2026 initial-adaptation source map
 
+## 2026-09-07: paused evaluation, public-task and source-retrieval repairs
+
+| Module | Source and implementation boundary |
+| --- | --- |
+| Contract text / evidence union and complete bounded artifact transport | **Direct port of existing project thin adaptation**, `46a61ae78fdab4f5310ca2654c19eee8c07a813c`: `healthbench_evidence_adapter._completion_arguments_schema`, clinical wrapper, runtime profile allowlists and `openai_gateway._format_healthbench_upstream_v3`. It follows SkillFlow `runtime/bounded_agent.py::_validate_completion` (actual JsonValue submission) and FlowSteer producer-to-consumer routing. Reuse the established v4 interface fix, not the v4 run's score or workflow. Legacy v3 is unchanged. |
+| Literal first lookup / scoped absence / status-only completion checks | **Necessary HealthBench adaptation** in existing `healthbench_clinical_react` admission and completion hooks, reached by unchanged `react_execution.ToolReactExecutionAdapter.execute`. Its failure remains an Observation for the same Agent, matching SkillFlow's bounded continuation. Short public study names are not expanded before a real lookup; knowledge.search uses the same rule. No benchmark alias/answer map or clinical role is added. Clinical semantic correctness is not proved by these surface checks. |
+| Corpus enrichment | **Reuse** `build_healthbench_question_corpus` and `HealthBenchKnowledgeStore.ingest_evidence`, with a minimal offline builder `refine_healthbench_evidence_corpus.py`. Replace selected short MedRAG excerpts with the original local `all_chunks.jsonl` document; import actual external Tool observations from all supplied trajectories regardless of grade. Infer PMID/source-read handle only from an existing NCBI document ID. No generated answer or rubric enters records. |
+| Metadata-aware lookup | **Reuse** SkillFlow `src/skillev/benchmarks/retrieval.py::RetrievalIndex.search` (FTS5 title weight 5, body weight 1) and the project's `qa_retrieval.build_keyword_query`. **Necessary adapter:** admit literal identifiers or complete query-term matches in source metadata ahead of related hybrid hits; retain fallbacks and expose that matching is not clinical verification. No new learned ranker. |
+| Semantic fallback and windowing | **Unchanged reuse** SkillFlow `training/environment.py::_search_passages/_bm25_score/_extract_query_terms`: normalized BM25 0.4 + BGE cosine 0.6, threshold 0.15. Reuse existing `build_healthbench_semantic_index.py` CPU encoder/window builder; add `--skip-query-probes` to avoid replaying 525 queries when only rebuilding sources. |
+| Execution / evaluation / MD | Free-text Agent contracts, independent per-node ReAct, incremental Canvas, graph relations, model pool, budgets and official evaluator remain unchanged. No fixed medical roles, training, MACE/Bayesian update or ACTIVE Skill publication. New flags default false; next-run config and all artifacts are separate from the paused run. |
+
+See `docs/healthbench_public_task_repair_20260907.md` for measurements and remaining limitations.
+
 ## 2026-09-07: HealthBench failure-derived candidates, full525 replay
 
 - **Direct reuse:** executable architecture from
