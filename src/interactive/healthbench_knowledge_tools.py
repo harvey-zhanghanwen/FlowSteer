@@ -233,7 +233,9 @@ class HealthBenchKnowledgeReactExecutionAdapter(HealthBenchClinicalReactExecutio
 
     async def execute(self, request: AgentRequest):
         store = HealthBenchKnowledgeStore(
-            self.knowledge_root, parse_model_visible_conversation(request.problem),
+            self.knowledge_root, parse_model_visible_conversation(
+                request.problem, include_rubric_context=False,
+            ),
             skillflow_source=self.skillflow_source,
             semantic_index=self.semantic_index,
             metadata_aware_retrieval=self.metadata_aware_retrieval,

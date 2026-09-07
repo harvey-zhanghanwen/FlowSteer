@@ -99,7 +99,9 @@ class HealthBenchClinicalReactExecutionAdapter(
         if not self._public_task_validation:
             return None
         try:
-            messages = parse_model_visible_conversation(request.problem)
+            messages = parse_model_visible_conversation(
+                request.problem, include_rubric_context=False,
+            )
         except ValueError:
             return None
         users = [message["content"].strip() for message in messages if message["role"] == "user"]

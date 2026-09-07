@@ -37,6 +37,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 import evaluate_hotpotqa_round as hotpot_round
+from healthbench_rubric_context import attach_context, condition_receipt
 from healthbench_candidate_skill_profile import (
     build_candidate_prompt_priors, load_candidate_skill_profile,
     validate_candidate_skill_run_config,
@@ -1186,6 +1187,10 @@ def _select_tasks(
 
     for task in expected:
         require_partition(task)
+
+    # Both arms receive the same explicit information condition before freeze.
+    # Ordinary rubric-hidden configs return the original records unchanged.
+    expected = attach_context(expected, config, root)
 
     if selected_path.exists():
         frozen = tuple(iter_task_records(selected_path, expected_split=split))
@@ -4433,6 +4438,7 @@ def _report(
     )
     return {
         "schema_version": "flowsteer.completion_benchmark.round_report.v1",
+        "benchmark_information_condition": condition_receipt(config),
         "dataset_key": dataset_key,
         "dataset": specification["label"],
         "project_split": str(bounded["split"]),
@@ -4613,6 +4619,11 @@ def _report_markdown(report: Mapping[str, Any]) -> str:
         if report.get("protocol_equivalent_to_direct") is True
         else "Direct and AgentGraph are separate protocols; their delta is descriptive, not a paired causal estimate."
     )
+    if report.get("benchmark_information_condition", {}).get("rubrics_visible_to_solving_models"):
+        protocol_sentence += (
+            " Rubric-aware experiment: per-task grading criteria were visible during "
+            "answering. This is not comparable to rubric-hidden benchmark scores."
+        )
     retrieval_pair = bool(
         report.get("dataset_key") == "healthbench_professional"
         and report.get("direct_execution_mode") == "react"
@@ -5042,6 +5053,7 @@ def _finish_collection_arm(
         "dataset_key": dataset_key, "collection_arm": arm,
         "sample_count": len(selected), "collection_arm_completed": complete,
         "metrics": {arm: metrics}, "paired_comparison_available": False,
+        "benchmark_information_condition": condition_receipt(config),
         "manifest_path": str(paths["manifest"]), "completed_at": manifest["completed_at"],
     })
     return manifest
@@ -5146,8 +5158,13 @@ async def run_completion_benchmark_round(
         "model_visible_task_boundary": {
             "prompt_source": "TaskRecord.question",
             "ground_truth_role": "evaluator_only",
-            "evaluator_payload_role": "evaluator_only",
+            "evaluator_payload_role": (
+                "per_task_rubrics_model_visible_physician_response_excluded"
+                if condition_receipt(config)["rubrics_visible_to_solving_models"]
+                else "evaluator_only"
+            ),
         },
+        "benchmark_information_condition": condition_receipt(config),
         "training_enabled": False,
         "optimizer_updates": 0,
         "candidate_skill_evaluation": {

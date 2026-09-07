@@ -1642,6 +1642,11 @@ def build_agent_messages(request: AgentRequest) -> list[dict[str, str]]:
                 "source provenance only to interpret and validate the artifact."
             )
     if healthbench_messages is not None:
+        if healthbench_messages[0]["role"] == "system":
+            # Explicit experimental task context, not another clinical turn.
+            # Keep one system message for existing provider chat compatibility.
+            system += "\n\n" + healthbench_messages[0]["content"]
+            healthbench_messages = healthbench_messages[1:]
         system += (
             "\n\nHealthBench Professional execution protocol "
             "(takes precedence over an Agent contract):\n"

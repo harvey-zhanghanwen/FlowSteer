@@ -81,17 +81,28 @@ def _validated_messages(value: object) -> tuple[dict[str, str], ...]:
 
 def render_model_visible_conversation(
     messages: Sequence[Mapping[str, str]],
+    *,
+    rubric_aware_context: str | None = None,
 ) -> str:
-    """Serialize model-visible messages without adding evaluator information.
+    """Serialize the original conversation; rubric exposure is explicit opt-in.
 
     JSON is used because message content may itself contain newlines, quotes,
     brackets, or tag-like text.  The fixed ordinary-language header remains
     readable by the Director, while ``json.loads`` makes the boundary exactly
     reversible for native chat-message execution.
+    Normal preparation never passes ``rubric_aware_context``. The separate
+    research condition uses it without changing the official source schema.
     """
 
     validated = _validated_messages(messages)
     payload = {"messages": list(validated)}
+    if rubric_aware_context is not None:
+        if not isinstance(rubric_aware_context, str) or not rubric_aware_context.strip():
+            raise ValueError("rubric-aware context must be non-empty text")
+        payload["rubric_aware_context"] = {
+            "protocol": "rubric_aware",
+            "content": rubric_aware_context,
+        }
     return _CONVERSATION_HEADER + json.dumps(
         payload,
         ensure_ascii=False,
@@ -99,7 +110,9 @@ def render_model_visible_conversation(
     )
 
 
-def parse_model_visible_conversation(question: str) -> tuple[dict[str, str], ...]:
+def parse_model_visible_conversation(
+    question: str, *, include_rubric_context: bool = True,
+) -> tuple[dict[str, str], ...]:
     """Recover native role/content messages from one rendered TaskRecord."""
 
     if not isinstance(question, str) or not question.startswith(_CONVERSATION_HEADER):
@@ -109,9 +122,25 @@ def parse_model_visible_conversation(question: str) -> tuple[dict[str, str], ...
         payload = json.loads(serialized)
     except json.JSONDecodeError as exc:
         raise ValueError("invalid HealthBench conversation JSON") from exc
-    if not isinstance(payload, Mapping) or set(payload) != {"messages"}:
-        raise ValueError("HealthBench conversation payload must contain only messages")
-    return _validated_messages(payload["messages"])
+    if not isinstance(payload, Mapping) or set(payload) not in (
+        {"messages"}, {"messages", "rubric_aware_context"},
+    ):
+        raise ValueError("HealthBench conversation payload has unsupported fields")
+    messages = _validated_messages(payload["messages"])
+    if "rubric_aware_context" not in payload:
+        return messages
+    context = payload["rubric_aware_context"]
+    if (not isinstance(context, Mapping)
+            or set(context) != {"protocol", "content"}
+            or context["protocol"] != "rubric_aware"
+            or not isinstance(context["content"], str)
+            or not context["content"].strip()):
+        raise ValueError("invalid explicit rubric-aware context")
+    # Keep the original clinical conversation intact. Experimental evaluation
+    # information is a distinct context, never a fictitious patient message.
+    if include_rubric_context:
+        return ({"role": "system", "content": context["content"]}, *messages)
+    return messages
 
 
 def validate_official_healthbench_professional_row(

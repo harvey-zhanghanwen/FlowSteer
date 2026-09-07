@@ -1,5 +1,29 @@
 # AIME 2026 initial-adaptation source map
 
+## 2026-09-07: explicit rubric-aware HealthBench information condition
+
+- **Unchanged upstream reuse:** SkillFlow bounded Agent execution and FlowSteer
+  Canvas step/feedback/producer-artifact flow, via the existing AgentGraph runtime.
+  No medical role, fixed topology, alternative scheduler, evaluator or trainer.
+- **Required task-specific adaptation requested by user:**
+  `scripts/healthbench_rubric_context.py::build_bank/attach_context` reuses
+  `healthbench_professional_grader.load_private_cases` and immutable TaskRecord.
+  The official rubric projection supplies exact criterion/points; positive and
+  negative directions are explicit. Physician responses are excluded.
+- **Existing adapter extension:** `healthbench_professional_adapter` renderer/parser
+  retains the original conversation and adds a separately labeled experimental
+  context only when explicitly supplied. Official row validation is unchanged.
+  `openai_gateway.build_agent_messages` merges this into its existing system message;
+  original-name checks and conversation indexing explicitly omit the supplement.
+- **Runner reuse:** `_select_tasks` attaches the same context before freezing either
+  arm. Exact frozen-task comparison prevents reuse of rubric-hidden predictions.
+  Manifest/report information-condition receipts explicitly disallow comparing this
+  treatment as ordinary rubric-hidden benchmarking. Native grading is unchanged.
+- **Not implemented/claimed:** reference-answer generation, rubric-conditioned
+  external corpus generation, learned/ACTIVE Skill, training, or a paid Direct arm.
+  Existing actual medical evidence remains independently sourced and queryable.
+  Full provenance, config and restore commands: `healthbench_rubric_aware_full525_20260907.md`.
+
 ## 2026-09-07: paused evaluation, public-task and source-retrieval repairs
 
 | Module | Source and implementation boundary |

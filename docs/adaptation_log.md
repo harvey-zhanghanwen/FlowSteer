@@ -1,5 +1,28 @@
 # AIME 2026 initial-adaptation log
 
+## 2026-09-07: user-authorized rubric-aware full525 experiment
+
+The user superseded the hidden-rubric constraint for this **separate experiment**,
+requesting per-task rubric data and a new525 run. Preserve the prior rubric-hidden
+repair branch `feature/healthbench-public-task-repair-20260907`, pushed at
+`4d8e5f3d01501bc59e00930c03a2e14b443f004d`. New work is isolated in
+`feature/healthbench-rubric-aware-full525-20260907` and a distinct artifact namespace.
+
+Built a525-case/1135-criterion context bank without paid generation, physician
+answers or invented medical evidence. Keep signed criteria apart from4505 external
+medical records and the patient-conversation index. Local BGE index4538 windows
+remains queryable through existing ReAct tools. This exposes test information and
+must **not** be called rubric-hidden, held-out generalization or an architecture-only
+improvement. Future Direct receives identical rubric information; it is not run now.
+
+The shared task selection and existing adapters implement the opt-in condition.
+Official grader task-ID join still uses the untouched original conversation.
+Native metrics and original sample order/count, model condition, seed, concurrency4,
+900-second budget and20 rounds stay unchanged. No training or Skill publication.
+80 targeted offline tests passed; actual525 prepare-only succeeded, with no scores.
+Run/push status will be reported from actual receipts, not inferred from preparation.
+See `healthbench_rubric_aware_full525_20260907.md` for restore scope and limitations.
+
 ## 2026-09-07: user pause and evidence-library refinement
 
 At the user's request, SIGINT was sent only to the verified HealthBench full525
