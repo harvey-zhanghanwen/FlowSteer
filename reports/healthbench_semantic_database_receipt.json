@@ -1,0 +1,33 @@
+{
+  "construction_complete": true,
+  "public_question_count": 525,
+  "public_query_count": 640,
+  "corpus_manifest": {
+    "schema_version": "flowsteer.healthbench.semantic-evidence-index.v1",
+    "status": "frozen",
+    "encoder": "BAAI/bge-base-en-v1.5",
+    "encoder_path": "/ssd1/iclr/.private/skillflow-resources/bge-base-en-v1.5",
+    "source_manifest": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-question-corpus/artifacts/healthbench_public525_evidence_corpus_v1/manifest.json",
+    "record_count": 4422,
+    "window_count": 4433,
+    "dimension": 768,
+    "window_tokens": 480,
+    "overlap_tokens": 64,
+    "source_text_preserved": true,
+    "source_counts": {
+      "MedRAG/textbooks": 3917,
+      "NCBI PubMed": 496,
+      "Europe PMC": 9
+    },
+    "retrieval": "SkillFlow normalized BM25 0.4 + BGE cosine 0.6; threshold 0.15",
+    "scope": "semantic access to existing public525 external-evidence library; not a new full-corpus harvest",
+    "training_performed": false,
+    "paid_model_calls": 0,
+    "grader_calls": 0
+  },
+  "running_architecture_commit": "bf4cd23a578abd8b4f5685f09b1852eabb9d2b02",
+  "configuration": "config/evaluation_healthbench_semantic_skills_new5.yaml",
+  "candidate_profile": "config/healthbench_candidate_skills_semantic_v1.yaml",
+  "backup_scope": "source, configuration, construction receipt and reproduction documentation; source corpus and vector assets remain local",
+  "clinical_relevance_or_answer_accuracy_verified": false
+}

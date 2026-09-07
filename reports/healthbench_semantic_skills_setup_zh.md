@@ -72,8 +72,15 @@ ID 与排除列表见 [选择记录](healthbench_semantic_new5_selection.json)�
 （模型载入完成后测量，不含模型冷启动）。查询包括 heart attack diagnosis、
 medication interactions in older adults、研究证据与建议的匹配问题。
 第一项实际返回 Harrison 和 First Aid 教材片段；第二项第三名仍返回与药物相互
-作用无直接对应的老年孤独症干预试验，因此检索相关性并未被“语义”自动解决。
+作用无直接对应的老年孤独感干预试验，因此检索相关性并未被“语义”自动解决。
 这些是接口和检索行为检查，不是临床核验、召回率评估或答案准确率。
+
+建库已全部结束：525 个问题、640 条公开查询均保存了检索 receipt。
+见 [构建完成记录](healthbench_semantic_database_receipt.json)。
+GPU6/8026 当前运行源码为 `bf4cd23a578abd8b4f5685f09b1852eabb9d2b02`，
+已推送到上述独立分支；后续构建记录与文字修正提交不改变这次运行代码或条件。
+源码、配置、候选 profile、必要公开记录备份到 Git；来源摘录、向量文件和完整
+评测 trajectory 仍保存在本地各自 artifacts 目录，不把它们冒称为已上传的资产。
 
 ```bash
 OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 TOKENIZERS_PARALLELISM=false HF_HUB_OFFLINE=1 \
