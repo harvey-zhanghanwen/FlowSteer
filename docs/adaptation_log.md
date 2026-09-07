@@ -15,7 +15,12 @@ Candidate profile v248 is injected through the existing collector interface;
 it contains no task-specific answer or rubric. Output remains a full response.
 Prepare-only passed for the frozen five IDs; offline collector tests verify
 all three rejectable priors reach collect, with no ACTIVE store or optimizer.
-Official scores are pending execution and are not predicted here.
+The frozen run finished with 4/5 valid FINISH receipts: raw 26.9231% and
+length-adjusted 26.4791% on completed cases. One Director context-capacity
+failure leaves both full-five means N/A. No additional evaluation was launched.
+The existing offline report generator from 8359561 was reused after collection;
+it makes zero model/Tool/grader calls. Full results and failure classification:
+[Chinese result report](../reports/healthbench_v233_all_sources_candidate_results_zh.md).
 
 ## Scope
 
