@@ -411,13 +411,13 @@ tracking:
 gpu:
   execution_layout: "single_gpu_sequential"
   gradient_worker_count: 1
-  learner_physical: 1
-  rollout_physical: 1
-  gradient_replica_physical: 1
-  learner_device: "cuda:1"
-  gradient_replica_device: "cuda:1"
+  learner_physical: "${HOTPOTQA_TRAIN_GPU:-1}"
+  rollout_physical: "${HOTPOTQA_TRAIN_GPU:-1}"
+  gradient_replica_physical: "${HOTPOTQA_TRAIN_GPU:-1}"
+  learner_device: "cuda:${HOTPOTQA_TRAIN_GPU:-1}"
+  gradient_replica_device: "cuda:${HOTPOTQA_TRAIN_GPU:-1}"
   rollout_engine: "sglang"
-  supervisor_gpu_id: 1
+  supervisor_gpu_id: "${HOTPOTQA_TRAIN_GPU:-1}"
   supervisor_port: 8016
   supervisor:
     # SkillFlow Qwen3.5 serving uses the PyTorch sampling backend. The manager

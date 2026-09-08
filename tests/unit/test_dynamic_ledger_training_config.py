@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from src.interactive.config_loader import load_yaml, validate_agent_graph_config
@@ -166,16 +167,20 @@ def test_phase_a_through_e_remain_fail_closed_and_phase_e_is_not_claimed() -> No
     assert phase_e["expected_natural_trajectories"] == 200
 
 
-def test_gpu1_profile_is_single_worker_sequential_and_uses_task_port() -> None:
+def test_gpu1_profile_is_single_worker_sequential_and_uses_task_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HOTPOTQA_TRAIN_GPU", raising=False)
     config = load_yaml(DYNAMIC_CONFIG)
+    validate_agent_graph_config(config)
     gpu = config["gpu"]
     assert gpu["execution_layout"] == "single_gpu_sequential"
     assert gpu["gradient_worker_count"] == 1
     assert {
-        gpu["learner_physical"],
-        gpu["rollout_physical"],
-        gpu["gradient_replica_physical"],
-        gpu["supervisor_gpu_id"],
+        int(gpu["learner_physical"]),
+        int(gpu["rollout_physical"]),
+        int(gpu["gradient_replica_physical"]),
+        int(gpu["supervisor_gpu_id"]),
     } == {1}
     assert gpu["learner_device"] == gpu["gradient_replica_device"] == "cuda:1"
     assert gpu["supervisor_port"] == 8016
@@ -195,6 +200,38 @@ def test_gpu1_profile_is_single_worker_sequential_and_uses_task_port() -> None:
     assert gpu["lifecycle"]["fail_closed"] is True
     assert gpu["lifecycle"]["stop_only_runtime_owned_process"] is True
     assert gpu["oom_policy"]["micro_batch_schedule"] == [4, 2, 1]
+
+
+@pytest.mark.parametrize("physical_gpu", range(8))
+def test_gpu_environment_override_changes_only_device_bindings(
+    monkeypatch: pytest.MonkeyPatch, physical_gpu: int
+) -> None:
+    monkeypatch.delenv("HOTPOTQA_TRAIN_GPU", raising=False)
+    default_config = load_yaml(DYNAMIC_CONFIG)
+    validate_agent_graph_config(default_config)
+
+    monkeypatch.setenv("HOTPOTQA_TRAIN_GPU", str(physical_gpu))
+    config = load_yaml(DYNAMIC_CONFIG)
+    validate_agent_graph_config(config)
+
+    physical_fields = (
+        "learner_physical",
+        "rollout_physical",
+        "gradient_replica_physical",
+        "supervisor_gpu_id",
+    )
+    device_fields = ("learner_device", "gradient_replica_device")
+    for field in physical_fields:
+        assert int(default_config["gpu"][field]) == 1
+        assert int(config["gpu"][field]) == physical_gpu
+    for field in device_fields:
+        assert default_config["gpu"][field] == "cuda:1"
+        assert config["gpu"][field] == f"cuda:{physical_gpu}"
+
+    for field in (*physical_fields, *device_fields):
+        default_config["gpu"].pop(field)
+        config["gpu"].pop(field)
+    assert config == default_config
 
 
 def test_frozen_validation_monitor_and_round01_start_are_not_changed() -> None:
