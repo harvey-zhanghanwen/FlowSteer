@@ -71,3 +71,26 @@ checkpoint；runner 原先把这种返回直接当作不可继续的异常。
 - runner 恢复集成及原有顺序边界：6 项 CPU 测试通过，证明失败不提交、重采
   ID 不重叠、同一 policy 继续、成功才增加一次 step；未知/更新后异常拒绝重放。
 - shell 语法与 Python 语法检查通过。没有用这些 CPU 测试冒充真实训练结果。
+
+## 15:41 的第二次零更新与零 action mask 修正
+
+第 4 step 的 attempt 1 再次未更新：4 组无奖励差异、1 组 action log-prob
+差异超出 0.25（最大 0.2973239），另 2 组被新增的
+`invalid_executed_action_span` 拒绝。自动恢复当时没有允许这个新原因，因此
+退出；不能把这次退出说成已经自动成功重试。
+
+已确认后两组属于工程误拒：199 个 turn 中有 5 个解析失败轮，真实 receipt
+有效、mask 为 0，且所在轨迹有后续有效动作。MD §4.5、原 FlowSteer action
+mask 和项目既有 `TrajectoryRecord.grpo_eligible` 只要求整条轨迹至少一个
+有效 action token，不要求每轮都有。因此仅将 preflight 的非法范围从
+`<=0` 改为 `<0`，保留完整形状校验、越界拒绝及实际 action token 的 0.25
+一致性阈值。零 mask 轮仍是上下文，对其梯度为零；全零轨迹仍不进入训练。
+
+已知 action-span 预检拒绝也加入“明确零更新后整批丢弃重采”的恢复列表；
+这不允许非法 span 进入 loss，不放宽 checkpoint/非零更新/未知错误门控。
+旧 attempt 完整归档到 `attempt_000002`，下一次采样 attempt_index=2、
+rollout_index_offset=200000000，完整提交步数仍为 3。
+
+验证：13 项 CPU action-mask 测试通过；20 项恢复及 runner 集成测试、35 个
+子测试通过。修复后的分组仍须在真实运行中通过其余 action token 的检查，
+不能预先把它们记为有效训练组。

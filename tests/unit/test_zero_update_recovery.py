@@ -104,6 +104,19 @@ class ZeroUpdateRecoveryTests(unittest.TestCase):
         self.assertEqual({"attempt_index": 0, "rollout_index_offset": 0},
                          self.transaction.retry_context(5))
 
+    def test_known_action_span_rejection_can_resample_but_never_admits_old_batch(self):
+        rejected = {**self.summary, "exclusions": {
+            "group-a": "invalid_executed_action_span",
+            "group-b": "behavior_logprob_tolerance_exceeded",
+        }}
+        self.write(self.step / "learner" / "training_summary.json", rejected)
+        receipt = self.recover()
+        self.assertEqual(0, receipt["optimizer_updates"])
+        self.assertFalse(receipt["consumed_by_optimizer"])
+        self.assertEqual(100_000_000, receipt["rollout_index_offset"])
+        archived = Path(receipt["archived_step_directory"])
+        self.assertEqual(rejected, json.loads((archived / "learner" / "training_summary.json").read_text()))
+
     def test_second_rejection_increments_namespace_and_retains_first_attempt(self):
         first = self.recover()
         original = Path(first["archived_step_directory"]) / "trajectories.jsonl"

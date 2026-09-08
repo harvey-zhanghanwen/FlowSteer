@@ -1166,7 +1166,7 @@ class Qwen35OnePassSmokeTrainer:
                         action_tokens = turn.executed_prefix_tokens
                         if (
                             type(action_tokens) is not int
-                            or action_tokens <= 0
+                            or action_tokens < 0
                             or action_tokens > len(turn.output_token_ids)
                         ):
                             accepted = False
@@ -1187,6 +1187,10 @@ class Qwen35OnePassSmokeTrainer:
                         # executed action.  Preserve the complete receipt shape
                         # check above, but do not reject a group for unused
                         # sampled suffix tokens outside the backward mask.
+                        # A parser-failure turn consumes no action and has an
+                        # all-zero mask.  MD 4.5 preserves it as context; the
+                        # existing trajectory eligibility gate requires at
+                        # least one consumed action elsewhere in the rollout.
                         computed = computed[:action_tokens]
                         behavior = behavior[:action_tokens]
                         if computed.numel():

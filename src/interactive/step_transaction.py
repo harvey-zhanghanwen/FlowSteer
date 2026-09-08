@@ -226,6 +226,9 @@ class StepTransaction:
             or any(not isinstance(key, str) or not key for key in exclusions)
             or any(reason not in {
                 "zero_information_group", "behavior_logprob_tolerance_exceeded",
+                # Known pre-backward receipt rejection: discard the whole
+                # proven-zero-update batch, never admit malformed tokens.
+                "invalid_executed_action_span",
             } for reason in exclusions.values())
         ):
             raise ValueError("not every exact group has an allowed rejection reason")
