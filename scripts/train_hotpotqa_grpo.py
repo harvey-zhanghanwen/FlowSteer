@@ -123,6 +123,10 @@ class HotpotTrainingError(RuntimeError):
     """The sequential training transaction failed closed."""
 
 
+class ZeroUpdateBatchError(HotpotTrainingError):
+    """No optimizer update; recovery still requires the durable zero-update proof."""
+
+
 class TrainingTracker(Protocol):
     run_id: str
     run_url: str
@@ -1823,6 +1827,8 @@ def _verify_training_summary(
     gradient_worker_count: int = 2,
 ) -> None:
     required_positive = ("grad_norm", "trainable_update_l2")
+    if summary.get("optimizer_updates") == 0:
+        raise ZeroUpdateBatchError("sealed GRPO batch produced no optimizer update")
     if int(summary.get("optimizer_updates", 0)) != 1:
         raise HotpotTrainingError("sealed GRPO batch produced no optimizer update")
     if summary.get("behavior_policy_version") != behavior_policy:
@@ -2893,6 +2899,20 @@ async def run_hotpotqa_training(
     if stop_after_optimizer_steps is not None and completed >= stop_after_optimizer_steps:
         raise HotpotTrainingError("requested boundary was already committed")
 
+    transaction = StepTransaction(paths["root"])
+    if resume and state:
+        # Only an explicit zero-update learner receipt permits this recovery.
+        # Never replay an interrupted/committed optimizer or publish operation.
+        transaction.recover_zero_update(
+            state,
+            expected_absolute_update_step=int(experiment["initial_update_step"]) + completed,
+        )
+    if transaction.load() is not None:
+        raise HotpotTrainingError(
+            "an uncommitted step recovery record exists; automatic replay is "
+            "intentionally blocked to avoid a duplicate optimizer update"
+        )
+
     manifest["optimizer_updates_completed"] = completed
     manifest["status"] = "running"
     _atomic_write_json(paths["manifest"], manifest)
@@ -2911,14 +2931,6 @@ async def run_hotpotqa_training(
         "mode": "online",
     }
     _atomic_write_json(paths["manifest"], manifest)
-
-    transaction = StepTransaction(paths["root"])
-    unfinished = transaction.load()
-    if unfinished is not None:
-        raise HotpotTrainingError(
-            "an uncommitted step recovery record exists; automatic replay is "
-            "intentionally blocked to avoid a duplicate optimizer update"
-        )
 
     if state:
         behavior_policy = str(state["behavior_policy_version"])
@@ -3003,6 +3015,8 @@ async def run_hotpotqa_training(
             if _STOP_REQUESTED or (paths["root"] / "STOP_REQUESTED").is_file():
                 manifest["status"] = "paused_at_safe_boundary"
                 break
+            retry_context = transaction.retry_context(training_step)
+            rollout_index_offset = int(retry_context["rollout_index_offset"])
             skill_runtime_update: Optional[SkillRuntimeUpdate] = None
             skill_runtime_update_path: Optional[Path] = None
             if dynamic_mode and ledger_epoch is not None and completed > 0:
@@ -3080,6 +3094,12 @@ async def run_hotpotqa_training(
                     for task in tasks
                 ],
             )
+            _atomic_write_json(step_dir / "sampling_attempt.json", {
+                "training_step": training_step,
+                "behavior_policy_version": behavior_policy,
+                "behavior_adapter_name": behavior_adapter,
+                **retry_context,
+            })
             step_value = _step_config(
                 config,
                 training_step=training_step,
@@ -3095,6 +3115,7 @@ async def run_hotpotqa_training(
                 behavior_policy_version=behavior_policy,
                 behavior_adapter_name=behavior_adapter,
                 candidate_policy_version=candidate_policy,
+                sampling_attempt=retry_context["attempt_index"],
             )
             transaction.seal(
                 step=training_step,
@@ -3131,7 +3152,7 @@ async def run_hotpotqa_training(
                     backend,
                     tasks,
                     rollouts_per_task=int(batch_config["rollouts_per_task"]),
-                    start_rollout_index=(training_step - 1) * 1000,
+                    start_rollout_index=rollout_index_offset + (training_step - 1) * 1000,
                 )
                 # Preserve completed on-policy sampling before optional paired
                 # exploration can fail. These files are evidence, not an
@@ -3173,7 +3194,7 @@ async def run_hotpotqa_training(
                     backend,
                     natural_batch,
                     selected_sites=selected_sites,
-                    start_rollout_index=5_000_000 + training_step * 100_000,
+                    start_rollout_index=rollout_index_offset + 5_000_000 + training_step * 100_000,
                 )
                 trajectories = dynamic_batch.natural_trajectories
                 dynamic_metrics = dict(dynamic_epoch_metrics(dynamic_batch))
@@ -3230,7 +3251,7 @@ async def run_hotpotqa_training(
                         rollout_jobs.append(
                             backend.collect(
                                 task,
-                                (training_step - 1) * 1000 + rollout_index,
+                                rollout_index_offset + (training_step - 1) * 1000 + rollout_index,
                                 versions,
                                 expected_task_split="train",
                             )
@@ -3526,7 +3547,7 @@ async def run_hotpotqa_training(
                     if updated_coordinator is not None:
                         versions = dynamic_transition.next_epoch.condition.versions
                         hook = updated_coordinator.make_hook(
-                            1_000_000 + training_step * 10 + index
+                            rollout_index_offset + 1_000_000 + training_step * 10 + index
                         )
                         canary_hooks.append(hook)
                         condition_id = dynamic_transition.next_epoch.condition.condition_id
@@ -3548,7 +3569,7 @@ async def run_hotpotqa_training(
                         jobs.append(
                             backend.collect(
                                 task,
-                                1_000_000 + training_step * 10 + index,
+                                rollout_index_offset + 1_000_000 + training_step * 10 + index,
                                 versions,
                                 expected_task_split="train",
                             )
@@ -3557,7 +3578,7 @@ async def run_hotpotqa_training(
                         jobs.append(
                             backend.collect(
                                 task,
-                                1_000_000 + training_step * 10 + index,
+                                rollout_index_offset + 1_000_000 + training_step * 10 + index,
                                 versions,
                                 expected_task_split="train",
                                 observation_hook=hook,
@@ -3645,7 +3666,7 @@ async def run_hotpotqa_training(
                         )
                     versions = dynamic_transition.next_epoch.condition.versions
                     hook = updated_coordinator.make_hook(
-                        2_000_000 + training_step * 100 + index
+                        rollout_index_offset + 2_000_000 + training_step * 100 + index
                     )
                     validation_hooks.append(hook)
                     condition_id = dynamic_transition.next_epoch.condition.condition_id
@@ -3667,7 +3688,7 @@ async def run_hotpotqa_training(
                     validation_jobs.append(
                         backend.collect(
                             task,
-                            2_000_000 + training_step * 100 + index,
+                            rollout_index_offset + 2_000_000 + training_step * 100 + index,
                             versions,
                             expected_task_split="validation",
                         )
@@ -3676,7 +3697,7 @@ async def run_hotpotqa_training(
                     validation_jobs.append(
                         backend.collect(
                             task,
-                            2_000_000 + training_step * 100 + index,
+                            rollout_index_offset + 2_000_000 + training_step * 100 + index,
                             versions,
                             expected_task_split="validation",
                             observation_hook=hook,
@@ -4124,6 +4145,36 @@ async def run_hotpotqa_training(
                 # already records fail-closed cleanup state when available.
                 pass
             active_sequential_runtime = None
+        cause: Optional[BaseException] = exc
+        while cause is not None and not isinstance(cause, ZeroUpdateBatchError):
+            cause = cause.__cause__
+        if cause is not None and paths["state"].is_file():
+            try:
+                committed_state = json.loads(paths["state"].read_text(encoding="utf-8"))
+                recovery = transaction.recover_zero_update(
+                    committed_state,
+                    expected_absolute_update_step=int(experiment["initial_update_step"]) + completed,
+                )
+            except (ValueError, RuntimeError, OSError) as recovery_error:
+                # Keep the original failure; unknown state must not be replayed.
+                manifest["zero_update_recovery_error"] = _safe_error(recovery_error)
+            else:
+                if recovery is not None:
+                    manifest.update(
+                        status="retryable_zero_update",
+                        optimizer_updates_completed=completed,
+                        rejected_batch_recovery=recovery,
+                        last_batch_error=_safe_error(exc),
+                        retry_requested_at=_utc_now(),
+                    )
+                    _atomic_write_json(paths["manifest"], manifest)
+                    active_tracker.update_summary({
+                        "status": "retryable_zero_update",
+                        "optimizer_updates_completed": completed,
+                        "rejected_batch/attempt_index": recovery["attempt_index"],
+                    })
+                    active_tracker.finish(exit_code=0)
+                    return manifest
         manifest.update(
             status="failed",
             optimizer_updates_completed=completed,
@@ -4277,6 +4328,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except (ConfigurationError, HotpotTrainingError, ValueError, RuntimeError) as exc:
         print(f"HotpotQA training failed: {_safe_error(exc)}", file=sys.stderr)
         return 1
+    if manifest["status"] == "retryable_zero_update":
+        print("Rejected batch archived without an optimizer update; resource-gated resampling requested.")
+        return 75
     print(
         json.dumps(
             {

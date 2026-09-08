@@ -9,6 +9,11 @@ if [[ "$gpu_selection" != auto && ! "$gpu_selection" =~ ^(0|[1-9][0-9]*)$ ]]; th
   exit 2
 fi
 approved_residual_pid=${HOTPOTQA_APPROVED_RESIDUAL_PID:-}
+stop_after_steps=${HOTPOTQA_STOP_AFTER_STEPS:-250}
+if [[ ! "$stop_after_steps" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'Stop boundary must be a positive optimizer step count\n'
+  exit 2
+fi
 if [[ -n "$approved_residual_pid" && ( "$gpu_selection" == auto || ! "$approved_residual_pid" =~ ^[1-9][0-9]*$ ) ]]; then
   printf 'Approved residual PID requires an explicitly selected GPU and positive PID\n'
   exit 2
@@ -36,6 +41,7 @@ gpu_processes_admissible() {
 
 # Resource admission only: do not adopt/stop another project's GPU process.
 # Three idle snapshots and this local flock are not a cluster-wide reservation.
+while true; do
 idle_checks=0
 training_gpu=''
 last_resource_state=''
@@ -80,12 +86,14 @@ while (( SECONDS < queue_deadline )); do
   sleep 2
 done
 if (( idle_checks < 3 )); then
-  printf '24-hour resource wait expired without launching training\n'
-  exit 75
+  printf 'GPU still busy after 24 hours; continuing resource wait without launching training\n'
+  sleep 30
+  continue
 fi
 if [ -n "$(ss -H -ltn '( sport = :8016 )')" ]; then
-  printf 'Director port 8016 is occupied; no existing service changed\n'
-  exit 2
+  printf 'Director port 8016 is occupied; waiting without changing the existing service\n'
+  sleep 30
+  continue
 fi
 
 set -a
@@ -122,11 +130,21 @@ PY
 final_free=$(nvidia-smi -i "$training_gpu" --query-gpu=memory.free --format=csv,noheader,nounits)
 final_free=${final_free//[[:space:]]/}
 if [[ ! "$final_free" =~ ^[0-9]+$ ]] || (( final_free < 78000 )) || ! gpu_processes_admissible "$training_gpu"; then
-  printf 'Selected GPU became occupied during preflight; no training launched\n'
-  exit 75
+  printf 'Selected GPU became occupied during preflight; returning to resource wait\n'
+  sleep 30
+  continue
 fi
 printf 'GPU%s idle; resuming existing checkpoint and W&B run at %s\n' "$training_gpu" "$(date -Is)"
-exec /ssd1/iclr/gpf/venvs/skillflow/bin/python scripts/train_hotpotqa_grpo.py \
+training_exit=0
+/ssd1/iclr/gpf/venvs/skillflow/bin/python scripts/train_hotpotqa_grpo.py \
   --config config/training_hotpotqa_dynamic_ledger_grpo.yaml \
-  --allow-md-grpo --resume --stop-after-optimizer-steps 300 \
-  >>"artifacts/hotpotqa_dynamic_ledger_grpo_300step/long_training_console_20260908_gpu${training_gpu}_resume.log" 2>&1
+  --allow-md-grpo --resume --stop-after-optimizer-steps "$stop_after_steps" \
+  >>"artifacts/hotpotqa_dynamic_ledger_grpo_300step/long_training_console_20260908_gpu${training_gpu}_resume.log" 2>&1 || training_exit=$?
+if (( training_exit == 75 )); then
+  printf 'Zero-update batch archived; waiting 30s before resource-gated resampling (no optimizer step counted)\n'
+  sleep 30
+  continue
+fi
+# Unknown failures and post-update recovery are not safe batch replays.
+exit "$training_exit"
+done

@@ -1163,6 +1163,15 @@ class Qwen35OnePassSmokeTrainer:
                 for item in group:
                     record = records_by_id[item.trajectory_id]
                     for turn in record.turns:
+                        action_tokens = turn.executed_prefix_tokens
+                        if (
+                            type(action_tokens) is not int
+                            or action_tokens <= 0
+                            or action_tokens > len(turn.output_token_ids)
+                        ):
+                            accepted = False
+                            reason = "invalid_executed_action_span"
+                            break
                         computed = self._turn_log_probs(model, device, turn)
                         behavior = torch.tensor(
                             list(turn.behavior_log_probs),
@@ -1173,6 +1182,13 @@ class Qwen35OnePassSmokeTrainer:
                             accepted = False
                             reason = "behavior_receipt_shape_mismatch"
                             break
+                        # FlowSteer's action mask and SkillFlow's action
+                        # teacher-forcing both restrict optimization to the
+                        # executed action.  Preserve the complete receipt shape
+                        # check above, but do not reject a group for unused
+                        # sampled suffix tokens outside the backward mask.
+                        computed = computed[:action_tokens]
+                        behavior = behavior[:action_tokens]
                         if computed.numel():
                             delta = float(
                                 (computed.detach().float() - behavior).abs().max().cpu()
