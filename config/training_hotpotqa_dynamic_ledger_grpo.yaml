@@ -117,7 +117,7 @@ data:
 
 storage:
   schema_version: "flowsteer.hotpotqa.dynamic_ledger_grpo_training.v1"
-  root: "artifacts/hotpotqa_dynamic_ledger_grpo_300step/evidence"
+  root: "${HOTPOTQA_EVIDENCE_ROOT:-artifacts/hotpotqa_dynamic_ledger_grpo_300step/evidence}"
   persist_exact_policy_receipts: true
   manifest_path: "artifacts/hotpotqa_dynamic_ledger_grpo_300step/run_manifest.json"
   state_path: "artifacts/hotpotqa_dynamic_ledger_grpo_300step/run_state.json"

@@ -30,6 +30,9 @@ assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 _CONFIG = _SCRIPT.parents[1] / "config" / "training_hotpotqa_grpo.yaml"
+_DYNAMIC_CONFIG = (
+    _SCRIPT.parents[1] / "config" / "training_hotpotqa_dynamic_ledger_grpo.yaml"
+)
 
 HotpotTrainingError = _MODULE.HotpotTrainingError
 run_hotpotqa_training = _MODULE.run_hotpotqa_training
@@ -468,6 +471,38 @@ def _create_project(root: Path) -> Path:
 
 
 class ConfigAndSamplingTests(unittest.TestCase):
+    def test_dynamic_evidence_root_defaults_to_existing_directory(self) -> None:
+        for environment in ({}, {"HOTPOTQA_EVIDENCE_ROOT": ""}):
+            with (
+                self.subTest(environment=environment),
+                patch.dict(_MODULE.os.environ, environment, clear=True),
+            ):
+                config = _MODULE.load_yaml(_DYNAMIC_CONFIG)
+                self.assertEqual(
+                    "artifacts/hotpotqa_dynamic_ledger_grpo_300step/evidence",
+                    config["storage"]["root"],
+                )
+
+    def test_dynamic_evidence_root_override_changes_only_storage_root(self) -> None:
+        evidence_root = (
+            "artifacts/hotpotqa_dynamic_ledger_grpo_300step/evidence_proxy_resume"
+        )
+        with patch.dict(_MODULE.os.environ, {}, clear=True):
+            default_config = _MODULE.load_yaml(_DYNAMIC_CONFIG)
+            with patch.dict(
+                _MODULE.os.environ, {"HOTPOTQA_EVIDENCE_ROOT": evidence_root}
+            ):
+                isolated_config = _MODULE.load_yaml(_DYNAMIC_CONFIG)
+
+        self.assertEqual(evidence_root, isolated_config["storage"]["root"])
+        isolated_config["storage"]["root"] = default_config["storage"]["root"]
+        self.assertEqual(
+            default_config,
+            isolated_config,
+            "Evidence isolation must not change any sampling, model, policy, "
+            "GRPO, seed, checkpoint, or other configuration field",
+        )
+
     def test_config_fixes_grpo_and_disables_other_learning_flows(self) -> None:
         config = yaml.safe_load(_CONFIG.read_text(encoding="utf-8"))
         validate_hotpotqa_training_config(config)

@@ -8,10 +8,31 @@ if [[ "$gpu_selection" != auto && ! "$gpu_selection" =~ ^(0|[1-9][0-9]*)$ ]]; th
   printf 'GPU selection must be auto or a non-negative physical GPU index\n'
   exit 2
 fi
+approved_residual_pid=${HOTPOTQA_APPROVED_RESIDUAL_PID:-}
+if [[ -n "$approved_residual_pid" && ( "$gpu_selection" == auto || ! "$approved_residual_pid" =~ ^[1-9][0-9]*$ ) ]]; then
+  printf 'Approved residual PID requires an explicitly selected GPU and positive PID\n'
+  exit 2
+fi
 cd /ssd1/iclr/1/.tmp/FlowSteer-hotpotqa-skillflow-ttb-250step-20260906
 exec 9>artifacts/hotpotqa_dynamic_ledger_grpo_300step/training_process.lock
 flock -n 9
 printf 'GPU selection=%s resume queue pid=%s started=%s; optimizer is not running while waiting\n' "$gpu_selection" "$$" "$(date -Is)"
+
+# Optional operational admission for the explicitly approved small allocation.
+# Do not stop it, infer ownership, or relax the existing free-memory threshold.
+gpu_processes_admissible() {
+  local target_gpu=$1 observed_apps observed_pid observed_memory observed_util
+  observed_apps=$(nvidia-smi -i "$target_gpu" --query-compute-apps=pid,used_gpu_memory --format=csv,noheader,nounits) || return 2
+  if [[ -z "$observed_apps" ]]; then return 0; fi
+  [[ -n "$approved_residual_pid" && "$observed_apps" != *$'\n'* ]] || return 1
+  IFS=, read -r observed_pid observed_memory <<< "$observed_apps"
+  observed_pid=${observed_pid//[[:space:]]/}
+  observed_memory=${observed_memory//[[:space:]]/}
+  [[ "$observed_pid" == "$approved_residual_pid" && "$observed_memory" =~ ^[0-9]+$ ]] || return 1
+  (( observed_memory <= 1024 )) || return 1
+  observed_util=$(nvidia-smi -i "$target_gpu" --query-gpu=utilization.gpu --format=csv,noheader,nounits) || return 2
+  [[ "$observed_util" == 0 ]]
+}
 
 # Resource admission only: do not adopt/stop another project's GPU process.
 # Three idle snapshots and this local flock are not a cluster-wide reservation.
@@ -38,8 +59,7 @@ while (( SECONDS < queue_deadline )); do
       exit 2
     fi
     if (( candidate_free < 78000 )); then continue; fi
-    gpu_apps=$(nvidia-smi -i "$candidate_gpu" --query-compute-apps=pid --format=csv,noheader,nounits)
-    if [ -z "$gpu_apps" ]; then
+    if gpu_processes_admissible "$candidate_gpu"; then
       available_gpu=$candidate_gpu
       break
     fi
@@ -100,9 +120,8 @@ print(f'GPU{target} checkpoint and catalog preflight passed; resuming step {stat
 PY
 # Preflight imports take time: do not launch if another project took the GPU.
 final_free=$(nvidia-smi -i "$training_gpu" --query-gpu=memory.free --format=csv,noheader,nounits)
-final_apps=$(nvidia-smi -i "$training_gpu" --query-compute-apps=pid --format=csv,noheader,nounits)
 final_free=${final_free//[[:space:]]/}
-if [[ ! "$final_free" =~ ^[0-9]+$ ]] || [ -n "$final_apps" ] || (( final_free < 78000 )); then
+if [[ ! "$final_free" =~ ^[0-9]+$ ]] || (( final_free < 78000 )) || ! gpu_processes_admissible "$training_gpu"; then
   printf 'Selected GPU became occupied during preflight; no training launched\n'
   exit 75
 fi
