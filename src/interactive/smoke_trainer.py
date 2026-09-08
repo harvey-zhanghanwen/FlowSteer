@@ -23,6 +23,7 @@ import math
 import os
 from pathlib import Path
 import random
+import re
 from typing import Any, Dict, Mapping, Sequence, Tuple
 import uuid
 
@@ -244,6 +245,7 @@ class SmokeTrainingSummary:
     learning_rate: float = 0.0
     next_learning_rate: float = 0.0
     gpu_memory_allocated_mib: Mapping[str, float] = field(default_factory=dict)
+    cuda_rng_restore_device_map: Mapping[str, str] = field(default_factory=dict)
     gradient_partition_token_costs: Tuple[int, ...] = (0, 0)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -347,6 +349,7 @@ class Qwen35OnePassSmokeTrainer:
 
     def __init__(self, config: SmokeTrainerConfig) -> None:
         self.config = config
+        self.cuda_rng_restore_device_map: dict[str, str] = {}
 
     def train(
         self,
@@ -738,6 +741,9 @@ class Qwen35OnePassSmokeTrainer:
                         "training_state_saved": training_state_saved,
                         "scheduler_state_saved": training_state_saved,
                         "rng_state_saved": training_state_saved,
+                        "cuda_rng_restore_device_map": dict(
+                            self.cuda_rng_restore_device_map
+                        ),
                         "checkpoint_recoverable": training_state_saved,
                         "scheduler_resume_status": scheduler_resume_status,
                         "learning_rate": learning_rate_used,
@@ -798,6 +804,7 @@ class Qwen35OnePassSmokeTrainer:
                 learning_rate=learning_rate_used,
                 next_learning_rate=next_learning_rate,
                 gpu_memory_allocated_mib=gpu_memory_allocated_mib,
+                cuda_rng_restore_device_map=dict(self.cuda_rng_restore_device_map),
                 gradient_partition_token_costs=partition_token_costs,
             )
             self._write_summary(output_path, summary)
@@ -872,6 +879,7 @@ class Qwen35OnePassSmokeTrainer:
     def _restore_training_state(self, torch, optimizer, scheduler) -> tuple[str, str]:
         """Restore the complete FlowSteer optimizer/scheduler/RNG boundary."""
 
+        self.cuda_rng_restore_device_map = {}
         state_checkpoint = self.config.optimizer_state_checkpoint
         if state_checkpoint is None:
             self._seed_training_rng(torch)
@@ -966,12 +974,33 @@ class Qwen35OnePassSmokeTrainer:
             raise ValueError("training checkpoint CUDA RNG state must be a mapping")
         if torch.cuda.is_available():
             expected_devices = set(self._training_devices())
-            if set(cuda_states) != expected_devices:
+            saved_devices = set(cuda_states)
+            if any(
+                not isinstance(device, str)
+                or re.fullmatch(r"cuda:(?:0|[1-9][0-9]*)", device) is None
+                for device in saved_devices | expected_devices
+            ):
+                raise ValueError("training checkpoint CUDA RNG device key is invalid")
+            if saved_devices == expected_devices:
+                device_map = {device: device for device in saved_devices}
+            elif (
+                self.config.gradient_worker_count == 1
+                and len(saved_devices) == len(expected_devices) == 1
+            ):
+                # Project resource-migration adaptation of FlowSteer's RNG
+                # restore boundary: a single learner has an unambiguous role.
+                # Keep its exact saved stream when changing physical GPU;
+                # never reseed or infer a multi-replica device permutation.
+                device_map = {
+                    next(iter(saved_devices)): self.config.learner_device
+                }
+            else:
                 raise ValueError("training checkpoint CUDA RNG devices differ")
             for device, state in cuda_states.items():
                 if hasattr(state, "cpu"):
                     state = state.cpu()
-                torch.cuda.set_rng_state(state, device=device)
+                torch.cuda.set_rng_state(state, device=device_map[device])
+            self.cuda_rng_restore_device_map = device_map
 
     def _save_training_state(
         self,
@@ -1020,6 +1049,7 @@ class Qwen35OnePassSmokeTrainer:
             "numpy_random_state": np.random.get_state(),
             "torch_cpu_rng_state": torch.get_rng_state(),
             "torch_cuda_rng_state_by_device": cuda_states,
+            "cuda_rng_restore_device_map": dict(self.cuda_rng_restore_device_map),
             "frozen_version_fingerprints": sorted(
                 {record.versions.fingerprint for record in records}
             ),
