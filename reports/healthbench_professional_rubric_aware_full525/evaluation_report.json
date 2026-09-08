@@ -1,0 +1,29 @@
+{
+  "benchmark_information_condition": {
+    "bank_version": "healthbench-rubric-aware-20260907-v1",
+    "comparable_to_rubric_hidden_baseline": false,
+    "protocol": "rubric_aware",
+    "rubrics_visible_to_solving_models": true,
+    "same_information_required_for_direct_baseline": true
+  },
+  "collection_arm": "agentgraph",
+  "collection_arm_completed": true,
+  "completed_at": "2026-09-08T05:06:57.145544+00:00",
+  "condition_id": "healthbench_professional_rubric_aware_full525",
+  "dataset_key": "healthbench_professional",
+  "manifest_path": "/ssd1/iclr/1/.tmp/FlowSteer-healthbench-failure-skills-full525/artifacts/healthbench_professional_rubric_aware_full525/evaluation/run_manifest.json",
+  "metrics": {
+    "agentgraph": {
+      "completed": 525,
+      "completed_only_overall_score": 0.6959898220405308,
+      "completed_only_overall_score_length_adjusted": 0.6898770860405317,
+      "denominator": 525,
+      "evaluator_valid": 525,
+      "strict_overall_score": 0.6959898220405308,
+      "strict_overall_score_length_adjusted": 0.6898770860405317
+    }
+  },
+  "paired_comparison_available": false,
+  "sample_count": 525,
+  "schema_version": "flowsteer.completion_benchmark.collection_arm_report.v1"
+}
