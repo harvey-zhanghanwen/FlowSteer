@@ -67,3 +67,39 @@ https://wandb.ai/zhanghanwen6660909-dut/flowsteer-hotpotqa/runs/q78e3r39
 - 启动 shell 的 `bash -n` 通过。
 - 新 step 是否完成，仍必须以实际 checkpoint、optimizer 更新、发布、canary
   和 committed receipt 为准，不能以服务启动或 W&B 连接代替。
+
+## 用户更新的停止边界：约 250 个完整 optimizer steps
+
+用户要求继续当前训练，直到完整跑完约 250 steps。本次不重启训练、不重置
+optimizer/scheduler/RNG，不修改已经加载的 300-step 学习率调度配置。实际停止
+边界由独立进程 `scripts/stop_hotpotqa_at_step.py` 监视已有恢复记录来请求：
+
+- 训练服务仍为 `flowsteer-hotpotqa-grpo-gpu6-proxy-20260908.service`，GPU6。
+- 监控服务为 `flowsteer-hotpotqa-stop250-20260908.service`，目标为 250。
+- `run_state.json.optimizer_updates_completed` 是已完整提交步数；
+  `recovery/current_step.json` 是正在进行的事务，二者不可混为一谈。
+- 当第 250 step 的 `prepared` 或后续状态已经落盘时，监控进程创建既有
+  `STOP_REQUESTED` 标记。trainer 完成当前 step 的 checkpoint、发布、
+  route switch、canary、validation monitor 和 W&B 记录后自行停止。
+- 若轮询恰好跨过目标边界，则保留已经在途的完整 step，不强行中断 optimizer。
+- 若训练异常退出或被已有 held-out gate 暂停，监控进程报告未达到目标并退出，
+  不自动重启，也不绕过原有验收条件。此机制不是训练完成证据或聊天推送服务。
+
+来源：本项目 `scripts/train_hotpotqa_grpo.py::run_hotpotqa_training` 已有循环入口和
+完整提交后的 `STOP_REQUESTED` 检查，以及
+`src/interactive/step_transaction.py::StepPhase`。新增脚本仅为本次长时间
+运行的停止控制适配，不新增优化算法、rollout 层或权重同步协议；不宣称来自
+FlowSteer/SkillFlow 论文的硬件或调度规定。
+
+定向验证：`tests/unit/test_hotpotqa_stop_at_step.py` 的 69 个用例通过，覆盖
+目标前不停止、目标 step 在途/已提交、全部已有事务阶段及无效状态拒绝。
+
+查看后台监控（不启动模型）：
+
+```sh
+systemctl --user status flowsteer-hotpotqa-stop250-20260908.service
+journalctl --user -u flowsteer-hotpotqa-stop250-20260908.service -n 10 --no-pager
+```
+
+这些配置只说明已安排的继续执行与停止条件；最终完成步数、指标和 checkpoint
+必须以实际训练记录和 W&B run 为准，不能将 250 写成已经完成。
