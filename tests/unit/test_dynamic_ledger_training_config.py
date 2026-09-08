@@ -166,7 +166,7 @@ def test_phase_a_through_e_remain_fail_closed_and_phase_e_is_not_claimed() -> No
     assert phase_e["expected_natural_trajectories"] == 200
 
 
-def test_gpu4_profile_is_single_worker_sequential_and_uses_task_port() -> None:
+def test_gpu1_profile_is_single_worker_sequential_and_uses_task_port() -> None:
     config = load_yaml(DYNAMIC_CONFIG)
     gpu = config["gpu"]
     assert gpu["execution_layout"] == "single_gpu_sequential"
@@ -176,8 +176,8 @@ def test_gpu4_profile_is_single_worker_sequential_and_uses_task_port() -> None:
         gpu["rollout_physical"],
         gpu["gradient_replica_physical"],
         gpu["supervisor_gpu_id"],
-    } == {4}
-    assert gpu["learner_device"] == gpu["gradient_replica_device"] == "cuda:4"
+    } == {1}
+    assert gpu["learner_device"] == gpu["gradient_replica_device"] == "cuda:1"
     assert gpu["supervisor_port"] == 8016
     assert config["director"]["api_base"] == "http://127.0.0.1:8016/v1"
     assert config["policy_sync"]["api_base"] == "http://127.0.0.1:8016"

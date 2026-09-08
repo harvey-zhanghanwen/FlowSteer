@@ -214,41 +214,45 @@ class ContinuationStateTests(unittest.TestCase):
         }
 
     def test_single_learner_rng_follows_role_when_gpu_changes(self) -> None:
-        trainer = Qwen35OnePassSmokeTrainer(
-            _config(
-                learner_device="cuda:4",
-                gradient_replica_device="cuda:4",
-                gradient_worker_count=1,
-            )
-        )
-        torch = MagicMock()
-        torch.cuda.is_available.return_value = True
-        saved_state = object()
-        payload = self._rng_payload({"cuda:5": saved_state})
+        for device in ("cuda:4", "cuda:1"):
+            with self.subTest(device=device):
+                trainer = Qwen35OnePassSmokeTrainer(
+                    _config(
+                        learner_device=device,
+                        gradient_replica_device=device,
+                        gradient_worker_count=1,
+                    )
+                )
+                torch = MagicMock()
+                torch.cuda.is_available.return_value = True
+                saved_state = object()
+                payload = self._rng_payload({"cuda:5": saved_state})
 
-        trainer._restore_rng_state(torch, payload)
+                trainer._restore_rng_state(torch, payload)
 
-        torch.cuda.set_rng_state.assert_called_once_with(saved_state, device="cuda:4")
-        torch.cuda.manual_seed.assert_not_called()
-        self.assertEqual(trainer.cuda_rng_restore_device_map, {"cuda:5": "cuda:4"})
-        self.assertEqual(payload["torch_cuda_rng_state_by_device"], {"cuda:5": saved_state})
+                torch.cuda.set_rng_state.assert_called_once_with(saved_state, device=device)
+                torch.cuda.manual_seed.assert_not_called()
+                self.assertEqual(trainer.cuda_rng_restore_device_map, {"cuda:5": device})
+                self.assertEqual(payload["torch_cuda_rng_state_by_device"], {"cuda:5": saved_state})
 
     def test_same_gpu_resume_records_identity_rng_mapping(self) -> None:
-        trainer = Qwen35OnePassSmokeTrainer(
-            _config(
-                learner_device="cuda:4",
-                gradient_replica_device="cuda:4",
-                gradient_worker_count=1,
-            )
-        )
-        torch = MagicMock()
-        torch.cuda.is_available.return_value = True
-        saved_state = object()
+        for device in ("cuda:4", "cuda:1"):
+            with self.subTest(device=device):
+                trainer = Qwen35OnePassSmokeTrainer(
+                    _config(
+                        learner_device=device,
+                        gradient_replica_device=device,
+                        gradient_worker_count=1,
+                    )
+                )
+                torch = MagicMock()
+                torch.cuda.is_available.return_value = True
+                saved_state = object()
 
-        trainer._restore_rng_state(torch, self._rng_payload({"cuda:4": saved_state}))
+                trainer._restore_rng_state(torch, self._rng_payload({device: saved_state}))
 
-        torch.cuda.set_rng_state.assert_called_once_with(saved_state, device="cuda:4")
-        self.assertEqual(trainer.cuda_rng_restore_device_map, {"cuda:4": "cuda:4"})
+                torch.cuda.set_rng_state.assert_called_once_with(saved_state, device=device)
+                self.assertEqual(trainer.cuda_rng_restore_device_map, {device: device})
 
     def test_rng_migration_does_not_infer_multi_worker_permutation(self) -> None:
         trainer = Qwen35OnePassSmokeTrainer(_config())
@@ -279,45 +283,49 @@ class ContinuationStateTests(unittest.TestCase):
                 torch.cuda.set_rng_state.assert_not_called()
 
     def test_migrated_rng_is_saved_on_current_gpu_with_restore_provenance(self) -> None:
-        trainer = Qwen35OnePassSmokeTrainer(
-            _config(
-                learner_device="cuda:4",
-                gradient_replica_device="cuda:4",
-                gradient_worker_count=1,
-            )
-        )
-        torch = MagicMock()
-        torch.cuda.is_available.return_value = True
-        trainer._restore_rng_state(torch, self._rng_payload({"cuda:5": object()}))
-        current_rng_state = object()
-        torch.cuda.get_rng_state.return_value = current_rng_state
-
-        with TemporaryDirectory() as directory:
-            with patch("src.interactive.smoke_trainer.os.replace"):
-                trainer._save_training_state(
-                    torch, MagicMock(), MagicMock(), Path(directory), (),
-                    learning_rate_used=1.0e-4, next_learning_rate=9.0e-5,
+        for device in ("cuda:4", "cuda:1"):
+            with self.subTest(device=device):
+                trainer = Qwen35OnePassSmokeTrainer(
+                    _config(
+                        learner_device=device,
+                        gradient_replica_device=device,
+                        gradient_worker_count=1,
+                    )
                 )
+                torch = MagicMock()
+                torch.cuda.is_available.return_value = True
+                trainer._restore_rng_state(torch, self._rng_payload({"cuda:5": object()}))
+                current_rng_state = object()
+                torch.cuda.get_rng_state.return_value = current_rng_state
 
-        saved_payload = torch.save.call_args.args[0]
-        torch.cuda.get_rng_state.assert_called_once_with("cuda:4")
-        self.assertEqual(saved_payload["torch_cuda_rng_state_by_device"],
-                         {"cuda:4": current_rng_state})
-        self.assertEqual(saved_payload["cuda_rng_restore_device_map"], {"cuda:5": "cuda:4"})
+                with TemporaryDirectory() as directory:
+                    with patch("src.interactive.smoke_trainer.os.replace"):
+                        trainer._save_training_state(
+                            torch, MagicMock(), MagicMock(), Path(directory), (),
+                            learning_rate_used=1.0e-4, next_learning_rate=9.0e-5,
+                        )
+
+                saved_payload = torch.save.call_args.args[0]
+                torch.cuda.get_rng_state.assert_called_once_with(device)
+                self.assertEqual(saved_payload["torch_cuda_rng_state_by_device"],
+                                 {device: current_rng_state})
+                self.assertEqual(saved_payload["cuda_rng_restore_device_map"], {"cuda:5": device})
 
     def test_training_summary_serializes_rng_restore_provenance(self) -> None:
-        summary = SmokeTrainingSummary(
-            optimizer_updates=1, input_trajectories=4, record_eligible_trajectories=4,
-            exact_groups=1, informative_groups=1, trained_groups=1,
-            trained_trajectories=4, zero_information_groups=0, excluded_groups=0,
-            loss=0.1, grad_norm=0.1, max_behavior_logprob_delta=0.0,
-            behavior_policy_version="old", updated_policy_version="new",
-            micro_batch_size_used=1, oom_backoff_count=0, trainable_update_l2=0.1,
-            checkpoint_dir="/checkpoint", exclusions={},
-            cuda_rng_restore_device_map={"cuda:5": "cuda:4"},
-        )
-        self.assertEqual(summary.to_dict()["cuda_rng_restore_device_map"],
-                         {"cuda:5": "cuda:4"})
+        for device in ("cuda:4", "cuda:1"):
+            with self.subTest(device=device):
+                summary = SmokeTrainingSummary(
+                    optimizer_updates=1, input_trajectories=4, record_eligible_trajectories=4,
+                    exact_groups=1, informative_groups=1, trained_groups=1,
+                    trained_trajectories=4, zero_information_groups=0, excluded_groups=0,
+                    loss=0.1, grad_norm=0.1, max_behavior_logprob_delta=0.0,
+                    behavior_policy_version="old", updated_policy_version="new",
+                    micro_batch_size_used=1, oom_backoff_count=0, trainable_update_l2=0.1,
+                    checkpoint_dir="/checkpoint", exclusions={},
+                    cuda_rng_restore_device_map={"cuda:5": device},
+                )
+                self.assertEqual(summary.to_dict()["cuda_rng_restore_device_map"],
+                                 {"cuda:5": device})
 
     def test_step_one_adapter_without_optimizer_is_explicit_warm_start(self) -> None:
         trainer = Qwen35OnePassSmokeTrainer(
